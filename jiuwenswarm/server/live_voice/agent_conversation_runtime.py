@@ -91,6 +91,9 @@ _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
 _MAX_FORMAL_CONTEXT_ENTRIES = 8
 _MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
+_PROGRESS_CRITICAL_KIND = "task-progress-terminal"
+_CRITICAL_REPLAY_FENCE_ROWS = 4
+_CRITICAL_REPLAY_FENCE_WIDTH = 1 << 13
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -171,6 +174,7 @@ class AgentConversationEffectAckResult:
 class _QueuedNotification:
     publish_seq: int
     notification: AgentConversationNotification
+    critical_key: tuple[str, str] | None = None
 
 
 class _NotificationBufferClosed(RuntimeError):
@@ -181,15 +185,54 @@ class _NotificationConsumerDetached(RuntimeError):
     pass
 
 
-class _BoundedNotificationBuffer:
-    """Lossy observer lane plus a bounded, non-blocking critical reserve."""
+class _CriticalLane:
+    """One critical reserve: queued capacity plus a bounded replay tombstone.
 
-    def __init__(self, *, observer_capacity: int, critical_capacity: int) -> None:
+    ``queued`` is the only capacity ledger, so delivering or discarding a
+    retained notification returns its slot to the reserve.  The released
+    identity moves into ``retired``, an exact bounded tombstone that keeps a
+    replay refusable without holding the notification payload it replaced.
+    """
+
+    __slots__ = ("capacity", "queued", "retired", "retired_keys")
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.queued: set[tuple[str, str]] = set()
+        self.retired: deque[tuple[str, str]] = deque()
+        self.retired_keys: set[tuple[str, str]] = set()
+
+
+class _BoundedNotificationBuffer:
+    """Lossy observer lane plus bounded, non-blocking critical reserves."""
+
+    def __init__(
+        self,
+        *,
+        observer_capacity: int,
+        critical_capacity: int,
+        progress_critical_capacity: int,
+    ) -> None:
         self._observer_capacity = observer_capacity
-        self._critical_capacity = critical_capacity
         self._observer: deque[_QueuedNotification] = deque()
         self._critical: deque[_QueuedNotification] = deque()
-        self._critical_keys: set[tuple[str, str]] = set()
+        self._request_lane = _CriticalLane(critical_capacity)
+        self._progress_lane = _CriticalLane(progress_critical_capacity)
+        # A released identity must stay refusable without retaining the
+        # notification the bound existed to reclaim.  Each lane keeps an exact
+        # tombstone for its own recent working set, so the two reserves cannot
+        # evict one another; anything older is folded into this conservative
+        # one-bit membership sketch, where a collision can only refuse a
+        # never-published identity and can never authorize a replay.  Four
+        # 8 KiB rows hold the whole fence in 32 KiB per composition instead of
+        # growing with the session, and only identities beyond the exact
+        # tombstones reach it: with a four-row width of 8192 the refusal is
+        # below 1e-3 for the first thousand fenced identities.
+        self._replay_fence = tuple(
+            bytearray(_CRITICAL_REPLAY_FENCE_WIDTH)
+            for _ in range(_CRITICAL_REPLAY_FENCE_ROWS)
+        )
+        self._fenced_critical_identities = 0
         self._ready = asyncio.Event()
         self._next_publish_seq = 0
         self._delivered_total = 0
@@ -211,14 +254,15 @@ class _BoundedNotificationBuffer:
                 ErrorCode.CONFLICT,
             )
         if critical_key is not None:
-            if critical_key in self._critical_keys:
+            lane = self._critical_lane(critical_key)
+            if self._critical_identity_known(lane, critical_key):
                 self._critical_invariant_failures += 1
                 raise AgentConversationRuntimeViolation(
                     "DUPLICATE_CRITICAL_NOTIFICATION",
                     "a retained presentation or terminal notification must be unique",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
-            if len(self._critical_keys) >= self._critical_capacity:
+            if len(lane.queued) >= lane.capacity:
                 self._critical_invariant_failures += 1
                 raise AgentConversationRuntimeViolation(
                     "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED",
@@ -230,9 +274,10 @@ class _BoundedNotificationBuffer:
         queued = _QueuedNotification(
             publish_seq=publish_seq,
             notification=replace(notification, publish_seq=publish_seq),
+            critical_key=critical_key,
         )
         if critical_key is not None:
-            self._critical_keys.add(critical_key)
+            self._critical_lane(critical_key).queued.add(critical_key)
             self._critical.append(queued)
         else:
             if len(self._observer) >= self._observer_capacity:
@@ -284,12 +329,15 @@ class _BoundedNotificationBuffer:
     def discard_pending_presentations(self) -> int:
         """Remove output notices invalidated by retained CR shutdown."""
 
-        retained = deque(
-            queued
-            for queued in self._critical
-            if queued.notification.presentation_unit is None
-        )
-        discarded = len(self._critical) - len(retained)
+        retained: deque[_QueuedNotification] = deque()
+        discarded = 0
+        for queued in self._critical:
+            if queued.notification.presentation_unit is None:
+                retained.append(queued)
+                continue
+            discarded += 1
+            if queued.critical_key is not None:
+                self._release_critical(queued.critical_key)
         self._critical = retained
         if not self._observer and not self._critical:
             self._ready.clear()
@@ -311,8 +359,24 @@ class _BoundedNotificationBuffer:
         return self._observer_capacity
 
     @property
+    def queued_progress_critical(self) -> int:
+        return len(self._progress_lane.queued)
+
+    @property
     def critical_capacity(self) -> int:
-        return self._critical_capacity
+        return self._request_lane.capacity
+
+    @property
+    def progress_critical_capacity(self) -> int:
+        return self._progress_lane.capacity
+
+    @property
+    def retired_critical_identities(self) -> int:
+        return len(self._request_lane.retired) + len(self._progress_lane.retired)
+
+    @property
+    def fenced_critical_identities(self) -> int:
+        return self._fenced_critical_identities
 
     @property
     def published_total(self) -> int:
@@ -344,6 +408,61 @@ class _BoundedNotificationBuffer:
     def critical_invariant_failures(self) -> int:
         return self._critical_invariant_failures
 
+    def _critical_lane(self, critical_key: tuple[str, str]) -> _CriticalLane:
+        if critical_key[0] == _PROGRESS_CRITICAL_KIND:
+            return self._progress_lane
+        return self._request_lane
+
+    def _critical_identity_known(
+        self, lane: _CriticalLane, critical_key: tuple[str, str]
+    ) -> bool:
+        return (
+            critical_key in lane.queued
+            or critical_key in lane.retired_keys
+            or self._replay_fenced(critical_key)
+        )
+
+    def _release_critical(self, critical_key: tuple[str, str]) -> None:
+        """Return one reserve slot while keeping the identity unrepeatable."""
+
+        lane = self._critical_lane(critical_key)
+        lane.queued.discard(critical_key)
+        if critical_key in lane.retired_keys:
+            return
+        lane.retired.append(critical_key)
+        lane.retired_keys.add(critical_key)
+        while len(lane.retired) > lane.capacity:
+            evicted = lane.retired.popleft()
+            lane.retired_keys.discard(evicted)
+            self._record_replay_fence(evicted)
+
+    def _replay_fence_indices(self, critical_key: tuple[str, str]) -> tuple[int, ...]:
+        digest = hashlib.sha256("\0".join(critical_key).encode("utf-8")).digest()
+        width = len(self._replay_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % width
+            for offset in range(0, 4 * _CRITICAL_REPLAY_FENCE_ROWS, 4)
+        )
+
+    def _record_replay_fence(self, critical_key: tuple[str, str]) -> None:
+        for row, index in zip(
+            self._replay_fence,
+            self._replay_fence_indices(critical_key),
+            strict=True,
+        ):
+            row[index] = 1
+        self._fenced_critical_identities += 1
+
+    def _replay_fenced(self, critical_key: tuple[str, str]) -> bool:
+        return all(
+            row[index]
+            for row, index in zip(
+                self._replay_fence,
+                self._replay_fence_indices(critical_key),
+                strict=True,
+            )
+        )
+
     def _pop_next(self) -> _QueuedNotification | None:
         queued: _QueuedNotification | None
         if self._observer and self._critical:
@@ -358,6 +477,8 @@ class _BoundedNotificationBuffer:
         else:
             self._ready.clear()
             return None
+        if queued.critical_key is not None:
+            self._release_critical(queued.critical_key)
         if not self._observer and not self._critical:
             self._ready.clear()
         return queued
@@ -404,6 +525,12 @@ class AgentConversationRuntimeSnapshot:
     notification_leases_detached: int
     discarded_invalidated_presentations: int
     critical_notification_invariant_failures: int
+    notification_progress_critical_capacity: int
+    queued_progress_critical_notifications: int
+    retired_critical_identities: int
+    fenced_critical_identities: int
+    bridge_publication_failures: int
+    last_bridge_publication_failure: tuple[str, str, str] | None
     pending_conversation_effects: int
     unacknowledged_effect_claims: int
     pending_history_intents: int
@@ -575,7 +702,14 @@ class AgentConversationRuntime:
         self._notifications = _BoundedNotificationBuffer(
             observer_capacity=notification_capacity,
             critical_capacity=2 * max_requests,
+            # Task progress terminals are keyed by Task evidence, not by this
+            # composition's bounded request ledger, so one live session can
+            # publish them without limit.  Their own reserve keeps them from
+            # ever consuming the presentation/terminal quota.
+            progress_critical_capacity=max_requests,
         )
+        self._bridge_publication_failures = 0
+        self._last_bridge_publication_failure: tuple[str, str, str] | None = None
         self._commits: dict[str, TurnCommit] = {}
         self._turn_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._commit_identity_claims: dict[str, _TurnIdentityClaim] = {}
@@ -1551,7 +1685,7 @@ class AgentConversationRuntime:
                 progress_event=intent.progress_event,
             ),
             critical_key=(
-                ("task-progress-terminal", intent.evidence_id)
+                (_PROGRESS_CRITICAL_KIND, intent.evidence_id)
                 if progress.state is WorkState.TERMINAL
                 else None
             ),
@@ -2469,6 +2603,18 @@ class AgentConversationRuntime:
             critical_notification_invariant_failures=(
                 self._notifications.critical_invariant_failures
             ),
+            notification_progress_critical_capacity=(
+                self._notifications.progress_critical_capacity
+            ),
+            queued_progress_critical_notifications=(
+                self._notifications.queued_progress_critical
+            ),
+            retired_critical_identities=(
+                self._notifications.retired_critical_identities
+            ),
+            fenced_critical_identities=self._notifications.fenced_critical_identities,
+            bridge_publication_failures=self._bridge_publication_failures,
+            last_bridge_publication_failure=self._last_bridge_publication_failure,
             pending_conversation_effects=len(self._effect_backlog),
             unacknowledged_effect_claims=sum(
                 not entry.acknowledged and not entry.superseded
@@ -2699,7 +2845,7 @@ class AgentConversationRuntime:
                     state.total_utf8 += len(content)
             if presentation is None:
                 consumable_event = None
-        self._publish(
+        self._publish_from_bridge(
             AgentConversationNotification(
                 kind="agent.output",
                 request_id=request.request_id,
@@ -2760,7 +2906,7 @@ class AgentConversationRuntime:
                 await self._close_interaction_after_terminal(
                     request.response_ref.interaction_id
                 )
-        self._publish(
+        self._publish_from_bridge(
             AgentConversationNotification(
                 kind="work.progress",
                 request_id=request.request_id,
@@ -2797,6 +2943,32 @@ class AgentConversationRuntime:
         critical_key: tuple[str, str] | None = None,
     ) -> None:
         self._notifications.publish(notification, critical_key=critical_key)
+
+    def _publish_from_bridge(
+        self,
+        notification: AgentConversationNotification,
+        *,
+        critical_key: tuple[str, str] | None = None,
+    ) -> None:
+        """Publish one bridge delivery under explicit failure supervision.
+
+        ``_consume_bridge`` is the only long-lived reader of Agent events and
+        Work Progress for this composition.  A notification-invariant failure
+        is therefore recorded as an observable publication failure instead of
+        terminating that consumer and silently ending every later delivery.
+        The Conversation Runtime transition, Harness round and Agent Bridge
+        truth that preceded this call are already settled and unaffected.
+        """
+
+        try:
+            self._publish(notification, critical_key=critical_key)
+        except AgentConversationRuntimeViolation as error:
+            self._bridge_publication_failures += 1
+            self._last_bridge_publication_failure = (
+                error.reason,
+                notification.kind,
+                notification.request_id,
+            )
 
     async def _shutdown_coordinator(
         self, *, closed_detail: str = "teardown_complete"

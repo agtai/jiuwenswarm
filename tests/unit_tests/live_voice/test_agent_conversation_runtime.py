@@ -589,12 +589,19 @@ async def acknowledge_formal_round(
 
 
 def task_progress_intent(
-    *, origin_id: str = "interaction-1"
+    *,
+    origin_id: str = "interaction-1",
+    task_id: str = "task-progress-1",
+    event_id: str = "task-progress-source-0",
+    seq: int = 0,
+    event_type: str = "task.accepted",
+    state: str = "accepted",
+    outcome: str | None = None,
 ) -> TaskProgressNotificationIntent:
     current_scope = scope()
     binding = TaskProgressOriginBinding(
         scope=current_scope,
-        task_id="task-progress-1",
+        task_id=task_id,
         session_id=current_scope.session_id or "",
         project_id=current_scope.project_id or "",
         correlation_id="correlation-task-progress",
@@ -612,14 +619,14 @@ def task_progress_intent(
         progress_adapter="task_progress_return.v1",
     )
     task_event = PersistentTaskEvent(
-        event_id="task-progress-source-0",
+        event_id=event_id,
         task_id=binding.task_id,
         attempt_id="attempt-progress-1",
         scope=current_scope,
-        seq=0,
-        event_type="task.accepted",
-        state="accepted",
-        outcome=None,
+        seq=seq,
+        event_type=event_type,
+        state=state,
+        outcome=outcome,
         producer="task_core",
         source_event_id=None,
         causation_id="command-progress-1",
@@ -4290,6 +4297,553 @@ def test_duplicate_or_exhausted_critical_reserve_fails_closed_without_growth() -
     assert snapshot.queued_critical_notifications == 2
     assert snapshot.published_notifications == 2
     assert snapshot.critical_notification_invariant_failures == 2
+
+
+def critical_notification(
+    request_id: str, *, kind: str = "work.progress"
+) -> AgentConversationNotification:
+    return AgentConversationNotification(
+        kind=kind,
+        request_id=request_id,
+        round_id=f"round-{request_id}",
+        response_ref=ResponseRef(
+            f"interaction-{request_id}", f"response-{request_id}", 0
+        ),
+    )
+
+
+def presentation_notification(request_id: str) -> AgentConversationNotification:
+    base = critical_notification(request_id, kind="agent.output")
+    return replace(
+        base,
+        presentation_unit=PresentationUnit(
+            ref=base.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=f"unit-{request_id}",
+            seq=0,
+            source_start_utf8=0,
+            source_end_utf8=1,
+            content_ref=f"sha256:{hashlib.sha256(request_id.encode()).hexdigest()}",
+        ),
+    )
+
+
+def assert_zero_business_effects(
+    current: AgentConversationRuntime,
+    lower: LowerFormalAdapter,
+    history: RecordingHistoryWriter,
+) -> None:
+    """A refused notification identity may not move any product authority."""
+
+    snapshot = current.snapshot()
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert lower.requests == []
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert snapshot.retained_admissions == 0
+    assert snapshot.active_requests == ()
+    assert snapshot.pending_history_intents == 0
+    assert snapshot.pending_conversation_effects == 0
+    assert snapshot.unacknowledged_effect_claims == 0
+    assert snapshot.conversation.conversation.turns == ()
+    assert snapshot.conversation.conversation.responses == ()
+    assert snapshot.conversation.presentation.records == ()
+    assert snapshot.harness.reservations == ()
+    assert snapshot.harness.active_rounds == ()
+    assert snapshot.harness.retained_rounds == 0
+    assert snapshot.harness.cancel_effects == 0
+    assert snapshot.bridge.pending_dispatches == 0
+    assert snapshot.bridge.active_requests == ()
+    assert snapshot.bridge.retained_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_drained_critical_reserve_returns_capacity_and_fences_replay() -> None:
+    """B4: queued items, not lifetime identities, own reserve capacity."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    for index in range(2):
+        current._publish(
+            critical_notification(f"request-drained-{index}"),
+            critical_key=("terminal", f"request-drained-{index}"),
+        )
+    assert current.snapshot().queued_critical_notifications == 2
+
+    drained = [await current.next_notification() for _ in range(2)]
+    assert [item.request_id for item in drained] == [
+        "request-drained-0",
+        "request-drained-1",
+    ]
+    assert current.snapshot().queued_critical_notifications == 0
+
+    # Delivering the retained notifications returns their reserve slots.
+    current._publish(
+        critical_notification("request-drained-2"),
+        critical_key=("terminal", "request-drained-2"),
+    )
+    assert current.snapshot().queued_critical_notifications == 1
+
+    # A delivered identity keeps its bounded tombstone and can never replay.
+    for index in range(2):
+        with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+            current._publish(
+                critical_notification(f"request-drained-{index}"),
+                critical_key=("terminal", f"request-drained-{index}"),
+            )
+        assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    # The same opaque id in the other retained lane is a distinct identity.
+    current._publish(
+        presentation_notification("request-drained-0"),
+        critical_key=("presentation", "request-drained-0"),
+    )
+
+    snapshot = current.snapshot()
+    assert snapshot.notification_critical_capacity == 2
+    assert snapshot.queued_critical_notifications == 2
+    assert snapshot.retired_critical_identities == 2
+    assert snapshot.fenced_critical_identities == 0
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert snapshot.bridge_publication_failures == 0
+    assert snapshot.last_bridge_publication_failure is None
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_discarded_presentation_reserve_returns_capacity_and_fences_replay() -> (
+    None
+):
+    """B4: retained-CR shutdown discard must release capacity, not identity."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    for index in range(2):
+        current._publish(
+            presentation_notification(f"request-discarded-{index}"),
+            critical_key=("presentation", f"request-discarded-{index}"),
+        )
+    assert current.snapshot().queued_critical_notifications == 2
+
+    assert current._notifications.discard_pending_presentations() == 2
+    assert current.snapshot().queued_critical_notifications == 0
+
+    current._publish(
+        presentation_notification("request-discarded-2"),
+        critical_key=("presentation", "request-discarded-2"),
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+        current._publish(
+            presentation_notification("request-discarded-0"),
+            critical_key=("presentation", "request-discarded-0"),
+        )
+    assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    snapshot = current.snapshot()
+    assert snapshot.queued_critical_notifications == 1
+    assert snapshot.retired_critical_identities == 2
+    assert snapshot.fenced_critical_identities == 0
+    assert snapshot.critical_notification_invariant_failures == 1
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_progress_terminal_reserve_cannot_starve_presentation_or_terminal() -> (
+    None
+):
+    """B4: Task progress terminals get their own quota, not the shared one."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=2)
+    for index in range(2):
+        current._publish(
+            critical_notification(
+                f"evidence-{index}", kind="task.progress.notification"
+            ),
+            critical_key=("task-progress-terminal", f"evidence-{index}"),
+        )
+    # The presentation/terminal reserve must be completely untouched.
+    for index in range(2):
+        current._publish(
+            presentation_notification(f"request-live-{index}"),
+            critical_key=("presentation", f"request-live-{index}"),
+        )
+        current._publish(
+            critical_notification(f"request-live-{index}"),
+            critical_key=("terminal", f"request-live-{index}"),
+        )
+    filled = current.snapshot()
+    assert filled.queued_progress_critical_notifications == 2
+    assert filled.notification_progress_critical_capacity == 2
+
+    with pytest.raises(AgentConversationRuntimeViolation) as progress_full:
+        current._publish(
+            critical_notification("evidence-2", kind="task.progress.notification"),
+            critical_key=("task-progress-terminal", "evidence-2"),
+        )
+    assert progress_full.value.reason == "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED"
+
+    with pytest.raises(AgentConversationRuntimeViolation) as request_full:
+        current._publish(
+            critical_notification("request-live-2"),
+            critical_key=("terminal", "request-live-2"),
+        )
+    assert request_full.value.reason == "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED"
+
+    snapshot = current.snapshot()
+    assert snapshot.notification_critical_capacity == 4
+    assert snapshot.queued_critical_notifications == 6
+    assert snapshot.queued_progress_critical_notifications == 2
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_evicted_replay_tombstone_still_refuses_released_identities() -> None:
+    """B4 boundary: eviction from the exact tombstone keeps the compact fence.
+
+    Restart is out of scope here: the composition cannot restart, so this
+    fence is a characterization of same-lifetime replay refusal, not a
+    durability guarantee across process restart.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    published = 64
+    for index in range(published):
+        current._publish(
+            critical_notification(f"request-cycled-{index}"),
+            critical_key=("terminal", f"request-cycled-{index}"),
+        )
+        delivered = await current.next_notification()
+        assert delivered.request_id == f"request-cycled-{index}"
+
+    snapshot = current.snapshot()
+    assert snapshot.queued_critical_notifications == 0
+    assert snapshot.retired_critical_identities == 2
+    assert snapshot.fenced_critical_identities == published - 2
+    assert snapshot.critical_notification_invariant_failures == 0
+
+    for index in range(published):
+        with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+            current._publish(
+                critical_notification(f"request-cycled-{index}"),
+                critical_key=("terminal", f"request-cycled-{index}"),
+            )
+        assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    # A never-published identity is still admitted: the fence refuses replays,
+    # not the live working set.
+    current._publish(
+        critical_notification("request-cycled-fresh"),
+        critical_key=("terminal", "request-cycled-fresh"),
+    )
+    assert current.snapshot().queued_critical_notifications == 1
+    assert current.snapshot().critical_notification_invariant_failures == published
+
+    # A second composition owns an independent fence for the same identities.
+    other = runtime(LowerFormalAdapter(), RecordingHistoryWriter(), max_requests=1)
+    other._publish(
+        critical_notification("request-cycled-0"),
+        critical_key=("terminal", "request-cycled-0"),
+    )
+    assert other.snapshot().queued_critical_notifications == 1
+
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+    assert (await other.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_injected_duplicate_publication_is_explicit_and_keeps_bridge_delivery() -> (
+    None
+):
+    """A6: one critical publish violation must not end every later delivery."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=4)
+    selected = await prepare(current)
+    # Injected violation: the retained presentation identity the sole bridge
+    # consumer is about to publish is already owned by the reserve.
+    current._publish(
+        critical_notification("request-1"),
+        critical_key=("presentation", "request-1"),
+    )
+    first = await dispatch(current, selected)
+    await asyncio.wait_for(first.completion, timeout=1)
+
+    second_commit = commit(
+        turn_id="turn-2",
+        commit_id="commit-2",
+        interaction_id="interaction-2",
+        text="second",
+    )
+    await current.open_interaction(second_commit.interaction_id)
+    await current.start_turn(second_commit.interaction_id, second_commit.turn_id)
+    await current.commit_turn(second_commit)
+    second = await dispatch(
+        current,
+        second_commit,
+        request_id="request-2",
+        response_id="response-2",
+    )
+    await asyncio.wait_for(second.completion, timeout=1)
+
+    delivered: dict[str, AgentConversationNotification] = {}
+    while len(delivered) < 2:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=2)
+        if notification.request_id != "request-2":
+            continue
+        if notification.presentation_unit is not None:
+            delivered["presentation"] = notification
+        elif notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                delivered["terminal"] = notification
+    assert delivered["presentation"].presentation_unit.ref == second.response_ref
+
+    snapshot = current.snapshot()
+    assert snapshot.bridge_publication_failures == 1
+    assert snapshot.last_bridge_publication_failure == (
+        "DUPLICATE_CRITICAL_NOTIFICATION",
+        "agent.output",
+        "request-1",
+    )
+    assert snapshot.critical_notification_invariant_failures == 1
+
+    # The dropped notification is confined to the notification lane: the CR
+    # response, its enqueued presentation and its terminal truth all survive.
+    responses = {
+        record.ref: record for record in snapshot.conversation.conversation.responses
+    }
+    assert responses[first.response_ref].state.value == "terminal"
+    assert responses[second.response_ref].state.value == "terminal"
+    assert any(
+        record.unit.ref == first.response_ref
+        for record in snapshot.conversation.presentation.records
+    )
+    assert lower.calls == 2
+    assert history.assistant_intents == []
+    assert snapshot.harness.cancel_effects == 0
+    assert snapshot.pending_history_intents == 0
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_injected_reserve_exhaustion_keeps_consumer_and_recovers_after_drain() -> (
+    None
+):
+    """A6+B4: an exhausted reserve is a reported failure, not a dead consumer."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=3)
+    selected = await prepare(current)
+    for index in range(6):
+        current._publish(
+            critical_notification(f"request-filler-{index}"),
+            critical_key=("terminal", f"request-filler-{index}"),
+        )
+    first = await dispatch(current, selected)
+    await asyncio.wait_for(first.completion, timeout=1)
+
+    async def wait_for_terminal_response(ref) -> None:
+        while not any(
+            record.ref == ref and record.state.value == "terminal"
+            for record in current.snapshot().conversation.conversation.responses
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_terminal_response(first.response_ref), timeout=2)
+
+    async def wait_for_publication_failures(expected: int) -> None:
+        while current.snapshot().bridge_publication_failures < expected:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_publication_failures(2), timeout=2)
+    exhausted = current.snapshot()
+    assert exhausted.last_bridge_publication_failure == (
+        "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED",
+        "work.progress",
+        "request-1",
+    )
+    assert exhausted.harness.cancel_effects == 0
+
+    while current.snapshot().queued_critical_notifications:
+        await asyncio.wait_for(current.next_notification(), timeout=1)
+
+    second_commit = commit(
+        turn_id="turn-2",
+        commit_id="commit-2",
+        interaction_id="interaction-2",
+        text="second",
+    )
+    await current.open_interaction(second_commit.interaction_id)
+    await current.start_turn(second_commit.interaction_id, second_commit.turn_id)
+    await current.commit_turn(second_commit)
+    second = await dispatch(
+        current,
+        second_commit,
+        request_id="request-2",
+        response_id="response-2",
+    )
+    await asyncio.wait_for(second.completion, timeout=1)
+
+    delivered: dict[str, AgentConversationNotification] = {}
+    while len(delivered) < 2:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=2)
+        if notification.request_id != "request-2":
+            continue
+        if notification.presentation_unit is not None:
+            delivered["presentation"] = notification
+        elif notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                delivered["terminal"] = notification
+    assert delivered["presentation"].presentation_unit.ref == second.response_ref
+
+    snapshot = current.snapshot()
+    assert snapshot.bridge_publication_failures == 2
+    assert snapshot.retired_critical_identities == 6
+    assert snapshot.fenced_critical_identities == 2
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert snapshot.harness.cancel_effects == 0
+    assert history.assistant_intents == []
+    assert lower.calls == 2
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_terminal_progress_admission_publishes_one_identity() -> None:
+    """B4 concurrency: one released barrier admits exactly one evidence id."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit(text="create task: inspect the repository")
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    response = await current.accept_task_origin(
+        request_id="task-origin-request-1",
+        response_id="task-origin-response-1",
+        correlation_id="task-origin-correlation-1",
+        commit=selected,
+    )
+    conversation_before = current.snapshot().conversation
+    intent = task_progress_intent(
+        event_id="task-progress-source-terminal",
+        seq=1,
+        event_type="task.terminal",
+        state="terminal",
+        outcome="completed",
+    )
+    released = asyncio.Event()
+
+    async def admit() -> bool:
+        await released.wait()
+        return await current.accept_task_progress_notification(
+            intent, response_ref=response
+        )
+
+    racers = [asyncio.create_task(admit()) for _ in range(2)]
+    await asyncio.sleep(0)
+    released.set()
+    outcomes = await asyncio.gather(*racers, return_exceptions=True)
+    accepted = [item for item in outcomes if item is True]
+    refused = [
+        item for item in outcomes if isinstance(item, AgentConversationRuntimeViolation)
+    ]
+    assert len(accepted) == 1
+    assert len(refused) == 1
+    assert refused[0].reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+    assert current.snapshot().queued_progress_critical_notifications == 1
+    assert current.snapshot().conversation == conversation_before
+
+    notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+    assert notification.kind == "task.progress.notification"
+    with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+        await current.accept_task_progress_notification(intent, response_ref=response)
+    assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    # Retry with a distinct Task evidence identity is still admitted.
+    assert (
+        await current.accept_task_progress_notification(
+            task_progress_intent(
+                task_id="task-progress-2",
+                event_id="task-progress-source-terminal-2",
+                seq=1,
+                event_type="task.terminal",
+                state="terminal",
+                outcome="completed",
+            ),
+            response_ref=response,
+        )
+        is True
+    )
+    snapshot = current.snapshot()
+    assert snapshot.queued_progress_critical_notifications == 1
+    assert snapshot.retired_critical_identities == 1
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert snapshot.bridge_publication_failures == 0
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert snapshot.harness.cancel_effects == 0
+    assert snapshot.conversation.presentation.records == ()
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+def test_disabled_composition_reports_bounded_reserves_without_publication() -> None:
+    """A6/B4 feature-off: the disabled path keeps its old closed behaviour."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, enabled=False, max_requests=2)
+    snapshot = current.snapshot()
+    assert snapshot.notification_critical_capacity == 4
+    assert snapshot.notification_progress_critical_capacity == 2
+    assert snapshot.retired_critical_identities == 0
+    assert snapshot.fenced_critical_identities == 0
+    assert snapshot.bridge_publication_failures == 0
+    assert snapshot.last_bridge_publication_failure is None
+
+    with pytest.raises(AgentConversationRuntimeViolation) as closed:
+        current._publish(
+            critical_notification("request-disabled"),
+            critical_key=("terminal", "request-disabled"),
+        )
+    assert closed.value.reason == "NOTIFICATION_STREAM_CLOSED"
+    assert current.snapshot().critical_notification_invariant_failures == 0
+    assert_zero_business_effects(current, lower, history)
 
 
 @pytest.mark.asyncio
