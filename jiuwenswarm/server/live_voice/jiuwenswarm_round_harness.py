@@ -162,6 +162,7 @@ class _RoundRecord:
     execution_error: BaseException | None = None
     cleanup_task: asyncio.Task[None] | None = None
     cleanup_error: BaseException | None = None
+    business_settled: bool = False
     cancel_requested: bool = False
     cancel_observed: bool = False
     cancel_coordinator: asyncio.Task[None] | None = None
@@ -708,7 +709,11 @@ class JiuWenSwarmRoundHarness:
             or command.origin.commit_id != binding.commit.commit_id
         ):
             rejection = "ROUND_CANCEL_ORIGIN_MISMATCH"
-        elif round_record.terminal_event is not None or round_record.task.done():
+        elif (
+            round_record.business_settled
+            or round_record.terminal_event is not None
+            or round_record.task.done()
+        ):
             rejection = "ROUND_ALREADY_TERMINAL"
         elif round_record.cancel_requested:
             rejection = "ROUND_CANCEL_ALREADY_REQUESTED"
@@ -847,6 +852,10 @@ class JiuWenSwarmRoundHarness:
             record.execution_error = error
             outcome = TerminalOutcome.FAILED
         finally:
+            # The stream result is the business linearization point.  Cleanup
+            # may still be retained, but no later cancel may take terminal
+            # ownership away from this task after the outcome is fixed.
+            record.business_settled = True
             record.started.set()
             record.cancel_safe.set()
             close = getattr(source_stream, "aclose", None)
@@ -908,6 +917,7 @@ class JiuWenSwarmRoundHarness:
         await record.cancel_safe.wait()
         if (
             not record.cancel_observed
+            and not record.business_settled
             and record.terminal_event is None
             and not record.task.done()
         ):

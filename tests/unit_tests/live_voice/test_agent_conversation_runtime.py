@@ -1855,6 +1855,150 @@ async def test_cleanup_deadline_publishes_terminal_and_retains_one_close_owner(
     assert history.assistant_intents == []
 
 
+@pytest.mark.parametrize(
+    ("settled_outcome", "cancel_before_cleanup"),
+    (("completed", False), ("cancelled", True)),
+)
+@pytest.mark.asyncio
+async def test_business_settled_round_fences_late_cancel_during_retained_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    settled_outcome: str,
+    cancel_before_cleanup: bool,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.05)
+    next_release = asyncio.Event() if cancel_before_cleanup else None
+    close_release = asyncio.Event()
+    close_error = RuntimeError(f"late {settled_outcome} stream close failed")
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        next_release=next_release,
+        close_release=close_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"settled-{settled_outcome}-cleanup-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"settled-{settled_outcome}-cleanup-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+
+    if cancel_before_cleanup:
+        await asyncio.wait_for(current_facade.stream.next_started.wait(), timeout=1)
+        initial_cancel = await current.close_interaction(
+            cancel_command(
+                handle,
+                selected,
+                command_id=f"cancel-{settled_outcome}-before-cleanup",
+            )
+        )
+        assert initial_cancel.accepted is True
+
+    await asyncio.wait_for(current_facade.stream.close_started.wait(), timeout=1)
+    round_record = harness._rounds[handle.round_id]
+    cleanup_owner = round_record.cleanup_task
+    assert cleanup_owner is not None
+    assert cleanup_owner.done() is False
+    cancel_effects_before_late_cancel = harness.snapshot().cancel_effects
+
+    late_cancel = await current.close_interaction(
+        cancel_command(
+            handle,
+            selected,
+            command_id=f"cancel-{settled_outcome}-after-business-settled",
+        )
+    )
+    try:
+        if late_cancel.accepted:
+            assert round_record.cancel_coordinator is not None
+            await asyncio.shield(round_record.cancel_coordinator)
+            await asyncio.sleep(0)
+        assert late_cancel.accepted is False
+        assert late_cancel.reason in {
+            "ROUND_ALREADY_TERMINAL",
+            "ROUND_CANCEL_ALREADY_REQUESTED",
+        }
+        assert late_cancel.terminal_observed is False
+        assert harness.snapshot().cancel_effects == cancel_effects_before_late_cancel
+
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.terminal_outcome.value == settled_outcome
+
+        notifications = []
+        while True:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                break
+        terminal_notifications = [
+            item
+            for item in notifications
+            if item.progress_event is not None
+            and WorkProgressEventV2.from_dict(item.progress_event.payload).state.value
+            == "terminal"
+        ]
+        assert len(terminal_notifications) == 1
+        assert (
+            WorkProgressEventV2.from_dict(
+                terminal_notifications[0].progress_event.payload
+            ).outcome.value
+            == settled_outcome
+        )
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+        assert harness._rounds[handle.round_id].cleanup_task is cleanup_owner
+        published_notifications = snapshot.published_notifications
+
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert current.snapshot().closed is False
+        assert current.snapshot().harness.closed is False
+        assert current.snapshot().harness.pending_cleanup_rounds == (handle.round_id,)
+        assert harness._rounds[handle.round_id].cleanup_task is cleanup_owner
+
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert current.snapshot().closed is True
+        assert current.snapshot().harness.closed is True
+        assert current.snapshot().harness.pending_cleanup_rounds == ()
+        assert harness._rounds[handle.round_id].cleanup_task is cleanup_owner
+        assert cleanup_owner.done()
+        assert round_record.cleanup_error is close_error
+        assert current.snapshot().published_notifications == published_notifications
+        assert (await handle.completion).terminal_outcome.value == settled_outcome
+        assert current_facade.calls == 1
+        assert current_facade.stream.close_calls == 1
+        assert len(history.users) == 1
+        assert history.assistant_intents == []
+    finally:
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        if not handle.completion.done():
+            harness._rounds[handle.round_id].handle.detach()
+        await current.close(timeout_seconds=1)
+
+
 async def _collect_harness_events(handle):
     return [item async for item in handle.events()]
 
