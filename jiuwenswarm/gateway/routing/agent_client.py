@@ -36,7 +36,35 @@ AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
 _DISCONNECT_CLOSE_TIMEOUT_SECONDS = 6.0
 _DISCONNECT_TASK_SETTLE_TIMEOUT_SECONDS = 1.0
-_LOG_REDACTED_KEYS = frozenset({"auth_token"})
+_LOG_SUMMARY_REFERENCE_KEYS = (
+    "type",
+    "event",
+    "protocol_version",
+    "request_id",
+    "response_id",
+    "channel",
+    "channel_id",
+    "method",
+    "status",
+    "response_kind",
+)
+_LOG_SUMMARY_BOOLEAN_KEYS = (
+    "is_stream",
+    "ok",
+    "is_complete",
+    "is_final",
+)
+_LOG_SUMMARY_INTEGER_KEYS = (
+    "sequence",
+)
+_LOG_SUMMARY_SHAPE_KEYS = (
+    "params",
+    "payload",
+    "metadata",
+    "channel_context",
+    "auth",
+    "provenance",
+)
 
 
 class _ReceiverFailure:
@@ -51,34 +79,94 @@ def _wire_request_id_key(request_id: Any) -> str:
     return str(request_id)
 
 
-def _redact_log_secrets(data: Any) -> Any:
-    """Return a log-only copy with formal-route credentials removed."""
-    if isinstance(data, dict):
-        return {
-            key: "[REDACTED]"
-            if str(key).lower() in _LOG_REDACTED_KEYS
-            else _redact_log_secrets(value)
-            for key, value in data.items()
+def _log_value_shape(value: Any) -> dict[str, Any]:
+    """Describe a payload-bearing value without inspecting or stringifying content."""
+    if isinstance(value, dict):
+        return {"kind": "object", "field_count": len(value)}
+    if isinstance(value, (list, tuple)):
+        return {"kind": "array", "item_count": len(value)}
+    if value is None:
+        return {"kind": "null"}
+    return {"kind": "scalar"}
+
+
+def _content_hidden_log_ref(field: str, value: Any) -> str:
+    """Return a fixed-length correlation ref without exposing scalar content."""
+    if value is None:
+        return "[ABSENT]"
+    if isinstance(value, str):
+        value_type = b"str"
+        raw = value.encode("utf-8", errors="surrogatepass")
+    elif isinstance(value, bool):
+        value_type = b"bool"
+        raw = b"1" if value else b"0"
+    elif isinstance(value, int):
+        value_type = b"int"
+        raw = str(value).encode("ascii")
+    elif isinstance(value, float):
+        value_type = b"float"
+        raw = value.hex().encode("ascii")
+    else:
+        return "[NON_SCALAR]"
+
+    digest = hashlib.sha256()
+    digest.update(field.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(value_type)
+    digest.update(b"\0")
+    digest.update(raw)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _log_boolean(value: Any) -> bool | str:
+    return value if isinstance(value, bool) else "[NON_BOOLEAN]"
+
+
+def _log_integer(value: Any) -> int | str:
+    return value if isinstance(value, int) and not isinstance(value, bool) else "[NON_INTEGER]"
+
+
+def _project_log_summary(data: Any) -> dict[str, Any]:
+    """Project an envelope/response into an allowlisted, content-free log summary."""
+    if not isinstance(data, dict):
+        return {"kind": "non_object"}
+
+    summary = {
+        f"{key}_ref": _content_hidden_log_ref(key, data[key])
+        for key in _LOG_SUMMARY_REFERENCE_KEYS
+        if key in data
+    }
+    summary.update(
+        {
+            key: _log_boolean(data[key])
+            for key in _LOG_SUMMARY_BOOLEAN_KEYS
+            if key in data
         }
-    if isinstance(data, list):
-        return [_redact_log_secrets(value) for value in data]
-    if isinstance(data, tuple):
-        return tuple(_redact_log_secrets(value) for value in data)
-    return data
+    )
+    summary.update(
+        {
+            key: _log_integer(data[key])
+            for key in _LOG_SUMMARY_INTEGER_KEYS
+            if key in data
+        }
+    )
+    for key in _LOG_SUMMARY_SHAPE_KEYS:
+        if key in data:
+            summary[f"{key}_shape"] = _log_value_shape(data[key])
+    summary["field_count"] = len(data)
+    return summary
 
 
 def _to_json(data: Any) -> str:
-    """将任意对象序列化为日志友好的 JSON 字符串."""
-    sanitized = _redact_log_secrets(data)
+    """将对象投影为不含业务内容的日志摘要 JSON."""
     try:
         return json.dumps(
-            sanitized,
+            _project_log_summary(data),
             ensure_ascii=False,
             sort_keys=True,
-            default=str,
         )
     except Exception:
-        return repr(sanitized)
+        return '{"kind": "unavailable"}'
 
 
 def _build_ws_origin(uri: str) -> str | None:
@@ -270,10 +358,10 @@ class WebSocketAgentServerClient(AgentServerClient):
         # 读取 AgentServer 的 connection.ack 事件
         try:
             raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(raw): %s", raw)
             data = json.loads(raw)
             logger.info(
-                "[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data)
+                "[WebSocketAgentServerClient] connect 首帧(summary): %s",
+                _to_json(data),
             )
             if data.get("type") == "event" and data.get("event") == "connection.ack":
                 self._server_ready = True
@@ -282,8 +370,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                 )
             else:
                 logger.warning(
-                    "[WebSocketAgentServerClient] 首帧非 connection.ack: %s",
-                    data.get("type"),
+                    "[WebSocketAgentServerClient] 首帧非 connection.ack: type_ref=%s",
+                    _content_hidden_log_ref("type", data.get("type")),
                 )
         except asyncio.TimeoutError:
             logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时")
@@ -311,8 +399,10 @@ class WebSocketAgentServerClient(AgentServerClient):
                         else:
                             logger.warning(
                                 "[WebSocketAgentServerClient] 收到 server_push 但未注册 handler，已丢弃: "
-                                "request_id=%s",
-                                data.get("request_id"),
+                                "request_id_ref=%s",
+                                _content_hidden_log_ref(
+                                    "request_id", data.get("request_id")
+                                ),
                             )
                         continue
                     request_id = _wire_request_id_key(data.get("request_id"))
@@ -328,8 +418,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                         # 正常路径下 queue 不被提前删；此处 2s 丢弃窗口仅针对已取消的残余。
                         if request_id in self._cancelled_request_ids:
                             logger.debug(
-                                "[WebSocketAgentServerClient] 收到已取消请求的残余消息，已丢弃: request_id=%s",
-                                request_id,
+                                "[WebSocketAgentServerClient] 收到已取消请求的残余消息，已丢弃: request_id_ref=%s",
+                                _content_hidden_log_ref("request_id", request_id),
                             )
                             continue
 
@@ -340,8 +430,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                             # request_id 不匹配，此时 send_request 会等满 600s 超时。
                             # 提升为 warning 让问题可见，便于排查"到点没推送"类故障。
                             logger.warning(
-                                "[WebSocketAgentServerClient] 收到无目标队列的消息（等待方将超时）: request_id=%s",
-                                request_id,
+                                "[WebSocketAgentServerClient] 收到无目标队列的消息（等待方将超时）: request_id_ref=%s",
+                                _content_hidden_log_ref("request_id", request_id),
                             )
                 except asyncio.CancelledError:
                     break
@@ -536,9 +626,15 @@ class WebSocketAgentServerClient(AgentServerClient):
                 format_ws_diagnostics(
                     self._diagnostic_state(expected_ws),
                     describe_ws_exception(exc),
-                    request_id=_wire_request_id_key(payload.get("request_id")),
-                    channel=payload.get("channel"),
-                    method=payload.get("method"),
+                    request_id_ref=_content_hidden_log_ref(
+                        "request_id", payload.get("request_id")
+                    ),
+                    channel_ref=_content_hidden_log_ref(
+                        "channel", payload.get("channel")
+                    ),
+                    method_ref=_content_hidden_log_ref(
+                        "method", payload.get("method")
+                    ),
                 ),
             )
             if self._connection_matches(expected_ws, expected_generation):
@@ -555,14 +651,14 @@ class WebSocketAgentServerClient(AgentServerClient):
         payload = _e2a_to_wire(envelope)
         fingerprint = _unary_replay_fingerprint(payload)
         logger.info(
-            "[E2A][out][nostream] request_id=%s channel=%s method=%s is_stream=%s",
-            rid,
-            envelope.channel,
-            envelope.method,
+            "[E2A][out][nostream] request_id_ref=%s channel_ref=%s method_ref=%s is_stream=%s",
+            _content_hidden_log_ref("request_id", rid),
+            _content_hidden_log_ref("channel", envelope.channel),
+            _content_hidden_log_ref("method", envelope.method),
             envelope.is_stream,
         )
         logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
+            "[WebSocketAgentServerClient] 发送请求(非流式) E2A summary: %s",
             _to_json(payload),
         )
 
@@ -588,18 +684,22 @@ class WebSocketAgentServerClient(AgentServerClient):
                 if retained_fingerprint != fingerprint:
                     raise RuntimeError(
                         "WebSocketAgentServerClient: duplicate in-flight "
-                        f"request_id={rid!r} changed its unary payload"
+                        "request_id_ref="
+                        f"{_content_hidden_log_ref('request_id', rid)} "
+                        "changed its unary payload"
                     )
                 logger.info(
                     "[WebSocketAgentServerClient] coalescing exact in-flight "
-                    "unary replay: request_id=%s",
-                    rid,
+                    "unary replay: request_id_ref=%s",
+                    _content_hidden_log_ref("request_id", rid),
                 )
             else:
                 if rid in self._message_queues:
                     raise RuntimeError(
                         "WebSocketAgentServerClient: duplicate in-flight "
-                        f"request_id={rid!r}; refusing to mix unary and stream waiters"
+                        "request_id_ref="
+                        f"{_content_hidden_log_ref('request_id', rid)}; "
+                        "refusing to mix unary and stream waiters"
                     )
                 task = asyncio.create_task(
                     self._run_retained_unary(
@@ -608,7 +708,10 @@ class WebSocketAgentServerClient(AgentServerClient):
                         connection_ws,
                         connection_generation,
                     ),
-                    name=f"agent-server-unary:{rid}",
+                    name=(
+                        "agent-server-unary:"
+                        f"{_content_hidden_log_ref('request_id', rid)}"
+                    ),
                 )
                 self._unary_operations[rid] = (
                     fingerprint,
@@ -660,7 +763,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                 raise RuntimeError("AgentServer WebSocket connection closed")
             if rid in self._message_queues:
                 raise RuntimeError(
-                    f"WebSocketAgentServerClient: duplicate in-flight request_id={rid!r}; "
+                    "WebSocketAgentServerClient: duplicate in-flight request_id_ref="
+                    f"{_content_hidden_log_ref('request_id', rid)}; "
                     "refusing to register queue (would mis-route responses, e.g. stream chunks to unary waiters)."
                 )
             self._message_queues[rid] = queue
@@ -669,7 +773,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 logger.info(
-                    "[WebSocketAgentServerClient] 发送请求(非流式) payload: %s",
+                    "[WebSocketAgentServerClient] 发送请求(非流式) summary: %s",
                     _to_json(payload),
                 )
                 await self._send_wire_payload(
@@ -688,12 +792,15 @@ class WebSocketAgentServerClient(AgentServerClient):
                     ) from data.exc
             except asyncio.TimeoutError as e:
                 logger.warning(
-                    "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
-                    rid,
+                    "[WebSocketAgentServerClient] 非流式请求超时: request_id_ref=%s timeout=%ss",
+                    _content_hidden_log_ref("request_id", rid),
                     _UNARY_REQUEST_TIMEOUT_SECONDS,
                 )
                 raise RuntimeError(
-                    f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
+                    "AgentServer 非流式请求超时 "
+                    "(request_id_ref="
+                    f"{_content_hidden_log_ref('request_id', rid)}, "
+                    f"timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
                 ) from e
             resp = parse_agent_server_wire_unary(data)
             return resp
@@ -710,14 +817,14 @@ class WebSocketAgentServerClient(AgentServerClient):
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
         logger.info(
-            "[E2A][out][stream] request_id=%s channel=%s method=%s is_stream=%s",
-            rid,
-            envelope.channel,
-            envelope.method,
+            "[E2A][out][stream] request_id_ref=%s channel_ref=%s method_ref=%s is_stream=%s",
+            _content_hidden_log_ref("request_id", rid),
+            _content_hidden_log_ref("channel", envelope.channel),
+            _content_hidden_log_ref("method", envelope.method),
             envelope.is_stream,
         )
         logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(流式) E2A: %s",
+            "[WebSocketAgentServerClient] 发送请求(流式) E2A summary: %s",
             _to_json(envelope.to_dict()),
         )
 
@@ -731,7 +838,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                 raise RuntimeError("AgentServer WebSocket connection closed")
             if rid in self._message_queues or rid in self._unary_operations:
                 raise RuntimeError(
-                    f"WebSocketAgentServerClient: duplicate in-flight request_id={rid!r}; "
+                    "WebSocketAgentServerClient: duplicate in-flight request_id_ref="
+                    f"{_content_hidden_log_ref('request_id', rid)}; "
                     "refusing to register queue (would mis-route responses, e.g. stream chunks to unary waiters)."
                 )
             self._message_queues[rid] = queue
@@ -741,7 +849,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
                 logger.info(
-                    "[WebSocketAgentServerClient] 发送请求(流式) payload: %s",
+                    "[WebSocketAgentServerClient] 发送请求(流式) summary: %s",
                     _to_json(payload),
                 )
                 await self._send_wire_payload(
@@ -772,25 +880,28 @@ class WebSocketAgentServerClient(AgentServerClient):
                 chunk_count += 1
                 if chunk_count <= 3:
                     _pl = getattr(chunk, "payload", None) or {}
-                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                    _has_event_type = (
+                        isinstance(_pl, dict) and "event_type" in _pl
+                    )
                     logger.info(
                         "[WebSocketAgentServerClient] stream chunk received:"
-                        " request_id=%s seq=%s event_type=%s",
-                        rid,
+                        " request_id_ref=%s seq=%s has_event_type=%s",
+                        _content_hidden_log_ref("request_id", rid),
                         chunk_count,
-                        _et,
+                        _has_event_type,
                     )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True
             logger.info(
-                "[WebSocketAgentServerClient] 流式响应结束: request_id=%s 共 %s 个 chunk",
-                rid,
+                "[WebSocketAgentServerClient] 流式响应结束: request_id_ref=%s 共 %s 个 chunk",
+                _content_hidden_log_ref("request_id", rid),
                 chunk_count,
             )
         except asyncio.CancelledError:
             logger.info(
-                "[WebSocketAgentServerClient] 流式接收被取消: request_id=%s", rid
+                "[WebSocketAgentServerClient] 流式接收被取消: request_id_ref=%s",
+                _content_hidden_log_ref("request_id", rid),
             )
             raise
         finally:
@@ -828,8 +939,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                 except asyncio.QueueEmpty:
                     break
             logger.debug(
-                "[WebSocketAgentServerClient] 队列已清空并移除: request_id=%s 清理消息数=%d",
-                rid,
+                "[WebSocketAgentServerClient] 队列已清空并移除: request_id_ref=%s 清理消息数=%d",
+                _content_hidden_log_ref("request_id", rid),
                 drained_count,
             )
             if owns_registration:
@@ -856,8 +967,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                 return
             del self._cancelled_request_ids[rid]
             logger.debug(
-                "[WebSocketAgentServerClient] 已取消标记已清理: request_id=%s",
-                rid,
+                "[WebSocketAgentServerClient] 已取消标记已清理: request_id_ref=%s",
+                _content_hidden_log_ref("request_id", rid),
             )
 
 
@@ -972,7 +1083,12 @@ async def _run_verification() -> None:
         assert resp1.request_id == "req-1"
         assert resp1.ok is True
         assert "Echo:" in str(resp1.payload)
-        logger.info("[main] 非流式验证通过: payload=%s", resp1.payload)
+        logger.info(
+            "[main] 非流式验证通过: request_id_ref=%s ok=%s payload_shape=%s",
+            _content_hidden_log_ref("request_id", resp1.request_id),
+            resp1.ok,
+            _log_value_shape(resp1.payload),
+        )
 
         # 2. 流式请求
         req2 = e2a_from_agent_fields(
@@ -986,14 +1102,7 @@ async def _run_verification() -> None:
             chunks.append(ch)
         assert len(chunks) == 3
         assert chunks[-1].is_complete
-        full_content = "".join(
-            c.payload.get("content", "") for c in chunks if c.payload
-        )
-        logger.info(
-            "[main] 流式验证通过: 共 %s 个 chunk, 拼接内容=%r",
-            len(chunks),
-            full_content,
-        )
+        logger.info("[main] 流式验证通过: 共 %s 个 chunk", len(chunks))
     finally:
         await client.disconnect()
         server.close()

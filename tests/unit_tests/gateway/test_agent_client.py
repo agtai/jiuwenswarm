@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 import pytest
@@ -169,26 +170,282 @@ def test_agent_client_uses_shared_websocket_limit():
     assert agent_client.AGENT_WS_MAX_MESSAGE_BYTES == AGENT_WS_MAX_MESSAGE_BYTES
 
 
-def test_agent_client_log_json_redacts_auth_token_without_mutating_payload():
-    class BrokenString:
+def test_agent_client_log_json_is_content_free_without_mutating_payload():
+    class PrivateValue:
         def __str__(self) -> str:
-            raise RuntimeError("cannot serialize")
+            return "sentinel-private-object"
 
+        def __repr__(self) -> str:
+            return "sentinel-private-repr"
+
+    private_value = PrivateValue()
     payload = {
+        "type": "sentinel-private-type",
+        "event": "sentinel-private-event",
+        "protocol_version": "sentinel-private-version",
+        "request_id": "sentinel-private-request-id",
+        "response_id": "sentinel-private-response-id",
+        "channel": "sentinel-private-channel",
+        "channel_id": "sentinel-private-channel-id",
+        "method": "sentinel-private-method",
+        "status": "sentinel-private-status",
+        "response_kind": "sentinel-private-response-kind",
+        "is_stream": False,
+        "ok": "sentinel-private-ok",
+        "is_complete": "sentinel-private-complete",
+        "sequence": "sentinel-private-sequence",
         "params": {
             "auth_token": "formal-route-secret",
-            "nested": [{"AUTH_TOKEN": "second-secret"}],
+            "Final-Text": "mixed-case-transcript",
+            "nested-list": [
+                {"AUTH TOKEN": "separator-secret"},
+                {"raw_audio": "deep-audio-secret"},
+            ],
         },
-        "forces_safe_repr_fallback": BrokenString(),
+        "payload": private_value,
+        "PAY-LOAD": {"spokenText": "unknown-top-level-secret"},
+        "forces_string_conversion": PrivateValue(),
     }
 
     rendered = agent_client._to_json(payload)
+    rendered_summary = json.loads(rendered)
 
+    assert '"request_id_ref": "sha256:' in rendered
+    assert '"response_id_ref": "sha256:' in rendered
+    assert '"channel_ref": "sha256:' in rendered
+    assert '"channel_id_ref": "sha256:' in rendered
+    assert '"method_ref": "sha256:' in rendered
+    assert '"status_ref": "sha256:' in rendered
+    assert '"is_stream": false' in rendered
+    assert '"ok": "[NON_BOOLEAN]"' in rendered
+    assert '"is_complete": "[NON_BOOLEAN]"' in rendered
+    assert '"sequence": "[NON_INTEGER]"' in rendered
+    for ref_key in (
+        "type_ref",
+        "event_ref",
+        "protocol_version_ref",
+        "request_id_ref",
+        "response_id_ref",
+        "channel_ref",
+        "channel_id_ref",
+        "method_ref",
+        "status_ref",
+        "response_kind_ref",
+    ):
+        assert rendered_summary[ref_key].startswith("sha256:")
+        assert len(rendered_summary[ref_key]) == 71
+    assert "sentinel-private-type" not in rendered
+    assert "sentinel-private-event" not in rendered
+    assert "sentinel-private-version" not in rendered
+    assert "sentinel-private-request-id" not in rendered
+    assert "sentinel-private-response-id" not in rendered
+    assert "sentinel-private-channel" not in rendered
+    assert "sentinel-private-channel-id" not in rendered
+    assert "sentinel-private-method" not in rendered
+    assert "sentinel-private-status" not in rendered
+    assert "sentinel-private-response-kind" not in rendered
+    assert "sentinel-private-ok" not in rendered
+    assert "sentinel-private-complete" not in rendered
+    assert "sentinel-private-sequence" not in rendered
     assert "formal-route-secret" not in rendered
-    assert "second-secret" not in rendered
-    assert rendered.count("[REDACTED]") == 2
+    assert "mixed-case-transcript" not in rendered
+    assert "separator-secret" not in rendered
+    assert "deep-audio-secret" not in rendered
+    assert "unknown-top-level-secret" not in rendered
+    assert "sentinel-private-object" not in rendered
+    assert "sentinel-private-repr" not in rendered
     assert payload["params"]["auth_token"] == "formal-route-secret"
-    assert payload["params"]["nested"][0]["AUTH_TOKEN"] == "second-secret"
+    assert payload["params"]["Final-Text"] == "mixed-case-transcript"
+    assert payload["params"]["nested-list"][0]["AUTH TOKEN"] == (
+        "separator-secret"
+    )
+    assert payload["params"]["nested-list"][1]["raw_audio"] == (
+        "deep-audio-secret"
+    )
+    assert payload["payload"] is private_value
+
+
+@pytest.mark.asyncio
+async def test_agent_client_unary_and_stream_logs_never_include_payload_content(
+    caplog, monkeypatch
+):
+    target_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger=target_logger.name)
+    monkeypatch.setattr(agent_client, "_STREAM_TRAILING_MESSAGE_GRACE_SECONDS", 0.001)
+
+    unary_success_params = {
+        "FINAL_TEXT": "sentinel-unary-success-text",
+        "nested-list": [{"Bearer-Token": "sentinel-unary-success-credential"}],
+    }
+    unary_error_params = {
+        "spoken-text": "sentinel-unary-error-text",
+        "deep": [{"RAW AUDIO": "sentinel-unary-error-audio"}],
+    }
+    stream_success_params = {
+        "Transcript": "sentinel-stream-success-text",
+        "deep": {"API_KEY": "sentinel-stream-success-credential"},
+    }
+    stream_error_params = {
+        "raw_audio": "sentinel-stream-error-audio",
+        "deep-list": [{"AUTH-TOKEN": "sentinel-stream-error-credential"}],
+    }
+    unary_success_request_id = "sentinel-private-unary-request-scalar"
+    unary_success_channel = "sentinel-private-unary-channel-scalar"
+    unary_success_method = "sentinel-private-unary-method-scalar"
+
+    try:
+        unary_client = AgentClientHarness()
+        unary_ws = FakeWebSocket()
+        unary_client.set_ws_for_test(unary_ws)
+        unary_env = e2a_from_agent_fields(
+            request_id=unary_success_request_id,
+            channel_id=unary_success_channel,
+            session_id="sess-private-unary-success",
+            req_method=unary_success_method,
+            params=unary_success_params,
+            is_stream=False,
+        )
+        unary_task = asyncio.create_task(unary_client.send_request(unary_env))
+        for _ in range(100):
+            if unary_ws.sent_payloads:
+                break
+            await asyncio.sleep(0.001)
+        assert unary_ws.sent_payloads
+        unary_response_payload = {
+            "Final-Text": "sentinel-unary-response-text",
+            "nested": [{"credential": "sentinel-unary-response-credential"}],
+        }
+        await unary_client.get_message_queue_for_test(
+            unary_success_request_id
+        ).put(
+            encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id=unary_success_request_id,
+                    channel_id=unary_success_channel,
+                    ok=True,
+                    payload=unary_response_payload,
+                ),
+                response_id=unary_success_request_id,
+            )
+        )
+        unary_response = await unary_task
+        assert unary_response.payload == unary_response_payload
+        assert json.loads(unary_ws.sent_payloads[0])["params"] == unary_success_params
+
+        unary_error_client = AgentClientHarness()
+        unary_error_client.set_ws_for_test(ClosingSendWebSocket())
+        unary_error_env = e2a_from_agent_fields(
+            request_id="rid-private-unary-error",
+            channel_id="web",
+            session_id="sess-private-unary-error",
+            req_method="chat.send",
+            params=unary_error_params,
+            is_stream=False,
+        )
+        with pytest.raises(
+            RuntimeError, match="AgentServer WebSocket connection closed"
+        ):
+            await unary_error_client.send_request(unary_error_env)
+
+        stream_client = AgentClientHarness()
+        stream_ws = FakeWebSocket()
+        stream_client.set_ws_for_test(stream_ws)
+        stream_env = e2a_from_agent_fields(
+            request_id="rid-private-stream-success",
+            channel_id="web",
+            session_id="sess-private-stream-success",
+            req_method="chat.send",
+            params=stream_success_params,
+            is_stream=True,
+        )
+
+        async def inject_stream_response():
+            while not stream_client.has_message_queue_for_test(
+                "rid-private-stream-success"
+            ):
+                await asyncio.sleep(0.001)
+            stream_response_payload = {
+                "event_type": "sentinel-stream-response-event",
+                "Final-Text": "sentinel-stream-response-text",
+                "deep": [{"AUTH TOKEN": "sentinel-stream-response-credential"}],
+            }
+            await stream_client.get_message_queue_for_test(
+                "rid-private-stream-success"
+            ).put(
+                encode_agent_chunk_for_wire(
+                    AgentResponseChunk(
+                        request_id="rid-private-stream-success",
+                        channel_id="web",
+                        payload=stream_response_payload,
+                        is_complete=True,
+                    ),
+                    response_id="rid-private-stream-success",
+                    sequence=0,
+                )
+            )
+            return stream_response_payload
+
+        injector = asyncio.create_task(inject_stream_response())
+        stream_chunks = [
+            chunk async for chunk in stream_client.send_request_stream(stream_env)
+        ]
+        stream_response_payload = await injector
+        assert [chunk.payload for chunk in stream_chunks] == [stream_response_payload]
+        assert json.loads(stream_ws.sent_payloads[0])["params"] == stream_success_params
+
+        stream_error_client = AgentClientHarness()
+        stream_error_client.set_ws_for_test(ClosingSendWebSocket())
+        stream_error_env = e2a_from_agent_fields(
+            request_id="rid-private-stream-error",
+            channel_id="web",
+            session_id="sess-private-stream-error",
+            req_method="chat.send",
+            params=stream_error_params,
+            is_stream=True,
+        )
+        with pytest.raises(
+            RuntimeError, match="AgentServer WebSocket connection closed"
+        ):
+            async for _ in stream_error_client.send_request_stream(stream_error_env):
+                pass
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    agent_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == target_logger.name
+    )
+    private_sentinels = (
+        "sentinel-unary-success-text",
+        "sentinel-unary-success-credential",
+        "sentinel-unary-error-text",
+        "sentinel-unary-error-audio",
+        "sentinel-stream-success-text",
+        "sentinel-stream-success-credential",
+        "sentinel-stream-error-audio",
+        "sentinel-stream-error-credential",
+        "sentinel-unary-response-text",
+        "sentinel-unary-response-credential",
+        "sentinel-stream-response-event",
+        "sentinel-stream-response-text",
+        "sentinel-stream-response-credential",
+        unary_success_request_id,
+        unary_success_channel,
+        unary_success_method,
+        "rid-private-unary-error",
+        "rid-private-stream-success",
+        "rid-private-stream-error",
+    )
+    assert not [sentinel for sentinel in private_sentinels if sentinel in agent_logs]
+    assert "request_id_ref=sha256:" in agent_logs
+    assert "channel_ref=sha256:" in agent_logs
+    assert "method_ref=sha256:" in agent_logs
+    assert unary_success_params["FINAL_TEXT"] == "sentinel-unary-success-text"
+    assert unary_error_params["spoken-text"] == "sentinel-unary-error-text"
+    assert stream_success_params["Transcript"] == "sentinel-stream-success-text"
+    assert stream_error_params["raw_audio"] == "sentinel-stream-error-audio"
 
 
 @pytest.mark.asyncio
