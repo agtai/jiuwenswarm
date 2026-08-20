@@ -741,6 +741,16 @@ git commit -m "feat(live-voice): run supervised post-capture probes"
 
 ### Task 6: Close baseline/candidate comparison for the new track
 
+> **Progress — 2026-08-20:** implemented in `b006f7644`. Post-capture targets
+> are explicitly allowlisted, any dirty source is ineligible, and A/B/A requires
+> B to improve against both baselines while A1→A2 latency and failure/
+> denominator drift remain smaller than the minimum candidate gain. The central
+> CLI emits one closed A/B/A JSON object; the runner compare mode invokes it
+> with argv/`shell=False` and writes only a new explicit output. Cumulative
+> probe/report/runner automation passed 169 tests plus Ruff, `py_compile`, and
+> diff checks. Independent comparison review and real A/B/A evidence remain
+> open; no optimization claim is granted.
+
 **Risk:** Tier 3 — benchmark truth and optimization decision boundary.
 
 **Files:**
@@ -786,7 +796,7 @@ uv run pytest tests/unit_tests/live_voice/test_latency_probe_report.py -q
 
 Expected: failures for absent track-aware target validation and A/B/A command.
 
-- [ ] **Step 3: Implement target allowlist and A/B/A composition**
+- [x] **Step 3: Implement target allowlist and A/B/A composition**
 
 Define an explicit post-capture target set:
 
@@ -811,14 +821,14 @@ Do not allow capture startup/first-frame targets in this track. A/B/A is
 drift is smaller than the minimum B gain; otherwise return `inconclusive` or
 `regressed` using stable reason IDs.
 
-- [ ] **Step 4: Add runner comparison mode**
+- [x] **Step 4: Add runner comparison mode**
 
 Add a `compare` subcommand to the runner that validates three report paths,
 calls the module CLI without shell invocation and writes no output beside the
 explicit `--output` path. It must never start services or Browser in compare
 mode.
 
-- [ ] **Step 5: Run GREEN and complete Python regression**
+- [x] **Step 5: Run GREEN and complete Python regression**
 
 ```bash
 uv run pytest \
