@@ -158,8 +158,10 @@ class _RoundRecord:
     task: asyncio.Task[None]
     started: asyncio.Event
     cancel_safe: asyncio.Event
+    cancel_authorized: asyncio.Event
     terminal_event: EventEnvelope | None = None
     execution_error: BaseException | None = None
+    terminal_task: asyncio.Task[None] | None = None
     cleanup_task: asyncio.Task[None] | None = None
     cleanup_error: BaseException | None = None
     business_settled: bool = False
@@ -568,6 +570,7 @@ class JiuWenSwarmRoundHarness:
             task=task,
             started=started,
             cancel_safe=cancel_safe,
+            cancel_authorized=asyncio.Event(),
         )
         record.state = HarnessReservationState.COMMITTED
         record.handle = handle
@@ -709,11 +712,7 @@ class JiuWenSwarmRoundHarness:
             or command.origin.commit_id != binding.commit.commit_id
         ):
             rejection = "ROUND_CANCEL_ORIGIN_MISMATCH"
-        elif (
-            round_record.business_settled
-            or round_record.terminal_event is not None
-            or round_record.task.done()
-        ):
+        elif round_record.business_settled or round_record.terminal_event is not None:
             rejection = "ROUND_ALREADY_TERMINAL"
         elif round_record.cancel_requested:
             rejection = "ROUND_CANCEL_ALREADY_REQUESTED"
@@ -722,6 +721,7 @@ class JiuWenSwarmRoundHarness:
         if rejection is None:
             accepted = True
             round_record.cancel_requested = True
+            round_record.cancel_authorized.set()
             self._cancel_effects += 1
             round_record.cancel_coordinator = asyncio.create_task(
                 self._deliver_exact_cancel(round_record),
@@ -798,6 +798,7 @@ class JiuWenSwarmRoundHarness:
         usable_final = False
         execution_reported_error = False
         outcome = TerminalOutcome.UNKNOWN
+        business_settled = False
         source_stream: AsyncIterator[AgentResponseChunk] | None = None
         record.started.set()
         try:
@@ -843,54 +844,87 @@ class JiuWenSwarmRoundHarness:
                 outcome = TerminalOutcome.COMPLETED
             else:
                 outcome = TerminalOutcome.UNKNOWN
+            business_settled = True
         except asyncio.CancelledError:
-            if not record.cancel_requested:
-                raise
-            record.cancel_observed = True
-            outcome = TerminalOutcome.CANCELLED
+            if record.cancel_requested:
+                record.cancel_observed = True
+                outcome = TerminalOutcome.CANCELLED
+                business_settled = True
         except BaseException as error:  # noqa: BLE001
             record.execution_error = error
             outcome = TerminalOutcome.FAILED
+            business_settled = True
         finally:
-            # The stream result is the business linearization point.  Cleanup
-            # may still be retained, but no later cancel may take terminal
-            # ownership away from this task after the outcome is fixed.
-            record.business_settled = True
+            # Only an observed business result or exact Harness cancel closes
+            # authority.  A direct task cancellation transfers settlement to
+            # the retained owner without inventing terminal truth.
+            record.business_settled = business_settled
             record.started.set()
             record.cancel_safe.set()
-            close = getattr(source_stream, "aclose", None)
-            if callable(close):
-                cleanup = asyncio.create_task(
-                    close(),
-                    name=f"live-voice-harness-stream-close:{handle.round_id}",
-                )
-                # The exact round record remains the owner after the bounded
-                # wait, and Harness close later joins the same task.
-                record.cleanup_task = cleanup
-                cleanup.add_done_callback(
-                    lambda completed: self._observe_cleanup_completion(
-                        record, completed
-                    )
-                )
-                try:
-                    await self._await_cleanup_deadline(cleanup)
-                except asyncio.CancelledError as error:
-                    if cleanup.cancelled():
-                        record.cleanup_error = error
-                    else:
-                        raise
-                except TimeoutError:
-                    if cleanup.done():
-                        self._observe_cleanup_completion(record, cleanup)
-                except BaseException as error:  # noqa: BLE001
+            terminal_owner = asyncio.create_task(
+                self._settle_round(
+                    record,
+                    handle,
+                    source_stream=source_stream,
+                    outcome=outcome,
+                    seq=seq,
+                    prior_event_id=prior_event_id,
+                ),
+                name=f"live-voice-harness-terminal:{handle.round_id}",
+            )
+            record.terminal_task = terminal_owner
+            try:
+                await asyncio.shield(terminal_owner)
+            except asyncio.CancelledError:
+                # The retained owner has already linearized ownership.  Direct
+                # or exact task cancellation cannot cancel cleanup/terminal.
+                pass
+
+    async def _settle_round(
+        self,
+        record: _RoundRecord,
+        handle: HarnessRoundHandle,
+        *,
+        source_stream: AsyncIterator[AgentResponseChunk] | None,
+        outcome: TerminalOutcome,
+        seq: int,
+        prior_event_id: str | None,
+    ) -> None:
+        close = getattr(source_stream, "aclose", None)
+        if callable(close):
+            cleanup = asyncio.create_task(
+                close(),
+                name=f"live-voice-harness-stream-close:{handle.round_id}",
+            )
+            # The exact round record remains the owner after the bounded wait,
+            # and Harness close later joins the same physical cleanup task.
+            record.cleanup_task = cleanup
+            cleanup.add_done_callback(
+                lambda completed: self._observe_cleanup_completion(record, completed)
+            )
+            try:
+                await self._await_cleanup_deadline(cleanup)
+            except asyncio.CancelledError as error:
+                if cleanup.cancelled():
                     record.cleanup_error = error
-                # Cleanup disposition may refine an otherwise unknown round,
-                # but can never replace a known business terminal outcome.
-                if (
-                    outcome is TerminalOutcome.UNKNOWN
-                    and record.cleanup_error is not None
-                ):
-                    outcome = TerminalOutcome.FAILED
+                else:
+                    raise
+            except TimeoutError:
+                if cleanup.done():
+                    self._observe_cleanup_completion(record, cleanup)
+            except BaseException as error:  # noqa: BLE001
+                record.cleanup_error = error
+
+        if not record.business_settled:
+            await record.cancel_authorized.wait()
+            record.cancel_observed = True
+            record.business_settled = True
+            outcome = TerminalOutcome.CANCELLED
+
+        # Cleanup disposition may refine an otherwise unknown round, but can
+        # never replace a known business terminal outcome.
+        if outcome is TerminalOutcome.UNKNOWN and record.cleanup_error is not None:
+            outcome = TerminalOutcome.FAILED
         terminal = self._round_event(
             record.reservation,
             seq=seq,
@@ -951,6 +985,15 @@ class JiuWenSwarmRoundHarness:
         if cancel_coordinators:
             await asyncio.shield(
                 asyncio.gather(*cancel_coordinators, return_exceptions=True)
+            )
+        terminal_tasks = tuple(
+            record.terminal_task
+            for record in self._rounds.values()
+            if record.terminal_task is not None
+        )
+        if terminal_tasks:
+            await asyncio.shield(
+                asyncio.gather(*terminal_tasks, return_exceptions=True)
             )
         cleanup_tasks = tuple(
             record.cleanup_task
