@@ -472,6 +472,41 @@ the acceptance above. Persistence restart is represented by the existing
 journal reconstruction seam; physical browser/network acceptance remains a
 candidate-level exclusion.
 
+## 5.8 Wave 8 activation — schedule scope diagnostic
+
+Wave 8 starts from integration commit
+`9ef6159dd9522e3b893a6b60f12b499401171645` and owns one literal-only
+diagnostic repair that does not overlap the active authority or durability
+packets.
+
+### SRR-19 — L14 schedule owner-scope diagnostic
+
+- Capability/owner: Auto Harness scheduled-task admission diagnostics for the
+  recurring `create_scheduled_task` and one-time `run_task` public service
+  entrypoints.
+- Risk: Tier 1 ordinary service-output correction. The two existing rejection
+  branches, validation order, scheduler/Store/Task authority and all state,
+  concurrency, retry and persistence semantics remain unchanged; only their
+  mojibake user-visible error text is corrected.
+- Owned source/tests:
+  `jiuwenswarm/agents/harness/common/auto_harness/service.py` and
+  `tests/unit_tests/auto_harness/test_schedule_task_service.py`; this execution
+  record is the only documentation surface.
+- Intended behavior: an explicitly supplied invalid `owner_scope` returns
+  exactly `code=TASK_SCOPE_REQUIRED` and
+  `error=调度任务缺少服务端所有者范围` from both public entrypoints before any
+  scheduler, Store, Task or execution-context effect.
+- Acceptance: first freeze both public paths as deterministic RED against the
+  old mojibake literals, including complete zero-effect assertions; replace
+  only the two matching strings; then run the focused cases, the complete
+  schedule service module and scoped static/diff checks. Existing positive and
+  compatibility coverage supplies Tier-1 P/K evidence; this repair directly
+  owns N and zero-effect evidence. B/S/T/C/R/I/F/X are unchanged and therefore
+  out of scope rather than artificially expanded.
+- Exclusions: no owner-scope validator, scheduling/admission, idempotency,
+  scheduler/Store/Task, persistence, schema, protocol or error-code change; do
+  not alter the separate `幂等任务缺少服务端所有者范围` diagnostic.
+
 ## 6. Queued repair programs
 
 These groups route work after the currently active packets; they are not yet
@@ -487,7 +522,7 @@ freezes smaller owner-specific packets before editing.
 - Event-loop, lock and filesystem responsiveness: A14, B15, B25 and B27.
 - Protocol/state/compatibility: A3, B1, B3, B5, B8, B19,
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
-  L9, L10, L11, L12, L13, L14, L15, L16, L17 and L22.
+  L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
 The queue excludes the already fixed A10, A24, B31 and L23; superseded B26;
 and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared
