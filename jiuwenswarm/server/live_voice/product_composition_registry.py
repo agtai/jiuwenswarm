@@ -2067,6 +2067,11 @@ class AgentServerProductCompositionRegistry:
                         manifest=existing.manifest,
                     )
                 self._p2_routes.pop(key, None)
+                # Run the same exact cleanup normal close runs. The conditional
+                # index release inside keeps the successor intact, because it
+                # only retires the interaction once no live route or pending
+                # intent still owns it.
+                self._drop_voice_task_origins_for_route_locked(key)
                 self._retain_closed_p2_route(
                     key,
                     _ClosedP2Route(

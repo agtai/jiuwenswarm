@@ -74,6 +74,9 @@ from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityResourceBinding,
     TrustedAuthorityCandidate,
 )
+from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+    P2LeaseState,
+)
 from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
@@ -6162,6 +6165,82 @@ async def test_concurrent_progress_activation_admits_one_generation_owner(
     ]
     assert registry._fenced_progress_generation(key) == max(admitted)
     assert len(p3.subscription_calls) == len(admitted)
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_higher_generation_p2_replacement_drops_the_superseded_origin(
+    tmp_path: Path,
+) -> None:
+    """Replacement runs the exact cleanup that normal close runs.
+
+    Popping the route and retaining a tombstone without dropping the voice
+    origin leaves the superseded activation holding an actionable task origin
+    and its critical-token commit.
+    """
+
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    route_key = ("session-product", "interaction-1")
+
+    first = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-replace-first",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first.ok is True
+    retained = registry._p2_routes[route_key]
+    registry._voice_task_origins["task-superseded"] = _VoiceTaskOrigin(
+        session_id="session-product",
+        interaction_id="interaction-1",
+        activation_id=retained.binding.activation_id,
+        activation_generation=retained.binding.activation_generation,
+        correlation_id=retained.binding.correlation_id,
+        response_ref=ResponseRef("interaction-1", "response-superseded", 0),
+    )
+    foreign_key = ("session-product", "interaction-neighbour")
+    registry._voice_task_origins["task-neighbour"] = _VoiceTaskOrigin(
+        session_id=foreign_key[0],
+        interaction_id=foreign_key[1],
+        activation_id="activation-neighbour",
+        activation_generation=1,
+        correlation_id="correlation-neighbour",
+        response_ref=ResponseRef(foreign_key[1], "response-neighbour", 0),
+    )
+
+    # Replacement only reaches the cleanup path once the superseded activation
+    # lease is no longer OPEN; an OPEN lease is either an exact replay or a
+    # binding conflict.
+    retained.activation_lease._state = P2LeaseState.CLOSED
+    successor = await registry.handle_p2_activate(
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
+        request_id="request-p2-replace-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert successor.ok is True
+    # The superseded activation keeps no actionable task origin.
+    assert "task-superseded" not in registry._voice_task_origins
+    # A neighbouring interaction is untouched by the replacement.
+    assert "task-neighbour" in registry._voice_task_origins
+    # The successor owns the route and its generation fence advanced.
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    assert registry._p2_routes[route_key].binding.activation_id == "activation-2"
+
+    # The superseded generation cannot come back through the tombstone.
+    stale = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-replace-stale",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] in {
+        "ACTIVATION_GENERATION_STALE",
+        "ACTIVATION_BINDING_CONFLICT",
+    }
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
     await registry.close_active_routes()
 
 
