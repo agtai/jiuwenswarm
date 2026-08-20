@@ -5,6 +5,7 @@ import importlib.util
 import json
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import urllib.error
 import urllib.parse
@@ -59,6 +60,7 @@ def _write_manifest(path: Path, wav_path: Path, *, digest: str, sample_rate: int
                         "wav_path": wav_path.name,
                         "sha256": digest,
                         "sample_rate_hz": sample_rate,
+                        "expected_transcript_sha256": "c" * 64,
                     }
                 ],
             }
@@ -67,7 +69,13 @@ def _write_manifest(path: Path, wav_path: Path, *, digest: str, sample_rate: int
     )
 
 
-def _write_run(path: Path, *, intended_attempts: int = 1) -> None:
+def _write_run(
+    path: Path,
+    *,
+    intended_attempts: int = 1,
+    profile_id: str = "dialogue_no_tool",
+    input_case_id: str = "dialogue-paris-en-v1",
+) -> None:
     path.write_text(
         json.dumps(
             {
@@ -92,8 +100,8 @@ def _write_run(path: Path, *, intended_attempts: int = 1) -> None:
                     "post_capture_benchmark": True,
                 },
                 "cold_or_warm": "warm",
-                "input_case_ids": ["dialogue-paris-en-v1"],
-                "profile_ids": ["dialogue_no_tool"],
+                "input_case_ids": [input_case_id],
+                "profile_ids": [profile_id],
                 "intended_attempts": intended_attempts,
                 "required_successes": 1,
                 "experiment": None,
@@ -106,13 +114,21 @@ def _write_run(path: Path, *, intended_attempts: int = 1) -> None:
     )
 
 
-def _write_complete_round(run_dir: Path, round_index: int, *, append: bool) -> None:
+def _write_complete_round(
+    run_dir: Path,
+    round_index: int,
+    *,
+    append: bool,
+    profile_id: str = "dialogue_no_tool",
+    input_case_id: str = "dialogue-paris-en-v1",
+    include_tool_marks: bool = False,
+) -> None:
     def mark(component: str, point: str, index: int, timestamp: float) -> LatencyMark:
         return LatencyMark(
             schema_version=MARK_SCHEMA_VERSION,
             run_id="run-a",
-            profile_id="dialogue_no_tool",
-            input_case_id="dialogue-paris-en-v1",
+            profile_id=profile_id,
+            input_case_id=input_case_id,
             round_index=round_index,
             source_instance_id=f"{component}-source",
             mark_index=index,
@@ -136,8 +152,8 @@ def _write_complete_round(run_dir: Path, round_index: int, *, append: bool) -> N
     common = {
         "schema_version": BATCH_SCHEMA_VERSION,
         "run_id": "run-a",
-        "profile_id": "dialogue_no_tool",
-        "input_case_id": "dialogue-paris-en-v1",
+        "profile_id": profile_id,
+        "input_case_id": input_case_id,
         "round_index": round_index,
         "terminal_outcome": "completed",
     }
@@ -145,25 +161,86 @@ def _write_complete_round(run_dir: Path, round_index: int, *, append: bool) -> N
         LatencyBatch(
             batch_id=f"browser-{round_index}", source_instance_id="browser-source",
             component="browser", phase="browser_round",
-            marks=(
-                mark("browser", "browser.eot_received", 0, 100.0),
-                mark("browser", "browser.playout_first_frame_started_estimate", 1, 900.0),
-            ), **common,
+            marks=tuple(
+                mark("browser", point, index, timestamp)
+                for index, (point, timestamp) in enumerate(
+                    (
+                        ("browser.eot_received", 100.0),
+                        ("browser.stt_final_received", 200.0),
+                        ("browser.commit_submit_started", 210.0),
+                        ("browser.presentation_received", 600.0),
+                        ("browser.tts_request_started", 610.0),
+                        ("browser.downlink_first_frame_received", 760.0),
+                        ("browser.playout_first_frame_scheduled", 770.0),
+                        ("browser.playout_first_frame_started_estimate", 800.0),
+                        ("browser.playout_completed", 880.0),
+                        ("browser.playout_ack_received", 900.0),
+                    )
+                )
+            ),
+            **common,
         ),
         LatencyBatch(
             batch_id=f"stt-{round_index}", source_instance_id="gateway-source",
             component="gateway", phase="gateway_stt",
-            marks=(mark("gateway", "gateway.stt_request_started", 0, 110.0),), **common,
+            marks=tuple(
+                mark("gateway", point, index, timestamp)
+                for index, (point, timestamp) in enumerate(
+                    (
+                        ("gateway.stt_request_started", 110.0),
+                        ("gateway.stt_provider_transport_open", 120.0),
+                        ("gateway.stt_session_ready", 130.0),
+                        ("gateway.vad_speech_stopped", 170.0),
+                        ("gateway.eot_control_sent", 180.0),
+                        ("gateway.stt_final_available", 190.0),
+                    )
+                )
+            ),
+            **common,
         ),
         LatencyBatch(
             batch_id=f"tts-{round_index}", source_instance_id="gateway-source",
             component="gateway", phase="gateway_tts",
-            marks=(mark("gateway", "gateway.tts_request_received", 0, 700.0),), **common,
+            marks=tuple(
+                mark("gateway", point, index, timestamp)
+                for index, (point, timestamp) in enumerate(
+                    (
+                        ("gateway.tts_request_received", 700.0),
+                        ("gateway.tts_provider_transport_open", 710.0),
+                        ("gateway.tts_provider_first_audio", 730.0),
+                        ("gateway.downlink_ticket_ready", 740.0),
+                        ("gateway.downlink_first_frame_sent", 750.0),
+                    )
+                )
+            ),
+            **common,
         ),
         LatencyBatch(
             batch_id=f"agent-{round_index}", source_instance_id="agent_server-source",
             component="agent_server", phase="agent_foreground",
-            marks=(mark("agent_server", "agent.commit_submit_received", 0, 300.0),), **common,
+            marks=tuple(
+                mark("agent_server", point, index, timestamp)
+                for index, (point, timestamp) in enumerate(
+                    (
+                        ("agent.commit_submit_received", 300.0),
+                        ("agent.commit_accepted", 310.0),
+                        ("agent.route_resolved", 320.0),
+                        ("agent.agent_started", 330.0),
+                        *(
+                            (
+                                ("agent.tool_execution_started", 400.0),
+                                ("agent.tool_execution_completed", 450.0),
+                            )
+                            if include_tool_marks
+                            else ()
+                        ),
+                        ("agent.agent_final", 500.0),
+                        ("agent.presentation_produced", 510.0),
+                        ("agent.presentation_dispatched", 520.0),
+                    )
+                )
+            ),
+            **common,
         ),
     )
     mode = "ab" if append else "wb"
@@ -190,6 +267,24 @@ def test_fixture_manifest_rejects_a_wav_whose_content_does_not_match_the_declare
         raise AssertionError("altered fixture bytes must fail closed")
 
 
+def test_fixture_manifest_loads_only_a_closed_semantic_transcript_digest(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_semantic_manifest")
+    wav = tmp_path / "fixture.wav"
+    _write_wav(wav)
+    manifest = tmp_path / "fixture.json"
+    _write_manifest(
+        manifest,
+        wav,
+        digest=hashlib.sha256(wav.read_bytes()).hexdigest(),
+    )
+
+    cases = runner.load_fixture_manifest(manifest, "en-v1-fixed-wav")
+
+    assert cases[0].expected_transcript_sha256 == "c" * 64
+
+
 def test_fixture_manifest_rejects_audio_that_is_not_pcm16_mono_at_the_declared_rate(tmp_path: Path) -> None:
     runner = _load_runner("post_capture_latency_runner_wav")
     wav = tmp_path / "fixture.wav"
@@ -203,6 +298,26 @@ def test_fixture_manifest_rejects_audio_that_is_not_pcm16_mono_at_the_declared_r
         assert str(error) == "FIXTURE_WAV_INVALID"
     else:
         raise AssertionError("non-mono fixture must fail closed")
+
+
+def test_fixture_manifest_requires_exact_non_boolean_48khz_rate(tmp_path: Path) -> None:
+    runner = _load_runner("post_capture_latency_runner_rate")
+    for index, rate in enumerate((True, 44_100)):
+        wav = tmp_path / f"fixture-{index}.wav"
+        _write_wav(wav, sample_rate=48_000 if rate is True else rate)
+        manifest = tmp_path / f"fixture-{index}.json"
+        _write_manifest(
+            manifest,
+            wav,
+            digest=hashlib.sha256(wav.read_bytes()).hexdigest(),
+            sample_rate=rate,
+        )
+        try:
+            runner.load_fixture_manifest(manifest, "en-v1-fixed-wav")
+        except ValueError as error:
+            assert str(error) == "FIXTURE_WAV_INVALID"
+        else:
+            raise AssertionError("fixture sample rate must be the exact 48 kHz integer")
 
 
 def test_fixture_manifest_rejects_wav_larger_than_four_mib(tmp_path: Path) -> None:
@@ -229,7 +344,7 @@ def test_fixture_manifest_loader_rejects_paths_outside_its_manifest_root(tmp_pat
     spec.loader.exec_module(module)
 
     manifest = tmp_path / "fixture.json"
-    manifest.write_text('{"schema_version":"live-voice.fixed-audio-fixture.v0","fixture_profile_id":"en-v1-fixed-wav","cases":[{"profile_id":"dialogue_no_tool","input_case_id":"dialogue-paris-en-v1","wav_path":"../private.wav","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sample_rate_hz":48000}]}', encoding="utf-8")
+    manifest.write_text('{"schema_version":"live-voice.fixed-audio-fixture.v0","fixture_profile_id":"en-v1-fixed-wav","cases":[{"profile_id":"dialogue_no_tool","input_case_id":"dialogue-paris-en-v1","wav_path":"../private.wav","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sample_rate_hz":48000,"expected_transcript_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}', encoding="utf-8")
 
     try:
         module.load_fixture_manifest(manifest, "en-v1-fixed-wav")
@@ -293,6 +408,59 @@ def test_loopback_fixture_server_rechecks_hash_before_serving_bytes(tmp_path: Pa
         server.server_close()
 
 
+def test_loopback_fixture_server_claims_one_attempt_before_serving_audio(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_fixture_claim")
+    wav = tmp_path / "fixture.wav"
+    _write_wav(wav)
+    digest = hashlib.sha256(wav.read_bytes()).hexdigest()
+    case = runner.FixtureCase(
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        wav,
+        digest,
+        48_000,
+    )
+    identity = runner.AttemptIdentity(
+        "run-20260820-a",
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        0,
+    )
+    server = runner.create_loopback_fixture_server(
+        "http://localhost:5173",
+        (case,),
+        identity,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/fixture/dialogue-paris-en-v1.wav",
+        headers={"Origin": "http://localhost:5173"},
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+            assert (
+                response.headers["X-Live-Voice-Transcript-Sha256"]
+                == case.expected_transcript_sha256
+            )
+            assert (
+                response.headers["Access-Control-Expose-Headers"]
+                == "X-Live-Voice-Transcript-Sha256"
+            )
+        try:
+            urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error:
+            assert error.code == 409
+        else:
+            raise AssertionError("a second tab must lose before receiving fixture bytes")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_loopback_server_rejects_non_loopback_web_origin_before_binding(tmp_path: Path) -> None:
     runner = _load_runner("post_capture_latency_runner_origin")
     wav = tmp_path / "fixture.wav"
@@ -311,7 +479,13 @@ def test_loopback_result_endpoint_accepts_one_exact_content_free_attempt(tmp_pat
     runner = _load_runner("post_capture_latency_runner_result")
     wav = tmp_path / "fixture.wav"
     _write_wav(wav)
-    case = runner.FixtureCase("dialogue_no_tool", "dialogue-paris-en-v1", wav, "a" * 64, 48_000)
+    case = runner.FixtureCase(
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        wav,
+        hashlib.sha256(wav.read_bytes()).hexdigest(),
+        48_000,
+    )
     identity = runner.AttemptIdentity(
         "run-20260820-a",
         "dialogue_no_tool",
@@ -338,6 +512,12 @@ def test_loopback_result_endpoint_accepts_one_exact_content_free_attempt(tmp_pat
         method="POST",
     )
     try:
+        fixture = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/fixture/dialogue-paris-en-v1.wav",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        with urllib.request.urlopen(fixture) as response:
+            assert response.status == 200
         with urllib.request.urlopen(request) as response:
             assert response.status == 204
         assert server.received_result == runner.AttemptResult(identity, "completed")
@@ -347,6 +527,125 @@ def test_loopback_result_endpoint_accepts_one_exact_content_free_attempt(tmp_pat
             assert error.code == 409
         else:
             raise AssertionError("duplicate result must fail closed")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_loopback_result_endpoint_accepts_only_the_browser_json_cors_preflight(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_preflight")
+    wav = tmp_path / "fixture.wav"
+    _write_wav(wav)
+    case = runner.FixtureCase(
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        wav,
+        "a" * 64,
+        48_000,
+    )
+    server = runner.create_loopback_fixture_server(
+        "http://localhost:5173",
+        (case,),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/result",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+        method="OPTIONS",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 204
+            assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+            assert response.headers["Access-Control-Allow-Methods"] == "POST"
+            assert response.headers["Access-Control-Allow-Headers"] == "Content-Type"
+
+        invalid = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/result",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization, content-type",
+            },
+            method="OPTIONS",
+        )
+        try:
+            urllib.request.urlopen(invalid)
+        except urllib.error.HTTPError as error:
+            assert error.code == 403
+        else:
+            raise AssertionError("preflight with an extra header must fail closed")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_loopback_result_endpoint_rejects_boolean_round_identity(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_boolean_round")
+    wav = tmp_path / "fixture.wav"
+    _write_wav(wav)
+    case = runner.FixtureCase(
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        wav,
+        hashlib.sha256(wav.read_bytes()).hexdigest(),
+        48_000,
+    )
+    identity = runner.AttemptIdentity(
+        "run-20260820-a",
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        1,
+    )
+    server = runner.create_loopback_fixture_server(
+        "http://localhost:5173",
+        (case,),
+        identity,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    fixture = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/fixture/dialogue-paris-en-v1.wav",
+        headers={"Origin": "http://localhost:5173"},
+    )
+    body = json.dumps(
+        {
+            "schema_version": "live-voice.post-capture-result.v0",
+            "run_id": identity.run_id,
+            "profile_id": identity.profile_id,
+            "input_case_id": identity.input_case_id,
+            "round_index": True,
+            "outcome": "completed",
+        }
+    ).encode()
+    result = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/result",
+        data=body,
+        headers={
+            "Origin": "http://localhost:5173",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(fixture) as response:
+            assert response.status == 200
+        try:
+            urllib.request.urlopen(result)
+        except urllib.error.HTTPError as error:
+            assert error.code == 400
+        else:
+            raise AssertionError("JSON boolean cannot impersonate round one")
+        assert server.received_result is None
     finally:
         server.shutdown()
         server.server_close()
@@ -440,6 +739,7 @@ def test_attempt_supervisor_uses_no_shell_and_terminates_only_its_owned_browser(
 
     def popen(argv, *, shell):
         calls.append(("popen", tuple(argv), shell))
+        assert server.claim_fixture(case)
         assert server.accept_result(runner.AttemptResult(identity, "completed"))
         return process
 
@@ -503,7 +803,7 @@ def test_empty_formal_shards_receive_no_attempt_credit(tmp_path: Path) -> None:
         raise AssertionError("empty diagnostic shards must fail closed")
 
 
-def test_complete_formal_shards_generate_a_report_and_receive_attempt_credit(tmp_path: Path) -> None:
+def test_completed_initial_only_shards_do_not_receive_attempt_credit(tmp_path: Path) -> None:
     runner = _load_runner("post_capture_latency_runner_complete_artifacts")
     run_dir = tmp_path / "run-a"
     run_dir.mkdir()
@@ -583,15 +883,12 @@ def test_complete_formal_shards_generate_a_report_and_receive_attempt_credit(tmp
     (run_dir / "agent.jsonl").write_bytes(agent.canonical_bytes() + b"\n")
     identity = runner.AttemptIdentity("run-a", "dialogue_no_tool", "dialogue-paris-en-v1", 0)
 
-    runner.validate_attempt_artifacts(run_dir, identity)
-
-    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-    response_total = next(
-        segment
-        for segment in report["profiles"][0]["segments"]
-        if segment["segment_id"] == "response_total"
-    )
-    assert response_total["successful_samples"] == 1
+    try:
+        runner.validate_attempt_artifacts(run_dir, identity)
+    except ValueError as error:
+        assert str(error) == "ARTIFACTS_FAILED"
+    else:
+        raise AssertionError("initial-only shards cannot prove the authoritative journey")
 
 
 def test_later_completed_round_keeps_credit_when_report_contains_prior_success(tmp_path: Path) -> None:
@@ -612,6 +909,107 @@ def test_later_completed_round_keeps_credit_when_report_contains_prior_success(t
         if segment["segment_id"] == "response_total"
     )
     assert response_total["successful_samples"] == 2
+
+
+def test_tool_profile_requires_authoritative_tool_marks_before_attempt_credit(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_tool_artifacts")
+    run_dir = tmp_path / "run-tool"
+    run_dir.mkdir()
+    _write_run(
+        run_dir / "run.json",
+        profile_id="dialogue_with_tool",
+        input_case_id="tool-git-status-en-v1",
+    )
+    identity = runner.AttemptIdentity(
+        "run-a",
+        "dialogue_with_tool",
+        "tool-git-status-en-v1",
+        0,
+    )
+    _write_complete_round(
+        run_dir,
+        0,
+        append=False,
+        profile_id="dialogue_with_tool",
+        input_case_id="tool-git-status-en-v1",
+        include_tool_marks=False,
+    )
+    try:
+        runner.validate_attempt_artifacts(run_dir, identity)
+    except ValueError as error:
+        assert str(error) == "ARTIFACTS_FAILED"
+    else:
+        raise AssertionError("a tool profile without real Tool marks must fail closed")
+
+    _write_complete_round(
+        run_dir,
+        0,
+        append=False,
+        profile_id="dialogue_with_tool",
+        input_case_id="tool-git-status-en-v1",
+        include_tool_marks=True,
+    )
+    runner.validate_attempt_artifacts(run_dir, identity)
+
+
+def test_artifact_settlement_waits_for_a_delayed_partial_append_and_times_out_closed(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_settlement")
+    run_dir = tmp_path / "run-a"
+    run_dir.mkdir()
+    _write_run(run_dir / "run.json")
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    _write_complete_round(staged, 0, append=False)
+    browser_bytes = (staged / "browser.jsonl").read_bytes()
+    split = len(browser_bytes) // 2
+    (run_dir / "browser.jsonl").write_bytes(browser_bytes[:split])
+    identity = runner.AttemptIdentity(
+        "run-a",
+        "dialogue_no_tool",
+        "dialogue-paris-en-v1",
+        0,
+    )
+
+    def settle() -> None:
+        time.sleep(0.05)
+        with (run_dir / "browser.jsonl").open("ab") as handle:
+            handle.write(browser_bytes[split:])
+        (run_dir / "gateway.jsonl").write_bytes(
+            (staged / "gateway.jsonl").read_bytes()
+        )
+        (run_dir / "agent.jsonl").write_bytes(
+            (staged / "agent.jsonl").read_bytes()
+        )
+
+    writer = threading.Thread(target=settle)
+    writer.start()
+    runner.wait_for_attempt_artifacts(
+        run_dir,
+        identity,
+        timeout_seconds=1.0,
+        poll_interval_seconds=0.01,
+    )
+    writer.join(timeout=1)
+    assert (run_dir / "report.json").is_file()
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _write_run(empty / "run.json")
+    try:
+        runner.wait_for_attempt_artifacts(
+            empty,
+            identity,
+            timeout_seconds=0.02,
+            poll_interval_seconds=0.005,
+        )
+    except ValueError as error:
+        assert str(error) == "ARTIFACTS_SETTLEMENT_TIMEOUT"
+    else:
+        raise AssertionError("missing exporter shards must time out closed")
 
 
 def test_prepare_run_cli_writes_one_closed_v1_manifest_and_refuses_overwrite(tmp_path: Path) -> None:

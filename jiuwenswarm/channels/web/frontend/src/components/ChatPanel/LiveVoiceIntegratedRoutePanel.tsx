@@ -1214,11 +1214,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   if (postCaptureConfigRef.current === undefined) {
     postCaptureConfigRef.current = typeof window === 'undefined' || typeof document === 'undefined'
       ? null
-      : selectProductPostCaptureBenchmark(
+      : parsePostCaptureBenchmarkConfig(
           FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK,
           window.location,
-          props.activeSessionId,
-          document.visibilityState,
         );
   }
   const latencyProbeRef = useRef<BrowserLatencyProbe | null | undefined>(undefined);
@@ -1553,7 +1551,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setPendingPresentationAck(null);
           setProductTextReason(null);
           setProductTextStatus('acknowledged');
-          scheduleProductVoiceLoopCapture();
+          const benchmarkController = postCaptureControllerRef.current;
+          if (benchmarkController === null) {
+            scheduleProductVoiceLoopCapture();
+          } else {
+            voiceLoopEnabledRef.current = false;
+            voiceLoopGenerationRef.current += 1;
+            void benchmarkController.observePresentationAck();
+          }
         }
       })
       .catch(error => {
@@ -3638,11 +3643,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopGenerationRef.current === loopGeneration;
     try {
       const recognition = await owner.stopAndRecognize();
-      if (
-        props.activeSessionId !== null &&
-        voiceLoopEnabledRef.current &&
-        voiceLoopGenerationRef.current === loopGeneration
-      ) {
+      if (props.activeSessionId !== null && voiceLoopEnabledRef.current && voiceLoopGenerationRef.current === loopGeneration) {
+        const benchmarkController = postCaptureControllerRef.current;
+        if (benchmarkController !== null && !(await benchmarkController.acceptRecognizedText(recognition.text))) {
+          p1VoiceCaptureBindingRef.current = null;
+          return;
+        }
         updateRecognizedSpeechConfirmation(null);
         const recognized = Object.freeze({
           session_id: props.activeSessionId,
@@ -4837,13 +4843,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingPresentationAttemptRef.current !== null ||
       pendingBargeInRef.current !== null ||
       activationOwnerRef.current?.hasPendingSubmission() ||
-      activationOwnerRef.current?.hasPendingNotification() ||
       activationOwnerRef.current?.hasPendingPresentationAck() ||
       activationOwnerRef.current?.hasPendingBargeIn() ||
       typeof document === 'undefined' ||
       document.visibilityState !== 'visible' ||
       typeof fetch !== 'function'
-    ) return;
+    )
+      return;
     const controller = createPostCapturePipelineBenchmark(config, {
       async fetchFixture(url, signal) {
         const response = await fetch(url, {
@@ -4853,7 +4859,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           credentials: 'omit',
         });
         if (!response.ok) throw new Error('FIXED_AUDIO_FETCH_FAILED');
-        return response.arrayBuffer();
+        const expectedTranscriptSha256 = response.headers.get(
+          'X-Live-Voice-Transcript-Sha256',
+        );
+        if (expectedTranscriptSha256 === null) {
+          throw new Error('FIXED_AUDIO_TRANSCRIPT_DIGEST_MISSING');
+        }
+        return Object.freeze({
+          wav_bytes: await response.arrayBuffer(),
+          expected_transcript_sha256: expectedTranscriptSha256,
+        });
       },
       async postResult(result) {
         const response = await fetch(config.result_url, {
@@ -4864,6 +4879,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           body: JSON.stringify(result),
         });
         if (!response.ok) throw new Error('POST_CAPTURE_RESULT_FAILED');
+      },
+      async digestTranscript(value) {
+        if (typeof globalThis.crypto?.subtle?.digest !== 'function') {
+          throw new Error('POST_CAPTURE_DIGEST_UNAVAILABLE');
+        }
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+        return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
       },
     });
     if (controller === null) return;
@@ -4883,6 +4905,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
       },
       async close() {
+        voiceLoopEnabledRef.current = false;
+        voiceLoopGenerationRef.current += 1;
         const voiceOwner = p1VoiceOwnerRef.current;
         if (voiceOwner !== null) {
           await voiceOwner.close().catch(() => undefined);

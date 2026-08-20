@@ -773,6 +773,23 @@ def compare_latency_reports_a_b_a(
 ) -> LatencyABAComparison:
     before = compare_latency_reports(baseline_before, candidate)
     after = compare_latency_reports(baseline_after, candidate)
+    source_reason: str | None = None
+    if baseline_before.run.git_commit != baseline_after.run.git_commit:
+        source_reason = "BASELINE_SOURCE_MISMATCH"
+    elif candidate.run.git_commit == baseline_before.run.git_commit:
+        source_reason = "CANDIDATE_SOURCE_NOT_DISTINCT"
+    if source_reason is not None:
+        return LatencyABAComparison(
+            ABA_COMPARISON_SCHEMA_VERSION,
+            "inconclusive",
+            source_reason,
+            baseline_before.run.run_id,
+            candidate.run.run_id,
+            baseline_after.run.run_id,
+            before,
+            after,
+            (),
+        )
     drift = (
         _comparison_rows(baseline_before, baseline_after)
         if _compatible(baseline_before.run, baseline_after.run)

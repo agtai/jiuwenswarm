@@ -105,6 +105,14 @@ product contract, the first runner may expose a separately named
 profile excludes STT finalization and must not be reported as the complete
 post-capture track.
 
+The controlled-WAV lane binds each private fixture to a SHA-256 digest of its
+normalized expected transcript. The Browser computes the same digest over the
+authoritative STT final in memory and must reject a mismatch before
+`unified.submit`. Raw expected or observed transcript text remains absent from
+the URL, result receipt, probe, report and logs. A dialogue profile must also
+reject Task identity; `dialogue_with_tool` receives credit only when the Agent
+shard contains the real Tool start and completion boundaries.
+
 For a Live Voice-only experiment, a declared fixture may hold the transcript,
 Agent/Tool outcome or PresentationUnit input constant. Such a profile isolates
 presentation, synthesis, downlink, playout and ACK, but remains separate from a
@@ -114,7 +122,10 @@ it is not the initial optimization owner.
 Pipeline automation may use a controlled Browser runtime for WebAudio output
 without requiring the operator to navigate the product UI or speak. Removing
 manual UI operation does not permit Browser playout to be replaced silently by
-a server byte-receipt proxy.
+a server byte-receipt proxy. The controlled profile must also declare one
+unchanged autoplay policy that permits the fixture-owned AudioContext to reach
+`running` without a click; a suspended or failed resume invalidates the attempt
+instead of silently feeding synthetic silence.
 
 ## 3. Corpus v0.1
 

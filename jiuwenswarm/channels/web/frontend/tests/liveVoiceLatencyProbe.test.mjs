@@ -585,12 +585,19 @@ test('synchronous and asynchronous export failures are private, contained, and n
     { requestError: new Error('PRIVATE sync transport failure') },
     { requestResult: Promise.reject(new Error('PRIVATE async transport failure')) },
   ]) {
-    const h = harness(requestResult);
+    const settlements = [];
+    const h = harness({
+      ...requestResult,
+      onBatchSettled(batch, receipt) {
+        settlements.push([batch, receipt]);
+      },
+    });
     const probe = createBrowserLatencyProbe(h.dependencies);
     const batch = finishedBatch(probe);
     await assert.doesNotReject(probe.exportBatch('session-1', batch));
     await assert.doesNotReject(probe.exportBatch('session-1', batch));
     assert.equal(h.requestCalls.length, 1);
+    assert.deepEqual(settlements, [[batch, { disposition: 'unknown' }]]);
   }
 });
 

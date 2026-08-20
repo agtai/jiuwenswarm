@@ -257,7 +257,7 @@ test('fixed audio owner starts one memory-only stream after the declared lead', 
 });
 ```
 
-Add negative tests for non-RIFF bytes, non-PCM16, stereo, empty data, sample-rate mismatch, more than 4 MiB, second `getUserMedia`, start-delay outside `250..5_000`, source/context failure, close-before-start and double close. Assert error messages contain stable reason IDs but no input bytes or decoded text.
+Add negative tests for non-RIFF bytes, non-PCM16, stereo, empty data, sample-rate mismatch, more than 4 MiB, a third `getUserMedia`, start-delay outside `250..5_000`, source/context failure, close-before-start and double close. The first claim plays the fixture exactly once; the second is a silent successor stream required by the unchanged P1 playout/ACK lifecycle and must never replay the fixture. Assert error messages contain stable reason IDs but no input bytes or decoded text.
 
 - [ ] **Step 2: Run the focused RED test**
 
@@ -271,7 +271,11 @@ The implementation must:
 - create its own `AudioContext` and `MediaStreamAudioDestinationNode`;
 - decode/copy the WAV into an `AudioBuffer` without persisting it;
 - schedule exactly one source at `currentTime + start_delay_ms / 1000`;
-- return only the destination stream from `getUserMedia`;
+- bounded-resume the fixture-owned `AudioContext` and require `running` before
+  scheduling the WAV and before returning the silent successor stream;
+- return the fixture destination on the first `getUserMedia`, one distinct
+  source-free successor destination on the second, and reject every later
+  claim without replaying the WAV;
 - report an authenticated-looking microphone permission status only inside this
   explicit benchmark environment, never through the default environment;
 - stop the source/tracks and close the context on every terminal path;
@@ -661,7 +665,8 @@ Use this exact private manifest shape:
       "input_case_id": "dialogue-paris-en-v1",
       "wav_path": "pcm48k/dialogue-paris-en-v1.wav",
       "sha256": "e37d2f1eb21ac3bfe61048b3e4f246c2775432b606742dc0bdbcaa57f84dde3c",
-      "sample_rate_hz": 48000
+      "sample_rate_hz": 48000,
+      "expected_transcript_sha256": "5b13d00914980969a596ca42fae11c18de921567c810067ca92a5301431629b0"
     }
   ]
 }
@@ -869,6 +874,24 @@ git commit -m "feat(live-voice): compare post-capture A B A runs"
 > product-code changes and the user deferred the real baseline run; therefore a
 > truthful clean automated smoke, failure journey, sanitized evidence, STATUS
 > smoke credit and final independent Tier-3 review all remain open.
+>
+> **Review remediation — 2026-08-21:** the first cumulative Tier-3 review
+> returned `NOT READY`. The follow-up batch adds strict CORS preflight, an
+> atomic pre-effect fixture claim, in-memory normalized-transcript digest
+> validation before `unified.submit`, authoritative profile-specific shard
+> gates, delayed/partial exporter settlement waiting, Browser export-unknown
+> settlement, exact A1/A2 source equality with a distinct B source, and mounted
+> feature-true positive/semantic-mismatch coverage. It also removes the normal
+> notification long-poll from the benchmark-start exclusion after the mounted
+> test proved that exclusion made automatic start unreachable. Follow-up cold
+> review also required the real P1 successor: the fixture plays once, a second
+> source-free stream supplies successor readiness, both claims bounded-resume
+> the fixture context, and later claims fail closed. Completion now joins the
+> settled Browser batch with the exact successful P2 presentation ACK, while a
+> fresh URL survives the initial `activeSessionId=null` render until the saved
+> Session binds. These changes
+> still grant no smoke or baseline credit until cumulative checks and the
+> repeated independent review pass on a clean commit.
 
 **Risk:** Tier 3 real-path evidence, but not physical acceptance.
 

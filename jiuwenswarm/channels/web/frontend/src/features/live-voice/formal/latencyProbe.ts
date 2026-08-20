@@ -865,12 +865,14 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
   }
 
   async exportBatch(sessionId: string, batch: Readonly<LatencyBatch>): Promise<void> {
+    let unsettledBatch: Readonly<LatencyBatch> | null = null;
     try {
       if (!boundedToken(sessionId) || batch === null || typeof batch !== 'object') return;
       if (!this.#ownedBatches.has(batch) || this.#settledExports.has(batch)) return;
       const provenance = this.#batchContexts.get(batch);
       if (provenance === undefined || !validateProducedBatch(batch, this.#selection, this.#points, provenance)) return;
       this.#settledExports.add(batch);
+      unsettledBatch = batch;
       const result = await this.#request(LATENCY_PROBE_BATCH_METHOD, { session_id: sessionId, batch });
       const disposition =
         result !== null && typeof result === 'object' && 'status' in result && result.status === 'written'
@@ -878,13 +880,20 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
           : result !== null && typeof result === 'object' && 'status' in result && result.status === 'idempotent'
             ? 'idempotent'
             : 'unknown';
+      unsettledBatch = null;
       try {
         this.#onBatchSettled?.(batch, Object.freeze({ disposition }));
       } catch {
         // An observer only consumes a closed export receipt.
       }
     } catch {
-      // Export is a one-shot diagnostic side channel; product work never retries it.
+      if (unsettledBatch !== null) {
+        try {
+          this.#onBatchSettled?.(unsettledBatch, Object.freeze({ disposition: 'unknown' }));
+        } catch {
+          // An observer only consumes a closed export receipt.
+        }
+      }
     }
   }
 }

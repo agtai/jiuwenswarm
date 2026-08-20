@@ -663,7 +663,13 @@ used only to debug the harness; the runner refuses artifact credit unless
 Create a closed fixture manifest beside the WAV. `wav_path` is relative to the
 manifest directory; SHA-256 is lowercase hex. The runner accepts only PCM16,
 48 kHz, mono WAV files up to 4 MiB and rechecks the hash immediately before
-serving:
+serving. `expected_transcript_sha256` is the SHA-256 of the expected English
+transcript after NFKC normalization, lowercase conversion, replacement of each
+non-letter/non-number run with one space, and trimming. The Browser compares
+that digest in memory before `unified.submit`; neither transcript is added to
+the query, result, probe, report or log. The loopback server releases only the
+digest in `X-Live-Voice-Transcript-Sha256` after the fixture GET wins the
+single-attempt claim:
 
 ```json
 {
@@ -675,7 +681,8 @@ serving:
       "input_case_id": "dialogue-paris-en-v1",
       "wav_path": "dialogue-paris-en-v1.wav",
       "sha256": "REPLACE_WITH_64_LOWERCASE_HEX",
-      "sample_rate_hz": 48000
+      "sample_rate_hz": 48000,
+      "expected_transcript_sha256": "REPLACE_WITH_64_LOWERCASE_HEX"
     }
   ]
 }
@@ -713,7 +720,8 @@ For B, pass one absolute `--experiment-json` whose value is the closed
 `LatencyExperiment` object. The target must belong to the post-capture
 allowlist; capture-startup/first-frame targets are rejected. A1, B and A2 must
 otherwise declare identical environment, provider, playout, flags, ordered
-profiles/cases and attempt counts.
+profiles/cases and attempt counts. A1 and A2 must declare the same exact
+`git_commit`; B must declare a different commit and one named experiment.
 
 Start the normal AgentServer, Gateway/WebChannel and Vite route described in
 the preceding sections. All Python producers receive the same three probe
@@ -732,6 +740,15 @@ the already-running visible Browser: the command prints the one-time
 Live Voice button, microphone selection or manual speech is used. Alternatively
 provide a JSON argv containing exactly one `{url}` token; the runner starts and
 terminates only that child and never invokes a shell.
+
+The declared controlled-Browser profile must allow WebAudio autoplay without a
+click, for example through an isolated Chrome profile launched with
+`--autoplay-policy=no-user-gesture-required`. Record the exact policy in the
+private environment label and use it unchanged across A1/B/A2. The fixed-audio
+owner bounded-resumes its private fixture context and requires authoritative
+`state === "running"` before both the WAV source and the silent successor
+stream. Failure remains `FIXED_AUDIO_CONTEXT_NOT_RUNNING` and earns no attempt
+credit; do not bypass it by relabeling silence as the fixture.
 
 ```bash
 uv run python scripts/live_voice/post_capture_latency_runner.py run \
@@ -766,8 +783,11 @@ uv run python scripts/live_voice/post_capture_latency_runner.py compare \
 
 An `improved` result requires B to improve against both A1 and A2 while
 baseline latency, denominator and failure-rate drift remain smaller than the
-minimum candidate gain. Always perform normal service shutdown/export drain,
-then unset all four variables. Do not update STATUS or create repository
+minimum candidate gain. The runner waits a bounded interval for the exact
+Browser/Gateway/Agent shards after the content-free result; a partial append or
+late exporter cannot be treated as immediate failure, while an incomplete set
+at the deadline remains failed. Always perform normal service shutdown/export
+drain, then unset all four variables. Do not update STATUS or create repository
 evidence until one independently reviewed clean-source smoke actually passes.
 
 ## 8. 先做文字工具冒烟，再做语音

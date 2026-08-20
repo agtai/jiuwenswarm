@@ -9,6 +9,7 @@ import type {
 const MAX_WAV_BYTES = 4 * 1024 * 1024;
 const MIN_START_DELAY_MS = 250;
 const MAX_START_DELAY_MS = 5_000;
+const CONTEXT_RESUME_TIMEOUT_MS = 2_000;
 
 export interface FixedAudioCaptureFixture {
   readonly input_case_id: string;
@@ -104,6 +105,24 @@ function defaultPlatform(): FixedAudioCapturePlatform {
   });
 }
 
+async function requireRunningContext(context: FixedAudioContext): Promise<void> {
+  if (context.state === 'running') return;
+  let timeout: ReturnType<typeof globalThis.setTimeout> | null = null;
+  try {
+    await Promise.race([
+      context.resume(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = globalThis.setTimeout(() => reject(violation('CONTEXT_NOT_RUNNING')), CONTEXT_RESUME_TIMEOUT_MS);
+      }),
+    ]);
+  } catch {
+    throw violation('CONTEXT_NOT_RUNNING');
+  } finally {
+    if (timeout !== null) globalThis.clearTimeout(timeout);
+  }
+  if (context.state !== 'running') throw violation('CONTEXT_NOT_RUNNING');
+}
+
 export function createFixedAudioCaptureOwner(
   fixture: FixedAudioCaptureFixture,
   platform: FixedAudioCapturePlatform = defaultPlatform(),
@@ -111,16 +130,21 @@ export function createFixedAudioCaptureOwner(
   if (fixture === null || typeof fixture !== 'object' || typeof fixture.input_case_id !== 'string' || fixture.input_case_id.length === 0) {
     throw violation('FIXTURE_INVALID');
   }
-  if (!Number.isInteger(fixture.start_delay_ms) || fixture.start_delay_ms < MIN_START_DELAY_MS || fixture.start_delay_ms > MAX_START_DELAY_MS) {
+  const inputCaseId = fixture.input_case_id;
+  const startDelayMs = fixture.start_delay_ms;
+  const expectedSampleRateHz = fixture.expected_sample_rate_hz;
+  const wavBytes = fixture.wav_bytes;
+  if (!Number.isInteger(startDelayMs) || startDelayMs < MIN_START_DELAY_MS || startDelayMs > MAX_START_DELAY_MS) {
     throw violation('START_DELAY_INVALID');
   }
-  const decoded = decodePcm16MonoWav(fixture.wav_bytes, fixture.expected_sample_rate_hz);
+  const decoded = decodePcm16MonoWav(wavBytes, expectedSampleRateHz);
+  const sampleRate = decoded.sampleRate;
   let sourceBytes: Float32Array | null = decoded.samples;
   let fixtureContext: FixedAudioContext;
   let destination: Readonly<{ stream: BrowserMediaStreamLike }>;
   try {
     fixtureContext = platform.createAudioContext();
-    if (fixtureContext.sampleRate !== decoded.sampleRate) throw violation('CONTEXT_SAMPLE_RATE_MISMATCH');
+    if (fixtureContext.sampleRate !== sampleRate) throw violation('CONTEXT_SAMPLE_RATE_MISMATCH');
     destination = fixtureContext.createMediaStreamDestination();
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('FIXED_AUDIO_')) throw error;
@@ -128,9 +152,10 @@ export function createFixedAudioCaptureOwner(
   }
 
   let closed = false;
-  let streamClaimed = false;
+  let streamClaims = 0;
   let started = false;
   let source: ReturnType<FixedAudioContext['createBufferSource']> | null = null;
+  const destinations: Array<Readonly<{ stream: BrowserMediaStreamLike }>> = [destination];
 
   const close = async (): Promise<void> => {
     if (closed) return;
@@ -145,11 +170,13 @@ export function createFixedAudioCaptureOwner(
     } catch {
       // Cleanup is best-effort and must not expose platform exceptions.
     }
-    for (const track of destination.stream.getTracks()) {
-      try {
-        track.stop();
-      } catch {
-        // A stopped fixture track is already terminal.
+    for (const ownedDestination of destinations) {
+      for (const track of ownedDestination.stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // A stopped fixture track is already terminal.
+        }
       }
     }
     source = null;
@@ -163,17 +190,29 @@ export function createFixedAudioCaptureOwner(
 
   const getUserMedia = async (): Promise<BrowserMediaStreamLike> => {
     if (closed) throw violation('OWNER_CLOSED');
-    if (streamClaimed) throw violation('STREAM_ALREADY_CLAIMED');
-    streamClaimed = true;
+    if (streamClaims >= 2) throw violation('STREAM_ALREADY_CLAIMED');
+    streamClaims += 1;
+    if (streamClaims === 2) {
+      try {
+        await requireRunningContext(fixtureContext);
+        const successor = fixtureContext.createMediaStreamDestination();
+        destinations.push(successor);
+        return successor.stream;
+      } catch {
+        await close();
+        throw violation('SUCCESSOR_STREAM_FAILED');
+      }
+    }
     try {
+      await requireRunningContext(fixtureContext);
       const values = sourceBytes;
       if (values === null) throw violation('OWNER_CLOSED');
-      const buffer = fixtureContext.createBuffer(1, values.length, decoded.sampleRate);
+      const buffer = fixtureContext.createBuffer(1, values.length, sampleRate);
       buffer.copyToChannel(values, 0);
       source = fixtureContext.createBufferSource();
       source.buffer = buffer;
       source.connect(destination);
-      source.start(fixtureContext.currentTime + fixture.start_delay_ms / 1000);
+      source.start(fixtureContext.currentTime + startDelayMs / 1000);
       started = true;
       return destination.stream;
     } catch (error) {
@@ -200,5 +239,5 @@ export function createFixedAudioCaptureOwner(
     createId: platform.createId ?? null,
   });
   void started;
-  return Object.freeze({ environment, input_case_id: fixture.input_case_id, close });
+  return Object.freeze({ environment, input_case_id: inputCaseId, close });
 }

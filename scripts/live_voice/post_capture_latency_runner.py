@@ -33,6 +33,55 @@ from jiuwenswarm.server.live_voice.latency_probe_report import (
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_WAV_BYTES = 4 * 1024 * 1024
 _PUBLIC_TOKEN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,255}$")
+_REQUIRED_ATTEMPT_POINTS = {
+    ("browser", "browser_round"): frozenset(
+        {
+            "browser.eot_received",
+            "browser.stt_final_received",
+            "browser.commit_submit_started",
+            "browser.presentation_received",
+            "browser.tts_request_started",
+            "browser.downlink_first_frame_received",
+            "browser.playout_first_frame_scheduled",
+            "browser.playout_first_frame_started_estimate",
+            "browser.playout_completed",
+            "browser.playout_ack_received",
+        }
+    ),
+    ("gateway", "gateway_stt"): frozenset(
+        {
+            "gateway.stt_request_started",
+            "gateway.stt_provider_transport_open",
+            "gateway.stt_session_ready",
+            "gateway.vad_speech_stopped",
+            "gateway.eot_control_sent",
+            "gateway.stt_final_available",
+        }
+    ),
+    ("gateway", "gateway_tts"): frozenset(
+        {
+            "gateway.tts_request_received",
+            "gateway.tts_provider_transport_open",
+            "gateway.tts_provider_first_audio",
+            "gateway.downlink_ticket_ready",
+            "gateway.downlink_first_frame_sent",
+        }
+    ),
+    ("agent_server", "agent_foreground"): frozenset(
+        {
+            "agent.commit_submit_received",
+            "agent.commit_accepted",
+            "agent.route_resolved",
+            "agent.agent_started",
+            "agent.agent_final",
+            "agent.presentation_produced",
+            "agent.presentation_dispatched",
+        }
+    ),
+}
+_TOOL_POINTS = frozenset(
+    {"agent.tool_execution_started", "agent.tool_execution_completed"}
+)
 
 
 def _validated_web_origin(value: str) -> urllib.parse.SplitResult:
@@ -168,6 +217,26 @@ def validate_attempt_artifacts(run_dir: Path, identity: AttemptIdentity) -> None
         for batch in exact
     ):
         raise ValueError("ARTIFACTS_FAILED")
+    for batch in exact:
+        points = frozenset(mark.point for mark in batch.marks)
+        required_points = _REQUIRED_ATTEMPT_POINTS[(batch.component, batch.phase)]
+        if (
+            not required_points.issubset(points)
+            or any(mark.task_id is not None for mark in batch.marks)
+            or "agent.task_command_accepted" in points
+        ):
+            raise ValueError("ARTIFACTS_FAILED")
+        if batch.phase == "agent_foreground" and (
+            (
+                identity.profile_id == "dialogue_with_tool"
+                and not _TOOL_POINTS.issubset(points)
+            )
+            or (
+                identity.profile_id == "dialogue_no_tool"
+                and bool(_TOOL_POINTS.intersection(points))
+            )
+        ):
+            raise ValueError("ARTIFACTS_FAILED")
     try:
         attempt_report = reduce_latency_run(run, exact)
         attempt_response_total = attempt_report.profile(identity.profile_id).segment("response_total")
@@ -180,6 +249,33 @@ def validate_attempt_artifacts(run_dir: Path, identity: AttemptIdentity) -> None
         write_latency_report(report, run_dir)
     except Exception as error:
         raise ValueError("ARTIFACTS_INVALID") from error
+
+
+def wait_for_attempt_artifacts(
+    run_dir: Path,
+    identity: AttemptIdentity,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.05,
+) -> None:
+    """Wait only for producer settlement; semantic failures remain terminal."""
+    if (
+        not 0 < timeout_seconds <= 60
+        or not 0 < poll_interval_seconds <= min(timeout_seconds, 1.0)
+    ):
+        raise ValueError("ARTIFACT_SETTLEMENT_BOUND_INVALID")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            validate_attempt_artifacts(run_dir, identity)
+            return
+        except ValueError as error:
+            if str(error) not in {"ARTIFACTS_INCOMPLETE", "ARTIFACTS_INVALID"}:
+                raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("ARTIFACTS_SETTLEMENT_TIMEOUT")
+        time.sleep(min(poll_interval_seconds, remaining))
 
 
 def write_a_b_a_comparison(
@@ -246,6 +342,7 @@ class FixtureCase:
     wav_path: Path
     sha256: str
     sample_rate_hz: int
+    expected_transcript_sha256: str = "a" * 64
 
 
 @dataclass(frozen=True)
@@ -276,11 +373,32 @@ class LoopbackFixtureServer(ThreadingHTTPServer):
         super().__init__(server_address, handler)
         self.expected_result = expected_result
         self.received_result: AttemptResult | None = None
+        self.fixture_claimed = False
         self.result_condition = Condition()
+
+    def claim_fixture(self, case: FixtureCase) -> bool:
+        with self.result_condition:
+            if (
+                self.expected_result is not None
+                and (
+                    case.profile_id != self.expected_result.profile_id
+                    or case.input_case_id != self.expected_result.input_case_id
+                    or self.fixture_claimed
+                )
+            ):
+                return False
+            if self.expected_result is not None:
+                self.fixture_claimed = True
+            return True
 
     def accept_result(self, result: AttemptResult) -> bool:
         with self.result_condition:
-            if self.expected_result is None or result.identity != self.expected_result or self.received_result is not None:
+            if (
+                self.expected_result is None
+                or not self.fixture_claimed
+                or result.identity != self.expected_result
+                or self.received_result is not None
+            ):
                 return False
             self.received_result = result
             self.result_condition.notify_all()
@@ -349,11 +467,37 @@ def load_fixture_manifest(path: Path, fixture_profile_id: str) -> tuple[FixtureC
     cases: list[FixtureCase] = []
     seen: set[tuple[str, str]] = set()
     for item in raw["cases"]:
-        if not isinstance(item, dict) or set(item) != {"profile_id", "input_case_id", "wav_path", "sha256", "sample_rate_hz"}:
+        if not isinstance(item, dict) or set(item) != {
+            "profile_id",
+            "input_case_id",
+            "wav_path",
+            "sha256",
+            "sample_rate_hz",
+            "expected_transcript_sha256",
+        }:
             raise ValueError("FIXTURE_MANIFEST_INVALID")
-        profile, case, relative, digest, rate = (item[key] for key in ("profile_id", "input_case_id", "wav_path", "sha256", "sample_rate_hz"))
-        if not all(isinstance(value, str) and value for value in (profile, case, relative, digest)) or not isinstance(rate, int):
+        profile, case, relative, digest, rate, transcript_digest = (
+            item[key]
+            for key in (
+                "profile_id",
+                "input_case_id",
+                "wav_path",
+                "sha256",
+                "sample_rate_hz",
+                "expected_transcript_sha256",
+            )
+        )
+        if (
+            not all(
+                isinstance(value, str) and value
+                for value in (profile, case, relative, digest, transcript_digest)
+            )
+            or not isinstance(rate, int)
+            or _SHA256.fullmatch(transcript_digest) is None
+        ):
             raise ValueError("FIXTURE_MANIFEST_INVALID")
+        if isinstance(rate, bool) or rate != 48_000:
+            raise ValueError("FIXTURE_WAV_INVALID")
         candidate = Path(relative)
         if candidate.is_absolute() or ".." in candidate.parts or not _SHA256.fullmatch(digest):
             raise ValueError("FIXTURE_PATH_INVALID")
@@ -387,7 +531,9 @@ def load_fixture_manifest(path: Path, fixture_profile_id: str) -> tuple[FixtureC
         if not valid_wav:
             raise ValueError("FIXTURE_WAV_INVALID")
         seen.add((profile, case))
-        cases.append(FixtureCase(profile, case, resolved, digest, rate))
+        cases.append(
+            FixtureCase(profile, case, resolved, digest, rate, transcript_digest)
+        )
     return tuple(cases)
 
 
@@ -403,6 +549,28 @@ def create_loopback_fixture_server(
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args: object) -> None:
             return
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            if self.path != "/result":
+                self.send_error(404)
+                return
+            requested_headers = {
+                item.strip().lower()
+                for item in self.headers.get("Access-Control-Request-Headers", "").split(",")
+                if item.strip()
+            }
+            if (
+                self.headers.get("Origin") != web_origin
+                or self.headers.get("Access-Control-Request-Method") != "POST"
+                or requested_headers != {"content-type"}
+            ):
+                self.send_error(403)
+                return
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", web_origin)
+            self.send_header("Access-Control-Allow-Methods", "POST")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
             if self.headers.get("Origin") != web_origin:
@@ -427,8 +595,20 @@ def create_loopback_fixture_server(
             ):
                 self.send_error(409)
                 return
+            server = cast(LoopbackFixtureServer, self.server)
+            if not server.claim_fixture(case):
+                self.send_error(409)
+                return
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", web_origin)
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "X-Live-Voice-Transcript-Sha256",
+            )
+            self.send_header(
+                "X-Live-Voice-Transcript-Sha256",
+                case.expected_transcript_sha256,
+            )
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
@@ -440,6 +620,9 @@ def create_loopback_fixture_server(
                 return
             if self.headers.get("Origin") != web_origin:
                 self.send_error(403)
+                return
+            if self.headers.get("Content-Type", "").lower() != "application/json":
+                self.send_error(400)
                 return
             length = self.headers.get("Content-Length", "")
             if not length.isascii() or not length.isdecimal() or not 1 <= int(length) <= 4096:
@@ -460,7 +643,14 @@ def create_loopback_fixture_server(
             if raw["schema_version"] != "live-voice.post-capture-result.v0" or raw["outcome"] not in ("completed", "unknown"):
                 self.send_error(400)
                 return
-            if not all(isinstance(raw[key], str) for key in ("run_id", "profile_id", "input_case_id")) or not isinstance(raw["round_index"], int):
+            if (
+                not all(
+                    isinstance(raw[key], str)
+                    for key in ("run_id", "profile_id", "input_case_id")
+                )
+                or isinstance(raw["round_index"], bool)
+                or not isinstance(raw["round_index"], int)
+            ):
                 self.send_error(400)
                 return
             result = AttemptResult(
@@ -620,7 +810,11 @@ def _run_attempt(args: argparse.Namespace) -> None:
         )
         if result.outcome != "completed":
             raise AttemptExecutionFailed("ATTEMPT_UNKNOWN")
-        validate_attempt_artifacts(args.run_json.parent, identity)
+        wait_for_attempt_artifacts(
+            args.run_json.parent,
+            identity,
+            timeout_seconds=min(15.0, args.timeout_seconds),
+        )
     except AttemptExecutionFailed:
         raise
     except ValueError as error:

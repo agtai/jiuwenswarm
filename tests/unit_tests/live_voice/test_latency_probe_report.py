@@ -404,6 +404,7 @@ def post_capture_config(tmp_path, name: str, *, target: str | None = None):
         input_case_ids=["short-greeting-v1"],
     )
     if target is not None:
+        payload["git_commit"] = "b" * 40
         payload["experiment"] = {
             "experiment_id": "latency-tune",
             "target_segment": target,
@@ -563,6 +564,37 @@ def test_a_b_a_rejects_baseline_failure_denominator_drift(tmp_path: Path) -> Non
     assert comparison.after_to_candidate.status == "improved"
     assert comparison.status == "inconclusive"
     assert comparison.reason == "BASELINE_DRIFT"
+
+
+def test_a_b_a_requires_one_unchanged_reference_and_a_distinct_candidate_source(
+    tmp_path: Path,
+) -> None:
+    before = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline-before"), response=100.0
+    )
+    candidate = report_with_complete_summaries(
+        post_capture_config(tmp_path, "candidate", target="response_total"),
+        response=80.0,
+    )
+    after = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline-after"), response=100.0
+    )
+
+    changed_reference = replace(
+        after,
+        run=replace(after.run, git_commit="c" * 40),
+    )
+    mismatched = compare_latency_reports_a_b_a(before, candidate, changed_reference)
+    assert mismatched.status == "inconclusive"
+    assert mismatched.reason == "BASELINE_SOURCE_MISMATCH"
+
+    unchanged_candidate = replace(
+        candidate,
+        run=replace(candidate.run, git_commit=before.run.git_commit),
+    )
+    indistinct = compare_latency_reports_a_b_a(before, unchanged_candidate, after)
+    assert indistinct.status == "inconclusive"
+    assert indistinct.reason == "CANDIDATE_SOURCE_NOT_DISTINCT"
 
 
 def test_compare_a_b_a_cli_emits_one_closed_json_result(

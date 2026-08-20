@@ -17,8 +17,9 @@ export interface PostCaptureBenchmarkControl {
 }
 
 export interface PostCaptureBenchmarkDependencies {
-  fetchFixture(url: string, signal: AbortSignal): Promise<ArrayBuffer>;
+  fetchFixture(url: string, signal: AbortSignal): Promise<Readonly<{ wav_bytes: ArrayBuffer; expected_transcript_sha256: string }>>;
   postResult(result: Readonly<PostCaptureBenchmarkResult>): Promise<void>;
+  digestTranscript(normalizedText: string): Promise<string>;
 }
 
 export interface PostCaptureBenchmarkResult {
@@ -45,6 +46,7 @@ const KEYS = new Set([
   'start_delay_ms',
 ]);
 const TOKEN = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 function canonicalInteger(value: string, minimum: number, maximum: number): number | null {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) return null;
@@ -115,6 +117,9 @@ class PostCapturePipelineBenchmark {
   #phase: PostCaptureBenchmarkPhase = 'waiting_for_session';
   #control: PostCaptureBenchmarkControl | null = null;
   #terminal = false;
+  #batchCompleted = false;
+  #presentationAcked = false;
+  #expectedTranscriptSha256: string | null = null;
 
   constructor(config: PostCaptureBenchmarkConfig, dependencies: PostCaptureBenchmarkDependencies) {
     this.#config = config;
@@ -126,10 +131,19 @@ class PostCapturePipelineBenchmark {
     this.#control = control;
     this.#phase = 'loading_fixture';
     try {
-      const wavBytes = await this.#dependencies.fetchFixture(this.#config.fixture_url, this.#abort.signal);
-      if (!(wavBytes instanceof ArrayBuffer) || wavBytes.byteLength === 0 || this.#terminal) return await this.#terminalize('unknown');
+      const fixture = await this.#dependencies.fetchFixture(this.#config.fixture_url, this.#abort.signal);
+      if (
+        fixture === null ||
+        typeof fixture !== 'object' ||
+        !(fixture.wav_bytes instanceof ArrayBuffer) ||
+        fixture.wav_bytes.byteLength === 0 ||
+        !SHA256.test(fixture.expected_transcript_sha256) ||
+        this.#terminal
+      )
+        return await this.#terminalize('unknown');
+      this.#expectedTranscriptSha256 = fixture.expected_transcript_sha256;
       this.#phase = 'waiting_for_activation';
-      await control.startFixture(wavBytes);
+      await control.startFixture(fixture.wav_bytes);
       if (!this.#terminal) this.#phase = 'running';
     } catch {
       await this.#terminalize('unknown');
@@ -139,14 +153,50 @@ class PostCapturePipelineBenchmark {
   async observeBatch(batch: Batch, receipt: BatchReceipt): Promise<void> {
     if (this.#terminal || this.#phase !== 'running') return;
     if (
-      receipt.disposition === 'unknown' ||
       batch.run_id !== this.#config.run_id ||
       batch.profile_id !== this.#config.profile_id ||
       batch.input_case_id !== this.#config.input_case_id ||
       batch.round_index !== this.#config.round_index
     )
       return;
-    await this.#terminalize(batch.terminal_outcome === 'completed' ? 'completed' : 'unknown');
+    if (receipt.disposition === 'unknown') {
+      await this.#terminalize('unknown');
+      return;
+    }
+    if (batch.terminal_outcome !== 'completed') {
+      await this.#terminalize('unknown');
+      return;
+    }
+    this.#batchCompleted = true;
+    if (this.#presentationAcked) await this.#terminalize('completed');
+  }
+
+  async observePresentationAck(): Promise<void> {
+    if (this.#terminal || this.#phase !== 'running') return;
+    this.#presentationAcked = true;
+    if (this.#batchCompleted) await this.#terminalize('completed');
+  }
+
+  async acceptRecognizedText(text: string): Promise<boolean> {
+    if (this.#terminal || this.#phase !== 'running' || typeof text !== 'string' || text.length > 16_384) return false;
+    const normalized = text
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+    if (normalized.length === 0) {
+      await this.#terminalize('unknown');
+      return false;
+    }
+    try {
+      const digest = await this.#dependencies.digestTranscript(normalized);
+      if (this.#terminal || this.#phase !== 'running') return false;
+      if (digest === this.#expectedTranscriptSha256) return true;
+    } catch {
+      // A semantic oracle failure is diagnostic and blocks product submission.
+    }
+    await this.#terminalize('unknown');
+    return false;
   }
 
   async close(): Promise<void> {
@@ -185,6 +235,13 @@ export function createPostCapturePipelineBenchmark(
   config: PostCaptureBenchmarkConfig | null,
   dependencies: PostCaptureBenchmarkDependencies | null,
 ): PostCapturePipelineBenchmark | null {
-  if (config === null || dependencies === null || typeof dependencies.fetchFixture !== 'function' || typeof dependencies.postResult !== 'function') return null;
+  if (
+    config === null ||
+    dependencies === null ||
+    typeof dependencies.fetchFixture !== 'function' ||
+    typeof dependencies.postResult !== 'function' ||
+    typeof dependencies.digestTranscript !== 'function'
+  )
+    return null;
   return new PostCapturePipelineBenchmark(config, dependencies);
 }
