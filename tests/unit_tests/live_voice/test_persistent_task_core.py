@@ -615,6 +615,8 @@ def _downgrade_fixture_to_v1(database: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
         connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TABLE task_event_consumption")
+        connection.execute("DROP INDEX uq_task_events_exact")
         connection.execute("DROP TABLE task_results")
         connection.execute("DROP TABLE current_background_tasks")
         connection.execute(
@@ -667,9 +669,41 @@ def _downgrade_fixture_to_v1(database: Path) -> None:
         connection.commit()
 
 
+def _downgrade_fixture_to_v4(database: Path) -> None:
+    """Rebuild exact Task 2 v4 shape without changing durable lifecycle facts."""
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TABLE task_event_consumption")
+        connection.execute("DROP INDEX uq_task_events_exact")
+        connection.execute(
+            """CREATE TABLE attempts_v4 (
+                attempt_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 1 AND 3),
+                executor_id TEXT NOT NULL, executor_ref TEXT,
+                state TEXT NOT NULL, outcome TEXT,
+                source_seq INTEGER NOT NULL DEFAULT -1, updated_at TEXT NOT NULL,
+                UNIQUE(task_id, attempt_number))"""
+        )
+        connection.execute(
+            """INSERT INTO attempts_v4(
+                   attempt_id, task_id, attempt_number, executor_id, executor_ref,
+                   state, outcome, source_seq, updated_at)
+               SELECT attempt_id, task_id, attempt_number, executor_id, executor_ref,
+                      state, outcome, source_seq, updated_at FROM attempts"""
+        )
+        connection.execute("DROP TABLE attempts")
+        connection.execute("ALTER TABLE attempts_v4 RENAME TO attempts")
+        connection.execute("UPDATE metadata SET value='4' WHERE key='schema_version'")
+        connection.commit()
+
+
 def _downgrade_fixture_to_v3(database: Path) -> None:
     """Rebuild the exact D-085 v3 Task shape without changing durable facts."""
 
+    _downgrade_fixture_to_v4(database)
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
         connection.execute("BEGIN IMMEDIATE")
@@ -906,7 +940,7 @@ def test_v1_schema_migrates_atomically_and_preserves_active_attempt(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
         assert "attempt_number" in columns
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -1042,7 +1076,7 @@ def test_v3_schema_migrates_create_lineage_without_relabelling_task_truth(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
         assert connection.execute(
             """SELECT create_command_id, predecessor_task_id, revision_number
                FROM tasks WHERE task_id=?""",
@@ -1777,6 +1811,8 @@ def test_corrupt_task_result_fails_closed_before_promotion_or_reopen(
     )
     if schema_version == 3:
         _downgrade_fixture_to_v3(database)
+    elif schema_version == 4:
+        _downgrade_fixture_to_v4(database)
     with sqlite3.connect(database) as connection:
         connection.execute("UPDATE task_results SET result_text='' ")
         connection.commit()
@@ -2013,6 +2049,8 @@ def test_corrupt_control_outbox_binding_fails_before_promotion_or_reopen(
     outbox_id = str(adjusted.result["outbox_id"])
     if schema_version == 3:
         _downgrade_fixture_to_v3(database)
+    elif schema_version == 4:
+        _downgrade_fixture_to_v4(database)
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT payload_json FROM outbox WHERE outbox_id=?", (outbox_id,)
@@ -2394,6 +2432,8 @@ def test_corrupt_repeat_cancel_state_fails_before_promotion_or_reopen(
     assert repeated.ok and repeated.result is not None
     if schema_version == 3:
         _downgrade_fixture_to_v3(database)
+    elif schema_version == 4:
+        _downgrade_fixture_to_v4(database)
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT result_json FROM commands WHERE command_id=?",
@@ -2705,10 +2745,10 @@ def test_fresh_task_schema_coexists_with_unrelated_component_tables(
         ).fetchall() == [("confirmation-1",)]
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
 
 
-def test_concurrent_initializers_converge_on_schema_v4(tmp_path: Path) -> None:
+def test_concurrent_initializers_converge_on_schema_v5(tmp_path: Path) -> None:
     database = tmp_path / "concurrent.sqlite"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -2718,7 +2758,7 @@ def test_concurrent_initializers_converge_on_schema_v4(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
 
 
 def test_current_background_selection_allows_concurrent_tasks_and_replays_exactly(
@@ -3100,7 +3140,7 @@ def test_predispatch_update_atomically_rewrites_spec_and_dispatch_on_v4(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
     reopened = SqliteTaskStore(database)
     assert reopened.get_task(task_id, _scope()).spec == task.spec
 
@@ -3679,10 +3719,18 @@ def test_unimplemented_running_controls_are_durable_unsupported_zero_effects(
     decision = core.execute(command, grant, now=NOW)
 
     assert not decision.ok and decision.error is not None
-    assert decision.error.reason == "TASK_CONTROL_UNSUPPORTED"
+    expected_reason = (
+        "TASK_CONTROL_STATE_CONFLICT"
+        if command_type == "task.reprioritize"
+        else "TASK_CONTROL_UNSUPPORTED"
+    )
+    expected_disposition = (
+        "conflict" if command_type == "task.reprioritize" else "unsupported"
+    )
+    assert decision.error.reason == expected_reason
     assert decision.extensions == {
         "live_voice.command": {
-            "disposition": "unsupported",
+            "disposition": expected_disposition,
             "admission_event_id": None,
             "settlement_event_id": None,
         }
@@ -3707,7 +3755,7 @@ def test_unimplemented_running_controls_are_durable_unsupported_zero_effects(
     [
         ("task.pause", "TASK_CONTROL_UNSUPPORTED"),
         ("task.resume", "TASK_CONTROL_UNSUPPORTED"),
-        ("task.reprioritize", "TASK_CONTROL_UNSUPPORTED"),
+        ("task.reprioritize", "TASK_CONTROL_STATE_CONFLICT"),
         ("task.provide_input", "TASK_CONTROL_STATE_CONFLICT"),
         ("task.update", "TASK_UPDATE_PRECONDITION_STALE"),
         ("task.adjust", "TASK_ADJUSTMENT_STATE_CONFLICT"),
@@ -5148,7 +5196,7 @@ def test_successor_failpoints_roll_back_and_preserve_predecessor(
 
 
 @pytest.mark.asyncio
-async def test_adjustment_admission_replay_conflict_and_final_event_are_v4(
+async def test_adjustment_admission_replay_conflict_and_final_event_keep_v5(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "tasks.sqlite"
@@ -5252,7 +5300,7 @@ async def test_adjustment_admission_replay_conflict_and_final_event_are_v4(
             connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
             ).fetchone()[0]
-            == "4"
+            == "5"
         )
         tables = {
             row[0]

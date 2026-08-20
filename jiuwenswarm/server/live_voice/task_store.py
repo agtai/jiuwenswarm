@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
@@ -31,6 +33,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 
 from .formal_task_models import (
+    AdmissionDisposition,
+    AdmissionPolicy,
+    AdmissionPriority,
     AppliedTaskRetryReplay,
     ExecutorObservation,
     ExecutorResolution,
@@ -40,6 +45,8 @@ from .formal_task_models import (
     FormalTaskViolation,
     OutboxKind,
     OutboxState,
+    PersistedExecutorSelection,
+    PersistentAdmissionRecord,
     PersistentAttemptRecord,
     PersistentOutboxItem,
     PersistentTaskEvent,
@@ -63,7 +70,7 @@ from .formal_task_models import (
     utc_now,
 )
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _DEFAULT_TASK_PAGE_LIMIT = 50
 _MAX_TASK_PAGE_LIMIT = 100
 _DEFAULT_EVENT_PAGE_LIMIT = 100
@@ -143,8 +150,11 @@ _TASK_STORE_TABLES_V2 = frozenset(
         "outbox",
     }
 )
-_TASK_STORE_TABLES = _TASK_STORE_TABLES_V2 | frozenset(
+_TASK_STORE_TABLES_V4 = _TASK_STORE_TABLES_V2 | frozenset(
     {"current_background_tasks", "task_results"}
+)
+_TASK_STORE_TABLES = _TASK_STORE_TABLES_V4 | frozenset(
+    {"task_event_consumption"}
 )
 _TASK_STORE_COLUMNS = {
     "metadata": ("key", "value"),
@@ -186,6 +196,16 @@ _TASK_STORE_COLUMNS = {
         "outcome",
         "source_seq",
         "updated_at",
+        "adapter_id",
+        "capability_profile_json",
+        "capability_profile_digest",
+        "execution_requirements_json",
+        "admission_priority",
+        "admission_reason",
+        "admission_attempt_count",
+        "admission_next_eligible_at",
+        "admission_deadline_at",
+        "admission_enqueued_at",
     ),
     "task_events": (
         "task_id",
@@ -238,6 +258,15 @@ _TASK_STORE_COLUMNS = {
         "result_text",
         "artifacts_json",
         "completed_at",
+    ),
+    "task_event_consumption": (
+        "subject_id",
+        "project_id",
+        "task_id",
+        "presentation_class",
+        "acked_through_seq",
+        "acked_event_id",
+        "updated_at",
     ),
 }
 _TASK_STORE_NOT_NULL = {
@@ -313,6 +342,9 @@ _TASK_STORE_NOT_NULL = {
             "completed_at",
         }
     ),
+    "task_event_consumption": frozenset(
+        _TASK_STORE_COLUMNS["task_event_consumption"]
+    ),
 }
 _TASK_STORE_PRIMARY_KEYS = {
     "metadata": ("key",),
@@ -324,6 +356,12 @@ _TASK_STORE_PRIMARY_KEYS = {
     "outbox": ("outbox_id",),
     "current_background_tasks": ("scope_key", "session_id"),
     "task_results": ("task_id", "attempt_id", "source_event_id"),
+    "task_event_consumption": (
+        "subject_id",
+        "project_id",
+        "task_id",
+        "presentation_class",
+    ),
 }
 _TASK_STORE_INTEGER_COLUMNS = frozenset(
     {
@@ -333,9 +371,11 @@ _TASK_STORE_INTEGER_COLUMNS = frozenset(
         ("tasks", "revision_number"),
         ("attempts", "attempt_number"),
         ("attempts", "source_seq"),
+        ("attempts", "admission_attempt_count"),
         ("task_events", "seq"),
         ("executor_events", "source_seq"),
         ("outbox", "delivery_count"),
+        ("task_event_consumption", "acked_through_seq"),
     }
 )
 _TASK_STORE_BLOB_COLUMNS = frozenset(
@@ -362,6 +402,24 @@ _TASK_STORE_NAMED_INDEXES_V4 = {
     **_TASK_STORE_NAMED_INDEXES_V3,
     "idx_tasks_scope_page": ("tasks", ("scope_key", "created_at", "task_id")),
 }
+_TASK_STORE_NAMED_INDEXES_V5 = {
+    **_TASK_STORE_NAMED_INDEXES_V4,
+    "idx_attempts_admission": (
+        "attempts",
+        (
+            "state",
+            "admission_next_eligible_at",
+            "admission_deadline_at",
+            "admission_priority",
+            "admission_enqueued_at",
+            "attempt_id",
+        ),
+    ),
+    "idx_task_event_consumption_event": (
+        "task_event_consumption",
+        ("task_id", "acked_through_seq", "acked_event_id"),
+    ),
+}
 _TASK_STORE_UNIQUE_KEYS_V3 = {
     "metadata": frozenset({("key",)}),
     "commands": frozenset({("scope_key", "command_id")}),
@@ -377,6 +435,21 @@ _TASK_STORE_UNIQUE_KEYS_V4 = {
     **_TASK_STORE_UNIQUE_KEYS_V3,
     "tasks": _TASK_STORE_UNIQUE_KEYS_V3["tasks"]
     | frozenset({("predecessor_task_id",)}),
+}
+_TASK_STORE_UNIQUE_KEYS_V5 = {
+    **_TASK_STORE_UNIQUE_KEYS_V4,
+    "task_events": _TASK_STORE_UNIQUE_KEYS_V4["task_events"]
+    | frozenset({("task_id", "seq", "event_id")}),
+    "task_event_consumption": frozenset(
+        {
+            (
+                "subject_id",
+                "project_id",
+                "task_id",
+                "presentation_class",
+            )
+        }
+    ),
 }
 _TASK_STORE_FOREIGN_KEYS_V3 = {
     "metadata": frozenset(),
@@ -411,6 +484,16 @@ _TASK_STORE_FOREIGN_KEYS_V4 = {
     **_TASK_STORE_FOREIGN_KEYS_V3,
     "tasks": frozenset({("predecessor_task_id", "tasks", "task_id", "RESTRICT")}),
 }
+_TASK_EVENT_CONSUMPTION_FOREIGN_KEYS = frozenset(
+    {
+        (
+            ("task_id", "acked_through_seq", "acked_event_id"),
+            "task_events",
+            ("task_id", "seq", "event_id"),
+            "CASCADE",
+        )
+    }
+)
 _StoredRecordT = TypeVar("_StoredRecordT")
 _OUTBOX_BINDING_SELECT = """
     SELECT o.*, a.attempt_id AS canonical_attempt_id,
@@ -421,6 +504,16 @@ _OUTBOX_BINDING_SELECT = """
            a.executor_id AS bound_executor_id,
            a.state AS bound_attempt_state,
            a.outcome AS bound_attempt_outcome,
+           a.adapter_id AS bound_adapter_id,
+           a.capability_profile_json AS bound_capability_profile_json,
+           a.capability_profile_digest AS bound_capability_profile_digest,
+           a.execution_requirements_json AS bound_execution_requirements_json,
+           a.admission_priority AS bound_admission_priority,
+           a.admission_reason AS bound_admission_reason,
+           a.admission_attempt_count AS bound_admission_attempt_count,
+           a.admission_next_eligible_at AS bound_admission_next_eligible_at,
+           a.admission_deadline_at AS bound_admission_deadline_at,
+           a.admission_enqueued_at AS bound_admission_enqueued_at,
            pa.attempt_id AS predecessor_attempt_id,
            pa.task_id AS predecessor_task_id,
            pa.attempt_number AS predecessor_attempt_number,
@@ -555,6 +648,132 @@ def _scope_key(scope: ScopeRef) -> str:
     return _json_dump(scope.to_dict())
 
 
+def _selection_fingerprint_payload(
+    selection: PersistedExecutorSelection,
+) -> dict[str, object]:
+    return {
+        "adapter_id": selection.adapter_id,
+        "capability_profile": json.loads(selection.capability_profile_json),
+        "capability_profile_digest": selection.capability_profile_digest,
+        "execution_requirements": json.loads(
+            selection.execution_requirements_json
+        ),
+        "admission_priority": selection.admission_priority.value,
+    }
+
+
+def _selection_from_fingerprint_payload(
+    value: object,
+) -> PersistedExecutorSelection:
+    if type(value) is not dict or set(value) != {
+        "adapter_id",
+        "capability_profile",
+        "capability_profile_digest",
+        "execution_requirements",
+        "admission_priority",
+    }:
+        raise FormalTaskViolation(
+            "TASK_STORE_CORRUPT",
+            "executor selection fingerprint is not canonical",
+            ErrorCode.INTERNAL,
+        )
+    return PersistedExecutorSelection(
+        adapter_id=value["adapter_id"],
+        capability_profile_json=canonical_json_bytes(value["capability_profile"]),
+        capability_profile_digest=value["capability_profile_digest"],
+        execution_requirements_json=canonical_json_bytes(
+            value["execution_requirements"]
+        ),
+        admission_priority=AdmissionPriority(value["admission_priority"]),
+    )
+
+
+def _utc_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_TIMESTAMP",
+            "admission creation requires an RFC3339 timestamp",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from error
+    if parsed.tzinfo is None:
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_TIMESTAMP",
+            "admission creation timestamp must include a timezone",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    return parsed.astimezone(UTC)
+
+
+def _utc_plus_seconds(value: str, seconds: float) -> str:
+    return (
+        (_utc_datetime(value) + timedelta(seconds=seconds))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _selection_from_attempt_row(
+    row: sqlite3.Row,
+) -> PersistedExecutorSelection | None:
+    selection_columns = _TASK_STORE_COLUMNS["attempts"][9:]
+    row_keys = frozenset(row.keys())
+    present_columns = row_keys.intersection(selection_columns)
+    if not present_columns:
+        return None
+    if present_columns != frozenset(selection_columns):
+        raise FormalTaskViolation(
+            "INVALID_EXECUTOR_SELECTION",
+            "persisted Attempt has a partial executor selection schema",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    values = tuple(row[column] for column in selection_columns)
+    if all(value is None for value in values):
+        return None
+    required_columns = tuple(
+        column for column in selection_columns if column != "admission_reason"
+    )
+    if any(row[column] is None for column in required_columns):
+        raise FormalTaskViolation(
+            "INVALID_EXECUTOR_SELECTION",
+            "persisted Attempt has partial executor admission facts",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    text_columns = (
+        "adapter_id",
+        "capability_profile_json",
+        "capability_profile_digest",
+        "execution_requirements_json",
+        "admission_priority",
+        "admission_next_eligible_at",
+        "admission_deadline_at",
+        "admission_enqueued_at",
+    )
+    if (
+        any(type(row[column]) is not str for column in text_columns)
+        or type(row["admission_attempt_count"]) is not int
+        or (
+            row["admission_reason"] is not None
+            and type(row["admission_reason"]) is not str
+        )
+    ):
+        raise FormalTaskViolation(
+            "INVALID_EXECUTOR_SELECTION",
+            "persisted Attempt executor admission facts have invalid storage types",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    return PersistedExecutorSelection(
+        adapter_id=row["adapter_id"],
+        capability_profile_json=row["capability_profile_json"].encode("utf-8"),
+        capability_profile_digest=row["capability_profile_digest"],
+        execution_requirements_json=row["execution_requirements_json"].encode(
+            "utf-8"
+        ),
+        admission_priority=AdmissionPriority(row["admission_priority"]),
+    )
+
+
 def _stored_record(
     record_kind: str, loader: Callable[[], _StoredRecordT]
 ) -> _StoredRecordT:
@@ -679,11 +898,12 @@ class SqliteTaskStore:
             }
             task_store_tables = tables & _TASK_STORE_TABLES
             if not task_store_tables:
-                self._create_schema_v4(connection)
-                self._verify_schema_structure(connection, version=4)
+                self._create_schema_v5(connection)
+                self._verify_schema_structure(connection, version=5)
                 self._verify_database(connection)
                 self._verify_v4_lineage(connection)
                 self._verify_v4_semantics(connection)
+                self._verify_v5_semantics(connection)
                 self._hit("initialize.bootstrap.before_metadata")
                 connection.execute(
                     "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -719,20 +939,30 @@ class SqliteTaskStore:
                     self._migrate_v1_to_v2(connection)
                     self._migrate_v2_to_v3(connection)
                     self._migrate_v3_to_v4(connection)
+                    self._migrate_v4_to_v5(connection)
                 elif version == 2:
                     self._verify_schema_structure(connection, version=2)
                     self._verify_database(connection)
                     self._migrate_v2_to_v3(connection)
                     self._migrate_v3_to_v4(connection)
+                    self._migrate_v4_to_v5(connection)
                 elif version == 3:
                     self._verify_schema_structure(connection, version=3)
                     self._verify_database(connection)
                     self._migrate_v3_to_v4(connection)
-                elif version == _SCHEMA_VERSION:
+                    self._migrate_v4_to_v5(connection)
+                elif version == 4:
                     self._verify_schema_structure(connection, version=4)
                     self._verify_database(connection)
                     self._verify_v4_lineage(connection)
                     self._verify_v4_semantics(connection)
+                    self._migrate_v4_to_v5(connection)
+                elif version == _SCHEMA_VERSION:
+                    self._verify_schema_structure(connection, version=5)
+                    self._verify_database(connection)
+                    self._verify_v4_lineage(connection)
+                    self._verify_v4_semantics(connection)
+                    self._verify_v5_semantics(connection)
                 else:
                     raise FormalTaskViolation(
                         "TASK_STORE_SCHEMA_UNSUPPORTED",
@@ -836,20 +1066,32 @@ class SqliteTaskStore:
                 """
             ).fetchall()
         }
-        expected_tables = _TASK_STORE_TABLES if version >= 3 else _TASK_STORE_TABLES_V2
-        if not expected_tables.issubset(tables):
+        expected_tables = (
+            _TASK_STORE_TABLES
+            if version >= 5
+            else _TASK_STORE_TABLES_V4
+            if version >= 3
+            else _TASK_STORE_TABLES_V2
+        )
+        if tables & _TASK_STORE_TABLES != expected_tables:
             raise cls._schema_unsupported(
                 "formal task Store schema is missing required tables"
             )
 
         unique_keys = dict(
-            _TASK_STORE_UNIQUE_KEYS_V4 if version >= 4 else _TASK_STORE_UNIQUE_KEYS_V3
+            _TASK_STORE_UNIQUE_KEYS_V5
+            if version >= 5
+            else _TASK_STORE_UNIQUE_KEYS_V4
+            if version >= 4
+            else _TASK_STORE_UNIQUE_KEYS_V3
         )
         foreign_keys = (
             _TASK_STORE_FOREIGN_KEYS_V4 if version >= 4 else _TASK_STORE_FOREIGN_KEYS_V3
         )
         named_indexes = (
-            _TASK_STORE_NAMED_INDEXES_V4
+            _TASK_STORE_NAMED_INDEXES_V5
+            if version >= 5
+            else _TASK_STORE_NAMED_INDEXES_V4
             if version >= 4
             else _TASK_STORE_NAMED_INDEXES_V3
         )
@@ -858,6 +1100,8 @@ class SqliteTaskStore:
         for table in sorted(expected_tables):
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             expected_columns = _TASK_STORE_COLUMNS[table]
+            if version < 5 and table == "attempts":
+                expected_columns = expected_columns[:9]
             if version < 4 and table == "tasks":
                 expected_columns = tuple(
                     column
@@ -936,18 +1180,41 @@ class SqliteTaskStore:
                     f"formal task Store {table} uniqueness is unsupported"
                 )
 
-            actual_foreign_keys = frozenset(
-                (
-                    row["from"],
-                    row["table"],
-                    row["to"],
-                    row["on_delete"].upper(),
+            foreign_key_rows = connection.execute(
+                f"PRAGMA foreign_key_list({table})"
+            ).fetchall()
+            if table == "task_event_consumption":
+                grouped: dict[int, list[sqlite3.Row]] = {}
+                for row in foreign_key_rows:
+                    grouped.setdefault(int(row["id"]), []).append(row)
+                actual_foreign_keys = frozenset(
+                    (
+                        tuple(
+                            item["from"]
+                            for item in sorted(rows, key=lambda item: item["seq"])
+                        ),
+                        rows[0]["table"],
+                        tuple(
+                            item["to"]
+                            for item in sorted(rows, key=lambda item: item["seq"])
+                        ),
+                        rows[0]["on_delete"].upper(),
+                    )
+                    for rows in grouped.values()
                 )
-                for row in connection.execute(
-                    f"PRAGMA foreign_key_list({table})"
-                ).fetchall()
-            )
-            if actual_foreign_keys != foreign_keys[table]:
+                expected_foreign_keys = _TASK_EVENT_CONSUMPTION_FOREIGN_KEYS
+            else:
+                actual_foreign_keys = frozenset(
+                    (
+                        row["from"],
+                        row["table"],
+                        row["to"],
+                        row["on_delete"].upper(),
+                    )
+                    for row in foreign_key_rows
+                )
+                expected_foreign_keys = foreign_keys[table]
+            if actual_foreign_keys != expected_foreign_keys:
                 raise cls._schema_unsupported(
                     f"formal task Store {table} foreign keys are unsupported"
                 )
@@ -985,6 +1252,13 @@ class SqliteTaskStore:
                 raise cls._schema_unsupported(
                     "formal task Store attempt bounds are unsupported"
                 )
+            if (
+                version >= 5
+                and "CHECK(ADMISSION_ATTEMPT_COUNT>=0)" not in normalized
+            ):
+                raise cls._schema_unsupported(
+                    "formal task Store admission bounds are unsupported"
+                )
 
         if version >= 4:
             task_sql_row = connection.execute(
@@ -997,8 +1271,26 @@ class SqliteTaskStore:
                     "formal task Store revision bounds are unsupported"
                 )
 
+        if version >= 5:
+            consumption_sql_row = connection.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type='table' AND name='task_event_consumption'"""
+            ).fetchone()
+            consumption_sql = (
+                "" if consumption_sql_row is None else consumption_sql_row["sql"]
+            )
+            normalized = "".join(str(consumption_sql).upper().split())
+            required_checks = {
+                "CHECK(PRESENTATION_CLASSIN('TEXT','VOICE'))",
+                "CHECK(ACKED_THROUGH_SEQ>=0)",
+            }
+            if any(fragment not in normalized for fragment in required_checks):
+                raise cls._schema_unsupported(
+                    "formal task Store consumer bounds are unsupported"
+                )
+
     @staticmethod
-    def _create_schema_v4(connection: sqlite3.Connection) -> None:
+    def _create_schema_v5(connection: sqlite3.Connection) -> None:
         statements = (
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             """CREATE TABLE commands (
@@ -1032,6 +1324,14 @@ class SqliteTaskStore:
                 executor_id TEXT NOT NULL, executor_ref TEXT,
                 state TEXT NOT NULL, outcome TEXT,
                 source_seq INTEGER NOT NULL DEFAULT -1, updated_at TEXT NOT NULL,
+                adapter_id TEXT, capability_profile_json TEXT,
+                capability_profile_digest TEXT,
+                execution_requirements_json TEXT, admission_priority TEXT,
+                admission_reason TEXT,
+                admission_attempt_count INTEGER
+                    CHECK(admission_attempt_count >= 0),
+                admission_next_eligible_at TEXT, admission_deadline_at TEXT,
+                admission_enqueued_at TEXT,
                 UNIQUE(task_id, attempt_number))""",
             """CREATE TABLE task_events (
                 task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
@@ -1042,6 +1342,8 @@ class SqliteTaskStore:
                 causation_id TEXT NOT NULL, correlation_id TEXT NOT NULL,
                 occurred_at TEXT NOT NULL, details_json TEXT NOT NULL,
                 PRIMARY KEY(task_id, seq))""",
+            """CREATE UNIQUE INDEX uq_task_events_exact
+                ON task_events(task_id, seq, event_id)""",
             """CREATE TABLE executor_events (
                 source_event_id TEXT PRIMARY KEY,
                 attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id) ON DELETE CASCADE,
@@ -1074,6 +1376,22 @@ class SqliteTaskStore:
                 PRIMARY KEY(task_id, attempt_id, source_event_id))""",
             """CREATE INDEX idx_task_results_task
                 ON task_results(task_id, attempt_id, completed_at)""",
+            """CREATE TABLE task_event_consumption (
+                subject_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                task_id TEXT NOT NULL, presentation_class TEXT NOT NULL
+                    CHECK(presentation_class IN ('text', 'voice')),
+                acked_through_seq INTEGER NOT NULL CHECK(acked_through_seq >= 0),
+                acked_event_id TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(subject_id, project_id, task_id, presentation_class),
+                FOREIGN KEY(task_id, acked_through_seq, acked_event_id)
+                    REFERENCES task_events(task_id, seq, event_id)
+                    ON DELETE CASCADE)""",
+            """CREATE INDEX idx_attempts_admission ON attempts(
+                state, admission_next_eligible_at, admission_deadline_at,
+                admission_priority, admission_enqueued_at, attempt_id)""",
+            """CREATE INDEX idx_task_event_consumption_event
+                ON task_event_consumption(
+                    task_id, acked_through_seq, acked_event_id)""",
         )
         for statement in statements:
             connection.execute(statement)
@@ -1239,6 +1557,71 @@ class SqliteTaskStore:
             raise FormalTaskViolation(
                 "TASK_STORE_SCHEMA_UNSUPPORTED",
                 "formal task Store changed during v4 migration",
+                ErrorCode.UNSUPPORTED,
+            )
+
+    def _migrate_v4_to_v5(self, connection: sqlite3.Connection) -> None:
+        """Add historical-nullable admission facts and the sole consumer table."""
+
+        self._hit("migration.v4_to_v5.before_columns")
+        column_definitions = (
+            "adapter_id TEXT",
+            "capability_profile_json TEXT",
+            "capability_profile_digest TEXT",
+            "execution_requirements_json TEXT",
+            "admission_priority TEXT",
+            "admission_reason TEXT",
+            "admission_attempt_count INTEGER CHECK(admission_attempt_count >= 0)",
+            "admission_next_eligible_at TEXT",
+            "admission_deadline_at TEXT",
+            "admission_enqueued_at TEXT",
+        )
+        for definition in column_definitions:
+            connection.execute(f"ALTER TABLE attempts ADD COLUMN {definition}")
+        self._hit("migration.v4_to_v5.after_columns")
+
+        connection.execute(
+            """CREATE UNIQUE INDEX uq_task_events_exact
+               ON task_events(task_id, seq, event_id)"""
+        )
+        connection.execute(
+            """CREATE TABLE task_event_consumption (
+                subject_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                task_id TEXT NOT NULL, presentation_class TEXT NOT NULL
+                    CHECK(presentation_class IN ('text', 'voice')),
+                acked_through_seq INTEGER NOT NULL CHECK(acked_through_seq >= 0),
+                acked_event_id TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(subject_id, project_id, task_id, presentation_class),
+                FOREIGN KEY(task_id, acked_through_seq, acked_event_id)
+                    REFERENCES task_events(task_id, seq, event_id)
+                    ON DELETE CASCADE)"""
+        )
+        self._hit("migration.v4_to_v5.after_consumption")
+        connection.execute(
+            """CREATE INDEX idx_attempts_admission ON attempts(
+                state, admission_next_eligible_at, admission_deadline_at,
+                admission_priority, admission_enqueued_at, attempt_id)"""
+        )
+        connection.execute(
+            """CREATE INDEX idx_task_event_consumption_event
+               ON task_event_consumption(
+                   task_id, acked_through_seq, acked_event_id)"""
+        )
+        self._hit("migration.v4_to_v5.after_indexes")
+
+        self._verify_schema_structure(connection, version=5)
+        self._verify_database(connection)
+        self._verify_v4_lineage(connection)
+        self._verify_v4_semantics(connection)
+        self._verify_v5_semantics(connection)
+        self._hit("migration.v4_to_v5.before_metadata")
+        changed = connection.execute(
+            "UPDATE metadata SET value='5' WHERE key='schema_version' AND value='4'"
+        ).rowcount
+        if changed != 1:
+            raise FormalTaskViolation(
+                "TASK_STORE_SCHEMA_UNSUPPORTED",
+                "formal task Store changed during v5 migration",
                 ErrorCode.UNSUPPORTED,
             )
 
@@ -1468,8 +1851,45 @@ class SqliteTaskStore:
                 ):
                     raise cls._corrupt(
                         "task.update command lacks one exact durable settlement"
-                )
+                    )
                 continue
+            if command_type == "task.reprioritize":
+                try:
+                    stored_result = ResultEnvelope.from_dict(
+                        _json_load(command_row["result_json"])
+                    )
+                except (ContractViolation, FormalTaskViolation) as error:
+                    raise cls._corrupt(
+                        "task.reprioritize command result is not canonical"
+                    ) from error
+                if stored_result.ok:
+                    command, result = cls._control_command_from_row(command_row)
+                    event_rows = connection.execute(
+                        """SELECT e.* FROM task_events AS e
+                           JOIN tasks AS t ON t.task_id=e.task_id
+                           WHERE t.scope_key=? AND e.causation_id=?
+                             AND e.event_type IN (
+                               'task.reprioritize_requested',
+                               'task.reprioritize_applied'
+                             ) ORDER BY e.seq""",
+                        (scope_key, command_id),
+                    ).fetchall()
+                    value = result.result
+                    if (
+                        len(event_rows) != 2
+                        or event_rows[0]["event_type"]
+                        != "task.reprioritize_requested"
+                        or event_rows[1]["event_type"]
+                        != "task.reprioritize_applied"
+                        or event_rows[1]["seq"] != event_rows[0]["seq"] + 1
+                        or command.target_ref.kind.value != "task"
+                        or type(value) is not dict
+                        or value.get("task_id") != command.target_ref.id
+                    ):
+                        raise cls._corrupt(
+                            "task.reprioritize command lacks one exact durable settlement"
+                        )
+                    continue
             if command_type in {
                 "task.provide_input",
                 "task.pause",
@@ -1728,9 +2148,261 @@ class SqliteTaskStore:
                     "current Task selection crosses its exact Session authority"
                 )
 
+    @classmethod
+    def _verify_v5_semantics(cls, connection: sqlite3.Connection) -> None:
+        """Reject ambiguous selection groups and cross-scope consumer authority."""
+
+        selection_columns = _TASK_STORE_COLUMNS["attempts"][9:]
+        required_selection_columns = tuple(
+            column for column in selection_columns if column != "admission_reason"
+        )
+        attempt_rows = connection.execute(
+            "SELECT * FROM attempts ORDER BY attempt_id"
+        ).fetchall()
+        for row in attempt_rows:
+            values = tuple(row[column] for column in selection_columns)
+            reprioritize_rows = connection.execute(
+                """SELECT details_json FROM task_events
+                   WHERE attempt_id=? AND event_type='task.reprioritize_applied'
+                   ORDER BY seq""",
+                (row["attempt_id"],),
+            ).fetchall()
+            if all(value is None for value in values):
+                if reprioritize_rows:
+                    raise cls._corrupt(
+                        "legacy formal Task Attempt has reprioritize authority"
+                    )
+                callback_rows = connection.execute(
+                    "SELECT * FROM executor_events WHERE attempt_id=? ORDER BY source_seq",
+                    (row["attempt_id"],),
+                ).fetchall()
+                if any(
+                    (
+                        observation.adapter_id,
+                        observation.capability_profile_digest,
+                    )
+                    != (None, None)
+                    for observation in (
+                        cls._executor_observation_from_row(callback_row)
+                        for callback_row in callback_rows
+                    )
+                ):
+                    raise cls._corrupt(
+                        "legacy formal Task callback has selected authority"
+                    )
+                continue
+            if any(row[column] is None for column in required_selection_columns):
+                raise cls._corrupt(
+                    "formal Task Attempt has a partial executor selection group"
+                )
+            try:
+                selection = _selection_from_attempt_row(row)
+                assert selection is not None
+                PersistentAdmissionRecord(
+                    task_id=row["task_id"],
+                    attempt_id=row["attempt_id"],
+                    priority=selection.admission_priority,
+                    reason=row["admission_reason"],
+                    attempt_count=row["admission_attempt_count"],
+                    next_eligible_at=row["admission_next_eligible_at"],
+                    deadline_at=row["admission_deadline_at"],
+                    enqueued_at=row["admission_enqueued_at"],
+                    queued=False,
+                )
+                binding_rows = connection.execute(
+                    """
+                    SELECT c.fingerprint, o.state AS dispatch_state,
+                           o.delivery_count, o.claimed_by, o.claimed_at,
+                           o.claim_token, o.last_error
+                    FROM outbox AS o
+                    JOIN commands AS c
+                      ON c.command_id=o.command_id
+                     AND c.scope_key=(
+                         SELECT scope_key FROM tasks WHERE task_id=o.task_id
+                     )
+                    WHERE o.attempt_id=? AND o.kind=?
+                    """,
+                    (row["attempt_id"], OutboxKind.ATTEMPT_DISPATCH.value),
+                ).fetchall()
+                if len(binding_rows) != 1:
+                    raise ValueError("selected Attempt lacks one dispatch fingerprint")
+                dispatch_binding = binding_rows[0]
+                if row["state"] == FormalAttemptState.ACCEPTED.value and (
+                    dispatch_binding["dispatch_state"]
+                    == OutboxState.PENDING.value
+                ) and (
+                    type(dispatch_binding["delivery_count"]) is not int
+                    or dispatch_binding["delivery_count"]
+                    != row["admission_attempt_count"]
+                    or dispatch_binding["claimed_by"] is not None
+                    or dispatch_binding["claimed_at"] is not None
+                    or dispatch_binding["claim_token"] is not None
+                    or (
+                        row["admission_attempt_count"] == 0
+                        and dispatch_binding["last_error"] is not None
+                    )
+                    or (
+                        row["admission_attempt_count"] > 0
+                        and dispatch_binding["last_error"]
+                        != row["admission_reason"]
+                    )
+                ):
+                    raise ValueError(
+                        "selected pending dispatch lacks closed pre-effect history"
+                    )
+                fingerprint = _json_load(dispatch_binding["fingerprint"])
+                if type(fingerprint) is not dict or "executor_selection" not in fingerprint:
+                    raise ValueError("selected Attempt fingerprint changed")
+                initial_selection = _selection_from_fingerprint_payload(
+                    fingerprint["executor_selection"]
+                )
+                expected_priority = initial_selection.admission_priority
+                for reprioritize_row in reprioritize_rows:
+                    details = _json_load(reprioritize_row["details_json"])
+                    expected_priority = AdmissionPriority(details["priority"])
+                expected_selection = replace(
+                    initial_selection, admission_priority=expected_priority
+                )
+                if expected_selection != selection:
+                    raise ValueError("selected Attempt fingerprint changed")
+                callback_rows = connection.execute(
+                    "SELECT * FROM executor_events WHERE attempt_id=? ORDER BY source_seq",
+                    (row["attempt_id"],),
+                ).fetchall()
+                expected_callback_binding = (
+                    selection.adapter_id,
+                    selection.capability_profile_digest,
+                )
+                for callback_row in callback_rows:
+                    observation = cls._executor_observation_from_row(callback_row)
+                    if (
+                        observation.adapter_id,
+                        observation.capability_profile_digest,
+                    ) != expected_callback_binding:
+                        raise ValueError("selected callback binding changed")
+            except (
+                AssertionError,
+                FormalTaskViolation,
+                UnicodeEncodeError,
+                ValueError,
+            ) as error:
+                raise cls._corrupt(
+                    "formal Task Attempt has invalid executor admission facts"
+                ) from error
+
+        consumer_rows = connection.execute(
+            """SELECT c.*, t.scope_json
+               FROM task_event_consumption AS c
+               JOIN tasks AS t ON t.task_id=c.task_id
+               ORDER BY c.subject_id, c.project_id, c.task_id,
+                        c.presentation_class"""
+        ).fetchall()
+        for row in consumer_rows:
+            try:
+                scope = ScopeRef.from_dict(_json_load(row["scope_json"]))
+            except (ContractViolation, FormalTaskViolation) as error:
+                raise cls._corrupt(
+                    "formal Task consumer scope is not canonical"
+                ) from error
+            if (
+                row["subject_id"] != scope.subject_id
+                or row["project_id"] != scope.project_id
+                or row["presentation_class"] not in {"text", "voice"}
+            ):
+                raise cls._corrupt(
+                    "formal Task consumer crosses its exact Task scope"
+                )
+
     def _hit(self, name: str) -> None:
         if self._failpoint is not None:
             self._failpoint(name)
+
+    @staticmethod
+    def _creation_fingerprint(
+        command: CommandEnvelope,
+        spec: FormalTaskSpec,
+        selection: PersistedExecutorSelection | None,
+    ) -> bytes:
+        payload: dict[str, object] = {
+            "command": json.loads(command.fingerprint()),
+            "resolved_spec": spec.to_dict(),
+        }
+        if selection is not None:
+            payload["executor_selection"] = _selection_fingerprint_payload(selection)
+        return canonical_json_bytes(payload)
+
+    @staticmethod
+    def _insert_attempt(
+        connection: sqlite3.Connection,
+        *,
+        attempt_id: str,
+        task_id: str,
+        attempt_number: int,
+        executor_id: str,
+        state: FormalAttemptState,
+        observed_at: str,
+        selection: PersistedExecutorSelection | None,
+        admission_policy: AdmissionPolicy | None,
+    ) -> None:
+        if selection is None:
+            if admission_policy is not None:
+                raise FormalTaskViolation(
+                    "ADMISSION_SELECTION_REQUIRED",
+                    "admission policy cannot relabel an unselected legacy Attempt",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            admission_values: tuple[object, ...] = (None,) * 10
+        else:
+            if not isinstance(selection, PersistedExecutorSelection):
+                raise FormalTaskViolation(
+                    "INVALID_EXECUTOR_SELECTION",
+                    "selected Attempt requires the strict persisted carrier",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            policy = (
+                AdmissionPolicy() if admission_policy is None else admission_policy
+            )
+            if not isinstance(policy, AdmissionPolicy):
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    "selected Attempt requires a canonical admission policy",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            admission_values = (
+                selection.adapter_id,
+                selection.capability_profile_json.decode("utf-8"),
+                selection.capability_profile_digest,
+                selection.execution_requirements_json.decode("utf-8"),
+                selection.admission_priority.value,
+                None,
+                0,
+                observed_at,
+                _utc_plus_seconds(observed_at, policy.deadline_seconds),
+                observed_at,
+            )
+        connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, attempt_number, executor_id, executor_ref,
+                state, outcome, source_seq, updated_at,
+                adapter_id, capability_profile_json, capability_profile_digest,
+                execution_requirements_json, admission_priority,
+                admission_reason, admission_attempt_count,
+                admission_next_eligible_at, admission_deadline_at,
+                admission_enqueued_at
+            ) VALUES(?, ?, ?, ?, NULL, ?, NULL, -1, ?,
+                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                task_id,
+                attempt_number,
+                executor_id,
+                state.value,
+                observed_at,
+                *admission_values,
+            ),
+        )
 
     def create(
         self,
@@ -1739,6 +2411,8 @@ class SqliteTaskStore:
         *,
         observed_at: str,
         current_background_session_id: str | None = None,
+        selection: PersistedExecutorSelection | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ) -> ResultEnvelope:
         if current_background_session_id is not None and (
             type(current_background_session_id) is not str
@@ -1751,12 +2425,7 @@ class SqliteTaskStore:
                 "current background task requires the exact authorized Session",
                 ErrorCode.PERMISSION_DENIED,
             )
-        fingerprint = canonical_json_bytes(
-            {
-                "command": json.loads(command.fingerprint()),
-                "resolved_spec": spec.to_dict(),
-            }
-        )
+        fingerprint = self._creation_fingerprint(command, spec, selection)
         scope_key = _scope_key(command.scope)
         with self._transaction() as connection:
             replay = self._command_replay(connection, command, fingerprint)
@@ -1790,20 +2459,16 @@ class SqliteTaskStore:
                 ),
             )
             self._hit("create.after_task")
-            connection.execute(
-                """
-                INSERT INTO attempts(
-                    attempt_id, task_id, attempt_number, executor_id, executor_ref,
-                    state, outcome, source_seq, updated_at
-                ) VALUES(?, ?, 1, ?, NULL, ?, NULL, -1, ?)
-                """,
-                (
-                    attempt_id,
-                    task_id,
-                    spec.executor_id,
-                    FormalAttemptState.ACCEPTED.value,
-                    now,
-                ),
+            self._insert_attempt(
+                connection,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                attempt_number=1,
+                executor_id=spec.executor_id,
+                state=FormalAttemptState.ACCEPTED,
+                observed_at=now,
+                selection=selection,
+                admission_policy=admission_policy,
             )
             self._insert_event(
                 connection,
@@ -1923,16 +2588,13 @@ class SqliteTaskStore:
         spec: FormalTaskSpec,
         *,
         observed_at: str,
+        selection: PersistedExecutorSelection | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ) -> ResultEnvelope:
         """Atomically create one immutable Task revision after a terminal Task."""
 
         self._validate_successor_command(command)
-        fingerprint = canonical_json_bytes(
-            {
-                "command": json.loads(command.fingerprint()),
-                "resolved_spec": spec.to_dict(),
-            }
-        )
+        fingerprint = self._creation_fingerprint(command, spec, selection)
         scope_key = _scope_key(command.scope)
         predecessor_id = command.target_ref.id
         payload = command.payload
@@ -2147,18 +2809,16 @@ class SqliteTaskStore:
                 ),
             )
             self._hit("successor.after_task")
-            connection.execute(
-                """INSERT INTO attempts(
-                       attempt_id, task_id, attempt_number, executor_id,
-                       executor_ref, state, outcome, source_seq, updated_at
-                   ) VALUES(?, ?, 1, ?, NULL, ?, NULL, -1, ?)""",
-                (
-                    attempt_id,
-                    task_id,
-                    spec.executor_id,
-                    FormalAttemptState.ACCEPTED.value,
-                    observed_at,
-                ),
+            self._insert_attempt(
+                connection,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                attempt_number=1,
+                executor_id=spec.executor_id,
+                state=FormalAttemptState.ACCEPTED,
+                observed_at=observed_at,
+                selection=selection,
+                admission_policy=admission_policy,
             )
             self._hit("successor.after_attempt")
             self._insert_event(
@@ -2381,6 +3041,181 @@ class SqliteTaskStore:
                 observed_at,
             )
             self._hit("update.after_command")
+            return result
+
+    def reprioritize(
+        self,
+        command: CommandEnvelope,
+        *,
+        observed_at: str,
+    ) -> ResultEnvelope:
+        """Atomically change the priority of one provably pre-effect dispatch."""
+
+        payload = command.payload
+        if command.command_type != "task.reprioritize" or type(payload) is not dict or set(
+            payload
+        ) != {"attempt_id", "expected_event_head", "priority", "reason"}:
+            raise FormalTaskViolation(
+                "TASK_CONTROL_INVALID",
+                "task.reprioritize payload must contain the exact queue authority",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            priority = AdmissionPriority(payload["priority"])
+        except (TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "TASK_CONTROL_INVALID",
+                "task.reprioritize priority is invalid",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        fingerprint = command.fingerprint()
+        scope_key = _scope_key(command.scope)
+        task_id = command.target_ref.id
+        with self._transaction() as connection:
+            replay = self._command_replay(connection, command, fingerprint)
+            if replay is not None:
+                return replay
+            task = self._require_task_row(connection, task_id, command.scope)
+            self._verify_durable_lineage(connection, task)
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?",
+                (task["attempt_id"],),
+            ).fetchone()
+            dispatches = connection.execute(
+                """
+                SELECT * FROM outbox
+                WHERE task_id=? AND attempt_id=? AND kind=?
+                ORDER BY created_at, outbox_id
+                """,
+                (
+                    task_id,
+                    task["attempt_id"],
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                ),
+            ).fetchall()
+            stale = (
+                attempt is None
+                or attempt["task_id"] != task_id
+                or payload["attempt_id"] != task["attempt_id"]
+                or payload["expected_event_head"] != int(task["event_head"])
+            )
+            if stale:
+                return self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.STALE,
+                    reason="TASK_CONTROL_PRECONDITION_STALE",
+                    message=(
+                        "task.reprioritize requires the exact current attempt and event head"
+                    ),
+                    observed_at=observed_at,
+                )
+            assert attempt is not None
+            selection = _selection_from_attempt_row(attempt)
+            dispatch = dispatches[0] if len(dispatches) == 1 else None
+            eligible = (
+                task["state"] == FormalTaskState.ACCEPTED.value
+                and not bool(task["cancel_requested"])
+                and not bool(task["dispatch_fenced"])
+                and task["reconciliation_state"] is None
+                and attempt["state"] == FormalAttemptState.ACCEPTED.value
+                and attempt["outcome"] is None
+                and attempt["executor_ref"] is None
+                and int(attempt["source_seq"]) == -1
+                and selection is not None
+                and dispatch is not None
+                and dispatch["state"] == OutboxState.PENDING.value
+                and dispatch["claimed_by"] is None
+                and dispatch["claimed_at"] is None
+                and dispatch["claim_token"] is None
+                and int(dispatch["delivery_count"])
+                == int(attempt["admission_attempt_count"])
+                and (
+                    int(dispatch["delivery_count"]) == 0
+                    or (
+                        attempt["admission_reason"]
+                        in {
+                            "EXECUTOR_PROJECT_BUSY",
+                            "EXECUTOR_CAPACITY_EXHAUSTED",
+                        }
+                        and dispatch["last_error"] == attempt["admission_reason"]
+                    )
+                )
+            )
+            if not eligible:
+                return self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.CONFLICT,
+                    reason="TASK_CONTROL_STATE_CONFLICT",
+                    message="task state does not admit queued reprioritization",
+                    observed_at=observed_at,
+                )
+            details = {"command_id": command.command_id, "priority": priority.value}
+            requested_event = self._append_event(
+                connection,
+                task,
+                event_type="task.reprioritize_requested",
+                state=FormalTaskState.ACCEPTED.value,
+                outcome=None,
+                producer="task_core.control",
+                source_event_id=None,
+                causation_id=command.command_id,
+                occurred_at=observed_at,
+                details=details,
+            )
+            self._hit("reprioritize.after_requested_event")
+            connection.execute(
+                """
+                UPDATE attempts SET admission_priority=?, updated_at=?
+                WHERE attempt_id=?
+                """,
+                (priority.value, observed_at, attempt["attempt_id"]),
+            )
+            self._hit("reprioritize.after_attempt")
+            current_task = self._require_task_row(connection, task_id, command.scope)
+            applied_event = self._append_event(
+                connection,
+                current_task,
+                event_type="task.reprioritize_applied",
+                state=FormalTaskState.ACCEPTED.value,
+                outcome=None,
+                producer="task_core.control",
+                source_event_id=None,
+                causation_id=command.command_id,
+                occurred_at=observed_at,
+                details=details,
+            )
+            self._hit("reprioritize.after_applied_event")
+            result = ResultEnvelope.success(
+                owner=command,
+                result={
+                    "task_id": task_id,
+                    "attempt_id": attempt["attempt_id"],
+                    "state": FormalTaskState.ACCEPTED.value,
+                    "priority": priority.value,
+                    "applied": True,
+                },
+                observed_at=observed_at,
+                extensions=command_result_extensions(
+                    TaskCommandDisposition.APPLIED,
+                    admission_event_id=requested_event.event_id,
+                    settlement_event_id=applied_event.event_id,
+                ),
+            )
+            self._insert_command(
+                connection,
+                command,
+                fingerprint,
+                scope_key,
+                result,
+                observed_at,
+            )
+            self._hit("reprioritize.after_command")
             return result
 
     def decide_unsupported_control(
@@ -2784,8 +3619,18 @@ class SqliteTaskStore:
             return result
 
     @staticmethod
-    def _retry_fingerprint(command: CommandEnvelope) -> bytes:
-        return command.fingerprint()
+    def _retry_fingerprint(
+        command: CommandEnvelope,
+        selection: PersistedExecutorSelection | None = None,
+    ) -> bytes:
+        if selection is None:
+            return command.fingerprint()
+        return canonical_json_bytes(
+            {
+                "command": json.loads(command.fingerprint()),
+                "executor_selection": _selection_fingerprint_payload(selection),
+            }
+        )
 
     @classmethod
     def _is_durable_retry_business_error(
@@ -2813,10 +3658,11 @@ class SqliteTaskStore:
         command: CommandEnvelope,
         *,
         observed_at: str | None = None,
+        selection: PersistedExecutorSelection | None = None,
     ) -> ResultEnvelope | TaskRetryAuthoritySnapshot:
         """Return exact replay or one side-effect-free retry admission snapshot."""
 
-        fingerprint = self._retry_fingerprint(command)
+        fingerprint = self._retry_fingerprint(command, selection)
         with self._transaction() as connection:
             replay = self._verified_retry_replay(connection, command, fingerprint)
             if replay is not None:
@@ -3031,10 +3877,12 @@ class SqliteTaskStore:
         authority: TaskRetryAuthoritySnapshot,
         *,
         observed_at: str,
+        selection: PersistedExecutorSelection | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ) -> ResultEnvelope:
         """Atomically create one bounded successor attempt after exact re-CAS."""
 
-        fingerprint = self._retry_fingerprint(command)
+        fingerprint = self._retry_fingerprint(command, selection)
         scope_key = _scope_key(command.scope)
         with self._transaction() as connection:
             replay = self._verified_retry_replay(connection, command, fingerprint)
@@ -3120,21 +3968,16 @@ class SqliteTaskStore:
             # D-058 retry is a bounded cross-attempt epoch compatibility path,
             # not a normal Task lifecycle edge.  It deliberately bypasses
             # ``_append_event``; P3-2 owns successor-Task revision semantics.
-            connection.execute(
-                """
-                INSERT INTO attempts(
-                    attempt_id, task_id, attempt_number, executor_id, executor_ref,
-                    state, outcome, source_seq, updated_at
-                ) VALUES(?, ?, ?, ?, NULL, ?, NULL, -1, ?)
-                """,
-                (
-                    attempt_id,
-                    task.task_id,
-                    precondition.attempt_number,
-                    spec.executor_id,
-                    FormalAttemptState.ACCEPTED.value,
-                    now,
-                ),
+            self._insert_attempt(
+                connection,
+                attempt_id=attempt_id,
+                task_id=task.task_id,
+                attempt_number=precondition.attempt_number,
+                executor_id=spec.executor_id,
+                state=FormalAttemptState.ACCEPTED,
+                observed_at=now,
+                selection=selection,
+                admission_policy=admission_policy,
             )
             self._hit("retry.after_attempt")
             self._insert_event(
@@ -3404,10 +4247,18 @@ class SqliteTaskStore:
                 )
             fingerprint_payload = _json_load(row["fingerprint"])
             resolved_spec: FormalTaskSpec | None = None
+            selection: PersistedExecutorSelection | None = None
             if row["command_type"] in {"task.create", "task.create_successor"}:
-                if type(fingerprint_payload) is not dict or set(
-                    fingerprint_payload
-                ) != {"command", "resolved_spec"}:
+                allowed_keys = {
+                    frozenset({"command", "resolved_spec"}),
+                    frozenset(
+                        {"command", "resolved_spec", "executor_selection"}
+                    ),
+                }
+                if (
+                    type(fingerprint_payload) is not dict
+                    or frozenset(fingerprint_payload) not in allowed_keys
+                ):
                     raise cls._corrupt(
                         "task admission ledger fingerprint is not canonical"
                     )
@@ -3415,8 +4266,22 @@ class SqliteTaskStore:
                 resolved_spec = FormalTaskSpec.from_dict(
                     fingerprint_payload["resolved_spec"]
                 )
+                if "executor_selection" in fingerprint_payload:
+                    selection = _selection_from_fingerprint_payload(
+                        fingerprint_payload["executor_selection"]
+                    )
             elif row["command_type"] == "task.retry":
-                command_payload = fingerprint_payload
+                if (
+                    type(fingerprint_payload) is dict
+                    and set(fingerprint_payload)
+                    == {"command", "executor_selection"}
+                ):
+                    command_payload = fingerprint_payload["command"]
+                    selection = _selection_from_fingerprint_payload(
+                        fingerprint_payload["executor_selection"]
+                    )
+                else:
+                    command_payload = fingerprint_payload
             else:
                 raise cls._corrupt("attempt lineage references a non-admission command")
             if type(command_payload) is not dict or "request_id" in command_payload:
@@ -3430,16 +4295,18 @@ class SqliteTaskStore:
                 or _scope_key(command.scope) != row["scope_key"]
             ):
                 raise cls._corrupt("formal Task command ledger binding is inconsistent")
-            expected_fingerprint = (
-                canonical_json_bytes(
-                    {
-                        "command": json.loads(command.fingerprint()),
-                        "resolved_spec": resolved_spec.to_dict(),
-                    }
-                )
-                if resolved_spec is not None
-                else command.fingerprint()
-            )
+            if resolved_spec is not None:
+                expected_payload: dict[str, object] = {
+                    "command": json.loads(command.fingerprint()),
+                    "resolved_spec": resolved_spec.to_dict(),
+                }
+                if selection is not None:
+                    expected_payload["executor_selection"] = (
+                        _selection_fingerprint_payload(selection)
+                    )
+                expected_fingerprint = canonical_json_bytes(expected_payload)
+            else:
+                expected_fingerprint = cls._retry_fingerprint(command, selection)
             if expected_fingerprint != row["fingerprint"]:
                 raise cls._corrupt(
                     "formal Task command ledger fingerprint is inconsistent"
@@ -3667,7 +4534,8 @@ class SqliteTaskStore:
             (task_row["task_id"], task_row["event_head"]),
         ).fetchone()
         dispatch_rows = connection.execute(
-            """SELECT outbox_id, state, delivery_count FROM outbox
+            """SELECT outbox_id, state, delivery_count, claimed_by, claimed_at,
+                      claim_token, last_error FROM outbox
                WHERE task_id=? AND attempt_id=? AND kind=?
                ORDER BY outbox_id""",
             (
@@ -3686,7 +4554,7 @@ class SqliteTaskStore:
                ORDER BY source_event_id""",
             (task_row["task_id"], task_row["attempt_id"]),
         ).fetchall()
-        return {
+        authority: dict[str, object] = {
             "reason": reason,
             "payload": cls._decision_payload_authority(command),
             "task": {
@@ -3737,6 +4605,57 @@ class SqliteTaskStore:
                 for row in result_rows
             ],
         }
+        if command.command_type == "task.reprioritize":
+            dispatch_row = dispatch_rows[0] if len(dispatch_rows) == 1 else None
+            admission_count = (
+                None
+                if attempt_row is None
+                else attempt_row["admission_attempt_count"]
+            )
+            admission_reason = (
+                None if attempt_row is None else attempt_row["admission_reason"]
+            )
+            delivery_matches = (
+                dispatch_row is not None
+                and type(admission_count) is int
+                and dispatch_row["delivery_count"] == admission_count
+            )
+            authority["reprioritize"] = {
+                "selection_present": (
+                    attempt_row is not None and attempt_row["adapter_id"] is not None
+                ),
+                "pre_effect": (
+                    attempt_row is not None
+                    and attempt_row["executor_ref"] is None
+                    and attempt_row["source_seq"] == -1
+                ),
+                "reconciliation_clear": task_row["reconciliation_state"] is None,
+                "dispatch_pending_unclaimed": (
+                    dispatch_row is not None
+                    and dispatch_row["state"] == OutboxState.PENDING.value
+                    and dispatch_row["claimed_by"] is None
+                    and dispatch_row["claimed_at"] is None
+                    and dispatch_row["claim_token"] is None
+                ),
+                "delivery_matches_admission": delivery_matches,
+                "closed_defer_history": (
+                    delivery_matches
+                    and (
+                        dispatch_row["delivery_count"] == 0
+                        and admission_reason is None
+                        or (
+                            dispatch_row["delivery_count"] > 0
+                            and admission_reason
+                            in {
+                                "EXECUTOR_PROJECT_BUSY",
+                                "EXECUTOR_CAPACITY_EXHAUSTED",
+                            }
+                            and dispatch_row["last_error"] == admission_reason
+                        )
+                    )
+                ),
+            }
+        return authority
 
     @classmethod
     def _business_decision_fingerprint(
@@ -3835,7 +4754,7 @@ class SqliteTaskStore:
                     "formal Task decision binding is not canonical"
                 )
             authority = binding["authority"]
-            if set(authority) != {
+            base_authority_fields = {
                 "reason",
                 "payload",
                 "task",
@@ -3844,7 +4763,34 @@ class SqliteTaskStore:
                 "dispatch",
                 "successor_task_ids",
                 "result_sha256s",
-            } or not isinstance(authority["payload"], dict):
+            }
+            authority_fields = frozenset(authority)
+            reprioritize_snapshot = authority.get("reprioritize")
+            if (
+                authority_fields
+                not in {frozenset(base_authority_fields), frozenset(base_authority_fields | {"reprioritize"})}
+                or not isinstance(authority["payload"], dict)
+                or (
+                    "reprioritize" in authority
+                    and (
+                        binding["command_type"] != "task.reprioritize"
+                        or type(reprioritize_snapshot) is not dict
+                        or set(reprioritize_snapshot)
+                        != {
+                            "selection_present",
+                            "pre_effect",
+                            "reconciliation_clear",
+                            "dispatch_pending_unclaimed",
+                            "delivery_matches_admission",
+                            "closed_defer_history",
+                        }
+                        or any(
+                            type(value) is not bool
+                            for value in reprioritize_snapshot.values()
+                        )
+                    )
+                )
+            ):
                 raise cls._corrupt(
                     "formal Task decision authority is not canonical"
                 )
@@ -4048,7 +4994,7 @@ class SqliteTaskStore:
             valid = (
                 text("attempt_id")
                 and uint("expected_event_head")
-                and payload["priority"] in {"low", "normal", "high"}
+                and payload["priority"] in {"low", "normal", "high", "urgent"}
                 and digest("reason_sha256", optional=True)
             )
         elif command_type == "task.adjust":
@@ -4256,7 +5202,11 @@ class SqliteTaskStore:
             or current_delivery < bound_delivery
             or current_state not in allowed_current
             or dispatch["outbox_id"] != dispatch_row["outbox_id"]
-            or (bound_state is OutboxState.PENDING and bound_delivery != 0)
+            or (
+                bound_state is OutboxState.PENDING
+                and bound_delivery != 0
+                and "reprioritize" not in binding["authority"]
+            )
             or (bound_state in {OutboxState.CLAIMED, OutboxState.DELIVERED} and bound_delivery < 1)
         ):
             raise cls._corrupt("formal Task decision dispatch history changed")
@@ -4318,7 +5268,6 @@ class SqliteTaskStore:
             "task.provide_input",
             "task.pause",
             "task.resume",
-            "task.reprioritize",
         }:
             stale = (
                 payload["attempt_id"] != task["attempt_id"]
@@ -4341,6 +5290,41 @@ class SqliteTaskStore:
                     else "TASK_CONTROL_UNSUPPORTED"
                 )
             )
+            valid_reason = reason == expected_reason
+        elif command_type == "task.reprioritize":
+            stale = (
+                payload["attempt_id"] != task["attempt_id"]
+                or payload["expected_event_head"] != task["event_head"]
+                or head["attempt_id"] != task["attempt_id"]
+            )
+            reprioritize_snapshot = binding["authority"].get("reprioritize")
+            if reprioritize_snapshot is None:
+                # Preserve accepted Task 2 negative rows created before queue support.
+                state_conflict = task["state"] == FormalTaskState.TERMINAL.value
+                expected_reason = (
+                    "TASK_CONTROL_PRECONDITION_STALE"
+                    if stale
+                    else (
+                        "TASK_CONTROL_STATE_CONFLICT"
+                        if state_conflict
+                        else "TASK_CONTROL_UNSUPPORTED"
+                    )
+                )
+            else:
+                eligible = (
+                    task["state"] == FormalTaskState.ACCEPTED.value
+                    and not bool(task["cancel_requested"])
+                    and not bool(task["dispatch_fenced"])
+                    and attempt["state"] == FormalAttemptState.ACCEPTED.value
+                    and all(reprioritize_snapshot.values())
+                )
+                expected_reason = (
+                    "TASK_CONTROL_PRECONDITION_STALE"
+                    if stale
+                    else (
+                        None if eligible else "TASK_CONTROL_STATE_CONFLICT"
+                    )
+                )
             valid_reason = reason == expected_reason
         elif command_type == "task.adjust":
             valid_reason = reason == "TASK_ADJUSTMENT_STATE_CONFLICT" and (
@@ -4544,6 +5528,92 @@ class SqliteTaskStore:
         return current_spec
 
     @classmethod
+    def _verify_reprioritize_authority(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+        requests: Mapping[str, PersistentTaskEvent],
+        settlements: Mapping[str, PersistentTaskEvent],
+    ) -> None:
+        """Verify each queued priority change against its command and event pair."""
+
+        if set(requests) != set(settlements):
+            raise cls._corrupt(
+                "formal Task reprioritize authority is not fully settled"
+            )
+        for command_id, request in sorted(
+            requests.items(), key=lambda item: item[1].seq
+        ):
+            settlement = settlements[command_id]
+            command_rows = connection.execute(
+                "SELECT * FROM commands WHERE scope_key=? AND command_id=?",
+                (_scope_key(task.scope), command_id),
+            ).fetchall()
+            if len(command_rows) != 1:
+                raise cls._corrupt(
+                    "formal Task reprioritize event lacks one exact command ledger"
+                )
+            command_row = command_rows[0]
+            command, result = cls._control_command_from_row(command_row)
+            payload = command.payload
+            try:
+                priority = AdmissionPriority(payload.get("priority"))
+            except (TypeError, ValueError) as error:
+                raise cls._corrupt(
+                    "formal Task reprioritize priority is not canonical"
+                ) from error
+            details = {"command_id": command_id, "priority": priority.value}
+            value = result.result
+            if (
+                command.command_type != "task.reprioritize"
+                or command.target_ref.id != task.task_id
+                or command.scope != task.scope
+                or command.required_capabilities != ("task.reprioritize",)
+                or type(payload) is not dict
+                or set(payload)
+                != {"attempt_id", "expected_event_head", "priority", "reason"}
+                or payload["attempt_id"] != attempt.attempt_id
+                or payload["expected_event_head"] != request.seq - 1
+                or settlement.seq != request.seq + 1
+                or request.details != details
+                or settlement.details != details
+                or request.state != FormalTaskState.ACCEPTED.value
+                or settlement.state != FormalTaskState.ACCEPTED.value
+                or request.outcome is not None
+                or settlement.outcome is not None
+                or request.occurred_at != settlement.occurred_at
+                or command_row["created_at"] != request.occurred_at
+                or result.observed_at != settlement.occurred_at
+                or type(value) is not dict
+                or value
+                != {
+                    "task_id": task.task_id,
+                    "attempt_id": attempt.attempt_id,
+                    "state": FormalTaskState.ACCEPTED.value,
+                    "priority": priority.value,
+                    "applied": True,
+                }
+                or dict(result.extensions)
+                != command_result_extensions(
+                    TaskCommandDisposition.APPLIED,
+                    admission_event_id=request.event_id,
+                    settlement_event_id=settlement.event_id,
+                )
+                or connection.execute(
+                    """SELECT COUNT(*) FROM outbox AS o
+                       JOIN tasks AS t ON t.task_id=o.task_id
+                       WHERE t.scope_key=? AND o.command_id=?""",
+                    (_scope_key(task.scope), command_id),
+                ).fetchone()[0]
+                != 0
+            ):
+                raise cls._corrupt(
+                    "formal Task reprioritize command does not bind its queue settlement"
+                )
+
+    @classmethod
     def _verify_successor_admission(
         cls,
         connection: sqlite3.Connection,
@@ -4688,9 +5758,14 @@ class SqliteTaskStore:
                 "result_text",
                 "result_artifacts",
             }
+            selected_keys = expected_keys | {
+                "adapter_id",
+                "capability_profile_digest",
+            }
             if (
                 type(payload) is not dict
-                or set(payload) != expected_keys
+                or frozenset(payload)
+                not in {frozenset(expected_keys), frozenset(selected_keys)}
                 or type(payload["result_artifacts"]) is not list
             ):
                 raise cls._corrupt("formal Task Executor authority is not canonical")
@@ -4730,6 +5805,8 @@ class SqliteTaskStore:
                 error=payload["error"],
                 result_text=payload["result_text"],
                 result_artifacts=artifacts,
+                adapter_id=payload.get("adapter_id"),
+                capability_profile_digest=payload.get("capability_profile_digest"),
             )
             if (
                 observation.resolution is not ExecutorResolution.KNOWN
@@ -5165,6 +6242,7 @@ class SqliteTaskStore:
 
             dispatch_specs: dict[int, FormalTaskSpec] = {}
             for ordinal, attempt in enumerate(attempts, 1):
+                attempt_row = attempt_rows[ordinal - 1]
                 segment = tuple(
                     event for event in events if event.attempt_id == attempt.attempt_id
                 )
@@ -5290,6 +6368,8 @@ class SqliteTaskStore:
                 adjustment_dispositions: dict[str, PersistentTaskEvent] = {}
                 update_requests: dict[str, PersistentTaskEvent] = {}
                 update_settlements: dict[str, PersistentTaskEvent] = {}
+                reprioritize_requests: dict[str, PersistentTaskEvent] = {}
+                reprioritize_settlements: dict[str, PersistentTaskEvent] = {}
                 verified_control_outbox_ids: set[str] = set()
                 executor_attempt_sources: set[str] = set()
                 executor_task_sources: set[str] = set()
@@ -5314,6 +6394,7 @@ class SqliteTaskStore:
                             "task_core",
                             "task_core.delivery",
                             "task_core.reconciliation",
+                            "task_core.admission",
                         } or (
                             event.event_type != "task.terminal"
                             and event.producer != "task_core"
@@ -5431,6 +6512,8 @@ class SqliteTaskStore:
                         "task.adjust_rejected",
                         "task.update_requested",
                         "task.update_applied",
+                        "task.reprioritize_requested",
+                        "task.reprioritize_applied",
                     }:
                         if (
                             event.producer != "task_core.control"
@@ -5445,14 +6528,23 @@ class SqliteTaskStore:
                         expected_details = (
                             {"command_id", "reason"}
                             if event.event_type == "task.adjust_rejected"
-                            else {"command_id"}
+                            else (
+                                {"command_id", "priority"}
+                                if event.event_type.startswith("task.reprioritize_")
+                                else {"command_id"}
+                            )
                         )
                         reason = event.details.get("reason")
+                        priority = event.details.get("priority")
                         if (
                             set(event.details) != expected_details
                             or type(command_id_value) is not str
                             or not command_id_value.strip()
                             or command_id_value != event.causation_id
+                            or (
+                                event.event_type.startswith("task.reprioritize_")
+                                and priority not in {item.value for item in AdmissionPriority}
+                            )
                             or (
                                 event.event_type == "task.adjust_rejected"
                                 and (
@@ -5499,6 +6591,31 @@ class SqliteTaskStore:
                                     "formal Task update settlement is unpaired"
                                 )
                             update_settlements[command_id_value] = event
+                        elif event.event_type == "task.reprioritize_requested":
+                            if (
+                                task_segment_state
+                                != FormalTaskState.ACCEPTED.value
+                                or attempt_segment_state
+                                != FormalAttemptState.ACCEPTED.value
+                                or command_id_value in reprioritize_requests
+                                or command_id_value in reprioritize_settlements
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task reprioritize request is duplicated or stale"
+                                )
+                            reprioritize_requests[command_id_value] = event
+                        elif event.event_type == "task.reprioritize_applied":
+                            request = reprioritize_requests.get(command_id_value)
+                            if (
+                                request is None
+                                or command_id_value in reprioritize_settlements
+                                or event.seq != request.seq + 1
+                                or event.details != request.details
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task reprioritize settlement is unpaired"
+                                )
+                            reprioritize_settlements[command_id_value] = event
                         elif event.event_type == "task.adjust_requested":
                             if (
                                 command_id_value in adjustment_requests
@@ -5568,7 +6685,11 @@ class SqliteTaskStore:
                             executor_attempt_sources.add(event.source_event_id)
                         elif (
                             event.producer
-                            not in {"task_core.delivery", "task_core.reconciliation"}
+                            not in {
+                                "task_core.delivery",
+                                "task_core.reconciliation",
+                                "task_core.admission",
+                            }
                             or event.source_event_id is not None
                             or event.state != FormalAttemptState.TERMINAL.value
                         ):
@@ -5636,10 +6757,28 @@ class SqliteTaskStore:
                                 == "EXECUTOR_ATTEMPT_LOST"
                                 and dispatch_row["updated_at"] == event.occurred_at
                             )
+                            admission_timeout = (
+                                event.producer == "task_core.admission"
+                                and event.outcome == TerminalOutcome.FAILED.value
+                                and event.details
+                                == {"reason": "EXECUTOR_ADMISSION_TIMEOUT"}
+                                and event.causation_id == dispatch_row["outbox_id"]
+                                and attempt.selection is not None
+                                and attempt.executor_ref is None
+                                and attempt.source_seq == -1
+                                and dispatch_state is OutboxState.SUPPRESSED
+                                and dispatch_delivery_count
+                                == int(attempt_row["admission_attempt_count"])
+                                and dispatch_claim_clear
+                                and dispatch_row["last_error"]
+                                == "EXECUTOR_ADMISSION_TIMEOUT"
+                                and dispatch_row["updated_at"] == event.occurred_at
+                            )
                             if not (
                                 dispatch_rejection
                                 or cancelled_before_dispatch
                                 or lost_reconciliation
+                                or admission_timeout
                             ):
                                 raise cls._corrupt(
                                     "formal Task accepted attempt terminal is not canonical"
@@ -5698,6 +6837,10 @@ class SqliteTaskStore:
                         attempt_segment_outcome = event.outcome
                     else:
                         raise cls._corrupt("formal Task event type is not canonical")
+                if set(reprioritize_requests) != set(reprioritize_settlements):
+                    raise cls._corrupt(
+                        "formal Task reprioritize authority lacks exact settlement"
+                    )
                 if cancel_request is not None:
                     outbox_id = cls._verify_control_authority(
                         connection,
@@ -5844,6 +6987,13 @@ class SqliteTaskStore:
                         "formal Task admission ledger does not bind its successor"
                     )
                 dispatch_specs[ordinal] = dispatch_spec
+                cls._verify_reprioritize_authority(
+                    connection,
+                    task=task,
+                    attempt=attempt,
+                    requests=reprioritize_requests,
+                    settlements=reprioritize_settlements,
+                )
 
                 if ordinal == 1:
                     if resolved_spec is None:
@@ -6418,12 +7568,218 @@ class SqliteTaskStore:
             ),
         )
 
-    def claim_outbox(self, worker_id: str) -> PersistentOutboxItem | None:
+    def _require_admission_row(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        outbox_id: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            """
+            SELECT o.*, a.adapter_id, a.capability_profile_json,
+                   a.capability_profile_digest, a.execution_requirements_json,
+                   a.admission_priority, a.admission_reason,
+                   a.admission_attempt_count, a.admission_next_eligible_at,
+                   a.admission_deadline_at, a.admission_enqueued_at,
+                   a.state AS attempt_state,
+                   a.outcome AS attempt_outcome,
+                   a.executor_ref AS attempt_executor_ref,
+                   a.source_seq AS attempt_source_seq,
+                   t.state AS task_state,
+                   t.outcome AS task_outcome,
+                   t.attempt_id AS task_attempt_id
+            FROM outbox AS o
+            JOIN attempts AS a ON a.attempt_id=o.attempt_id
+            JOIN tasks AS t ON t.task_id=o.task_id
+            WHERE o.outbox_id=?
+            """,
+            (outbox_id,),
+        ).fetchone()
+        if row is None:
+            raise FormalTaskViolation(
+                "OUTBOX_BINDING_MISMATCH",
+                "admission outbox lost its exact Task/Attempt binding",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        return row
+
+    def _mark_admission_reconciliation_required(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        observed_at: str,
+    ) -> AdmissionDisposition:
+        reason = "EXECUTOR_ADMISSION_OWNERSHIP_UNKNOWN_MANUAL_ACTION_REQUIRED"
+        connection.execute(
+            """
+            UPDATE tasks SET reconciliation_state=?, reconciliation_reason=?,
+                updated_at=?
+            WHERE task_id=? AND state<>?
+            """,
+            (
+                ReconciliationState.REQUIRED.value,
+                reason,
+                observed_at,
+                task_id,
+                FormalTaskState.TERMINAL.value,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                claim_token=NULL, last_error=?, updated_at=?
+            WHERE task_id=? AND state IN (?, ?)
+            """,
+            (
+                OutboxState.SUPPRESSED.value,
+                reason,
+                observed_at,
+                task_id,
+                OutboxState.PENDING.value,
+                OutboxState.CLAIMED.value,
+            ),
+        )
+        return AdmissionDisposition.RECONCILIATION_REQUIRED
+
+    def _settle_admission_timeout(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        outbox_id: str,
+        observed_at: str,
+    ) -> AdmissionDisposition:
+        row = self._require_admission_row(connection, outbox_id=outbox_id)
+        if (
+            row["kind"] != OutboxKind.ATTEMPT_DISPATCH.value
+            or row["adapter_id"] is None
+            or row["task_attempt_id"] != row["attempt_id"]
+            or row["task_state"] != FormalTaskState.ACCEPTED.value
+            or row["attempt_state"] != FormalAttemptState.ACCEPTED.value
+            or row["attempt_executor_ref"] is not None
+            or int(row["attempt_source_seq"]) != -1
+            or int(row["delivery_count"])
+            != int(row["admission_attempt_count"])
+            or (
+                int(row["admission_attempt_count"]) == 0
+                and (
+                    row["admission_reason"] is not None
+                    or row["last_error"] is not None
+                )
+            )
+            or (
+                int(row["admission_attempt_count"]) > 0
+                and (
+                    row["admission_reason"]
+                    not in {
+                        "EXECUTOR_PROJECT_BUSY",
+                        "EXECUTOR_CAPACITY_EXHAUSTED",
+                    }
+                    or row["last_error"] != row["admission_reason"]
+                )
+            )
+        ):
+            return self._mark_admission_reconciliation_required(
+                connection,
+                task_id=row["task_id"],
+                observed_at=observed_at,
+            )
+        connection.execute(
+            """
+            UPDATE attempts SET state=?, outcome=?, updated_at=?
+            WHERE attempt_id=? AND state=?
+            """,
+            (
+                FormalAttemptState.TERMINAL.value,
+                TerminalOutcome.FAILED.value,
+                observed_at,
+                row["attempt_id"],
+                FormalAttemptState.ACCEPTED.value,
+            ),
+        )
+        self._hit("admission.timeout.after_attempt")
+        details = {"reason": "EXECUTOR_ADMISSION_TIMEOUT"}
+        task = self._require_task_row_by_id(connection, row["task_id"])
+        self._append_event(
+            connection,
+            task,
+            event_type="attempt.terminal",
+            state=FormalAttemptState.TERMINAL.value,
+            outcome=TerminalOutcome.FAILED.value,
+            producer="task_core.admission",
+            source_event_id=None,
+            causation_id=outbox_id,
+            occurred_at=observed_at,
+            details=details,
+        )
+        self._hit("admission.timeout.after_attempt_event")
+        task = self._require_task_row_by_id(connection, row["task_id"])
+        self._reject_open_adjustments_before_terminal(
+            connection, task=task, observed_at=observed_at
+        )
+        task = self._require_task_row_by_id(connection, row["task_id"])
+        self._append_event(
+            connection,
+            task,
+            event_type="task.terminal",
+            state=FormalTaskState.TERMINAL.value,
+            outcome=TerminalOutcome.FAILED.value,
+            producer="task_core.admission",
+            source_event_id=None,
+            causation_id=outbox_id,
+            occurred_at=observed_at,
+            details=details,
+            update_task=True,
+        )
+        self._hit("admission.timeout.after_task_event")
+        connection.execute(
+            """
+            UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                claim_token=NULL, last_error=?, updated_at=?
+            WHERE task_id=? AND state IN (?, ?)
+            """,
+            (
+                OutboxState.SUPPRESSED.value,
+                "EXECUTOR_ADMISSION_TIMEOUT",
+                observed_at,
+                row["task_id"],
+                OutboxState.PENDING.value,
+                OutboxState.CLAIMED.value,
+            ),
+        )
+        self._hit("admission.timeout.after_outbox")
+        return AdmissionDisposition.TIMED_OUT
+
+    def claim_outbox(
+        self, worker_id: str, *, observed_at: str | None = None
+    ) -> PersistentOutboxItem | None:
         if not worker_id.strip():
             raise ValueError("worker_id must be non-empty")
-        now = utc_now()
+        now = observed_at or utc_now()
+        _utc_datetime(now)
         claim_token = uuid.uuid4().hex
         with self._transaction() as connection:
+            expired = connection.execute(
+                """
+                SELECT o.outbox_id, a.admission_deadline_at
+                FROM outbox AS o
+                JOIN attempts AS a ON a.attempt_id=o.attempt_id
+                WHERE o.state=? AND o.kind=? AND a.adapter_id IS NOT NULL
+                ORDER BY a.admission_deadline_at, o.outbox_id
+                """,
+                (
+                    OutboxState.PENDING.value,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                ),
+            ).fetchall()
+            now_value = _utc_datetime(now)
+            for expired_row in expired:
+                if now_value >= _utc_datetime(expired_row["admission_deadline_at"]):
+                    self._settle_admission_timeout(
+                        connection,
+                        outbox_id=expired_row["outbox_id"],
+                        observed_at=now,
+                    )
             candidates = connection.execute(
                 _OUTBOX_BINDING_SELECT
                 + """
@@ -6445,7 +7801,24 @@ class SqliteTaskStore:
                           AND prior_event.seq<ae.seq
                       )
                     )
-                  ORDER BY o.updated_at, o.created_at, o.outbox_id
+                  ORDER BY
+                    CASE WHEN o.kind<>? THEN 0 ELSE 1 END,
+                    CASE WHEN o.kind<>? THEN o.updated_at END,
+                    CASE
+                      WHEN o.kind=? THEN
+                        CASE a.admission_priority
+                          WHEN 'urgent' THEN 0
+                          WHEN 'high' THEN 1
+                          WHEN 'normal' THEN 2
+                          WHEN 'low' THEN 3
+                          ELSE 2
+                        END
+                    END,
+                    CASE WHEN o.kind=? THEN
+                         CASE WHEN a.adapter_id IS NULL THEN o.updated_at
+                              ELSE a.admission_enqueued_at END
+                         ELSE o.created_at END,
+                    o.created_at, o.outbox_id
                 """,
                 (
                     OutboxState.PENDING.value,
@@ -6453,6 +7826,10 @@ class SqliteTaskStore:
                     OutboxKind.ATTEMPT_ADJUST.value,
                     OutboxState.PENDING.value,
                     OutboxState.CLAIMED.value,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
                 ),
             )
             row = None
@@ -6471,6 +7848,25 @@ class SqliteTaskStore:
                     candidate["bound_task_state"] == FormalTaskState.TERMINAL.value
                     or candidate["bound_attempt_state"]
                     == FormalAttemptState.TERMINAL.value
+                ):
+                    continue
+                if (
+                    candidate["kind"] == OutboxKind.ATTEMPT_DISPATCH.value
+                    and candidate["bound_adapter_id"] is not None
+                    and int(candidate["delivery_count"])
+                    != int(candidate["bound_admission_attempt_count"])
+                ):
+                    self._mark_admission_reconciliation_required(
+                        connection,
+                        task_id=candidate["task_id"],
+                        observed_at=now,
+                    )
+                    continue
+                if (
+                    candidate["kind"] == OutboxKind.ATTEMPT_DISPATCH.value
+                    and candidate["bound_adapter_id"] is not None
+                    and now_value
+                    < _utc_datetime(candidate["bound_admission_next_eligible_at"])
                 ):
                     continue
                 item = self._outbox_from_row(connection, candidate)
@@ -6513,16 +7909,171 @@ class SqliteTaskStore:
                 )
             return self._outbox_from_row(connection, claimed)
 
+    def defer_admission(
+        self,
+        item: PersistentOutboxItem,
+        *,
+        reason: str,
+        policy: AdmissionPolicy,
+        observed_at: str,
+    ) -> AdmissionDisposition:
+        """Close one proven pre-effect capacity delivery without reallocating."""
+
+        if reason not in {
+            "EXECUTOR_PROJECT_BUSY",
+            "EXECUTOR_CAPACITY_EXHAUSTED",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_REASON",
+                "admission defer reason is not a closed pre-effect outcome",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if not isinstance(policy, AdmissionPolicy):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_POLICY",
+                "admission deferral requires a canonical runtime policy",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        observed = _utc_datetime(observed_at)
+        if (
+            not isinstance(item, PersistentOutboxItem)
+            or item.kind is not OutboxKind.ATTEMPT_DISPATCH
+            or item.selection is None
+            or item.claim_token is None
+        ):
+            raise FormalTaskViolation(
+                "ADMISSION_CLAIM_REQUIRED",
+                "admission deferral requires the exact selected dispatch claim",
+                ErrorCode.CONFLICT,
+            )
+        with self._transaction() as connection:
+            row = self._require_admission_row(
+                connection, outbox_id=item.outbox_id
+            )
+            stored_selection = _selection_from_attempt_row(row)
+            if (
+                row["state"] != OutboxState.CLAIMED.value
+                or row["claim_token"] != item.claim_token
+                or row["task_id"] != item.task_id
+                or row["attempt_id"] != item.attempt_id
+                or row["task_attempt_id"] != item.attempt_id
+                or stored_selection != item.selection
+            ):
+                raise FormalTaskViolation(
+                    "OUTBOX_CLAIM_LOST",
+                    "admission deferral no longer owns the exact Store claim",
+                    ErrorCode.CONFLICT,
+                )
+            current_count = int(row["admission_attempt_count"])
+            next_count = current_count + 1
+            if int(row["delivery_count"]) != next_count:
+                return self._mark_admission_reconciliation_required(
+                    connection,
+                    task_id=item.task_id,
+                    observed_at=observed_at,
+                )
+            deadline = _utc_datetime(row["admission_deadline_at"])
+            if observed >= deadline or next_count >= policy.max_attempts:
+                connection.execute(
+                    """
+                    UPDATE attempts SET admission_reason=?,
+                        admission_attempt_count=?, updated_at=?
+                    WHERE attempt_id=?
+                    """,
+                    (reason, next_count, observed_at, item.attempt_id),
+                )
+                changed = connection.execute(
+                    """
+                    UPDATE outbox SET last_error=?, updated_at=?
+                    WHERE outbox_id=? AND state=? AND claim_token=?
+                    """,
+                    (
+                        reason,
+                        observed_at,
+                        item.outbox_id,
+                        OutboxState.CLAIMED.value,
+                        item.claim_token,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise FormalTaskViolation(
+                        "OUTBOX_CLAIM_LOST",
+                        "admission Store claim changed before timeout proof",
+                        ErrorCode.CONFLICT,
+                    )
+                return self._settle_admission_timeout(
+                    connection,
+                    outbox_id=item.outbox_id,
+                    observed_at=observed_at,
+                )
+            exponent = next_count - 1
+            saturation_exponent = math.ceil(
+                math.log2(
+                    policy.max_backoff_seconds / policy.initial_backoff_seconds
+                )
+            )
+            delay = (
+                policy.max_backoff_seconds
+                if exponent >= saturation_exponent
+                else policy.initial_backoff_seconds * (2**exponent)
+            )
+            next_eligible_at = _utc_plus_seconds(observed_at, delay)
+            changed = connection.execute(
+                """
+                UPDATE attempts SET admission_reason=?,
+                    admission_attempt_count=?, admission_next_eligible_at=?,
+                    updated_at=?
+                WHERE attempt_id=? AND state=?
+                """,
+                (
+                    reason,
+                    next_count,
+                    next_eligible_at,
+                    observed_at,
+                    item.attempt_id,
+                    FormalAttemptState.ACCEPTED.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise FormalTaskViolation(
+                    "TASK_ATTEMPT_STALE",
+                    "admission deferral targets a non-accepted Attempt",
+                    ErrorCode.STALE,
+                )
+            changed = connection.execute(
+                """
+                UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                    claim_token=NULL, last_error=?, updated_at=?
+                WHERE outbox_id=? AND state=? AND claim_token=?
+                """,
+                (
+                    OutboxState.PENDING.value,
+                    reason,
+                    observed_at,
+                    item.outbox_id,
+                    OutboxState.CLAIMED.value,
+                    item.claim_token,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise FormalTaskViolation(
+                    "OUTBOX_CLAIM_LOST",
+                    "admission Store claim changed before defer commit",
+                    ErrorCode.CONFLICT,
+                )
+            return AdmissionDisposition.DEFERRED
+
     def release_outbox(self, item: PersistentOutboxItem, error: str) -> bool:
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT task_id, attempt_id FROM outbox WHERE outbox_id=?",
+                "SELECT * FROM outbox WHERE outbox_id=?",
                 (item.outbox_id,),
             ).fetchone()
             if (
                 row is None
                 or row["task_id"] != item.task_id
                 or row["attempt_id"] != item.attempt_id
+                or row["kind"] != item.kind.value
             ):
                 raise FormalTaskViolation(
                     "OUTBOX_BINDING_MISMATCH",
@@ -6537,7 +8088,7 @@ class SqliteTaskStore:
                     ErrorCode.STALE,
                 )
             attempt = connection.execute(
-                "SELECT state FROM attempts WHERE attempt_id=?",
+                "SELECT * FROM attempts WHERE attempt_id=?",
                 (item.attempt_id,),
             ).fetchone()
             if attempt is None:
@@ -6546,6 +8097,32 @@ class SqliteTaskStore:
                 task["state"] == FormalTaskState.TERMINAL.value
                 or attempt["state"] == FormalAttemptState.TERMINAL.value
             )
+            selection = _stored_record(
+                "executor selection", lambda: _selection_from_attempt_row(attempt)
+            )
+            if item.selection != selection:
+                raise FormalTaskViolation(
+                    "EXECUTOR_SELECTION_MISMATCH",
+                    "released outbox does not match its persisted selection",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if (
+                not terminal
+                and item.kind is OutboxKind.ATTEMPT_DISPATCH
+                and selection is not None
+            ):
+                if (
+                    row["state"] != OutboxState.CLAIMED.value
+                    or item.claim_token is None
+                    or row["claim_token"] != item.claim_token
+                ):
+                    return False
+                self._mark_admission_reconciliation_required(
+                    connection,
+                    task_id=item.task_id,
+                    observed_at=utc_now(),
+                )
+                return True
             return (
                 connection.execute(
                     """
@@ -6746,6 +8323,27 @@ class SqliteTaskStore:
                     "outbox executor does not match the stored attempt",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
+            selection = _stored_record(
+                "executor selection", lambda: _selection_from_attempt_row(attempt)
+            )
+            for observation in observations:
+                expected_binding = (
+                    (None, None)
+                    if selection is None
+                    else (
+                        selection.adapter_id,
+                        selection.capability_profile_digest,
+                    )
+                )
+                if (
+                    observation.adapter_id,
+                    observation.capability_profile_digest,
+                ) != expected_binding:
+                    raise FormalTaskViolation(
+                        "EXECUTOR_SELECTION_MISMATCH",
+                        "Executor callback does not match the persisted selection",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
             task = self._require_task_row_by_id(connection, item.task_id)
             if task["attempt_id"] != item.attempt_id:
                 raise FormalTaskViolation(
@@ -7235,6 +8833,34 @@ class SqliteTaskStore:
             attempt = connection.execute(
                 "SELECT * FROM attempts WHERE attempt_id=?", (first.attempt_id,)
             ).fetchone()
+            selection = (
+                None
+                if attempt is None
+                else _stored_record(
+                    "executor selection", lambda: _selection_from_attempt_row(attempt)
+                )
+            )
+            expected_selection_binding = (
+                (None, None)
+                if selection is None
+                else (
+                    selection.adapter_id,
+                    selection.capability_profile_digest,
+                )
+            )
+            if any(
+                (
+                    observation.adapter_id,
+                    observation.capability_profile_digest,
+                )
+                != expected_selection_binding
+                for observation in observations
+            ):
+                raise FormalTaskViolation(
+                    "EXECUTOR_SELECTION_MISMATCH",
+                    "Executor callback does not match the persisted selection",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
             if (
                 attempt is None
                 or attempt["task_id"] != first.task_id
@@ -7755,6 +9381,33 @@ class SqliteTaskStore:
                     FormalAttemptState.TERMINAL.value,
                 ),
             ).rowcount
+            selected_expired = connection.execute(
+                """
+                SELECT o.outbox_id, o.task_id
+                FROM outbox AS o
+                JOIN attempts AS a ON a.attempt_id=o.attempt_id
+                JOIN tasks AS t ON t.task_id=o.task_id
+                WHERE o.state=? AND o.claimed_at IS NOT NULL
+                  AND o.claimed_at<=? AND o.kind=?
+                  AND a.adapter_id IS NOT NULL
+                  AND t.attempt_id=o.attempt_id
+                  AND t.state<>? AND a.state<>?
+                ORDER BY o.outbox_id
+                """,
+                (
+                    OutboxState.CLAIMED.value,
+                    claimed_before,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                    FormalTaskState.TERMINAL.value,
+                    FormalAttemptState.TERMINAL.value,
+                ),
+            ).fetchall()
+            for expired in selected_expired:
+                self._mark_admission_reconciliation_required(
+                    connection,
+                    task_id=expired["task_id"],
+                    observed_at=now,
+                )
             reset = connection.execute(
                 """
                 UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
@@ -7768,7 +9421,7 @@ class SqliteTaskStore:
                     claimed_before,
                 ),
             ).rowcount
-            return suppressed + reset
+            return suppressed + len(selected_expired) + reset
 
     def mark_reconciliation_pending(
         self,
@@ -7801,6 +9454,13 @@ class SqliteTaskStore:
                     TaskMutationDisposition.SUPERSEDED,
                 )
             if task["state"] == FormalTaskState.TERMINAL.value:
+                return self._mutation_result(
+                    connection, attempt, TaskMutationDisposition.NOOP
+                )
+            if (
+                task["reconciliation_state"]
+                == ReconciliationState.REQUIRED.value
+            ):
                 return self._mutation_result(
                     connection, attempt, TaskMutationDisposition.NOOP
                 )
@@ -8055,6 +9715,68 @@ class SqliteTaskStore:
                 )
             return self._attempt_from_row(row)
 
+    def admission_projection(
+        self, task_id: str, scope: ScopeRef
+    ) -> PersistentAdmissionRecord | None:
+        """Return persisted queue facts without changing canonical lifecycle."""
+
+        with self._reader() as connection:
+            task = self._require_task_row(connection, task_id, scope)
+            row = connection.execute(
+                """
+                SELECT a.*,
+                       EXISTS(
+                           SELECT 1 FROM outbox AS o
+                           WHERE o.task_id=a.task_id
+                             AND o.attempt_id=a.attempt_id
+                             AND o.kind=? AND o.state=?
+                       ) AS is_queued
+                FROM attempts AS a
+                WHERE a.attempt_id=? AND a.task_id=?
+                """,
+                (
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                    OutboxState.PENDING.value,
+                    task["attempt_id"],
+                    task_id,
+                ),
+            ).fetchone()
+            if row is None:
+                raise self._corrupt("Task admission projection lost its current Attempt")
+            selection = _stored_record(
+                "executor selection", lambda: _selection_from_attempt_row(row)
+            )
+            if selection is None:
+                return None
+            reconciliation_required = (
+                task["reconciliation_state"] == ReconciliationState.REQUIRED.value
+            )
+            return _stored_record(
+                "admission",
+                lambda: PersistentAdmissionRecord(
+                    task_id=task_id,
+                    attempt_id=row["attempt_id"],
+                    priority=AdmissionPriority(row["admission_priority"]),
+                    reason=row["admission_reason"],
+                    attempt_count=int(row["admission_attempt_count"]),
+                    next_eligible_at=row["admission_next_eligible_at"],
+                    deadline_at=row["admission_deadline_at"],
+                    enqueued_at=row["admission_enqueued_at"],
+                    queued=bool(row["is_queued"]),
+                    reconciliation_required=reconciliation_required,
+                    reconciliation_reason=(
+                        task["reconciliation_reason"]
+                        if reconciliation_required
+                        else None
+                    ),
+                    manual_action=(
+                        "verify_external_ownership_and_settle"
+                        if reconciliation_required
+                        else None
+                    ),
+                ),
+            )
+
     def events(
         self,
         task_id: str,
@@ -8255,7 +9977,12 @@ class SqliteTaskStore:
                     a.executor_id AS a_executor_id, a.executor_ref AS a_executor_ref,
                     a.attempt_number AS a_attempt_number,
                     a.state AS a_state, a.outcome AS a_outcome,
-                    a.source_seq AS a_source_seq, a.updated_at AS a_updated_at
+                    a.source_seq AS a_source_seq, a.updated_at AS a_updated_at,
+                    a.adapter_id, a.capability_profile_json,
+                    a.capability_profile_digest, a.execution_requirements_json,
+                    a.admission_priority, a.admission_reason,
+                    a.admission_attempt_count, a.admission_next_eligible_at,
+                    a.admission_deadline_at, a.admission_enqueued_at
                 FROM tasks t JOIN attempts a ON a.attempt_id=t.attempt_id
                 WHERE t.state<>? ORDER BY t.created_at, t.task_id
                 """,
@@ -8276,6 +10003,7 @@ class SqliteTaskStore:
                     ),
                     int(row["a_source_seq"]),
                     int(row["a_attempt_number"]),
+                    _selection_from_attempt_row(row),
                 )
                 result.append((self._task_from_row(row), attempt))
             return tuple(result)
@@ -8363,14 +10091,19 @@ class SqliteTaskStore:
         return _stored_record(
             "attempt",
             lambda: PersistentAttemptRecord(
-                row["attempt_id"],
-                row["task_id"],
-                row["executor_id"],
-                row["executor_ref"],
-                FormalAttemptState(row["state"]),
-                None if row["outcome"] is None else TerminalOutcome(row["outcome"]),
-                int(row["source_seq"]),
-                int(row["attempt_number"]),
+                attempt_id=row["attempt_id"],
+                task_id=row["task_id"],
+                executor_id=row["executor_id"],
+                executor_ref=row["executor_ref"],
+                state=FormalAttemptState(row["state"]),
+                outcome=(
+                    None
+                    if row["outcome"] is None
+                    else TerminalOutcome(row["outcome"])
+                ),
+                source_seq=int(row["source_seq"]),
+                attempt_number=int(row["attempt_number"]),
+                selection=_selection_from_attempt_row(row),
             ),
         )
 
@@ -8420,6 +10153,8 @@ class SqliteTaskStore:
                     ErrorCode.INTERNAL,
                 )
             row_keys = set(row.keys())
+            attempt_selection: PersistedExecutorSelection | None = None
+            attempt_row: sqlite3.Row | None = None
             scope = ScopeRef.from_dict(payload["scope"])
             spec = FormalTaskSpec.from_dict(payload["spec"])
             adjustment = (
@@ -8534,15 +10269,34 @@ class SqliteTaskStore:
                         "outbox scope or Executor does not match its canonical binding",
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
+                attempt_row = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=?",
+                    (row["attempt_id"],),
+                ).fetchone()
+                if attempt_row is None:
+                    raise FormalTaskViolation(
+                        "OUTBOX_BINDING_MISMATCH",
+                        "outbox lost its persisted executor selection",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                attempt_selection = _selection_from_attempt_row(attempt_row)
                 stored_fingerprint = _json_load(row["command_fingerprint"])
+                fingerprint_selection: PersistedExecutorSelection | None = None
                 if (
                     kind is OutboxKind.ATTEMPT_DISPATCH
                     and row["bound_command_type"]
                     in {"task.create", "task.create_successor"}
                 ):
-                    if type(stored_fingerprint) is not dict or set(
-                        stored_fingerprint
-                    ) != {"command", "resolved_spec"}:
+                    allowed_keys = {
+                        frozenset({"command", "resolved_spec"}),
+                        frozenset(
+                            {"command", "resolved_spec", "executor_selection"}
+                        ),
+                    }
+                    if (
+                        type(stored_fingerprint) is not dict
+                        or frozenset(stored_fingerprint) not in allowed_keys
+                    ):
                         raise FormalTaskViolation(
                             "OUTBOX_COMMAND_BINDING_MISMATCH",
                             "dispatch outbox lacks its exact create command binding",
@@ -8552,6 +10306,10 @@ class SqliteTaskStore:
                     resolved_spec = FormalTaskSpec.from_dict(
                         stored_fingerprint["resolved_spec"]
                     )
+                    if "executor_selection" in stored_fingerprint:
+                        fingerprint_selection = _selection_from_fingerprint_payload(
+                            stored_fingerprint["executor_selection"]
+                        )
                     if resolved_spec != spec:
                         task_row = connection.execute(
                             "SELECT * FROM tasks WHERE task_id=?",
@@ -8564,8 +10322,58 @@ class SqliteTaskStore:
                                 ErrorCode.PROTOCOL_VIOLATION,
                             )
                         cls._verify_durable_lineage(connection, task_row)
+                elif (
+                    kind is OutboxKind.ATTEMPT_DISPATCH
+                    and row["bound_command_type"] == "task.retry"
+                    and type(stored_fingerprint) is dict
+                    and set(stored_fingerprint)
+                    == {"command", "executor_selection"}
+                ):
+                    command_payload = stored_fingerprint["command"]
+                    fingerprint_selection = _selection_from_fingerprint_payload(
+                        stored_fingerprint["executor_selection"]
+                    )
                 else:
                     command_payload = stored_fingerprint
+                if (
+                    kind is OutboxKind.ATTEMPT_DISPATCH
+                    and fingerprint_selection is not None
+                ):
+                    task_row = connection.execute(
+                        "SELECT * FROM tasks WHERE task_id=?",
+                        (row["task_id"],),
+                    ).fetchone()
+                    if task_row is None:
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "selected dispatch lost its canonical Task",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    cls._verify_durable_lineage(connection, task_row)
+                    current_priority = fingerprint_selection.admission_priority
+                    reprioritize_rows = connection.execute(
+                        """SELECT details_json FROM task_events
+                           WHERE attempt_id=?
+                             AND event_type='task.reprioritize_applied'
+                           ORDER BY seq""",
+                        (row["attempt_id"],),
+                    ).fetchall()
+                    for reprioritize_row in reprioritize_rows:
+                        details = _json_load(reprioritize_row["details_json"])
+                        current_priority = AdmissionPriority(details["priority"])
+                    fingerprint_selection = replace(
+                        fingerprint_selection,
+                        admission_priority=current_priority,
+                    )
+                if (
+                    kind is OutboxKind.ATTEMPT_DISPATCH
+                    and fingerprint_selection != attempt_selection
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_COMMAND_BINDING_MISMATCH",
+                        "dispatch selection differs from its immutable Attempt",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
                 if type(command_payload) is not dict or "request_id" in command_payload:
                     raise FormalTaskViolation(
                         "OUTBOX_COMMAND_BINDING_MISMATCH",
@@ -8981,20 +10789,40 @@ class SqliteTaskStore:
             source_seq = (
                 int(row["bound_source_seq"]) if "bound_source_seq" in row_keys else -1
             )
+            admission = (
+                None
+                if attempt_selection is None or attempt_row is None
+                else PersistentAdmissionRecord(
+                    task_id=row["task_id"],
+                    attempt_id=row["attempt_id"],
+                    priority=attempt_selection.admission_priority,
+                    reason=attempt_row["admission_reason"],
+                    attempt_count=int(attempt_row["admission_attempt_count"]),
+                    next_eligible_at=attempt_row["admission_next_eligible_at"],
+                    deadline_at=attempt_row["admission_deadline_at"],
+                    enqueued_at=attempt_row["admission_enqueued_at"],
+                    queued=(
+                        kind is OutboxKind.ATTEMPT_DISPATCH
+                        and row["state"] == OutboxState.PENDING.value
+                    ),
+                )
+            )
             return PersistentOutboxItem(
-                row["outbox_id"],
-                OutboxKind(row["kind"]),
-                row["task_id"],
-                row["attempt_id"],
-                row["command_id"],
-                scope,
-                spec,
-                payload["executor_ref"],
-                source_seq,
-                OutboxState(row["state"]),
-                int(row["delivery_count"]),
-                row["claim_token"],
-                adjustment,
+                outbox_id=row["outbox_id"],
+                kind=OutboxKind(row["kind"]),
+                task_id=row["task_id"],
+                attempt_id=row["attempt_id"],
+                command_id=row["command_id"],
+                scope=scope,
+                spec=spec,
+                executor_ref=payload["executor_ref"],
+                source_seq=source_seq,
+                state=OutboxState(row["state"]),
+                delivery_count=int(row["delivery_count"]),
+                claim_token=row["claim_token"],
+                adjustment=adjustment,
+                selection=attempt_selection,
+                admission=admission,
             )
 
         return _stored_record("outbox", load)

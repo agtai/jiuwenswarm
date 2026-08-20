@@ -8,6 +8,9 @@ They contain only stable, non-secret facts that the formal Task Core can persist
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -62,6 +65,19 @@ class OutboxState(StrEnum):
     CLAIMED = "claimed"
     DELIVERED = "delivered"
     SUPPRESSED = "suppressed"
+
+
+class AdmissionPriority(StrEnum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+class AdmissionDisposition(StrEnum):
+    DEFERRED = "deferred"
+    TIMED_OUT = "timed_out"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
 
 
 class ReconciliationState(StrEnum):
@@ -166,6 +182,245 @@ def _parse_utc(value: object, field_name: str) -> datetime:
             ErrorCode.INVALID_ARGUMENT,
         )
     return parsed.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionPolicy:
+    """Runtime admission bounds; only derived absolute facts are persisted."""
+
+    deadline_seconds: float = 3_600
+    initial_backoff_seconds: float = 1
+    max_backoff_seconds: float = 60
+    max_attempts: int = 120
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("deadline_seconds", self.deadline_seconds),
+            ("initial_backoff_seconds", self.initial_backoff_seconds),
+            ("max_backoff_seconds", self.max_backoff_seconds),
+        ):
+            if (
+                type(value) not in {int, float}
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    f"admission policy {field_name} must be positive",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_POLICY",
+                "admission policy maximum backoff cannot be below its initial value",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(self.max_attempts) is not int or self.max_attempts <= 0:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_POLICY",
+                "admission policy max_attempts must be a positive integer",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedExecutorSelection:
+    """Executor-independent canonical selection facts owned by Core/Store."""
+
+    adapter_id: str
+    capability_profile_json: bytes
+    capability_profile_digest: str
+    execution_requirements_json: bytes
+    admission_priority: AdmissionPriority = AdmissionPriority.NORMAL
+
+    def __post_init__(self) -> None:
+        adapter_id = _require_text(self.adapter_id, "executor_selection.adapter_id")
+        if (
+            "\x00" in adapter_id
+            or len(adapter_id) > 256
+            or _utf8_size(adapter_id, "executor_selection.adapter_id") > 1_024
+        ):
+            raise FormalTaskViolation(
+                "INVALID_EXECUTOR_SELECTION",
+                "executor selection adapter identity exceeds its closed bound",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        try:
+            priority = AdmissionPriority(self.admission_priority)
+        except (TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PRIORITY",
+                "executor selection priority must be low, normal, high, or urgent",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        object.__setattr__(self, "admission_priority", priority)
+        for field_name, encoded in (
+            ("capability_profile_json", self.capability_profile_json),
+            ("execution_requirements_json", self.execution_requirements_json),
+        ):
+            if type(encoded) is not bytes or not encoded or len(encoded) > 262_144:
+                raise FormalTaskViolation(
+                    "INVALID_EXECUTOR_SELECTION",
+                    f"executor selection {field_name} must be bounded UTF-8 bytes",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                decoded = encoded.decode("utf-8")
+                value = json.loads(decoded)
+                canonical = canonical_json_bytes(value)
+            except (UnicodeDecodeError, json.JSONDecodeError, ContractViolation) as error:
+                raise FormalTaskViolation(
+                    "INVALID_EXECUTOR_SELECTION",
+                    f"executor selection {field_name} is not canonical JSON",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from error
+            if type(value) is not dict or canonical != encoded:
+                raise FormalTaskViolation(
+                    "EXECUTOR_SELECTION_JSON_NOT_CANONICAL",
+                    f"executor selection {field_name} must use exact canonical JSON",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        digest = self.capability_profile_digest
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or hashlib.sha256(self.capability_profile_json).hexdigest() != digest
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_DIGEST_MISMATCH",
+                "executor selection digest does not match its canonical profile",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    @classmethod
+    def from_values(
+        cls,
+        *,
+        adapter_id: str,
+        capability_profile: Mapping[str, object],
+        execution_requirements: Mapping[str, object],
+        admission_priority: AdmissionPriority | str = AdmissionPriority.NORMAL,
+    ) -> PersistedExecutorSelection:
+        profile = canonical_json_bytes(dict(capability_profile))
+        requirements = canonical_json_bytes(dict(execution_requirements))
+        return cls(
+            adapter_id=adapter_id,
+            capability_profile_json=profile,
+            capability_profile_digest=hashlib.sha256(profile).hexdigest(),
+            execution_requirements_json=requirements,
+            admission_priority=admission_priority,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentAdmissionRecord:
+    task_id: str
+    attempt_id: str
+    priority: AdmissionPriority
+    reason: str | None
+    attempt_count: int
+    next_eligible_at: str
+    deadline_at: str
+    enqueued_at: str
+    queued: bool
+    reconciliation_required: bool = False
+    reconciliation_reason: str | None = None
+    manual_action: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "admission.task_id")
+        _require_text(self.attempt_id, "admission.attempt_id")
+        if not isinstance(self.priority, AdmissionPriority):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PRIORITY",
+                "persisted admission priority is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.reason not in {
+            None,
+            "EXECUTOR_PROJECT_BUSY",
+            "EXECUTOR_CAPACITY_EXHAUSTED",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_REASON",
+                "persisted admission reason is not a closed pre-effect defer reason",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if type(self.attempt_count) is not int or self.attempt_count < 0:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_ATTEMPT_COUNT",
+                "persisted admission attempt count must be non-negative",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (self.attempt_count == 0) != (self.reason is None):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_HISTORY",
+                "persisted admission reason must exactly prove deferred deliveries",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        next_eligible = _parse_utc(
+            self.next_eligible_at, "admission.next_eligible_at"
+        )
+        deadline = _parse_utc(self.deadline_at, "admission.deadline_at")
+        enqueued = _parse_utc(self.enqueued_at, "admission.enqueued_at")
+        if next_eligible < enqueued or deadline < enqueued:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_TIMELINE",
+                "persisted admission times precede immutable enqueue time",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if type(self.queued) is not bool:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PROJECTION",
+                "admission queued projection must be boolean",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if type(self.reconciliation_required) is not bool or (
+            self.reconciliation_required
+            != (self.reconciliation_reason is not None)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PROJECTION",
+                "admission reconciliation projection is incomplete",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.reconciliation_required:
+            _require_text(
+                self.reconciliation_reason,
+                "admission.reconciliation_reason",
+            )
+            if (
+                len(self.reconciliation_reason) > 1_000
+                or self.manual_action != "verify_external_ownership_and_settle"
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_PROJECTION",
+                    "admission reconciliation requires one bounded manual action",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif self.manual_action is not None:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PROJECTION",
+                "healthy admission cannot request manual settlement",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "queued": self.queued,
+            "priority": self.priority.value,
+            "reason": self.reason,
+            "attempt_count": self.attempt_count,
+            "next_eligible_at": self.next_eligible_at,
+            "deadline_at": self.deadline_at,
+            "enqueued_at": self.enqueued_at,
+            "reconciliation_required": self.reconciliation_required,
+            "reconciliation_reason": self.reconciliation_reason,
+            "manual_action": self.manual_action,
+        }
 
 
 def command_result_extensions(
@@ -855,6 +1110,7 @@ class PersistentAttemptRecord:
     outcome: TerminalOutcome | None
     source_seq: int
     attempt_number: int = 1
+    selection: PersistedExecutorSelection | None = None
 
     def __post_init__(self) -> None:
         if type(self.attempt_number) is not int or not 1 <= self.attempt_number <= 3:
@@ -865,7 +1121,7 @@ class PersistentAttemptRecord:
             )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "attempt_id": self.attempt_id,
             "task_id": self.task_id,
             "executor_id": self.executor_id,
@@ -875,6 +1131,21 @@ class PersistentAttemptRecord:
             "source_seq": self.source_seq,
             "attempt_number": self.attempt_number,
         }
+        if self.selection is not None:
+            payload["executor_selection"] = {
+                "adapter_id": self.selection.adapter_id,
+                "capability_profile": json.loads(
+                    self.selection.capability_profile_json
+                ),
+                "capability_profile_digest": (
+                    self.selection.capability_profile_digest
+                ),
+                "execution_requirements": json.loads(
+                    self.selection.execution_requirements_json
+                ),
+                "admission_priority": self.selection.admission_priority.value,
+            }
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1584,6 +1855,8 @@ class PersistentOutboxItem:
     delivery_count: int
     claim_token: str | None = None
     adjustment: TaskAdjustmentRequest | None = None
+    selection: PersistedExecutorSelection | None = None
+    admission: PersistentAdmissionRecord | None = None
 
     def __post_init__(self) -> None:
         if (self.kind is OutboxKind.ATTEMPT_ADJUST) != (self.adjustment is not None):
@@ -1620,6 +1893,8 @@ class ExecutorObservation:
     error: str | None = None
     result_text: str | None = None
     result_artifacts: tuple[TaskResultArtifact, ...] = ()
+    adapter_id: str | None = None
+    capability_profile_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolution, ExecutorResolution):
@@ -1639,9 +1914,32 @@ class ExecutorObservation:
             ("executor_observation.summary", self.summary),
             ("executor_observation.error", self.error),
             ("executor_observation.result_text", self.result_text),
+            ("executor_observation.adapter_id", self.adapter_id),
+            (
+                "executor_observation.capability_profile_digest",
+                self.capability_profile_digest,
+            ),
         ):
             if value is not None:
                 _require_text(value, field_name)
+        if (self.adapter_id is None) != (self.capability_profile_digest is None):
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_BINDING_INCOMPLETE",
+                "Executor callback selection binding must be all-null or complete",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.capability_profile_digest is not None and (
+            len(self.capability_profile_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.capability_profile_digest
+            )
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_BINDING_INVALID",
+                "Executor callback profile digest must be lowercase SHA-256",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
         if self.result_text is not None and (
             "\x00" in self.result_text
             or len(self.result_text) > 32_768
@@ -1732,7 +2030,7 @@ class ExecutorObservation:
             )
 
     def canonical_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "resolution": self.resolution.value,
             "executor_id": self.executor_id,
             "executor_ref": self.executor_ref,
@@ -1755,6 +2053,10 @@ class ExecutorObservation:
                 artifact.to_dict() for artifact in self.result_artifacts
             ],
         }
+        if self.adapter_id is not None:
+            payload["adapter_id"] = self.adapter_id
+            payload["capability_profile_digest"] = self.capability_profile_digest
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1807,6 +2109,9 @@ def safe_json_value(value: Any) -> Any:
 
 
 __all__ = [
+    "AdmissionDisposition",
+    "AdmissionPolicy",
+    "AdmissionPriority",
     "AppliedTaskRetryReplay",
     "ExecutorDeliveryResult",
     "ExecutorObservation",
@@ -1818,6 +2123,8 @@ __all__ = [
     "FormalTaskViolation",
     "OutboxKind",
     "OutboxState",
+    "PersistedExecutorSelection",
+    "PersistentAdmissionRecord",
     "PersistentAttemptRecord",
     "PersistentOutboxItem",
     "PersistentTaskEvent",

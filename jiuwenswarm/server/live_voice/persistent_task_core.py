@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 
 from .formal_task_models import (
+    AdmissionPolicy,
     AppliedTaskRetryReplay,
     ExecutorDeliveryResult,
     ExecutorObservation,
@@ -29,6 +30,7 @@ from .formal_task_models import (
     FormalTaskSpec,
     FormalTaskViolation,
     OutboxKind,
+    PersistedExecutorSelection,
     PersistentAttemptRecord,
     PersistentOutboxItem,
     PersistentTaskEvent,
@@ -236,10 +238,16 @@ class PersistentTaskCore:
         executor: FormalExecutor,
         *,
         reconciliation_event_sink: ReconciliationEventSink | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ) -> None:
         self.store = store
         self.executor = executor
         self._reconciliation_event_sink = reconciliation_event_sink
+        self._admission_policy = (
+            AdmissionPolicy() if admission_policy is None else admission_policy
+        )
+        if not isinstance(self._admission_policy, AdmissionPolicy):
+            raise TypeError("admission_policy must be an AdmissionPolicy")
 
     def read_current_retry_authority(
         self,
@@ -323,9 +331,20 @@ class PersistentTaskCore:
         context: ResolvedTaskContext | None = None,
         now: str | None = None,
         current_background_session_id: str | None = None,
+        selection: PersistedExecutorSelection | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ) -> ResultEnvelope:
         observed_at = now or utc_now()
         try:
+            selected_policy = (
+                None
+                if selection is None
+                else (
+                    self._admission_policy
+                    if admission_policy is None
+                    else admission_policy
+                )
+            )
             if authorization is None:
                 raise FormalTaskViolation(
                     "FORMAL_TASK_AUTHORIZATION_REQUIRED",
@@ -420,6 +439,8 @@ class PersistentTaskCore:
                     expected_payload,
                     field_name=f"{command.command_type} payload",
                 )
+                if command.command_type == "task.reprioritize":
+                    return self.store.reprioritize(command, observed_at=observed_at)
                 return self.store.decide_unsupported_control(
                     command, observed_at=observed_at
                 )
@@ -482,7 +503,11 @@ class PersistentTaskCore:
                         ErrorCode.CAPABILITY_UNAVAILABLE,
                     )
                 return self.store.create_successor(
-                    command, spec, observed_at=observed_at
+                    command,
+                    spec,
+                    observed_at=observed_at,
+                    selection=selection,
+                    admission_policy=selected_policy,
                 )
             if command.command_type == "task.update":
                 require_exact_payload(
@@ -510,7 +535,9 @@ class PersistentTaskCore:
                 )
             if command.command_type == "task.retry":
                 authority_or_replay = self.store.read_retry_authority(
-                    command, observed_at=observed_at
+                    command,
+                    observed_at=observed_at,
+                    selection=selection,
                 )
                 if isinstance(authority_or_replay, ResultEnvelope):
                     return authority_or_replay
@@ -540,6 +567,8 @@ class PersistentTaskCore:
                     spec,
                     authority,
                     observed_at=observed_at,
+                    selection=selection,
+                    admission_policy=selected_policy,
                 )
             if context is None:
                 raise FormalTaskViolation(
@@ -600,6 +629,8 @@ class PersistentTaskCore:
                 spec,
                 observed_at=observed_at,
                 current_background_session_id=current_background_session_id,
+                selection=selection,
+                admission_policy=selected_policy,
             )
         except FormalTaskViolation as error:
             return _failure(command, error, observed_at=observed_at)
@@ -664,6 +695,16 @@ class PersistentTaskCore:
                 ErrorCode.UNAVAILABLE,
             )
 
+    def _task_read_projection(
+        self, task: PersistentTaskRecord
+    ) -> tuple[dict[str, object], dict[str, object] | None]:
+        admission = self.store.admission_projection(task.task_id, task.scope)
+        admission_payload = None if admission is None else admission.to_dict()
+        task_payload = task.to_dict()
+        task_payload["queued"] = bool(admission is not None and admission.queued)
+        task_payload["admission"] = admission_payload
+        return task_payload, admission_payload
+
     def query(
         self,
         query: QueryEnvelope,
@@ -725,8 +766,11 @@ class PersistentTaskCore:
                     cursor=cursor,
                     limit=limit,
                 )
+                projected_tasks = [
+                    self._task_read_projection(task)[0] for task in tasks
+                ]
                 result: Mapping[str, object] = {
-                    "tasks": [task.to_dict() for task in tasks],
+                    "tasks": projected_tasks,
                     "cursor": cursor,
                     "next_cursor": next_cursor,
                     "has_more": has_more,
@@ -739,9 +783,11 @@ class PersistentTaskCore:
                     field_name=f"{query.query_type} payload",
                 )
                 task = self.store.get_task(query.target_ref.id, query.scope)
+                task_payload, admission_payload = self._task_read_projection(task)
                 result = {
-                    "task": task.to_dict(),
+                    "task": task_payload,
                     "attempt": self.store.get_attempt(task.attempt_id).to_dict(),
+                    "admission": admission_payload,
                 }
             elif query.query_type == "task.events":
                 payload = query.payload
@@ -805,9 +851,14 @@ class PersistentTaskCore:
         except FormalTaskViolation as error:
             return _failure(query, error, observed_at=observed_at)
 
-    async def drain_outbox_once(self, *, worker_id: str | None = None) -> bool:
+    async def drain_outbox_once(
+        self,
+        *,
+        worker_id: str | None = None,
+        observed_at: str | None = None,
+    ) -> bool:
         worker = worker_id or f"task-core-{uuid.uuid4().hex}"
-        item = self.store.claim_outbox(worker)
+        item = self.store.claim_outbox(worker, observed_at=observed_at)
         if item is None:
             return False
         try:
@@ -818,6 +869,20 @@ class PersistentTaskCore:
             else:
                 adjustment_delivery = await self.executor.adjust(item)
         except FormalTaskViolation as error:
+            if (
+                item.kind is OutboxKind.ATTEMPT_DISPATCH
+                and item.selection is not None
+                and error.code is ErrorCode.UNAVAILABLE
+                and error.reason
+                in {"EXECUTOR_PROJECT_BUSY", "EXECUTOR_CAPACITY_EXHAUSTED"}
+            ):
+                self.store.defer_admission(
+                    item,
+                    reason=error.reason,
+                    policy=self._admission_policy,
+                    observed_at=observed_at or utc_now(),
+                )
+                return True
             if item.kind is OutboxKind.ATTEMPT_ADJUST and error.code not in {
                 ErrorCode.UNAVAILABLE,
                 ErrorCode.TIMEOUT,
