@@ -1,11 +1,10 @@
 # P3 Wave-2 command/admission/replay implementation review — 2026-08-20
 
-> Status: **PARTIAL ACCEPTANCE.** P3-2, P3-3 and P3-5A source implementation,
-> affected automation, schema compatibility and independent Tier-3 code review
-> pass. The bounded real run proves two-project Direct concurrency but not the
-> required successful file-Tool/A2/control/cleanup journey. This review does not
-> grant complete physical P3-3 acceptance, complete P3, controlled-candidate or
-> feature-complete credit.
+> Status: **PASS — SCOPED WAVE-2 ACCEPTANCE.** P3-2, P3-3 and P3-5A source
+> implementation, affected automation, schema compatibility, independent Tier-3
+> code review and the required physical file-Tool/A2/control/cleanup journey
+> pass. This review does not grant complete P3, controlled-candidate,
+> feature-complete or Production credit.
 
 ## 1. Authority, baseline and scope
 
@@ -14,6 +13,8 @@
 - Exact physical-attempt source: `fcf029625a589d4843a35d81ec69724d2ab453e1`.
 - Exact post-diagnostic source candidate:
   `534a04fbac40be633d0f275357958992a25cfca1`.
+- Exact successful physical source:
+  `3aa61f0193ac25e3da277f2dd632870355baf95a`.
 - Governing decisions: D-060/D-062 parallel ownership, D-084 completion
   boundaries, D-087 command/admission/replay contract and D-088 Wave-2 packet.
 - Preparation maps:
@@ -132,6 +133,7 @@ effect.
 | Python Ruff/`py_compile`, schema v5 and Git whitespace | **PASS** |
 | Tasks 1–6 cumulative independent review | **APPROVED, 0/0/0** with additional Core/Store/ACK/Direct/JS focused cases |
 | Task7 final security review | **APPROVED, 0/0/0** after all process/output/ACL/path repairs |
+| Fresh private Wave-2 production journey | **PASS** on `3aa61f0193ac25e3da277f2dd632870355baf95a`; producer and independent validator both returned 14 observations, 7 paired file Tools and 4 successful write/edit streams, with every scenario/cleanup check true |
 
 The exact commands and physical facts are recorded in the scoped
 [evidence](../evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md).
@@ -146,9 +148,9 @@ conclusions are:
 
 - **P3-2:** all applicable automated/source dimensions pass. Core/Store
   successor completion does not imply a P3-6 product-carrier journey.
-- **P3-3:** all applicable automated/source dimensions pass. The private run
-  proves real selected Direct concurrency only; successful file-Tool pairing,
-  A2 admission/control and clean settlement remain unproved.
+- **P3-3:** all applicable automated/source dimensions pass. The successful
+  private run proves real selected Direct concurrency, successful file-Tool
+  pairing, A2 admission/control and clean settlement.
 - **P3-5A:** all applicable automated/source dimensions pass. P3-5B filtering,
   presentation invocation and Production retention remain excluded.
 - Every unauthorized, malformed, mismatch, stale, duplicate, timeout, unknown,
@@ -157,32 +159,32 @@ conclusions are:
 
 ## 6. Physical review disposition
 
-The second bounded run produced two selected A1/B1 Tasks on distinct projects,
-two delivered dispatches and overlapping Direct-running intervals. Both target
-repositories remained clean. It produced no positive evidence JSON, no A2, no
-adjustment/cancel and no successful file write/edit target effect. After the
-Job-owned interruption, canonical Tasks remain running while Direct journals
-are interrupted and Store reconciliation is pending with
-`EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED`.
+The first two bounded attempts remain immutable historical failures. A third,
+separately authorized fresh ACL-private Windows run executed the repaired source
+at `3aa61f0193ac25e3da277f2dd632870355baf95a` and returned the closed aggregate
+`14 observations / 7 paired file Tools / 4 successful write-edit streams`.
 
-The later no-Provider seams now prove that normal trusted Tool callback
-completion can produce a content-free successful pair and that Direct shutdown
-can settle `interrupted` into canonical Store truth without dispatching new
-work. They repair source behavior but do not alter or supersede the retained
-private-run facts.
+The producer observed and recorded distinct A1/A2/B1 Task and Attempt bindings,
+four exact run bindings, production registration/factory use, persisted
+profile/requirements, real Agent and Tool observation, two-project concurrency,
+A2 busy queuing with zero pre-release effect, same-Attempt dequeue, A2
+adjustment, exact A1/B1 cancellation, Store reopen match, source integrity and
+cleanup. The independent validator does not re-observe the runtime; it enforces
+the closed schema, binding/pair/count consistency and that every required check
+is true. Observer failures, drops, unknowns, sequence gaps and unpaired
+observations are all zero.
 
-The precise Provider/model/network/Agent/Tool cause is not established because
-private content was deliberately not inspected. Full Agent/OS-worker cleanup
-is also not proved, so the private root remains `CLEANUP_PENDING`. These facts
-forbid a complete physical or P3-3 acceptance claim.
+The 9,404-byte positive artifact and machine-private configuration remain
+outside Git. The evidence document retains only its closed aggregate/boolean
+dispositions, exact Git source and private-root basename; full Task/Attempt/run
+IDs and Tool identity digests remain private. No process remained bound to the
+successful private root after the run; the older two failed roots remain
+`CLEANUP_PENDING` and were not reused or deleted.
 
 ## 7. Final judgement and non-claims
 
-The source implementation is accepted as a clean local Wave-2 package candidate
-on the exact source recorded above. The physical evidence Gate is **PARTIAL**,
-not PASS. A further real run is outside the accepted one-fresh-root retry bound
-and requires a new explicit execution decision to validate the repaired
-file-Tool and shutdown seams in the private environment.
+The source implementation and scoped physical Wave-2 Gate are **PASS** on the
+exact clean source `3aa61f0193ac25e3da277f2dd632870355baf95a`.
 
 No complete P3, feature-complete, controlled product-readiness, Production,
 P3-4/P3-5B/P3-6/P3-7/P3-8B, deferred P1/P2, `develop`, remote-ref or push credit

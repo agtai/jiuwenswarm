@@ -1,11 +1,12 @@
 # P3 Wave-2 command/admission/replay evidence — 2026-08-20
 
-> Result: **PARTIAL — SOURCE/AUTOMATION ACCEPTED; COMPLETE PHYSICAL TOOL
-> EVIDENCE NOT PRODUCED.** P3-2, P3-3 and P3-5A are implemented, locally
-> integrated and independently reviewed. The bounded private production run
-> proved two-project Direct dispatch/start/running, but it did not produce the
-> required paired real file-Tool observations or reach A2 queue/dequeue,
-> adjustment and cancel. No positive evidence JSON is synthesized.
+> Result: **PASS — WAVE-2 SOURCE/AUTOMATION/PHYSICAL GATE.** P3-2, P3-3 and
+> P3-5A are implemented, locally integrated and independently reviewed. A third
+> explicitly authorized fresh private production run on the exact integrated
+> source produced a schema-valid content-free artifact and proved the required
+> real file-Tool, A2 queue/dequeue, adjustment, cancellation, reopen and cleanup
+> journey. This scoped result does not grant complete P3, controlled-candidate,
+> feature-complete or Production credit.
 
 ## 1. Exact source and privacy boundary
 
@@ -14,22 +15,28 @@
 - Exact second-run source: `fcf029625a589d4843a35d81ec69724d2ab453e1`.
 - Exact post-diagnostic source candidate:
   `534a04fbac40be633d0f275357958992a25cfca1`.
-- The source worktree was clean before and after the bounded run. Both target
+- Exact successful third-run source:
+  `3aa61f0193ac25e3da277f2dd632870355baf95a`.
+- The source worktree was clean before and after the successful run. The target
   repositories were source-external, ACL-private, no-remote Git repositories.
 - Existing `config.yaml` and `.env` were copied by basename only into each
   private root. Their values, hashes and diffs were never read, printed,
   uploaded, staged or included here.
-- The producer suppressed Python/native/child stdout and stderr. Its only
-  second-run output was the closed line
-  `{"ok":false,"reason":"REAL_PRODUCER_FAILED"}`.
+- The producer suppressed Python/native/child stdout and stderr. The successful
+  run emitted only the closed aggregate
+  `{"observation_count":14,"ok":true,"paired_file_tool_count":7,"write_edit_pair_count":4}`.
 - Remote refs were untouched.
 
 The positive JSON contract in
 [`p3_wave2_real_evidence.schema.json`](../../scripts/live_voice/p3_wave2_real_evidence.schema.json)
 requires exact A1/A2/B1 bindings, paired observations, the complete control
-journey and cleanup truth. Those facts were not all present. Consequently
-`P3_WAVE2_REAL_EVIDENCE_V1_20260819.json` is intentionally absent rather than
-filled with invented IDs, observations or booleans.
+journey and cleanup truth. The successful private artifact is 9,404 bytes and
+passed the independent validator with the same aggregate. Under the
+documentation privacy rule it remains outside Git. This record retains the
+closed booleans/counts, exact source Git facts, historical truncated target Git
+facts and private-root basenames needed to correlate the attempts; it excludes
+full Task/Attempt/run IDs, Tool identity digests, configuration and raw
+Agent/Tool content.
 
 ## 2. Current-source automated evidence
 
@@ -42,8 +49,8 @@ filled with invented IDs, observations or booleans.
 | Static/build | broad changed-surface Ruff, `py_compile`, Git diff check and frontend production `npm run build:live-voice` passed; Vite emitted only existing chunk/dynamic-import warnings |
 | Independent review | Tasks 1–7 cumulative reviews plus the post-run diagnostics, shutdown and callback repairs each reported **0 Critical / 0 Important / 0 Minor** after their recorded repair rounds |
 
-These results establish automated and source-review credit. They do not replace
-the missing physical file-Tool proof.
+These results establish automated and source-review credit. The separate third
+run below supplies the scoped physical file-Tool proof.
 
 ## 3. Bounded private attempts
 
@@ -113,26 +120,61 @@ closed without reading private configuration or running a Provider:
   fake Agent reproduces the former Direct-interrupted/Store-running split and
   proves terminal `interrupted` settlement with no new outbox delivery.
 
-These repairs are source and automation evidence only. They do not prove that
-the retained private environment will emit the required Tool pair, reach A2 or
-complete cleanup; that requires a newly authorized fresh private run.
+These repairs did not alter the second run's immutable facts. Their real
+environment result is recorded separately in the successful third run below.
+
+### 3.4 Third root — complete validated Wave-2 journey
+
+- Private basename: `p3-wave2-3e06e75427c44cb5b2f48677bc578a68`.
+- Exact source: `3aa61f0193ac25e3da277f2dd632870355baf95a`.
+- The user explicitly authorized one fresh ACL-private Windows run using the
+  existing machine-private model/Provider configuration and real Tool calls.
+- The production CLI ran inside its Windows Job-owned bound and exited zero.
+  Independent validation of the private artifact also returned `ok=true`.
+
+The executed entrypoint was:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.live_voice.p3_wave2_real_evidence_producer --private-root <fresh-ACL-private-root> --output <fresh-ACL-private-root>\raw-evidence.json
+```
+
+The absolute private parent is intentionally omitted; its unique basename and
+the exact Git source above are sufficient to bind this sanitized record.
+
+The schema-closed facts are:
+
+| Fact | Producer-recorded, validator-accepted result |
+|---|---|
+| Production path | production registration and factory used; persisted profile and requirements checks all true |
+| Real boundary | real Agent and real Tool observed; 7 calls and 7 results form 7 exact file-Tool pairs |
+| Required successful streams | 4 write/edit pairs cover A1 initial, A2 initial, A2 adjustment and B1 initial |
+| Observation integrity | 14 observations; zero observer failures, drops, unknowns, sequence gaps or unpaired observations |
+| Concurrency/admission | two projects concurrent; A2 busy-queued with zero pre-release effect; the same A2 Attempt dequeued |
+| Controls | A2 adjustment applied; exact A1 and B1 cancellation checks true |
+| Durable close | Store reopen matched and cleanup completed |
+| Source/privacy | source untouched; output stayed below 64 KiB; no process remained bound to the private root after the run |
+
+The successful root is retained under its private ACL as out-of-Git evidence.
+Unlike the first two failed roots, its validated state is `cleanup_complete`,
+not `CLEANUP_PENDING`.
 
 ## 4. Physical claim disposition
 
 | Required claim | Disposition |
 |---|---|
-| Production registration/factory and persisted Direct dispatch | **PROVED by durable closed facts**, but not packaged by the positive JSON validator |
-| Two different projects simultaneously Direct-running | **PROVED** by overlapping Direct journal intervals and distinct clean project roots |
-| Persisted selected Direct adapter/profile | **PROVED** for A1/B1 |
-| Paired real file write/edit Tool observations | **NOT PROVED**; the no-Provider callback seam is repaired, but no validated private-run observer artifact or target effect exists |
-| A2 `EXECUTOR_PROJECT_BUSY`, zero pre-release effect and same-Attempt dequeue | **NOT REACHED** |
-| A2 checkpoint adjustment and completion | **NOT REACHED** |
-| Exact A1/B1 cancellation | **NOT REACHED** |
-| Store reopen/terminal/result match | **CONTRADICTED in the retained run**; the shutdown ordering is repaired in a synthetic real-Direct seam but has not been physically rerun |
-| Complete Agent/worker cleanup | **NOT PROVED**; Direct owner/lease facts cleared and targets are clean, but Store reconciliation remains pending |
+| Production registration/factory and persisted Direct dispatch | **PROVED** by the validated third-run production checks |
+| Two different projects simultaneously Direct-running | **PROVED** by the validated concurrency check |
+| Persisted selected Direct adapter/profile | **PROVED** together with the exact requirements binding |
+| Paired real file write/edit Tool observations | **PROVED**: 7 exact pairs, including all 4 required successful write/edit streams |
+| A2 `EXECUTOR_PROJECT_BUSY`, zero pre-release effect and same-Attempt dequeue | **PROVED** |
+| A2 checkpoint adjustment and completion | **PROVED** by adjustment and durable reopen checks |
+| Exact A1/B1 cancellation | **PROVED** |
+| Store reopen/terminal/result match | **PROVED** by the third-run reopen check; the older second-run contradiction remains historical |
+| Complete Agent/worker cleanup | **PROVED within the scoped producer contract**; cleanup check true and no process remained bound to the root |
 
-The second root is retained under its private ACL as `CLEANUP_PENDING`; no
-recursive deletion is attempted while full cleanup authority is unproved.
+The first two roots remain retained under their private ACLs as
+`CLEANUP_PENDING`; the successful third root is retained separately as validated
+private evidence. No recursive deletion was performed.
 
 ## 5. D-032 package evidence map
 
@@ -164,8 +206,9 @@ recursive deletion is attempted while full cleanup authority is unproved.
   projects manual reconciliation without fallback. Post-close status-only
   reconciliation now settles exact Direct terminal truth without draining new
   work. D1/D2 remain P3-4 scope.
-- **Physical limitation:** A1/B1 real Direct overlap is proved, but the required
-  file-Tool pair and A2 busy/dequeue/control journey remain unproved.
+- **Physical result:** the successful third run proves the required real
+  file-Tool pairs, two-project concurrency, A2 busy/dequeue/control journey and
+  clean durable settlement on the exact integrated source.
 
 ### P3-5A — retained result/event and explicit unread ACK
 
@@ -182,11 +225,11 @@ recursive deletion is attempted while full cleanup authority is unproved.
 
 ## 6. Conclusion and next gate
 
-The Wave-2 source package is reviewable and automated-green, while its required
-complete physical Direct/Agent/file-Tool proof remains **PARTIAL**. Overall P3,
-feature completeness, controlled product readiness and Production remain false.
-Another private Provider run is outside this packet's one-fresh-root retry
-limit and requires a new explicit execution decision to validate the repaired
-file-Tool and shutdown seams in the real environment. See the scoped
+The Wave-2 source package is automated-green, independently reviewed and its
+scoped physical Direct/Agent/file-Tool Gate is **PASS** on
+`3aa61f0193ac25e3da277f2dd632870355baf95a`. Overall P3, feature completeness,
+controlled product readiness and Production remain false; P3-4, P3-5B, P3-6
+and the deferred P1/P2 journey retain their own implementation and acceptance
+boundaries. See the scoped
 [implementation review](../reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md)
 and current [STATUS](../STATUS.md).
