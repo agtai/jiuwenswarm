@@ -601,6 +601,7 @@ def _compatible(left: LatencyRunConfig, right: LatencyRunConfig) -> bool:
         "gateway_runtime_class", "agent_runtime_class", "stt_provider_and_model", "tts_provider_and_model",
         "audio_format", "vad_configuration", "playout_configuration", "allowlisted_feature_flags",
         "cold_or_warm", "input_case_ids", "profile_ids", "intended_attempts", "required_successes",
+        "optimization_track", "benchmark_lane", "fixture_profile_id",
     )
     return all(getattr(left, field) == getattr(right, field) for field in fields)
 

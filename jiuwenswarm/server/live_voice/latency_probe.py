@@ -25,7 +25,11 @@ import time
 from typing import Final
 
 
-RUN_SCHEMA_VERSION: Final = "live-voice.latency-run.v0"
+RUN_SCHEMA_VERSION_V0: Final = "live-voice.latency-run.v0"
+RUN_SCHEMA_VERSION_V1: Final = "live-voice.latency-run.v1"
+# Keep the historical public name stable for v0 callers. New producers select
+# v1 explicitly in their closed manifest.
+RUN_SCHEMA_VERSION: Final = RUN_SCHEMA_VERSION_V0
 CONTEXT_SCHEMA_VERSION: Final = "live-voice.latency-context.v0"
 MARK_SCHEMA_VERSION: Final = "live-voice.latency-probe.v0"
 BATCH_SCHEMA_VERSION: Final = "live-voice.latency-batch.v0"
@@ -47,6 +51,19 @@ PROFILE_IDS: Final = (
     "task_create",
     "task_status",
     "task_cancel",
+)
+OPTIMIZATION_TRACKS: Final = (
+    "capture_endpointing",
+    "post_capture_pipeline",
+)
+BENCHMARK_LANES: Final = (
+    "controlled_browser_fixture",
+    "controlled_browser",
+    "physical_journey",
+)
+_POST_CAPTURE_FIXTURE_PROFILES: Final = (
+    "dialogue_no_tool",
+    "dialogue_with_tool",
 )
 COMPONENTS: Final = ("browser", "gateway", "agent_server")
 COMPONENT_OUTPUT_FILES: Final[Mapping[str, str]] = {
@@ -169,7 +186,7 @@ _SENSITIVE_DESCRIPTOR = re.compile(
     r"(?:private|secret|credential|password|transcript|prompt|authorization|bearer|api[_-]?key)",
     re.IGNORECASE,
 )
-_CONFIG_KEYS = frozenset(
+_CONFIG_V0_KEYS = frozenset(
     {
         "schema_version", "run_id", "git_commit", "source_state",
         "environment_profile", "browser_family_and_version", "browser_os_class",
@@ -179,6 +196,9 @@ _CONFIG_KEYS = frozenset(
         "input_case_ids", "profile_ids", "intended_attempts", "required_successes",
         "experiment",
     }
+)
+_CONFIG_V1_KEYS = _CONFIG_V0_KEYS | frozenset(
+    {"optimization_track", "benchmark_lane", "fixture_profile_id"}
 )
 _MARK_KEYS = frozenset(
     {
@@ -369,9 +389,12 @@ class LatencyRunConfig:
     intended_attempts: int
     required_successes: int
     experiment: LatencyExperiment | None
+    optimization_track: str = "legacy_full_journey"
+    benchmark_lane: str = "legacy_unspecified"
+    fixture_profile_id: str = "legacy-unspecified"
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "git_commit": self.git_commit,
@@ -394,6 +417,13 @@ class LatencyRunConfig:
             "required_successes": self.required_successes,
             "experiment": None if self.experiment is None else self.experiment.to_dict(),
         }
+        if self.schema_version == RUN_SCHEMA_VERSION_V1:
+            result.update(
+                optimization_track=self.optimization_track,
+                benchmark_lane=self.benchmark_lane,
+                fixture_profile_id=self.fixture_profile_id,
+            )
+        return result
 
     def allows_point(self, point: str, component: str) -> bool:
         if component not in COMPONENTS or not isinstance(point, str):
@@ -741,8 +771,25 @@ def _parse_experiment(value: object) -> LatencyExperiment | None:
 
 
 def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
-    value = _require_exact_keys(raw, _CONFIG_KEYS)
-    if value["schema_version"] != RUN_SCHEMA_VERSION:
+    if not isinstance(raw, Mapping):
+        raise LatencyProbeViolation("INVALID_STRUCTURE")
+    schema_version = raw.get("schema_version")
+    if schema_version == RUN_SCHEMA_VERSION_V0:
+        value = _require_exact_keys(raw, _CONFIG_V0_KEYS)
+        optimization_track = "legacy_full_journey"
+        benchmark_lane = "legacy_unspecified"
+        fixture_profile_id = "legacy-unspecified"
+    elif schema_version == RUN_SCHEMA_VERSION_V1:
+        value = _require_exact_keys(raw, _CONFIG_V1_KEYS)
+        optimization_track = value["optimization_track"]
+        benchmark_lane = value["benchmark_lane"]
+        fixture_profile_id = value["fixture_profile_id"]
+        if optimization_track not in OPTIMIZATION_TRACKS:
+            raise LatencyProbeViolation("INVALID_OPTIMIZATION_TRACK")
+        if benchmark_lane not in BENCHMARK_LANES:
+            raise LatencyProbeViolation("INVALID_BENCHMARK_LANE")
+        fixture_profile_id = _bounded_string(fixture_profile_id)
+    else:
         raise LatencyProbeViolation("INVALID_SCHEMA_VERSION")
     run_id = _bounded_string(value["run_id"])
     git_commit = value["git_commit"]
@@ -753,7 +800,18 @@ def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
     if value["cold_or_warm"] not in ("cold", "warm"):
         raise LatencyProbeViolation("INVALID_COLD_OR_WARM")
     profile_ids = _unique_bounded_strings(value["profile_ids"])
-    if profile_ids != PROFILE_IDS:
+    expected_subset = tuple(profile for profile in PROFILE_IDS if profile in profile_ids)
+    if (
+        (schema_version == RUN_SCHEMA_VERSION_V0 and profile_ids != PROFILE_IDS)
+        or (schema_version == RUN_SCHEMA_VERSION_V1 and profile_ids != expected_subset)
+    ):
+        raise LatencyProbeViolation("INVALID_PROFILES")
+    if (
+        schema_version == RUN_SCHEMA_VERSION_V1
+        and optimization_track == "post_capture_pipeline"
+        and benchmark_lane == "controlled_browser_fixture"
+        and any(profile not in _POST_CAPTURE_FIXTURE_PROFILES for profile in profile_ids)
+    ):
         raise LatencyProbeViolation("INVALID_PROFILES")
     flags = value["allowlisted_feature_flags"]
     if not isinstance(flags, Mapping) or len(flags) > MAX_RUN_COLLECTION_ITEMS:
@@ -781,7 +839,7 @@ def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
     if len(input_case_ids) != len(profile_ids):
         raise LatencyProbeViolation("INVALID_ATTEMPT_POLICY")
     return LatencyRunConfig(
-        schema_version=RUN_SCHEMA_VERSION,
+        schema_version=schema_version,
         run_id=run_id,
         git_commit=git_commit,
         source_state=value["source_state"],
@@ -792,6 +850,9 @@ def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
         intended_attempts=intended_attempts,
         required_successes=required_successes,
         experiment=_parse_experiment(value["experiment"]),
+        optimization_track=optimization_track,
+        benchmark_lane=benchmark_lane,
+        fixture_profile_id=fixture_profile_id,
         **parsed,
     )
 

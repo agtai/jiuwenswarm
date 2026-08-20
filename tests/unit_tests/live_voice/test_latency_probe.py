@@ -93,6 +93,19 @@ def valid_run_json() -> dict[str, object]:
     }
 
 
+def valid_post_capture_run_json() -> dict[str, object]:
+    value = valid_run_json()
+    value.update(
+        schema_version="live-voice.latency-run.v1",
+        optimization_track="post_capture_pipeline",
+        benchmark_lane="controlled_browser_fixture",
+        fixture_profile_id="en-v1-fixed-wav",
+        profile_ids=["dialogue_no_tool", "dialogue_with_tool"],
+        input_case_ids=["dialogue-paris-en-v1", "tool-weather-en-v1"],
+    )
+    return value
+
+
 @pytest.fixture
 def run_config(tmp_path):
     path = tmp_path / "run.json"
@@ -120,6 +133,52 @@ def test_load_run_config_accepts_the_five_fixed_profiles_and_declared_points(run
     assert (
         run_config.allows_point("experiment.buffer-tuning.ready", "browser") is True
     )
+
+
+def test_v1_run_declares_post_capture_track_and_ordered_dialogue_subset(tmp_path) -> None:
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(valid_post_capture_run_json()), encoding="utf-8")
+
+    run = load_latency_run_config(path)
+
+    assert run.schema_version == "live-voice.latency-run.v1"
+    assert run.optimization_track == "post_capture_pipeline"
+    assert run.benchmark_lane == "controlled_browser_fixture"
+    assert run.fixture_profile_id == "en-v1-fixed-wav"
+    assert run.profile_ids == ("dialogue_no_tool", "dialogue_with_tool")
+    assert run.input_case_for_profile("dialogue_with_tool") == "tool-weather-en-v1"
+
+
+def test_v0_run_remains_legacy_and_round_trips_without_v1_keys(run_config) -> None:
+    assert run_config.optimization_track == "legacy_full_journey"
+    assert run_config.benchmark_lane == "legacy_unspecified"
+    assert run_config.fixture_profile_id == "legacy-unspecified"
+    assert "optimization_track" not in run_config.to_dict()
+    assert run_config.to_dict()["schema_version"] == "live-voice.latency-run.v0"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.__setitem__("optimization_track", "unknown_track"),
+        lambda value: value.__setitem__("benchmark_lane", "unknown_lane"),
+        lambda value: value.__setitem__(
+            "profile_ids", ["dialogue_with_tool", "dialogue_no_tool"]
+        ),
+        lambda value: value.update(
+            profile_ids=["dialogue_no_tool", "task_create"],
+            input_case_ids=["dialogue-paris-en-v1", "task-create-itinerary-en-v1"],
+        ),
+    ],
+)
+def test_v1_post_capture_run_rejects_unknown_or_non_dialogue_identity(tmp_path, mutate) -> None:
+    value = valid_post_capture_run_json()
+    mutate(value)
+    path = tmp_path / "invalid-v1-run.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(LatencyProbeViolation):
+        load_latency_run_config(path)
 
 
 @pytest.mark.parametrize(
