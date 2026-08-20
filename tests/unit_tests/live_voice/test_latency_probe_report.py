@@ -67,6 +67,26 @@ def run_payload(
     }
 
 
+def test_reducer_accepts_the_post_capture_v1_manifest(tmp_path: Path) -> None:
+    payload = run_payload()
+    payload.update(
+        schema_version="live-voice.latency-run.v1",
+        optimization_track="post_capture_pipeline",
+        benchmark_lane="controlled_browser_fixture",
+        fixture_profile_id="en-v1-fixed-wav",
+        profile_ids=["dialogue_no_tool"],
+        input_case_ids=["short-greeting-v1"],
+    )
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    run = load_latency_run_config(path)
+
+    report = reduce_latency_run(run, [])
+
+    assert report.run.schema_version == "live-voice.latency-run.v1"
+    assert report.profile("dialogue_no_tool").segment("response_total").attempts == 1
+
+
 @pytest.fixture
 def run_config(tmp_path):
     path = tmp_path / "run.json"

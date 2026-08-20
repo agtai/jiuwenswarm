@@ -28,7 +28,8 @@ from .latency_probe import (
     LatencyProbeViolation,
     LatencyRunConfig,
     PROFILE_IDS,
-    RUN_SCHEMA_VERSION,
+    RUN_SCHEMA_VERSION_V0,
+    RUN_SCHEMA_VERSION_V1,
     _parse_latency_run_config,
     load_latency_run_config,
 )
@@ -486,7 +487,10 @@ def _validated_batches(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -
 
 def reduce_latency_run(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -> LatencyRunReport:
     """Reduce one homogeneous run without treating absent evidence as zero."""
-    if not isinstance(run, LatencyRunConfig) or run.schema_version != RUN_SCHEMA_VERSION:
+    if not isinstance(run, LatencyRunConfig) or run.schema_version not in {
+        RUN_SCHEMA_VERSION_V0,
+        RUN_SCHEMA_VERSION_V1,
+    }:
         raise LatencyProbeViolation("INCOMPATIBLE_RUN")
     checked = _validated_batches(run, batches)
     grouped: dict[tuple[str, str, int], list[LatencyBatch]] = defaultdict(list)
