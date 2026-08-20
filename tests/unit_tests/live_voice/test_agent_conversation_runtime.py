@@ -978,6 +978,88 @@ async def test_prestart_direct_cancel_keeps_terminal_owner_until_exact_cancel() 
         await current.close(timeout_seconds=1)
 
 
+@pytest.mark.asyncio
+async def test_terminal_owner_cancel_is_not_swallowed_by_same_turn_business_finish() -> (
+    None
+):
+    business_release = asyncio.Event()
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        next_release=business_release,
+    )
+    harness, _selected, _binding, handle = controlled_harness_round(
+        current_facade,
+        suffix="terminal-owner-cancel-race",
+    )
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    stream = current_facade.stream
+    assert stream is not None
+    await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+
+    round_record = harness._rounds[handle.round_id]
+    terminal_owner = round_record.terminal_task
+    assert terminal_owner is not None
+    assert terminal_owner.done() is False
+    # Let the retained owner enter shield(record.task) before the business
+    # result is released.  The child done callback then places the real owner
+    # cancellation in the same scheduling window as shield completion.
+    await asyncio.sleep(0)
+    owner_cancel_requested = asyncio.Event()
+    cancel_results: list[bool] = []
+
+    def cancel_terminal_owner(_business_task: asyncio.Task[None]) -> None:
+        cancel_results.append(
+            terminal_owner.cancel("terminal owner cancelled after business result")
+        )
+        owner_cancel_requested.set()
+
+    round_record.task.add_done_callback(cancel_terminal_owner)
+    business_release.set()
+
+    try:
+        await asyncio.wait_for(owner_cancel_requested.wait(), timeout=1)
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await terminal_owner
+        assert raised.value.args == ("terminal owner cancelled after business result",)
+        assert cancel_results == [True]
+        assert terminal_owner.cancelled()
+        assert round_record.task.done()
+        assert round_record.task.cancelled() is False
+        assert round_record.task.exception() is None
+        assert round_record.business_settled is True
+        assert round_record.terminal_outcome.value == "completed"
+
+        # Process-control cancellation cannot fabricate terminal authority or
+        # an end marker.  Only the legally emitted accepted/running/final data
+        # may remain queued for this abandoned subscription.
+        queued = tuple(handle._queue._queue)
+        progress = [
+            item.payload["state"]
+            for item in queued
+            if isinstance(item, harness_module.EventEnvelope)
+        ]
+        assert progress == ["accepted", "running"]
+        assert sum(isinstance(item, AgentResponseChunk) for item in queued) == 1
+        assert all(
+            isinstance(item, (AgentResponseChunk, harness_module.EventEnvelope))
+            for item in queued
+        )
+        assert handle.terminal_event is None
+        assert round_record.cleanup_task is None
+        assert stream.close_lookups == 0
+        assert stream.close_invocations == 0
+        assert stream.close_calls == 0
+    finally:
+        business_release.set()
+        handle.detach()
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+    assert harness.snapshot().closed is True
+    assert round_record.task.done()
+    assert terminal_owner.done()
+    assert round_record.cleanup_task is None
+
+
 async def claim_and_ack_effects(
     current: AgentConversationRuntime,
     lease: AgentConversationNotificationLease,

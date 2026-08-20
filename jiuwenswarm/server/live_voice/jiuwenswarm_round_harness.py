@@ -886,6 +886,12 @@ class JiuWenSwarmRoundHarness:
         try:
             await asyncio.shield(record.task)
         except asyncio.CancelledError:
+            owner = asyncio.current_task()
+            if owner is None or owner.cancelling():
+                # Cancellation of the retained terminal owner is distinct from
+                # the shielded business task's own cancelled disposition.  It
+                # must propagate even when both become done in one loop turn.
+                raise
             if not record.task.done():
                 raise
         except BaseException as error:  # noqa: BLE001
