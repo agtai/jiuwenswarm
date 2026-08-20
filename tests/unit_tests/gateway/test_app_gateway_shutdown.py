@@ -116,6 +116,8 @@ class _ShutdownHarness:
         enterprise_bot_key: str = _ENTERPRISE_BOT_KEY,
         agent_server_url: str = _AGENT_SERVER_URL,
         cancel_barrier_phase: str | None = None,
+        descriptor_failures: dict[str, BaseException] | None = None,
+        discover_unowned_feishu: bool = False,
     ) -> None:
         self.failures = dict(failures or {})
         self.restart_requested = restart_requested
@@ -124,6 +126,8 @@ class _ShutdownHarness:
         self.enterprise_bot_key = enterprise_bot_key
         self.agent_server_url = agent_server_url
         self.cancel_barrier_phase = cancel_barrier_phase
+        self.descriptor_failures = dict(descriptor_failures or {})
+        self.discover_unowned_feishu = discover_unowned_feishu
         self.calls: list[str] = []
         self.issuer_values: list[object | None] = []
         self.shutdown_started = False
@@ -132,6 +136,7 @@ class _ShutdownHarness:
         self.cancel_barrier_started = asyncio.Event()
         self.release_cancel_barrier = asyncio.Event()
         self.observed_caller_cancellations: list[asyncio.CancelledError] = []
+        self.owned_tasks: list[asyncio.Task[None]] = []
         self.registered_channels: dict[str, list[object]] = {
             "feishu": [],
             "xiaoyi": [],
@@ -141,6 +146,8 @@ class _ShutdownHarness:
             "xiaoyi": [],
         }
         self.stopped_channels: list[object] = []
+        self.discovered_only_channels: list[object] = []
+        self.unregistered_channel_ids: list[str] = []
         self.channel_manager: object | None = None
 
     def call(self, phase: str) -> None:
@@ -151,6 +158,14 @@ class _ShutdownHarness:
 
     async def async_call(self, phase: str) -> None:
         self.call(phase)
+
+    def raise_descriptor_failure(self, phase: str) -> None:
+        if not self.shutdown_started:
+            return
+        failure = self.descriptor_failures.get(phase)
+        if failure is not None:
+            self.calls.append(phase)
+            raise failure
 
     async def cancel_leftover_cleanup(self) -> None:
         task = self.cleanup_task
@@ -167,7 +182,7 @@ class _ShutdownHarness:
 
         for channels in self.registered_channels.values():
             for channel in channels:
-                task = getattr(channel, "start_task", None)
+                task = object.__getattribute__(channel, "start_task")
                 if task is None or task.done():
                     continue
                 task.cancel()
@@ -176,7 +191,20 @@ class _ShutdownHarness:
                 except BaseException:
                     pass
 
+        for task in self.owned_tasks:
+            if task.done():
+                continue
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
     async def owned_task(self, phase: str) -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        if current not in self.owned_tasks:
+            self.owned_tasks.append(current)
         try:
             await _wait_forever()
         except asyncio.CancelledError:
@@ -270,8 +298,13 @@ def _install_gateway_fakes(
         async def connect(self, _url: str) -> None:
             return None
 
-        async def disconnect(self) -> None:
+        async def _disconnect(self) -> None:
             await harness.async_call("client.disconnect")
+
+        @property
+        def disconnect(self) -> object:
+            harness.raise_descriptor_failure("client.disconnect")
+            return self._disconnect
 
         def set_or_update_server_config(self, **_kwargs: object) -> None:
             return None
@@ -391,6 +424,15 @@ def _install_gateway_fakes(
                 assert isinstance(config, dict)
                 assert self._config_callback is not None
                 await self._config_callback(dict(config))
+                if harness.discover_unowned_feishu:
+                    channel = _FeishuChannel(_Config(channel_id="feishu"))
+                    task = asyncio.create_task(
+                        channel.start(),
+                        name="feishu-discovered-only",
+                    )
+                    channel.start_task = task
+                    self.register_channel(channel)
+                    harness.discovered_only_channels.append(channel)
 
         @staticmethod
         def pop_channel_restart_pending() -> set[str]:
@@ -423,8 +465,11 @@ def _install_gateway_fakes(
             return None
 
         def unregister_channel(self, channel_id: str) -> None:
-            assert channel_id == "a2a"
-            harness.call("a2a.unregister")
+            if channel_id == "a2a":
+                harness.call("a2a.unregister")
+                return
+            self._registered.pop(channel_id, None)
+            harness.unregistered_channel_ids.append(channel_id)
 
         def pop_channels_by_id(self, channel_id: str) -> list[object]:
             if harness.shutdown_started:
@@ -437,10 +482,20 @@ def _install_gateway_fakes(
     class _BaseChannel:
         channel_id = "unused"
         task_phase = "unused.task"
+        stop_phase = "unused.stop"
 
         def __init__(self, *args: object, **_kwargs: object) -> None:
             self.config = args[0] if args else None
             self.start_task: asyncio.Task[None] | None = None
+
+        def __getattribute__(self, name: str) -> object:
+            if name == "start_task":
+                phase = object.__getattribute__(self, "task_phase")
+                harness.raise_descriptor_failure(phase)
+            elif name == "stop":
+                phase = object.__getattribute__(self, "stop_phase")
+                harness.raise_descriptor_failure(phase)
+            return object.__getattribute__(self, name)
 
         async def start(self) -> None:
             await harness.owned_task(self.task_phase)
@@ -453,6 +508,7 @@ def _install_gateway_fakes(
             def __init__(self, *_args: object, **_kwargs: object) -> None:
                 self.channel_id = channel_id
                 self.task_phase = f"{channel_id}.task"
+                self.stop_phase = shutdown_phase or f"{channel_id}.stop"
                 self.key_issuer = object()
 
             async def stop(self) -> None:
@@ -469,6 +525,9 @@ def _install_gateway_fakes(
             self.task_phase = (
                 "feishu.enterprise.task" if self.enterprise else "channels.feishu.task"
             )
+            self.stop_phase = (
+                "feishu.enterprise.stop" if self.enterprise else "channels.feishu.stop"
+            )
 
         async def stop(self) -> None:
             if not self.enterprise:
@@ -476,10 +535,19 @@ def _install_gateway_fakes(
             await harness.async_call(
                 "feishu.enterprise.stop" if self.enterprise else "channels.feishu.stop"
             )
+            if self in harness.discovered_only_channels:
+                task = object.__getattribute__(self, "start_task")
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
     class _XiaoyiChannel(_BaseChannel):
         channel_id = "xiaoyi"
         task_phase = "channels.xiaoyi.task"
+        stop_phase = "channels.xiaoyi.stop"
 
         async def stop(self) -> None:
             harness.stopped_channels.append(self)
@@ -487,6 +555,7 @@ def _install_gateway_fakes(
 
     class _A2AChannel(_BaseChannel):
         channel_id = "a2a"
+        stop_phase = "a2a.stop"
 
         async def stop(self) -> None:
             await harness.async_call("a2a.stop")
@@ -494,12 +563,14 @@ def _install_gateway_fakes(
     class _WebChannel(_BaseChannel):
         channel_id = "web"
         task_phase = "web.task"
+        stop_phase = "web.stop"
 
         async def stop(self) -> None:
             await harness.async_call("web.stop")
 
     class _TuiChannel(_BaseChannel):
         channel_id = "tui"
+        stop_phase = "tui.stop"
 
         async def stop(self) -> None:
             await harness.async_call("tui.stop")
@@ -1068,17 +1139,8 @@ async def test_failed_shutdown_does_not_poison_a_clean_retry(
     assert retry.calls == [*_SHUTDOWN_PHASES, "restart.exec"]
 
 
-def _all_owner_expected_calls(failure_phase: str | None = None) -> list[str]:
-    expected = list(_ALL_OWNER_EXPECTED_CALLS)
-    if failure_phase == "channels.pop.feishu":
-        expected = [
-            phase for phase in expected if not phase.startswith("channels.feishu.")
-        ]
-    elif failure_phase == "channels.pop.xiaoyi":
-        expected = [
-            phase for phase in expected if not phase.startswith("channels.xiaoyi.")
-        ]
-    return expected
+def _all_owner_expected_calls() -> list[str]:
+    return list(_ALL_OWNER_EXPECTED_CALLS)
 
 
 @pytest.mark.asyncio
@@ -1102,7 +1164,7 @@ async def test_real_run_attempts_every_enabled_owner_after_each_phase_failure(
         phase=failure_phase,
         category="runtime_error",
     )
-    expected = _all_owner_expected_calls(failure_phase)
+    expected = _all_owner_expected_calls()
     assert harness.calls == expected
     assert Counter(harness.calls) == Counter(expected)
     assert "restart.exec" not in harness.calls
@@ -1144,6 +1206,70 @@ async def test_real_run_clean_shutdown_covers_optional_tasks_stops_and_ssh_issue
     assert harness.issuer_values[0] is None
     assert harness.issuer_values[1] is not None
     assert harness.issuer_values[2] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", ("feishu", "xiaoyi"))
+async def test_dynamic_owner_registry_survives_pop_discovery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    channel_id: str,
+) -> None:
+    phase = f"channels.pop.{channel_id}"
+    harness = _ShutdownHarness(
+        failures={phase: RuntimeError("private-pop-discovery-failure")},
+        enable_all_owners=True,
+    )
+
+    _install_gateway_fakes(monkeypatch, harness)
+    public_failure: BaseException | None = None
+    all_registered_tasks_done = False
+    manager_registry_empty = False
+    try:
+        await gateway_module._run(
+            harness.agent_server_url,
+            "127.0.0.1",
+            19000,
+            "/ws",
+        )
+    except BaseException as exc:
+        public_failure = exc
+    finally:
+        registered = harness.registered_channels[channel_id]
+        all_registered_tasks_done = all(
+            object.__getattribute__(channel, "start_task").done()
+            for channel in registered
+        )
+        manager = harness.channel_manager
+        assert manager is not None
+        manager_registry_empty = channel_id not in object.__getattribute__(
+            manager, "_registered"
+        )
+        await harness.cancel_leftover_cleanup()
+
+    assert public_failure is not None
+    _assert_safe_public_failure(
+        public_failure,
+        expected_type=RuntimeError,
+        phase=phase,
+        category="runtime_error",
+    )
+    expected = list(_ALL_OWNER_EXPECTED_CALLS)
+    assert harness.calls == expected
+    assert Counter(harness.calls) == Counter(expected)
+    registered = harness.registered_channels[channel_id]
+    assert len(registered) == 2
+    stopped = [
+        channel
+        for channel in harness.stopped_channels
+        if any(channel is registered_channel for registered_channel in registered)
+    ]
+    assert Counter(map(id, stopped)) == Counter(
+        {id(channel): 1 for channel in registered}
+    )
+    assert all_registered_tasks_done
+    assert manager_registry_empty
+    assert harness.unregistered_channel_ids.count(channel_id) == 1
+    assert "restart.exec" not in harness.calls
 
 
 @pytest.mark.asyncio
@@ -1213,6 +1339,122 @@ async def test_caller_cancellation_settles_owned_task_and_blocks_restart(
             raised_cancellation.__traceback__,
         )
     )
+    assert harness.calls == list(_ALL_OWNER_EXPECTED_CALLS)
+    assert Counter(harness.calls) == Counter(_ALL_OWNER_EXPECTED_CALLS)
+    assert "restart.exec" not in harness.calls
+
+
+@pytest.mark.asyncio
+async def test_first_failure_wins_over_late_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_marker = "private-first-shutdown-failure"
+    cancel_marker = "private-late-caller-cancellation"
+    harness = _ShutdownHarness(
+        failures={"web.stop": RuntimeError(first_marker)},
+        enable_all_owners=True,
+        cancel_barrier_phase="restart_cleanup",
+    )
+    _install_gateway_fakes(monkeypatch, harness)
+    runner = asyncio.create_task(
+        gateway_module._run(
+            harness.agent_server_url,
+            "127.0.0.1",
+            19000,
+            "/ws",
+        ),
+        name="gateway-first-failure-before-caller-cancel",
+    )
+    public_failure: BaseException | None = None
+    try:
+        await asyncio.wait_for(harness.cancel_barrier_started.wait(), timeout=2)
+        runner.cancel(cancel_marker)
+        await asyncio.sleep(0)
+        assert runner.done() is False
+        harness.release_cancel_barrier.set()
+        try:
+            await runner
+        except BaseException as exc:
+            public_failure = exc
+    finally:
+        harness.release_cancel_barrier.set()
+        if not runner.done():
+            runner.cancel()
+            try:
+                await runner
+            except BaseException:
+                pass
+        await harness.cancel_leftover_cleanup()
+
+    assert public_failure is not None
+    _assert_safe_public_failure(
+        public_failure,
+        expected_type=RuntimeError,
+        phase="web.stop",
+        category="runtime_error",
+    )
+    assert len(harness.observed_caller_cancellations) == 1
+    assert harness.calls == list(_ALL_OWNER_EXPECTED_CALLS)
+    assert Counter(harness.calls) == Counter(_ALL_OWNER_EXPECTED_CALLS)
+    assert "restart.exec" not in harness.calls
+    rendered = "".join(
+        traceback.format_exception(
+            type(public_failure),
+            public_failure,
+            public_failure.__traceback__,
+        )
+    )
+    assert first_marker not in rendered
+    assert cancel_marker not in rendered
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_wins_over_later_shutdown_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancel_marker = "private-first-caller-cancellation"
+    harness = _ShutdownHarness(
+        failures={"heartbeat.stop": RuntimeError("private-later-failure")},
+        enable_all_owners=True,
+        cancel_barrier_phase="web.task",
+    )
+    _install_gateway_fakes(monkeypatch, harness)
+    runner = asyncio.create_task(
+        gateway_module._run(
+            harness.agent_server_url,
+            "127.0.0.1",
+            19000,
+            "/ws",
+        ),
+        name="gateway-caller-cancel-before-later-failure",
+    )
+    raised_cancellation: asyncio.CancelledError | None = None
+    try:
+        await asyncio.wait_for(harness.cancel_barrier_started.wait(), timeout=2)
+        runner.cancel(cancel_marker)
+        await asyncio.sleep(0)
+        assert runner.done() is False
+        harness.release_cancel_barrier.set()
+        try:
+            await runner
+        except asyncio.CancelledError as exc:
+            raised_cancellation = exc
+    finally:
+        harness.release_cancel_barrier.set()
+        if not runner.done():
+            runner.cancel()
+            try:
+                await runner
+            except BaseException:
+                pass
+        await harness.cancel_leftover_cleanup()
+
+    assert raised_cancellation is not None
+    assert len(harness.observed_caller_cancellations) == 1
+    assert raised_cancellation is harness.observed_caller_cancellations[0]
+    assert raised_cancellation.args == ()
+    assert raised_cancellation.__cause__ is None
+    assert raised_cancellation.__context__ is None
     assert harness.calls == list(_ALL_OWNER_EXPECTED_CALLS)
     assert Counter(harness.calls) == Counter(_ALL_OWNER_EXPECTED_CALLS)
     assert "restart.exec" not in harness.calls
@@ -1384,3 +1626,106 @@ async def test_real_run_public_failure_and_all_logs_are_content_free(
         for record in caplog.records
     )
     assert "restart.exec" not in harness.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "failure_kind", "expected_type", "category"),
+    (
+        ("web.stop", "runtime", RuntimeError, "runtime_error"),
+        (
+            "client.disconnect",
+            "unknown",
+            gateway_module._GatewayShutdownError,
+            "base_exception",
+        ),
+        (
+            "channels.feishu.task",
+            "cancelled",
+            gateway_module._GatewayShutdownError,
+            "cancelled",
+        ),
+    ),
+)
+async def test_descriptor_failure_is_guarded_content_free_and_non_short_circuiting(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    phase: str,
+    failure_kind: str,
+    expected_type: type[BaseException],
+    category: str,
+) -> None:
+    marker = f"private-descriptor-{failure_kind}"
+
+    class _UnknownDescriptorFailure(BaseException):
+        def __str__(self) -> str:
+            return marker
+
+        def __repr__(self) -> str:
+            return f"UnknownDescriptorFailure({marker})"
+
+    if failure_kind == "runtime":
+        raw_failure: BaseException = RuntimeError(marker)
+    elif failure_kind == "cancelled":
+        raw_failure = asyncio.CancelledError(marker)
+    else:
+        raw_failure = _UnknownDescriptorFailure()
+    harness = _ShutdownHarness(
+        enable_all_owners=True,
+        descriptor_failures={phase: raw_failure},
+        discover_unowned_feishu=phase == "channels.feishu.task",
+    )
+    public_failure: BaseException | None = None
+    calls_before_cleanup: list[str] = []
+    owned_tasks_done_before_cleanup = False
+
+    _install_gateway_fakes(monkeypatch, harness)
+    gateway_module.logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO):
+            try:
+                await gateway_module._run(
+                    harness.agent_server_url,
+                    "127.0.0.1",
+                    19000,
+                    "/ws",
+                )
+            except BaseException as exc:
+                public_failure = exc
+    finally:
+        calls_before_cleanup = list(harness.calls)
+        owned_tasks_done_before_cleanup = all(
+            task.done() for task in harness.owned_tasks
+        )
+        await harness.cancel_leftover_cleanup()
+        gateway_module.logger.removeHandler(caplog.handler)
+
+    assert public_failure is not None
+    assert public_failure is not raw_failure
+    _assert_safe_public_failure(
+        public_failure,
+        expected_type=expected_type,
+        phase=phase,
+        category=category,
+    )
+    rendered = "".join(
+        traceback.format_exception(
+            type(public_failure),
+            public_failure,
+            public_failure.__traceback__,
+        )
+    )
+    assert marker not in rendered
+    assert marker not in caplog.text
+    assert all(marker not in repr(record.args) for record in caplog.records)
+    assert "restart.exec" not in calls_before_cleanup
+    expected_phase_count = 3 if phase == "channels.feishu.task" else 1
+    assert calls_before_cleanup.count(phase) == expected_phase_count
+    phase_index = calls_before_cleanup.index(phase)
+    assert phase_index < calls_before_cleanup.index("restart_cleanup")
+    assert calls_before_cleanup[-1] == "restart_cleanup"
+    assert Counter(calls_before_cleanup)["heartbeat.stop"] == 1
+    assert Counter(calls_before_cleanup)["forward.stop"] == 1
+    assert Counter(calls_before_cleanup)["client.disconnect"] == 1
+    assert Counter(calls_before_cleanup)["restart_cleanup"] == 1
+    assert owned_tasks_done_before_cleanup

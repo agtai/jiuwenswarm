@@ -579,14 +579,14 @@ class _GatewayShutdownFailures:
 
     @property
     def first_phase(self) -> str:
-        if self.caller_cancellation is not None:
-            return self.caller_cancellation[0]
         return self.entries[0][0]
 
     def take_caller_cancellation(self) -> asyncio.CancelledError | None:
         if self.caller_cancellation is None:
             return None
         cancellation = self.caller_cancellation[1]
+        if not self.entries or self.entries[0][1] is not cancellation:
+            return None
         cancellation.args = ()
         cancellation.__traceback__ = None
         cancellation.__cause__ = None
@@ -733,6 +733,12 @@ async def _cancel_gateway_owned_task(
         return
     if owned_failure is not None:
         raise owned_failure
+
+
+async def _cancel_gateway_channel_start_task(channel: Any) -> None:
+    task = getattr(channel, "start_task", None)
+    if task is not None:
+        await _cancel_gateway_owned_task(task)
 
 
 @dataclass
@@ -2407,6 +2413,10 @@ async def _run(
     feishu_enterprise_tasks: dict[str, asyncio.Task] = {}
     xiaoyi_channel = None
     xiaoyi_task = None
+    dynamic_channel_owners: dict[
+        str,
+        list[tuple[Any, asyncio.Task[Any]]],
+    ] = {"feishu": [], "xiaoyi": []}
     dingtalk_channel = None
     dingtalk_task = None
     telegram_channel = None
@@ -2559,12 +2569,20 @@ async def _run(
             # ---- 停止旧 apps 实例（从 channel_manager 查找） ----
             # 先 pop 再停止，避免 _stop_channel 内部 unregister_channel(channel_id)
             # 批量删除后后续 key 访问抛 KeyError
-            for ch in channel_manager.pop_channels_by_id("feishu"):
+            old_owners = list(dynamic_channel_owners["feishu"])
+            known_owner_ids = {id(channel) for channel, _task in old_owners}
+            for channel in channel_manager.pop_channels_by_id("feishu"):
+                if id(channel) not in known_owner_ids:
+                    old_owners.append(
+                        (channel, getattr(channel, "start_task", None))
+                    )
+            for ch, task in old_owners:
                 await _stop_channel(
                     ch,
-                    getattr(ch, "start_task", None),
+                    task,
                     "feishu_app",
                 )
+            dynamic_channel_owners["feishu"].clear()
             # 统一注销 adapter（所有 feishu app 共享 "feishu" 标识）
             im_inbound.unregister_adapter("feishu")
             im_outbound.unregister_adapter("feishu")
@@ -2624,7 +2642,8 @@ async def _run(
                         channel.start(),
                         name=f"feishu-app-{app_index}",
                     )
-                    channel.start_task = task  # 挂到 channel 对象上，不另存 dict
+                    channel.start_task = task
+                    dynamic_channel_owners["feishu"].append((channel, task))
                     logger.info(
                         "[App] FeishuChannel registered from channels.feishu.apps"
                     )
@@ -2722,12 +2741,20 @@ async def _run(
             # ---- 停止旧 apps 实例（从 channel_manager 查找） ----
             # 先 pop 再停止，避免 _stop_channel 内部 unregister_channel(channel_id)
             # 批量删除后后续 key 访问抛 KeyError
-            for ch in channel_manager.pop_channels_by_id("xiaoyi"):
+            old_owners = list(dynamic_channel_owners["xiaoyi"])
+            known_owner_ids = {id(channel) for channel, _task in old_owners}
+            for channel in channel_manager.pop_channels_by_id("xiaoyi"):
+                if id(channel) not in known_owner_ids:
+                    old_owners.append(
+                        (channel, getattr(channel, "start_task", None))
+                    )
+            for ch, task in old_owners:
                 await _stop_channel(
                     ch,
-                    getattr(ch, "start_task", None),
+                    task,
                     "xiaoyi_app",
                 )
+            dynamic_channel_owners["xiaoyi"].clear()
 
             # 单变量置空（不再使用，但保持 nonlocal 兼容）
             xiaoyi_channel, xiaoyi_task = None, None
@@ -2778,7 +2805,8 @@ async def _run(
                         channel.start(),
                         name=f"xiaoyi-app-{app_index}",
                     )
-                    channel.start_task = task  # 挂到 channel 对象上，不另存 dict
+                    channel.start_task = task
+                    dynamic_channel_owners["xiaoyi"].append((channel, task))
                     logger.info(
                         "[App] XiaoyiChannel registered from channels.xiaoyi.apps"
                     )
@@ -3169,7 +3197,7 @@ async def _run(
             )
         await _run_gateway_shutdown_phase(
             "a2a.stop",
-            a2a_channel.stop,
+            lambda: a2a_channel.stop(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
@@ -3185,18 +3213,18 @@ async def _run(
             )
         await _run_gateway_shutdown_phase(
             "gateway.stop",
-            gateway_server.stop,
+            lambda: gateway_server.stop(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
             "inbound.stop",
-            acp_inbound_server.stop,
+            lambda: acp_inbound_server.stop(),
             shutdown_failures,
         )
         if tui_channel is not None:
             await _run_gateway_shutdown_phase(
                 "tui.stop",
-                tui_channel.stop,
+                lambda: tui_channel.stop(),
                 shutdown_failures,
             )
         if web_task is not None:
@@ -3208,7 +3236,7 @@ async def _run(
         if web_channel is not None:
             await _run_gateway_shutdown_phase(
                 "web.stop",
-                web_channel.stop,
+                lambda: web_channel.stop(),
                 shutdown_failures,
             )
 
@@ -3221,7 +3249,7 @@ async def _run(
         if feishu_channel is not None:
             await _run_gateway_shutdown_phase(
                 "feishu.stop",
-                feishu_channel.stop,
+                lambda: feishu_channel.stop(),
                 shutdown_failures,
             )
         enterprise_keys = list(feishu_enterprise_tasks)
@@ -3242,7 +3270,7 @@ async def _run(
             if channel is not None:
                 await _run_gateway_shutdown_phase(
                     "feishu.enterprise.stop",
-                    channel.stop,
+                    lambda channel=channel: channel.stop(),
                     shutdown_failures,
                 )
         if xiaoyi_task is not None:
@@ -3254,7 +3282,7 @@ async def _run(
         if xiaoyi_channel is not None:
             await _run_gateway_shutdown_phase(
                 "xiaoyi.stop",
-                xiaoyi_channel.stop,
+                lambda: xiaoyi_channel.stop(),
                 shutdown_failures,
             )
         # ---- 从 channel_manager 清理所有动态注册的 channel 实例 ----
@@ -3264,12 +3292,31 @@ async def _run(
                 lambda _cid=_cid: list(channel_manager.pop_channels_by_id(_cid)),
                 shutdown_failures,
             )
+            if channels is None:
+                await _run_gateway_shutdown_phase(
+                    f"channels.pop.{_cid}",
+                    lambda _cid=_cid: channel_manager.unregister_channel(_cid),
+                    shutdown_failures,
+                )
+            owners: list[tuple[Any, asyncio.Task[Any] | None]] = list(
+                dynamic_channel_owners[_cid]
+            )
+            known_owner_ids = {id(channel) for channel, _task in owners}
             for ch in channels or []:
-                task = getattr(ch, "start_task", None)
+                if id(ch) not in known_owner_ids:
+                    owners.append((ch, None))
+                    known_owner_ids.add(id(ch))
+            for ch, task in owners:
                 if task is not None:
                     await _run_gateway_shutdown_phase(
                         f"channels.{_cid}.task",
                         lambda task=task: _cancel_gateway_owned_task(task),
+                        shutdown_failures,
+                    )
+                else:
+                    await _run_gateway_shutdown_phase(
+                        f"channels.{_cid}.task",
+                        lambda ch=ch: _cancel_gateway_channel_start_task(ch),
                         shutdown_failures,
                     )
                 await _run_gateway_shutdown_phase(
@@ -3277,6 +3324,7 @@ async def _run(
                     lambda ch=ch: ch.stop(),
                     shutdown_failures,
                 )
+            dynamic_channel_owners[_cid].clear()
         # -----------------------------------
         channel_owners = (
             ("dingtalk", dingtalk_channel, dingtalk_task, True),
@@ -3303,7 +3351,7 @@ async def _run(
             if channel is not None:
                 await _run_gateway_shutdown_phase(
                     f"{channel_id}.stop",
-                    channel.stop,
+                    lambda channel=channel: channel.stop(),
                     shutdown_failures,
                 )
         if ssh_channel is not None:
@@ -3315,27 +3363,27 @@ async def _run(
 
         await _run_gateway_shutdown_phase(
             "cron.stop",
-            cron_scheduler.stop,
+            lambda: cron_scheduler.stop(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
             "dispatch.stop",
-            channel_manager.stop_dispatch,
+            lambda: channel_manager.stop_dispatch(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
             "heartbeat.stop",
-            heartbeat_service.stop,
+            lambda: heartbeat_service.stop(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
             "forward.stop",
-            message_handler.stop_forwarding,
+            lambda: message_handler.stop_forwarding(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
             "client.disconnect",
-            client.disconnect,
+            lambda: client.disconnect(),
             shutdown_failures,
         )
         await _run_gateway_shutdown_phase(
