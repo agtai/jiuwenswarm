@@ -590,16 +590,96 @@ packets.
   scheduler/Store/Task, persistence, schema, protocol or error-code change; do
   not alter the separate `幂等任务缺少服务端所有者范围` diagnostic.
 
+## 5.9 Wave 9 ownership record — ACTIVE
+
+Wave 9 is frozen from integration baseline `c4301ef98`, the SRR-10 closure
+record. Its two writer surfaces are disjoint: one backend Python module and one
+frontend TypeScript pair. Both packets come from batch 1 of the historical
+revalidation's highest-priority ordering ("privacy and authority integrity"),
+which that report requires before reliability-only work.
+
+B18, B32, B37, B38, B39, D2 and L19 belong to the same historical family but are
+deliberately excluded from Wave 9. `productP1VoiceRoute.ts` and
+`LiveVoiceIntegratedRoutePanel.tsx` are being modified in parallel on
+`agtai/hx/0819_live_voice_p1p2`, so B32, L19, B37, B38 and B39 must be routed
+after that branch merges; B18 and D2 stay unactivated in §6.
+
+### SRR-20 — B12+B13+B14 composition registry generation authority
+
+- Capability/owner: `ProductCompositionRegistry` progress-generation admission,
+  higher-generation P2 replacement cleanup and post-gate failure release.
+- Risk: Tier 3 authority and generation integrity. This umbrella does not
+  propagate Tier 3 to later repairs in the same file.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/product_composition_registry.py` and
+  `tests/unit_tests/live_voice/test_product_composition_registry.py` only.
+- Intended behavior:
+  - B12 (`:681,1077-1107,7971`): progress-generation admission retains an
+    owner-scoped monotonic fence independent of the heavy route state, so a
+    generation evicted at capacity can never activate again.
+  - B13 (`:1872,2008-2009`): higher-generation P2 replacement performs the same
+    exact voice-origin drop and critical-token release that normal close
+    performs at `:5862-5872,8787-8796` before the successor is published, and
+    pairs with the conditional index release B7/SRR-09 already established.
+  - B14 (`:663-664,2869,3103`): a gate-approved submit that later fails
+    releases both exact maps and the token gate; the existing failure cleanup at
+    `:2534+` handles only pending/unknown outcomes.
+- Acceptance: each of the three mechanisms is reproduced RED first. Then
+  fill/evict/replay of an old generation rejects as stale with zero
+  subscription/output effects; an old origin/token cannot act after replacement
+  while the successor stays intact; a forced post-gate admission failure retains
+  no entry and releases no successor. Capacity and stop-time assertions,
+  concurrency linearization and restart/replay coverage are required, and every
+  rejected path asserts zero Agent/Tool/Task/audio/history/store effects.
+- Exclusions: no new product policy or classifier, no protocol/schema or
+  migration change, no capacity-policy change beyond the recorded fence, no
+  Gateway route or conformance source change, no other module owner, no
+  physical Provider claim.
+
+### SRR-21 — B36+L20+L21 formal task leaf and intent authority
+
+- Capability/owner: formal task control-leaf snapshot monotonicity, mutation
+  envelope authority, and durable cancellation fencing in the intent route.
+- Risk: Tier 3 authority and durability boundary.
+- Worker-owned source/tests:
+  `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskControlLeaf.ts`,
+  `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskIntentRoute.ts`
+  and their `tests/formalTaskControlLeaf.test.mjs` and
+  `tests/formalTaskIntentRoute.test.mjs` only.
+- Intended behavior:
+  - B36 (`formalTaskControlLeaf.ts:339-344,525-583`): adopting `task.get`/
+    `status` rejects attempt and event-head rollback, terminal resurrection and
+    outcome change, and retains the known event cursor instead of resetting it
+    to null.
+  - L21 (`formalTaskControlLeaf.ts:537-549,603-667`): create/cancel/retry
+    require the product mutation envelope; legacy `{ok:true,result}` success is
+    reserved for queries and never carries mutation authority.
+  - L20 (`formalTaskIntentRoute.ts:590-599,956-969`): a durable cancellation
+    tombstone, or an equivalent durable fail-closed state, is written before or
+    with local invalidation, so a journal-removal failure cannot later let
+    `recoverPending` at `:640-674,721-730,972-993` claim and re-authorize the
+    cancelled token.
+- Acceptance: each mechanism is reproduced RED first. Then stale get/status
+  after terminal events is rejected and the snapshot is unchanged; every legacy
+  mutation response rejects without replica or receipt change; checkpoint
+  removal failure first blocks submit and then `recoverPending` cannot
+  resurrect the cancelled token, with zero Gateway mutation. Restart/replay and
+  concurrent-adoption coverage are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no backend source change, no touch of `productP1VoiceRoute.ts` or
+  `LiveVoiceIntegratedRoutePanel.tsx` (owned by the parallel p1p2 branch), no
+  other module owner.
+
 ## 6. Queued repair programs
 
-The 67 remaining unique defects are the unactivated defects below; no
-candidate is in flight. These groups are not worker write authority. Each
-activation removes its IDs from this queue and freezes smaller owner-specific
-packets before editing.
+The 67 remaining unique defects consist of the six activated Wave 9
+candidates B12, B13, B14, B36, L20 and L21 plus the 61 unactivated defects
+below. These groups are not worker write authority. Each activation removes its
+IDs from this queue and freezes smaller owner-specific packets before editing.
 
-- Generation/successor/authority cleanup (**13**): B12, B13, B14, B18, B32,
-  B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an inactive alias of
-  B13.
+- Generation/successor/authority cleanup (**7**): B18, B32, B37, B38, B39, D2
+  and L19. B12, B13, B14, B36, L20 and L21 moved to the active Wave 9 packets.
+  B17 remains an inactive alias of B13 and is activated with it.
 - Cancellation/teardown/retained cleanup (**9**): A7, A19, A22, B21, B23,
   B24, D1, D3 and L7.
 - Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, B4, B11,
@@ -611,9 +691,10 @@ packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `13 + 9 + 12 + 4 + 29 = 67`, which is the complete
-remainder now that A2+B2 closed. By historical family the same remainder is
-11 A, 32 B, 21 L and three D findings.
+The queue arithmetic is `7 + 9 + 12 + 4 + 29 = 61`; adding the six activated
+Wave 9 candidates gives the 67 unique remaining defects. By historical family
+that remainder is 11 A, 32 B, 21 L and three D findings, of which the
+unactivated 61 are 11 A, 28 B, 19 L and three D.
 
 The queue excludes the already fixed A10, A24, B31 and L23; superseded B26;
 and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared

@@ -178,22 +178,22 @@ exact-source Alpha result.
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
 - **Remaining accounting:** 67 unique defects remain: 11 A findings, 32 B
-  findings, 21 L findings and D1-D3. No candidate is implemented or awaiting
-  review; all 67 remain unactivated in the owner-scoped queue. C3 continues to
-  alias B42 and B17 continues to alias B13, so neither creates another unique
-  repair.
+  findings, 21 L findings and D1-D3. Six are the activated Wave 9 candidates
+  B12, B13, B14, B36, L20 and L21; the other 61 remain unactivated in the
+  owner-scoped queue. C3 continues to alias B42 and B17 continues to alias B13,
+  so neither creates another unique repair.
 - **Excluded:** new product policy/classifier, schema migration, unrecorded
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** A2+B2/SRR-10 closed at `b5e6dd6e7`; no candidate is in
-  flight. On explicit resume, follow §2.1 of the repair execution contract and
-  activate one or more disjoint owner-scoped packets from its §6 queue, each
-  frozen from the latest integration branch with its own capability/module,
-  risk tier, dependencies, scope, exclusions and acceptance recorded before
-  implementation. Every activated packet still requires reproduced defects,
-  applicable D-032 evidence, independent module review and Main-only
-  integration before the numerator advances.
+- **Next action:** A2+B2/SRR-10 closed at `b5e6dd6e7`. Wave 9 is now frozen
+  from `c4301ef98` with two disjoint packets recorded in §5.9 of the repair
+  execution contract: SRR-20 owns B12+B13+B14 in the composition registry and
+  SRR-21 owns B36+L20+L21 in the formal task leaf/intent pair. Each still
+  requires deterministic RED reproduction, a minimum owner-scoped fix,
+  negative/concurrency/restart evidence, independent review by someone who did
+  not implement it, and Main-only integration with an affected rerun before the
+  numerator advances.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original
