@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import math
 import sqlite3
 import subprocess
@@ -1616,7 +1617,15 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("case", "params", "session_id", "contexts", "expiry", "expected"),
+    (
+        "case",
+        "params",
+        "session_id",
+        "contexts",
+        "expiry",
+        "expected",
+        "expected_code",
+    ),
     [
         (
             "unauthenticated",
@@ -1625,6 +1634,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             EXPIRY,
             "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+            ErrorCode.UNAUTHENTICATED.value,
         ),
         (
             "non-ascii-bearer",
@@ -1633,6 +1643,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             EXPIRY,
             "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+            ErrorCode.UNAUTHENTICATED.value,
         ),
         (
             "session-mismatch",
@@ -1641,6 +1652,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             EXPIRY,
             "FORMAL_TASK_SESSION_MISMATCH",
+            ErrorCode.PERMISSION_DENIED.value,
         ),
         (
             "expired",
@@ -1649,6 +1661,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             "2026-08-05T11:59:59Z",
             "FORMAL_TASK_AUTHORIZATION_EXPIRED",
+            ErrorCode.PERMISSION_DENIED.value,
         ),
         (
             "redacted",
@@ -1657,6 +1670,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             {"session-1": _context(Path.cwd(), redacted=True)},
             EXPIRY,
             "TASK_CONTEXT_REDACTED",
+            ErrorCode.PERMISSION_DENIED.value,
         ),
     ],
 )
@@ -1668,8 +1682,8 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
     contexts: dict[str, ResolvedTaskContext] | None,
     expiry: str,
     expected: str,
+    expected_code: str,
 ) -> None:
-    del case
     if contexts is not None:
         contexts = {
             key: replace(value, uri=tmp_path.resolve().as_uri())
@@ -1688,9 +1702,17 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
         await asyncio.sleep(0)
         assert result.ok is False
         assert result.payload["error"]["reason"] == expected
+        assert result.payload["error"]["code"] == expected_code
         assert _store_counts(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
+        assert harness.executor.statuses == []
+        assert harness.executor.adjustments == []
+        assert harness.executor.adjustment_settlements == []
+        assert harness.executor.readiness == []
+        assert harness.models.calls == []
+        if case == "non-ascii-bearer":
+            assert harness.authority.calls == []
     finally:
         await harness.composition.stop()
 
@@ -1700,6 +1722,38 @@ def test_static_bearer_rejects_non_ascii_configuration() -> None:
         StaticBearerAuthenticator(token="令" * 32, principal=_principal())
 
     assert raised.value.reason == "INVALID_P3_AUTH_CONFIGURATION"
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+
+
+def test_static_bearer_compares_only_supported_ascii_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    original_compare = hmac.compare_digest
+
+    def compare(left: str, right: str) -> bool:
+        calls.append((left, right))
+        return original_compare(left, right)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.hmac.compare_digest",
+        compare,
+    )
+    authenticator = StaticBearerAuthenticator(token=TOKEN, principal=_principal())
+
+    assert authenticator.authenticate(TOKEN, operation="task.list", now=NOW) == (
+        _principal()
+    )
+    with pytest.raises(FormalTaskViolation) as wrong:
+        authenticator.authenticate("x" * 32, operation="task.list", now=NOW)
+    with pytest.raises(FormalTaskViolation) as unsupported:
+        authenticator.authenticate("令" * 32, operation="task.list", now=NOW)
+
+    assert wrong.value.reason == "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    assert wrong.value.code is ErrorCode.UNAUTHENTICATED
+    assert unsupported.value.reason == "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    assert unsupported.value.code is ErrorCode.UNAUTHENTICATED
+    assert calls == [(TOKEN, TOKEN), ("x" * 32, TOKEN)]
 
 
 @pytest.mark.asyncio
@@ -2301,6 +2355,49 @@ def _configure_enabled_factory(
         "JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT", "2100-01-01T00:00:00Z"
     )
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS", str(interval))
+
+
+def test_factory_rejects_non_ascii_bearer_before_runtime_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 30)
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "令" * 32)
+    database = tmp_path / "non-ascii-must-not-exist.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    constructed: list[str] = []
+
+    def forbidden_dependency(name: str):
+        def construct(*_args: object, **_kwargs: object) -> object:
+            constructed.append(name)
+            return object()
+
+        return construct
+
+    for dependency in (
+        "ServerSessionProjectAuthorityResolver",
+        "AgentManagerProjectBindingResolver",
+        "DirectProjectCodeExecutorAdapter",
+        "SqliteTaskStore",
+        "PersistentTaskCore",
+    ):
+        monkeypatch.setattr(
+            f"jiuwenswarm.server.live_voice.p3_authenticated_composition.{dependency}",
+            forbidden_dependency(dependency),
+        )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert raised.value.reason == "INVALID_P3_AUTH_CONFIGURATION"
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+    assert constructed == []
+    assert not database.exists()
 
 
 @pytest.mark.parametrize("interval", ["nan", "inf", "-inf", "0", "-1", "3600.1"])
