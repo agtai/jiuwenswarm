@@ -4513,6 +4513,133 @@ def test_executor_duplicate_is_noop_and_conflicting_duplicate_is_rejected(
     assert store.counts() == before
 
 
+def test_outbox_completion_rejects_cross_bound_observation_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+
+    invocation_b = _create(tmp_path, identity_suffix="-b")
+    created_b = core.execute(
+        invocation_b.envelope,
+        invocation_b.authorization,
+        context=invocation_b.context,
+        now=NOW,
+    )
+    assert created_b.ok
+    item_b = store.claim_outbox("worker-b")
+    assert item_b is not None
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{item_b.attempt_id}",
+        observations=(_observations(item_b)[0],),
+    )
+
+    invocation_a = _create(tmp_path, identity_suffix="-a")
+    created_a = core.execute(
+        invocation_a.envelope,
+        invocation_a.authorization,
+        context=invocation_a.context,
+        now=NOW,
+    )
+    assert created_a.ok
+    item_a = store.claim_outbox("worker-a")
+    assert item_a is not None
+    observation_b = _observations(item_b)[1]
+    observation_a = replace(
+        _observations(item_a)[0],
+        executor_ref=observation_b.executor_ref,
+    )
+    cross_bound_delivery = ExecutorDeliveryResult(
+        observation_b.executor_ref,
+        (observation_a, observation_b),
+    )
+    before_dump = _database_dump(database)
+    before_task_a = store.get_task(item_a.task_id, _scope())
+    before_task_b = store.get_task(item_b.task_id, _scope())
+    before_attempt_a = store.get_attempt(item_a.attempt_id)
+    before_attempt_b = store.get_attempt(item_b.attempt_id)
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.complete_outbox(
+            item_a,
+            executor_ref=cross_bound_delivery.executor_ref,
+            observations=cross_bound_delivery.observations,
+        )
+
+    assert raised.value.reason == "EXECUTOR_OBSERVATION_BINDING_MISMATCH"
+    assert raised.value.code is ErrorCode.PROTOCOL_VIOLATION
+    assert _database_dump(database) == before_dump
+    reopened = SqliteTaskStore(database)
+    assert reopened.get_task(item_a.task_id, _scope()) == before_task_a
+    assert reopened.get_task(item_b.task_id, _scope()) == before_task_b
+    assert reopened.get_attempt(item_a.attempt_id) == before_attempt_a
+    assert reopened.get_attempt(item_b.attempt_id) == before_attempt_b
+
+    exact_observations = _observations(item_a)
+    reopened.complete_outbox(
+        item_a,
+        executor_ref=f"legacy:{item_a.attempt_id}",
+        observations=exact_observations,
+    )
+    assert reopened.get_task(item_a.task_id, _scope()).state is FormalTaskState.RUNNING
+    assert reopened.get_attempt(item_a.attempt_id).state is FormalAttemptState.RUNNING
+    assert reopened.get_task(item_b.task_id, _scope()) == before_task_b
+    assert reopened.get_attempt(item_b.attempt_id) == before_attempt_b
+
+    after_completion = _database_dump(database)
+    replay = SqliteTaskStore(database).apply_observations(exact_observations)
+    assert replay.disposition is TaskMutationDisposition.NOOP
+    assert replay.events == ()
+    assert _database_dump(database) == after_completion
+
+
+@pytest.mark.parametrize(
+    "binding_field",
+    ("task_id", "attempt_id", "executor_id", "executor_ref"),
+)
+def test_outbox_completion_prevalidates_each_observation_binding(
+    tmp_path: Path,
+    binding_field: str,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    item = store.claim_outbox("worker")
+    assert item is not None
+    valid = _observations(item)[0]
+    mismatched = replace(
+        valid,
+        **{binding_field: f"{getattr(valid, binding_field)}-other"},
+    )
+    before_dump = _database_dump(database)
+    before_task = store.get_task(item.task_id, _scope())
+    before_attempt = store.get_attempt(item.attempt_id)
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.complete_outbox(
+            item,
+            executor_ref=f"legacy:{item.attempt_id}",
+            observations=(mismatched,),
+        )
+
+    assert raised.value.reason == "EXECUTOR_OBSERVATION_BINDING_MISMATCH"
+    assert raised.value.code is ErrorCode.PROTOCOL_VIOLATION
+    assert _database_dump(database) == before_dump
+    reopened = SqliteTaskStore(database)
+    assert reopened.get_task(item.task_id, _scope()) == before_task
+    assert reopened.get_attempt(item.attempt_id) == before_attempt
+
+
 def test_wrong_executor_binding_and_sequence_gap_leave_state_unchanged(
     tmp_path: Path,
 ) -> None:

@@ -4341,6 +4341,18 @@ class SqliteTaskStore:
                     "attempt cannot change its executor reference",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
+            if any(
+                observation.task_id != item.task_id
+                or observation.attempt_id != item.attempt_id
+                or observation.executor_id != item.spec.executor_id
+                or observation.executor_ref != executor_ref
+                for observation in observations
+            ):
+                raise FormalTaskViolation(
+                    "EXECUTOR_OBSERVATION_BINDING_MISMATCH",
+                    "outbox completion observations must bind its exact delivery",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
             now = utc_now()
             if item.kind is OutboxKind.ATTEMPT_DISPATCH:
                 pending_controls = connection.execute(
