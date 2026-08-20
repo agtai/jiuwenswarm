@@ -456,8 +456,12 @@ before independent Tier-3 review and exact integration verification.
   ghost entries at the multibyte byte boundary and injected checkpoint failure;
   assert zero retained pending/result entries and zero send/Agent/Task/media/
   presentation effect, then retry a valid exact operation successfully. Cover
-  concurrent identical and conflicting callers, journal throw/false/late
-  failure, close/session replacement fencing and existing successful replay.
+  concurrent identical and conflicting callers, pre-write journal rejection,
+  after-write ambiguous failure, close/session replacement fencing and
+  existing successful replay.
+  A checkpoint rejected before durable acceptance must permit retry; an
+  ambiguous storage write that is durably recoverable remains owned by the
+  existing journal recovery path and must not be reissued under a new identity.
   Preserve request bytes, operation ordering and wire protocol.
 - Exclusions: no backend/Gateway change, journal schema or storage-provider
   redesign, retry classifier, media/P1 ownership, Task policy, session rollover
