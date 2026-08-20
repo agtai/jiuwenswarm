@@ -2243,12 +2243,16 @@ def test_flag_off_constructs_no_store_scheduler_or_agent(
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_ENABLED", "0")
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_DATABASE", str(database))
 
+    observer_calls: list[object] = []
     composition = create_p3_composition_from_environment(
-        agent_manager=object(), model_resolver=lambda _name: None
+        agent_manager=object(),
+        model_resolver=lambda _name: None,
+        stream_observer=observer_calls.append,
     )
 
     assert composition is None
     assert not database.exists()
+    assert observer_calls == []
 
 
 @pytest.mark.parametrize(
@@ -2334,6 +2338,35 @@ def test_factory_accepts_reconciliation_interval_boundaries(
     assert composition is not None
     assert composition._reconcile_interval == interval
     assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
+
+
+def test_factory_passes_only_the_explicit_direct_stream_observer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / "factory-observer.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    observed: list[object] = []
+    observer = observed.append
+    profile_before = DirectProjectCodeExecutorAdapter.capability_profile()
+
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(),
+        model_resolver=_ModelResolver(),
+        stream_observer=observer,
+    )
+
+    assert composition is not None
+    direct = composition._core.executor
+    assert type(direct) is DirectProjectCodeExecutorAdapter
+    assert direct._stream_observer is observer
+    assert direct.capability_profile() is profile_before
+    assert direct.capability_profile().digest_sha256() == profile_before.digest_sha256()
+    assert observed == []
 
 
 def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(

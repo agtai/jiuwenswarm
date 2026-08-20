@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -101,6 +101,33 @@ class _DirectProjectExecutor:
         project = Path(request.params["project_dir"]).resolve()
         try:
             if self.behavior == "wait":
+                await asyncio.Event().wait()
+            elif self.behavior == "observe_wait":
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={
+                        "event_type": "chat.tool_call",
+                        "tool_call": {
+                            "tool_name": "read_file",
+                            "tool_call_id": f"call-{request.request_id}",
+                            "arguments": {"path": "PRIVATE_PATH_SENTINEL"},
+                        },
+                    },
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={
+                        "event_type": "chat.tool_result",
+                        "tool_name": "read_file",
+                        "tool_call_id": f"call-{request.request_id}",
+                        "result": "PRIVATE_RESULT_SENTINEL",
+                        "success": True,
+                    },
+                    is_complete=False,
+                )
                 await asyncio.Event().wait()
             elif self.behavior == "agent_error":
                 yield AgentResponseChunk(
@@ -205,6 +232,64 @@ class _AdjustableItineraryProjectExecutor(_DirectProjectExecutor):
             request.request_id,
             request.channel_id,
             payload={"event_type": "chat.final", "content": content},
+            is_complete=True,
+        )
+
+
+class _ObservedAdjustableProjectExecutor(_DirectProjectExecutor):
+    """Emit realistic private tool payloads without crediting a real Agent/Tool."""
+
+    sentinel = "PRIVATE_STREAM_SENTINEL"
+
+    def __init__(self, project: Path) -> None:
+        super().__init__(project)
+        self.initial_complete = asyncio.Event()
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        project = Path(request.params["project_dir"]).resolve()
+        initial = request.params["source"] == "live_voice.formal_task.d0"
+        tool_name = "write_file" if initial else "edit_file"
+        call_id = f"call-{self.sentinel}-{'initial' if initial else 'adjustment'}"
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={
+                "event_type": "chat.tool_call",
+                "tool_call": {
+                    "tool_name": tool_name,
+                    "tool_call_id": call_id,
+                    "arguments": {
+                        "path": f"C:/private/{self.sentinel}.txt",
+                        "content": self.sentinel,
+                    },
+                },
+            },
+            is_complete=False,
+        )
+        if initial:
+            (project / "result.txt").write_text("initial\n", encoding="utf-8")
+            self.initial_complete.set()
+        else:
+            (project / "result.txt").write_text("adjusted\n", encoding="utf-8")
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={
+                "event_type": "chat.tool_result",
+                "tool_name": tool_name,
+                "tool_call_id": call_id,
+                "result": self.sentinel,
+                "raw_output": self.sentinel,
+                "success": True,
+            },
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={"event_type": "chat.final", "content": self.sentinel},
             is_complete=True,
         )
 
@@ -1162,6 +1247,245 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
     finally:
         await first.close()
         await second.close()
+
+
+def test_direct_stream_observer_defaults_off_and_never_changes_profile(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "observer-profile-project"
+    _git_project(project)
+    resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
+    baseline = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "baseline.sqlite3")
+    observed = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "observed.sqlite3",
+        stream_observer=lambda _observation: None,
+    )
+
+    assert baseline._stream_observer is None
+    assert baseline.stream_observer_failure_count == 0
+    assert baseline.capability_profile() is observed.capability_profile()
+    assert (
+        baseline.capability_profile().digest_sha256()
+        == observed.capability_profile().digest_sha256()
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_observer_is_content_free_immutable_and_pairs_each_stream(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "observed-adjustable-project"
+    _git_project(project)
+    executor = _ObservedAdjustableProjectExecutor(project)
+    checkpoint_open = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+    observations: list[object] = []
+    observer_health_reads: list[int] = []
+    adapter: DirectProjectCodeExecutorAdapter | None = None
+
+    async def checkpoint_barrier(_attempt_id: str) -> None:
+        checkpoint_open.set()
+        await release_checkpoint.wait()
+
+    def observe(observation: object) -> None:
+        assert adapter is not None
+        observer_health_reads.append(adapter.stream_observer_failure_count)
+        observations.append(observation)
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "observed.sqlite3",
+        clock=lambda: "2026-08-05T12:00:00Z",
+        adjustment_checkpoint_barrier=checkpoint_barrier,
+        stream_observer=observe,
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await asyncio.wait_for(checkpoint_open.wait(), timeout=2)
+        adjustment = _adjustment_item(
+            project,
+            command_id="adjust-1",
+            adjustment="Apply one bounded private adjustment.",
+            requested_seq=4,
+        )
+        delivery_task = asyncio.create_task(adapter.adjust(adjustment))
+        await asyncio.wait_for(
+            adapter._adjustment_checkpoints["attempt-1"].changed.wait(), timeout=2
+        )
+        release_checkpoint.set()
+        delivery = await asyncio.wait_for(delivery_task, timeout=2)
+        assert delivery.state is TaskAdjustmentState.APPLIED
+        await adapter.settle_adjustment(
+            adjustment,
+            TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False),
+        )
+        await _wait_direct_settled(adapter)
+
+        assert all(
+            isinstance(item, project_code_executor.DirectStreamObservation)
+            for item in observations
+        )
+        assert [item.sequence for item in observations] == [1, 2, 1, 2]
+        assert [item.stream_kind for item in observations] == [
+            "initial",
+            "initial",
+            "adjustment",
+            "adjustment",
+        ]
+        assert [item.event_kind for item in observations] == [
+            "tool_call",
+            "tool_result",
+            "tool_call",
+            "tool_result",
+        ]
+        assert [item.file_tool_kind for item in observations] == [
+            "write",
+            "write",
+            "edit",
+            "edit",
+        ]
+        assert [item.result_status for item in observations] == [
+            "not_applicable",
+            "success",
+            "not_applicable",
+            "success",
+        ]
+        assert {item.task_ref for item in observations} == {"task-1"}
+        assert {item.attempt_ref for item in observations} == {"attempt-1"}
+        assert [item.run_ref for item in observations] == [
+            "d0-project:attempt-1",
+            "d0-project:attempt-1",
+            "d0-project:attempt-1:adjust:adjust-1",
+            "d0-project:attempt-1:adjust:adjust-1",
+        ]
+        assert {item.observed_at for item in observations} == {
+            "2026-08-05T12:00:00Z"
+        }
+        assert observer_health_reads == [0, 0, 0, 0]
+        assert all(item.tool_name_digest.startswith("sha256:") for item in observations)
+        assert all(item.call_id_digest.startswith("sha256:") for item in observations)
+        assert observations[0].tool_name_digest == observations[1].tool_name_digest
+        assert observations[0].call_id_digest == observations[1].call_id_digest
+        assert observations[2].tool_name_digest == observations[3].tool_name_digest
+        assert observations[2].call_id_digest == observations[3].call_id_digest
+
+        rendered = repr(observations)
+        encoded = json.dumps([asdict(item) for item in observations])
+        assert _ObservedAdjustableProjectExecutor.sentinel not in rendered
+        assert _ObservedAdjustableProjectExecutor.sentinel not in encoded
+        with pytest.raises(FrozenInstanceError):
+            observations[0].sequence = 99
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_observer_maps_unknown_tool_and_error_without_raw_fields(
+    tmp_path: Path,
+) -> None:
+    sentinel = "PRIVATE_UNKNOWN_TOOL_SENTINEL"
+    project = tmp_path / "unknown-tool-project"
+    _git_project(project)
+
+    class UnknownToolExecutor(_DirectProjectExecutor):
+        async def process_background_code_task_stream(self, request):
+            project_root = Path(request.params["project_dir"])
+            (project_root / "result.txt").write_text("done", encoding="utf-8")
+            tool_name = f"private-{sentinel}"
+            call_id = f"call-{sentinel}"
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={
+                    "event_type": "chat.tool_call",
+                    "tool_call": {
+                        "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                        "arguments": {"private": sentinel},
+                    },
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={
+                    "event_type": "chat.tool_result",
+                    "tool_name": tool_name,
+                    "tool_call_id": call_id,
+                    "result": sentinel,
+                    "error": sentinel,
+                    "is_error": True,
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": sentinel},
+                is_complete=True,
+            )
+
+    observations: list[object] = []
+    executor = UnknownToolExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "unknown.sqlite3",
+        stream_observer=observations.append,
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await _wait_direct_settled(adapter)
+
+        assert [item.file_tool_kind for item in observations] == ["unknown", "unknown"]
+        assert [item.result_status for item in observations] == [
+            "not_applicable",
+            "error",
+        ]
+        assert sentinel not in repr(observations)
+        assert sentinel not in json.dumps([asdict(item) for item in observations])
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_observer_failure_and_awaitable_never_change_execution(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "observer-failure-project"
+    _git_project(project)
+    executor = _ObservedAdjustableProjectExecutor(project)
+    calls = 0
+
+    async def forbidden_awaitable() -> None:
+        raise AssertionError("observer awaitables must never execute")
+
+    def failing_observer(_observation):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("PRIVATE_OBSERVER_FAILURE")
+        return forbidden_awaitable()
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "observer-failure.sqlite3",
+        stream_observer=failing_observer,
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await _wait_direct_settled(adapter)
+        task, attempt = _direct_task_attempt(project)
+        terminal = await adapter.status(task, attempt)
+
+        assert calls == 2
+        assert adapter.stream_observer_failure_count == 2
+        assert isinstance(terminal, ExecutorDeliveryResult)
+        assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+        assert (project / "result.txt").read_text(encoding="utf-8") == "initial\n"
+    finally:
+        await adapter.close()
 
 
 @pytest.mark.asyncio
@@ -2679,8 +3003,8 @@ async def test_direct_executor_runs_two_distinct_projects_concurrently(
     second_project = tmp_path / "second-project"
     _git_project(first_project)
     _git_project(second_project)
-    first_executor = _DirectProjectExecutor(first_project, behavior="wait")
-    second_executor = _DirectProjectExecutor(second_project, behavior="wait")
+    first_executor = _DirectProjectExecutor(first_project, behavior="observe_wait")
+    second_executor = _DirectProjectExecutor(second_project, behavior="observe_wait")
     first_binding = _direct_binding(first_project, first_executor)
     second_binding = replace(
         _direct_binding(second_project, second_executor),
@@ -2697,9 +3021,11 @@ async def test_direct_executor_runs_two_distinct_projects_concurrently(
             second_project.resolve(): second_binding,
         }
     )
+    observations: list[object] = []
     adapter = DirectProjectCodeExecutorAdapter(
         resolver,  # type: ignore[arg-type]
         tmp_path / "p3.sqlite3",
+        stream_observer=observations.append,
     )
     first_item = _item(first_project)
     second_scope = ScopeRef(
@@ -2731,11 +3057,34 @@ async def test_direct_executor_runs_two_distinct_projects_concurrently(
     second_delivery = await adapter.dispatch(second_item)
     await asyncio.wait_for(first_executor.started.wait(), timeout=2)
     await asyncio.wait_for(second_executor.started.wait(), timeout=2)
+    for _ in range(100):
+        if len(observations) == 4:
+            break
+        await asyncio.sleep(0.01)
 
     assert set(adapter._running) == {"attempt-1", "attempt-2"}
     assert resolver.calls == [first_project.resolve(), second_project.resolve()]
     assert len(first_executor.requests) == 1
     assert len(second_executor.requests) == 1
+    assert {
+        (item.task_ref, item.attempt_ref, item.run_ref)
+        for item in observations
+    } == {
+        ("task-1", "attempt-1", "d0-project:attempt-1"),
+        ("task-2", "attempt-2", "d0-project:attempt-2"),
+    }
+    assert [
+        item.sequence
+        for item in observations
+        if item.attempt_ref == "attempt-1"
+    ] == [1, 2]
+    assert [
+        item.sequence
+        for item in observations
+        if item.attempt_ref == "attempt-2"
+    ] == [1, 2]
+    assert "PRIVATE_PATH_SENTINEL" not in repr(observations)
+    assert "PRIVATE_RESULT_SENTINEL" not in repr(observations)
 
     await adapter.cancel(
         replace(

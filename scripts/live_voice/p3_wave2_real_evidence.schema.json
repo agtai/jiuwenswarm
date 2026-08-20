@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openjiuwen.invalid/live-voice/p3-wave2-real-evidence.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_sha256",
+    "run_id",
+    "private_output_basename",
+    "environment",
+    "bindings",
+    "checks",
+    "counts",
+    "observations"
+  ],
+  "properties": {
+    "schema_version": {"const": "live-voice.p3-wave2-real-evidence.v1"},
+    "source_sha256": {"$ref": "#/$defs/sha256"},
+    "run_id": {"$ref": "#/$defs/id"},
+    "private_output_basename": {"$ref": "#/$defs/basename"},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_dir_basename", "database_basename", "project_basenames"],
+      "properties": {
+        "data_dir_basename": {"$ref": "#/$defs/basename"},
+        "database_basename": {"$ref": "#/$defs/basename"},
+        "project_basenames": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/basename"}
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_refs", "attempt_refs", "profile_sha256", "requirements_sha256"],
+      "properties": {
+        "task_refs": {"$ref": "#/$defs/scenario_refs"},
+        "attempt_refs": {"$ref": "#/$defs/scenario_refs"},
+        "profile_sha256": {"$ref": "#/$defs/sha256"},
+        "requirements_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "production_factory_used",
+        "production_registration_used",
+        "profile_persisted",
+        "requirements_persisted",
+        "two_projects_concurrent",
+        "a2_busy_queued",
+        "a2_zero_pre_release_effect",
+        "same_attempt_dequeued",
+        "adjustment_applied",
+        "cancel_a1_exact",
+        "cancel_b1_exact",
+        "reopen_matched",
+        "cleanup_complete",
+        "source_untouched",
+        "real_agent_observed",
+        "real_tool_observed"
+      ],
+      "properties": {
+        "production_factory_used": {"type": "boolean"},
+        "production_registration_used": {"type": "boolean"},
+        "profile_persisted": {"type": "boolean"},
+        "requirements_persisted": {"type": "boolean"},
+        "two_projects_concurrent": {"type": "boolean"},
+        "a2_busy_queued": {"type": "boolean"},
+        "a2_zero_pre_release_effect": {"type": "boolean"},
+        "same_attempt_dequeued": {"type": "boolean"},
+        "adjustment_applied": {"type": "boolean"},
+        "cancel_a1_exact": {"type": "boolean"},
+        "cancel_b1_exact": {"type": "boolean"},
+        "reopen_matched": {"type": "boolean"},
+        "cleanup_complete": {"type": "boolean"},
+        "source_untouched": {"type": "boolean"},
+        "real_agent_observed": {"type": "boolean"},
+        "real_tool_observed": {"type": "boolean"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observations",
+        "tool_calls",
+        "tool_results",
+        "paired_file_tools",
+        "write_edit_pairs",
+        "observer_failures",
+        "dropped_observations",
+        "unknown_observations",
+        "sequence_gaps",
+        "unpaired_observations"
+      ],
+      "properties": {
+        "observations": {"$ref": "#/$defs/count"},
+        "tool_calls": {"$ref": "#/$defs/count"},
+        "tool_results": {"$ref": "#/$defs/count"},
+        "paired_file_tools": {"$ref": "#/$defs/count"},
+        "write_edit_pairs": {"$ref": "#/$defs/count"},
+        "observer_failures": {"$ref": "#/$defs/count"},
+        "dropped_observations": {"$ref": "#/$defs/count"},
+        "unknown_observations": {"$ref": "#/$defs/count"},
+        "sequence_gaps": {"$ref": "#/$defs/count"},
+        "unpaired_observations": {"$ref": "#/$defs/count"}
+      }
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/observation"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+    "basename": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+    "count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "scenario_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["A1", "A2", "B1"],
+      "properties": {
+        "A1": {"$ref": "#/$defs/id"},
+        "A2": {"$ref": "#/$defs/id"},
+        "B1": {"$ref": "#/$defs/id"}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_ref",
+        "attempt_ref",
+        "run_ref",
+        "sequence",
+        "stream_kind",
+        "event_kind",
+        "file_tool_kind",
+        "tool_name_digest",
+        "call_id_digest",
+        "result_status",
+        "observed_at"
+      ],
+      "properties": {
+        "task_ref": {"$ref": "#/$defs/id"},
+        "attempt_ref": {"$ref": "#/$defs/id"},
+        "run_ref": {"$ref": "#/$defs/id"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "stream_kind": {"enum": ["initial", "adjustment"]},
+        "event_kind": {"enum": ["tool_call", "tool_result"]},
+        "file_tool_kind": {"enum": ["read", "search", "list", "write", "edit", "unknown"]},
+        "tool_name_digest": {"$ref": "#/$defs/sha256"},
+        "call_id_digest": {"$ref": "#/$defs/sha256"},
+        "result_status": {"enum": ["not_applicable", "success", "error", "unknown"]},
+        "observed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$"
+        }
+      }
+    }
+  }
+}

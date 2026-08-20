@@ -78,6 +78,7 @@ from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
+    DirectStreamObserver,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
@@ -3033,6 +3034,7 @@ def create_p3_composition_from_environment(
     telemetry: P3TelemetrySink | None = None,
     commit_ledger: TurnCommitLedger | None = None,
     reconciliation_event_sink: ReconciliationEventSink | None = None,
+    stream_observer: DirectStreamObserver | None = None,
 ) -> P3AuthenticatedComposition | None:
     """Build the production composition only after the complete gate validates."""
 
@@ -3119,6 +3121,7 @@ def create_p3_composition_from_environment(
                 _is_enabled(os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV))
                 and _is_enabled(os.getenv(_DEMO_ADJUSTMENT_CHECKPOINT_ENV))
             ),
+            stream_observer=stream_observer,
         )
         runtime_owner = _DirectP3RuntimeOwner(
             executor=executor,

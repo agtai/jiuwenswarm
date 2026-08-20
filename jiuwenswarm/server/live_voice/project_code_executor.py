@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -141,6 +143,23 @@ _EXECUTION_TARGET_FIELDS = {
     "origin_channel_id",
 }
 _OWNER_SCOPE_FIELDS = {"channel_id", "session_id", "app_id"}
+_DIRECT_FILE_TOOL_KINDS = MappingProxyType(
+    {
+        "read_file": "read",
+        "grep": "search",
+        "list_files": "list",
+        "ls": "list",
+        "glob": "list",
+        "write_file": "write",
+        "edit_file": "edit",
+    }
+)
+_DIRECT_TOOL_RESULT_SUCCESS = frozenset({"completed", "done", "ok", "success"})
+_DIRECT_TOOL_RESULT_ERROR = frozenset(
+    {"cancelled", "error", "failed", "failure", "rejected"}
+)
+_INVALID_TOOL_NAME_DIGEST_SOURCE = b"live-voice.invalid-tool-name"
+_INVALID_TOOL_CALL_DIGEST_SOURCE = b"live-voice.invalid-tool-call-id"
 
 
 class LegacyProjectTaskService(Protocol):
@@ -155,6 +174,26 @@ class LegacyProjectTaskService(Protocol):
     async def cancel_scheduled_task(
         self, task_id: str, **kwargs: Any
     ) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DirectStreamObservation:
+    """Content-free metadata for one Direct file-tool stream event."""
+
+    task_ref: str
+    attempt_ref: str
+    run_ref: str
+    sequence: int
+    stream_kind: str
+    event_kind: str
+    file_tool_kind: str
+    tool_name_digest: str
+    call_id_digest: str
+    result_status: str
+    observed_at: str
+
+
+DirectStreamObserver = Callable[[DirectStreamObservation], object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2320,6 +2359,97 @@ def _text(payload: Mapping[str, Any], *keys: str) -> str | None:
     return None
 
 
+def _closed_stream_text(value: object, *, maximum: int) -> str | None:
+    if type(value) is not str or not value or len(value) > maximum or "\x00" in value:
+        return None
+    return value
+
+
+def _closed_stream_digest(
+    value: object,
+    *,
+    maximum: int,
+    invalid_source: bytes,
+) -> str:
+    closed = _closed_stream_text(value, maximum=maximum)
+    source = invalid_source if closed is None else closed.encode("utf-8")
+    return "sha256:" + hashlib.sha256(source).hexdigest()
+
+
+def _closed_tool_result_status(payload: Mapping[str, Any]) -> str:
+    signals: set[str] = set()
+    if type(payload.get("is_error")) is bool and payload["is_error"]:
+        signals.add("error")
+    success = payload.get("success")
+    if type(success) is bool:
+        signals.add("success" if success else "error")
+    raw_status = payload.get("status")
+    if type(raw_status) is str and len(raw_status) <= 32:
+        status = raw_status.strip().casefold()
+        if status in _DIRECT_TOOL_RESULT_SUCCESS:
+            signals.add("success")
+        elif status in _DIRECT_TOOL_RESULT_ERROR:
+            signals.add("error")
+    return next(iter(signals)) if len(signals) == 1 else "unknown"
+
+
+def _closed_direct_stream_observation(
+    payload: Mapping[str, Any],
+    *,
+    task_ref: str,
+    attempt_ref: str,
+    run_ref: str,
+    sequence: int,
+    stream_kind: str,
+    observed_at: str,
+) -> DirectStreamObservation | None:
+    event_type = payload.get("event_type")
+    if event_type == "chat.tool_call":
+        raw_carrier = payload.get("tool_call")
+        carrier = raw_carrier if isinstance(raw_carrier, Mapping) else {}
+        event_kind = "tool_call"
+        result_status = "not_applicable"
+    elif event_type == "chat.tool_result":
+        carrier = payload
+        event_kind = "tool_result"
+        result_status = _closed_tool_result_status(payload)
+    else:
+        return None
+    tool_name = carrier.get("tool_name") or carrier.get("name")
+    call_id = (
+        carrier.get("tool_call_id")
+        or carrier.get("toolCallId")
+        or carrier.get("id")
+    )
+    closed_name = _closed_stream_text(tool_name, maximum=64)
+    file_tool_kind = (
+        _DIRECT_FILE_TOOL_KINDS.get(closed_name.casefold(), "unknown")
+        if closed_name is not None
+        else "unknown"
+    )
+    return DirectStreamObservation(
+        task_ref=task_ref,
+        attempt_ref=attempt_ref,
+        run_ref=run_ref,
+        sequence=sequence,
+        stream_kind=stream_kind,
+        event_kind=event_kind,
+        file_tool_kind=file_tool_kind,
+        tool_name_digest=_closed_stream_digest(
+            tool_name,
+            maximum=64,
+            invalid_source=_INVALID_TOOL_NAME_DIGEST_SOURCE,
+        ),
+        call_id_digest=_closed_stream_digest(
+            call_id,
+            maximum=256,
+            invalid_source=_INVALID_TOOL_CALL_DIGEST_SOURCE,
+        ),
+        result_status=result_status,
+        observed_at=observed_at,
+    )
+
+
 class _ReleaseOnce:
     """Keep resolver and carrier cleanup ownership safe across handoff failures."""
 
@@ -2390,6 +2520,7 @@ class DirectProjectCodeExecutorAdapter:
         demo_itinerary_fixture_enabled: bool = False,
         demo_itinerary_adjustment_checkpoint_enabled: bool = False,
         adjustment_checkpoint_barrier: (Callable[[str], Awaitable[None]] | None) = None,
+        stream_observer: DirectStreamObserver | None = None,
     ) -> None:
         if (
             isinstance(heartbeat_interval, bool)
@@ -2441,6 +2572,8 @@ class DirectProjectCodeExecutorAdapter:
             adjustment_checkpoint_barrier
         ):
             raise ValueError("adjustment_checkpoint_barrier must be callable")
+        if stream_observer is not None and not callable(stream_observer):
+            raise ValueError("stream_observer must be callable")
         self._resolver = resolver
         self._journal = _DirectProjectAttemptJournal(database)
         self._clock = clock
@@ -2453,6 +2586,9 @@ class DirectProjectCodeExecutorAdapter:
             demo_itinerary_adjustment_checkpoint_enabled
         )
         self._adjustment_checkpoint_barrier = adjustment_checkpoint_barrier
+        self._stream_observer = stream_observer
+        self._stream_observer_lock = RLock() if stream_observer is not None else None
+        self._stream_observer_failure_count = 0
         self._owner_id = f"d0-project-executor-{uuid.uuid4().hex}"
         self._running: dict[str, asyncio.Task[None]] = {}
         self._applying: set[str] = set()
@@ -2461,6 +2597,69 @@ class DirectProjectCodeExecutorAdapter:
         self._adjustment_checkpoints: dict[str, _AdjustmentCheckpoint] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
+
+    @property
+    def stream_observer_failure_count(self) -> int:
+        """Return the monotonic closed count of rejected observer deliveries."""
+
+        lock = self._stream_observer_lock
+        if lock is None:
+            return 0
+        with lock:
+            return self._stream_observer_failure_count
+
+    def _record_stream_observer_failure(self) -> None:
+        lock = self._stream_observer_lock
+        if lock is None:
+            return
+        with lock:
+            self._stream_observer_failure_count += 1
+
+    def _observe_stream_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        task_ref: str,
+        attempt_ref: str,
+        run_ref: str,
+        sequence: int,
+        stream_kind: str,
+    ) -> int:
+        observer = self._stream_observer
+        if observer is None or payload.get("event_type") not in {
+            "chat.tool_call",
+            "chat.tool_result",
+        }:
+            return sequence
+        next_sequence = sequence + 1
+        try:
+            observation = _closed_direct_stream_observation(
+                payload,
+                task_ref=task_ref,
+                attempt_ref=attempt_ref,
+                run_ref=run_ref,
+                sequence=next_sequence,
+                stream_kind=stream_kind,
+                observed_at=self._clock(),
+            )
+            if observation is None:
+                return sequence
+            lock = self._stream_observer_lock
+            assert lock is not None
+            with lock:
+                returned = observer(observation)
+        except BaseException:  # noqa: BLE001 -- observer never changes execution
+            self._record_stream_observer_failure()
+            return next_sequence
+        if inspect.isawaitable(returned):
+            self._record_stream_observer_failure()
+            close = getattr(returned, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except BaseException:  # noqa: BLE001 -- observer stays isolated
+                    pass
+        return next_sequence
 
     @property
     def database(self) -> str:
@@ -2983,6 +3182,7 @@ class DirectProjectCodeExecutorAdapter:
             terminal = False
             agent_error = False
             adjusted_final: str | None = None
+            stream_sequence = 0
             try:
                 with forbid_background_project_shell_commands():
                     async for (
@@ -2992,6 +3192,15 @@ class DirectProjectCodeExecutorAdapter:
                         payload = (
                             chunk.payload if isinstance(chunk.payload, dict) else None
                         )
+                        if payload is not None:
+                            stream_sequence = self._observe_stream_payload(
+                                payload,
+                                task_ref=item.task_id,
+                                attempt_ref=item.attempt_id,
+                                run_ref=request.request_id,
+                                sequence=stream_sequence,
+                                stream_kind="adjustment",
+                            )
                         if payload and payload.get("event_type") == "chat.error":
                             agent_error = True
                         if payload:
@@ -3238,6 +3447,7 @@ class DirectProjectCodeExecutorAdapter:
             )
             terminal = False
             agent_error = False
+            stream_sequence = 0
             started.set()
             with forbid_background_project_shell_commands():
                 async for chunk in project_executor.process_background_code_task_stream(
@@ -3245,6 +3455,15 @@ class DirectProjectCodeExecutorAdapter:
                 ):
                     terminal = terminal or chunk.is_complete
                     payload = chunk.payload if isinstance(chunk.payload, dict) else None
+                    if payload is not None:
+                        stream_sequence = self._observe_stream_payload(
+                            payload,
+                            task_ref=item.task_id,
+                            attempt_ref=item.attempt_id,
+                            run_ref=request.request_id,
+                            sequence=stream_sequence,
+                            stream_kind="initial",
+                        )
                     if payload and payload.get("event_type") == "chat.error":
                         agent_error = True
                     if payload:
@@ -4670,6 +4889,8 @@ class ProjectCodeExecutorAdapter:
 
 __all__ = [
     "DirectProjectCodeExecutorAdapter",
+    "DirectStreamObservation",
+    "DirectStreamObserver",
     "DIRECT_PROJECT_EXECUTOR_REF_PREFIX",
     "FORMAL_PROJECT_EXECUTOR_ID",
     "FORMAL_RUNTIME_SUPPORT_POLICY",
