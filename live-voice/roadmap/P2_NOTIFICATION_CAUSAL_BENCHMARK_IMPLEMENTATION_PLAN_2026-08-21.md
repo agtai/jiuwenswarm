@@ -62,12 +62,13 @@ report outside the repository.
   compiled `productWebActivation.js`.
 - Produces:
   `runP2NotificationCausalBenchmark(input) -> Promise<Readonly<Report>>` and a
-  CLI accepting `--output`, `--git-commit`, `--run-id`, `--samples` and
-  `--delay-ms`; the supplied commit must equal `git rev-parse HEAD` and
+  CLI accepting `--output`, `--git-commit`, `--run-id`, `--samples`,
+  `--delay-ms` and `--batch-size`; the supplied commit must equal
+  `git rev-parse HEAD` and
   `git status --porcelain --untracked-files=all` must be empty.
 - Report schema: `live-voice.p2-notification-causal-report.v0`, with closed
   top-level keys `schema_version`, `run_id`, `git_commit`, `source_state`,
-  `sample_count`, `delay_ms`, `notification_counts`, `rows` and
+  `sample_count`, `delay_ms`, `batch_size`, `notification_counts`, `rows` and
   `forbidden_effects`.
 - Each row contains `notification_count`, `attempts`, `successful`,
   `notification_rpc_count`, `expected_serial_ms`, `samples_ms`, `p50_ms` and
@@ -211,7 +212,8 @@ npm run benchmark:live-voice-p2-notifications -- \
   --git-commit "$P2_A1_COMMIT" \
   --run-id "$P2_A1_RUN_ID" \
   --samples 5 \
-  --delay-ms 85
+  --delay-ms 85 \
+  --batch-size 16
 ```
 
 Expected: exit `0`; 15 successful attempts; notification RPC totals are 50,
@@ -230,12 +232,13 @@ import assert from 'node:assert/strict';
 const [path, commit, runId] = process.argv.slice(2);
 const report = JSON.parse(fs.readFileSync(path, 'utf8'));
 assert.deepEqual(Object.keys(report).sort(), [
-  'delay_ms', 'forbidden_effects', 'git_commit', 'notification_counts',
+  'batch_size', 'delay_ms', 'forbidden_effects', 'git_commit', 'notification_counts',
   'rows', 'run_id', 'sample_count', 'schema_version', 'source_state',
 ]);
 assert.equal(report.git_commit, commit);
 assert.equal(report.run_id, runId);
 assert.equal(report.source_state, 'clean');
+assert.equal(report.batch_size, 16);
 assert.deepEqual(report.notification_counts, [10, 50, 100]);
 assert.deepEqual(report.rows.map(row => row.notification_rpc_count), [50, 250, 500]);
 assert.ok(Object.values(report.forbidden_effects).every(value => value === 0));

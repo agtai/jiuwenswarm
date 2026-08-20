@@ -18,6 +18,7 @@ test('real P2 owner exposes linear serial notification cost with zero forbidden 
     notificationCounts: [2, 4],
     sampleCount: 2,
     delayMs: 85,
+    notificationBatchSize: 16,
     now: () => monotonicMs,
     sleep: async delayMs => {
       monotonicMs += delayMs;
@@ -25,6 +26,7 @@ test('real P2 owner exposes linear serial notification cost with zero forbidden 
   });
 
   assert.deepEqual(Object.keys(report).sort(), [
+    'batch_size',
     'delay_ms',
     'forbidden_effects',
     'git_commit',
@@ -36,6 +38,7 @@ test('real P2 owner exposes linear serial notification cost with zero forbidden 
     'source_state',
   ]);
   assert.equal(report.schema_version, 'live-voice.p2-notification-causal-report.v0');
+  assert.equal(report.batch_size, 16);
   assert.deepEqual(report.rows, [
     {
       notification_count: 2,
@@ -78,6 +81,7 @@ test('closed benchmark input rejects unsafe identifiers and numeric boundaries b
     notificationCounts: [10, 50, 100],
     sampleCount: 1,
     delayMs: 0,
+    notificationBatchSize: 16,
     now: () => 0,
     sleep: async () => undefined,
   };
@@ -91,6 +95,8 @@ test('closed benchmark input rejects unsafe identifiers and numeric boundaries b
     { ...base, sampleCount: 31 },
     { ...base, delayMs: -1 },
     { ...base, delayMs: 1_001 },
+    { ...base, notificationBatchSize: 1 },
+    { ...base, notificationBatchSize: 17 },
   ];
 
   for (const input of invalid) {
@@ -112,6 +118,8 @@ test('CLI parser is closed and report writer refuses overwrite', async () => {
     '5',
     '--delay-ms',
     '85',
+    '--batch-size',
+    '16',
   ]);
 
   assert.deepEqual(parsed, {
@@ -120,6 +128,7 @@ test('CLI parser is closed and report writer refuses overwrite', async () => {
     runId: 'p2-a1-cli',
     sampleCount: 5,
     delayMs: 85,
+    notificationBatchSize: 16,
   });
   assert.throws(() => parseP2NotificationBenchmarkArgs(['--output', output, '--output', output]), /P2_BENCHMARK_ARGUMENT_INVALID/);
   assert.throws(() => parseP2NotificationBenchmarkArgs(['--unknown', 'value']), /P2_BENCHMARK_ARGUMENT_INVALID/);

@@ -61,13 +61,13 @@ transport understand both legacy `notification` and future
 `notification_batch` responses. The current owner ignores the prospective
 constructor field and therefore must retain 50/250/500 RPCs.
 
-- [ ] Write a failing test requiring `notification_batch_size: 16` to be passed
+- [x] Write a failing test requiring `notification_batch_size: 16` to be passed
   while the current owner still produces the legacy A1 curve.
-- [ ] Run the focused test and observe RED on the missing argument/report field.
-- [ ] Implement the minimal candidate-neutral fake transport and closed report
+- [x] Run the focused test and observe RED on the missing argument/report field.
+- [x] Implement the minimal candidate-neutral fake transport and closed report
   field `batch_size`.
-- [ ] Run focused tests, integrated Web and formatting checks.
-- [ ] Commit as `test(live-voice): freeze bounded-pull benchmark input`.
+- [x] Run focused tests, integrated Web and formatting checks.
+- [x] Commit as `test(live-voice): freeze bounded-pull benchmark input`.
 - [ ] Execute replacement A1 in a clean detached worktree: five samples each,
   85 ms delay, batch size 16. Mark the earlier `a9142dd2d` A1 preliminary and
   record the new exact reference commit/result.

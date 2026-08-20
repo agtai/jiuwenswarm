@@ -53,6 +53,7 @@ function validateRunInput(input) {
     new Set(counts).size !== counts.length ||
     canonicalInteger(input?.sampleCount, 1, 30) === null ||
     canonicalInteger(input?.delayMs, 0, 1_000) === null ||
+    canonicalInteger(input?.notificationBatchSize, 2, 16) === null ||
     typeof input?.now !== 'function' ||
     typeof input?.sleep !== 'function'
   ) {
@@ -64,6 +65,7 @@ function validateRunInput(input) {
     notificationCounts: Object.freeze(counts),
     sampleCount: input.sampleCount,
     delayMs: input.delayMs,
+    notificationBatchSize: input.notificationBatchSize,
     now: input.now,
     sleep: input.sleep,
   });
@@ -147,6 +149,7 @@ async function runAttempt(config, notificationCount, attempt) {
   let notificationRpcCount = 0;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
+    notification_batch_size: config.notificationBatchSize,
     request: async (method, params, requestId) => {
       if (!sameBinding(params, binding)) fail('P2_BENCHMARK_BINDING_MISMATCH');
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return boundResult(binding, 'active', { replayed: false });
@@ -155,10 +158,22 @@ async function runAttempt(config, notificationCount, attempt) {
         if (params.notification_sequence !== delivered + 1 || delivered >= notificationCount) {
           fail('P2_BENCHMARK_SEQUENCE_MISMATCH');
         }
+        const requestedBatchSize = params.max_notifications ?? 1;
+        if (
+          canonicalInteger(requestedBatchSize, 1, config.notificationBatchSize) === null ||
+          (requestedBatchSize > 1 && requestedBatchSize !== config.notificationBatchSize)
+        ) {
+          fail('P2_BENCHMARK_BATCH_SIZE_MISMATCH');
+        }
         await config.sleep(config.delayMs);
-        delivered += 1;
         notificationRpcCount += 1;
-        return notificationResult(binding, requestId, delivered, notificationCount);
+        const batchCount = Math.min(requestedBatchSize, notificationCount - delivered);
+        const notifications = [];
+        for (let index = 0; index < batchCount; index += 1) {
+          delivered += 1;
+          notifications.push(notificationResult(binding, requestId, delivered, notificationCount).result);
+        }
+        return requestedBatchSize === 1 ? { ok: true, result: notifications[0] } : boundResult(binding, 'notification_batch', { notifications });
       }
       if (
         method === PRODUCT_P2_SUBMIT_METHOD ||
@@ -239,6 +254,7 @@ export async function runP2NotificationCausalBenchmark(input) {
     source_state: 'clean',
     sample_count: config.sampleCount,
     delay_ms: config.delayMs,
+    batch_size: config.notificationBatchSize,
     notification_counts: config.notificationCounts,
     rows: Object.freeze(rows),
     forbidden_effects: FORBIDDEN_EFFECTS,
@@ -247,7 +263,7 @@ export async function runP2NotificationCausalBenchmark(input) {
 
 export function parseP2NotificationBenchmarkArgs(argv) {
   if (!Array.isArray(argv) || argv.length % 2 !== 0) fail('P2_BENCHMARK_ARGUMENT_INVALID');
-  const allowed = new Set(['--output', '--git-commit', '--run-id', '--samples', '--delay-ms']);
+  const allowed = new Set(['--output', '--git-commit', '--run-id', '--samples', '--delay-ms', '--batch-size']);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
@@ -263,6 +279,7 @@ export function parseP2NotificationBenchmarkArgs(argv) {
   const runId = values.get('--run-id');
   const sampleCount = canonicalInteger(values.get('--samples'), 1, 30);
   const delayMs = canonicalInteger(values.get('--delay-ms'), 0, 1_000);
+  const notificationBatchSize = canonicalInteger(values.get('--batch-size'), 2, 16);
   if (
     typeof output !== 'string' ||
     !path.isAbsolute(output) ||
@@ -271,11 +288,12 @@ export function parseP2NotificationBenchmarkArgs(argv) {
     !GIT_COMMIT.test(gitCommit ?? '') ||
     !RUN_ID.test(runId ?? '') ||
     sampleCount === null ||
-    delayMs === null
+    delayMs === null ||
+    notificationBatchSize === null
   ) {
     fail('P2_BENCHMARK_ARGUMENT_INVALID');
   }
-  return Object.freeze({ output, gitCommit, runId, sampleCount, delayMs });
+  return Object.freeze({ output, gitCommit, runId, sampleCount, delayMs, notificationBatchSize });
 }
 
 export async function writeP2NotificationCausalReport(output, report) {
@@ -303,6 +321,7 @@ export async function main(argv = process.argv.slice(2)) {
     notificationCounts: [10, 50, 100],
     sampleCount: args.sampleCount,
     delayMs: args.delayMs,
+    notificationBatchSize: args.notificationBatchSize,
     now: () => performance.now(),
     sleep: delayMs => new Promise(resolve => setTimeout(resolve, delayMs)),
   });
