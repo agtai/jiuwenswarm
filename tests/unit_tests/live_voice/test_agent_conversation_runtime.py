@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
     canonical_json_bytes,
 )
+from jiuwenswarm.server.live_voice import jiuwenswarm_round_harness as harness_module
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
     AgentConversationNotificationLease,
@@ -151,6 +152,95 @@ class LowerFormalAdapter:
         yield  # pragma: no cover
 
 
+class ControlledCloseStream:
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        channel_id: str,
+        final: str | None,
+        next_release: asyncio.Event | None,
+        close_release: asyncio.Event | None,
+        close_error: BaseException | None,
+    ) -> None:
+        self.request_id = request_id
+        self.channel_id = channel_id
+        self.final = final
+        self.next_release = next_release
+        self.close_release = close_release
+        self.close_error = close_error
+        self.next_started = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_finished = asyncio.Event()
+        self.close_calls = 0
+        self._final_examined = False
+
+    def __aiter__(self) -> ControlledCloseStream:
+        return self
+
+    async def __anext__(self) -> AgentResponseChunk:
+        if not self._final_examined:
+            self._final_examined = True
+            if self.final is not None:
+                return AgentResponseChunk(
+                    request_id=self.request_id,
+                    channel_id=self.channel_id,
+                    payload={"event_type": "chat.final", "content": self.final},
+                    is_complete=True,
+                )
+        if self.next_release is not None:
+            self.next_started.set()
+            await self.next_release.wait()
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        try:
+            if self.close_release is not None:
+                await self.close_release.wait()
+            if self.close_error is not None:
+                raise self.close_error
+        finally:
+            self.close_finished.set()
+
+
+class ControlledCloseFacade:
+    def __init__(
+        self,
+        *,
+        final: str | None,
+        next_release: asyncio.Event | None = None,
+        close_release: asyncio.Event | None = None,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self.final = final
+        self.next_release = next_release
+        self.close_release = close_release
+        self.close_error = close_error
+        self.stream_created = asyncio.Event()
+        self.stream: ControlledCloseStream | None = None
+        self.calls = 0
+
+    def supports_formal_live_voice(self) -> bool:
+        return True
+
+    def process_formal_live_voice_stream(self, execution) -> ControlledCloseStream:
+        self.calls += 1
+        if self.stream is not None:
+            raise AssertionError("formal stream must be constructed exactly once")
+        self.stream = ControlledCloseStream(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            final=self.final,
+            next_release=self.next_release,
+            close_release=self.close_release,
+            close_error=self.close_error,
+        )
+        self.stream_created.set()
+        return self.stream
+
+
 class RecordingHistoryWriter:
     def __init__(self, *, fail_assistant_once: bool = False) -> None:
         self.users = []
@@ -262,6 +352,42 @@ def id_factory():
         return f"opaque-{counter}"
 
     return allocate
+
+
+def controlled_harness_round(
+    current_facade: ControlledCloseFacade,
+    *,
+    suffix: str,
+):
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"controlled-close-harness-{suffix}",
+        id_factory=id_factory(),
+    )
+    selected = commit(
+        turn_id=f"turn-{suffix}",
+        commit_id=f"commit-{suffix}",
+        interaction_id=f"interaction-{suffix}",
+    )
+    binding = HarnessRoundBinding(
+        request_id=f"request-{suffix}",
+        response_id=f"response-{suffix}",
+        correlation_id=f"correlation-request-{suffix}",
+        commit=selected,
+    )
+    reservation = harness.reserve_round(binding, facade=current_facade)
+    assert harness.begin_round_commit(reservation) is True
+    handle = harness.commit_round(
+        reservation,
+        response_ref=ResponseRef(
+            interaction_id=selected.interaction_id,
+            response_id=binding.response_id,
+            response_generation=0,
+        ),
+        context=FormalContextSnapshot(selected.scope),
+        facade=current_facade,
+        allow_tools=False,
+    )
+    return harness, selected, binding, handle
 
 
 def runtime(
@@ -1568,6 +1694,169 @@ async def test_capacity_one_unsubscribed_round_can_cancel_and_close() -> None:
     assert harness.snapshot().active_rounds == ()
     await asyncio.wait_for(harness.close(), timeout=1)
     assert harness.snapshot().closed is True
+
+
+@pytest.mark.parametrize(
+    ("final", "expected_outcome"),
+    (("formal answer", "completed"), (None, "failed")),
+)
+@pytest.mark.asyncio
+async def test_stream_close_error_preserves_known_round_outcome_and_fails_unknown(
+    final: str | None,
+    expected_outcome: str,
+) -> None:
+    current_facade = ControlledCloseFacade(
+        final=final,
+        close_error=RuntimeError("stream close failed"),
+    )
+    harness, _, _, handle = controlled_harness_round(
+        current_facade,
+        suffix=f"close-error-{expected_outcome}",
+    )
+
+    events = await asyncio.wait_for(
+        asyncio.create_task(_collect_harness_events(handle)),
+        timeout=1,
+    )
+
+    terminal_events = [
+        item for item in events if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].payload == {
+        "state": "terminal",
+        "outcome": expected_outcome,
+    }
+    assert current_facade.calls == 1
+    assert current_facade.stream is not None
+    assert current_facade.stream.close_calls == 1
+    assert current_facade.stream.close_finished.is_set()
+    assert harness.snapshot().active_rounds == ()
+    assert harness.snapshot().pending_cleanup_rounds == ()
+    await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_round_survives_stream_close_error() -> None:
+    next_release = asyncio.Event()
+    current_facade = ControlledCloseFacade(
+        final=None,
+        next_release=next_release,
+        close_error=RuntimeError("cancelled stream close failed"),
+    )
+    harness, selected, binding, handle = controlled_harness_round(
+        current_facade,
+        suffix="cancel-close-error",
+    )
+    events_task = asyncio.create_task(_collect_harness_events(handle))
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+    await asyncio.wait_for(current_facade.stream.next_started.wait(), timeout=1)
+
+    accepted = handle.cancel(
+        cancel_command(
+            SimpleNamespace(
+                request_id=binding.request_id,
+                round_id=handle.round_id,
+            ),
+            selected,
+            command_id="cancel-with-close-error",
+        )
+    )
+    assert accepted.accepted is True
+    events = await asyncio.wait_for(events_task, timeout=1)
+
+    terminal_events = [
+        item for item in events if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].payload == {
+        "state": "terminal",
+        "outcome": "cancelled",
+    }
+    assert current_facade.calls == 1
+    assert current_facade.stream.close_calls == 1
+    assert harness.snapshot().cancel_effects == 1
+    assert harness.snapshot().active_rounds == ()
+    assert harness.snapshot().pending_cleanup_rounds == ()
+    await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deadline_publishes_terminal_and_retains_one_close_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.01)
+    close_release = asyncio.Event()
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        close_release=close_release,
+        close_error=RuntimeError("late stream close failed"),
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id="retained-cleanup-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id="retained-cleanup-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+    await asyncio.wait_for(current_facade.stream.close_started.wait(), timeout=1)
+
+    completion = await asyncio.wait_for(asyncio.shield(handle.completion), timeout=1)
+    assert completion.terminal_outcome.value == "completed"
+    notifications = [
+        await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
+    ]
+    terminal_notifications = [
+        item
+        for item in notifications
+        if item.progress_event is not None
+        and WorkProgressEventV2.from_dict(item.progress_event.payload).state.value
+        == "terminal"
+    ]
+    assert len(terminal_notifications) == 1
+    assert (
+        WorkProgressEventV2.from_dict(
+            terminal_notifications[0].progress_event.payload
+        ).outcome.value
+        == "completed"
+    )
+    snapshot = current.snapshot()
+    assert snapshot.harness.active_rounds == ()
+    assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+    published_notifications = snapshot.published_notifications
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert current.snapshot().closed is False
+    assert current.snapshot().harness.closed is False
+    assert current.snapshot().harness.pending_cleanup_rounds == (handle.round_id,)
+
+    close_release.set()
+    await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+    closed = await current.close(timeout_seconds=1)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert current.snapshot().closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().harness.pending_cleanup_rounds == ()
+    assert current.snapshot().published_notifications == published_notifications
+    assert (await handle.completion).terminal_outcome.value == "completed"
+    assert current_facade.calls == 1
+    assert current_facade.stream.close_calls == 1
+    assert history.assistant_intents == []
+
+
+async def _collect_harness_events(handle):
+    return [item async for item in handle.events()]
 
 
 @pytest.mark.asyncio

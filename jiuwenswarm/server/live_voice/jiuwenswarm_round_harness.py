@@ -32,7 +32,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 )
 
 
-_STREAM_CLOSE_WAIT_SLICE_SECONDS = 5.0
+_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS = 5.0
 _ROUND_CONTROL_QUEUE_RESERVE = 4
 
 
@@ -127,6 +127,7 @@ class HarnessRoundSnapshot:
     reservations: tuple[tuple[str, HarnessReservationState], ...]
     active_rounds: tuple[str, ...]
     retained_rounds: int
+    pending_cleanup_rounds: tuple[str, ...]
     cancel_effects: int
     detached_subscriptions: int
 
@@ -159,6 +160,8 @@ class _RoundRecord:
     cancel_safe: asyncio.Event
     terminal_event: EventEnvelope | None = None
     execution_error: BaseException | None = None
+    cleanup_task: asyncio.Task[None] | None = None
+    cleanup_error: BaseException | None = None
     cancel_requested: bool = False
     cancel_observed: bool = False
     cancel_coordinator: asyncio.Task[None] | None = None
@@ -769,6 +772,11 @@ class JiuWenSwarmRoundHarness:
                 if record.terminal_event is None
             ),
             retained_rounds=len(self._rounds),
+            pending_cleanup_rounds=tuple(
+                round_id
+                for round_id, record in self._rounds.items()
+                if record.cleanup_task is not None and not record.cleanup_task.done()
+            ),
             cancel_effects=self._cancel_effects,
             detached_subscriptions=self._detached_subscriptions,
         )
@@ -847,10 +855,32 @@ class JiuWenSwarmRoundHarness:
                     close(),
                     name=f"live-voice-harness-stream-close:{handle.round_id}",
                 )
+                # The exact round record remains the owner after the bounded
+                # wait, and Harness close later joins the same task.
+                record.cleanup_task = cleanup
+                cleanup.add_done_callback(
+                    lambda completed: self._observe_cleanup_completion(
+                        record, completed
+                    )
+                )
                 try:
-                    await self._await_retained_cleanup(cleanup)
+                    await self._await_cleanup_deadline(cleanup)
+                except asyncio.CancelledError as error:
+                    if cleanup.cancelled():
+                        record.cleanup_error = error
+                    else:
+                        raise
+                except TimeoutError:
+                    if cleanup.done():
+                        self._observe_cleanup_completion(record, cleanup)
                 except BaseException as error:  # noqa: BLE001
-                    record.execution_error = error
+                    record.cleanup_error = error
+                # Cleanup disposition may refine an otherwise unknown round,
+                # but can never replace a known business terminal outcome.
+                if (
+                    outcome is TerminalOutcome.UNKNOWN
+                    and record.cleanup_error is not None
+                ):
                     outcome = TerminalOutcome.FAILED
         terminal = self._round_event(
             record.reservation,
@@ -884,16 +914,20 @@ class JiuWenSwarmRoundHarness:
             record.task.cancel()
 
     @staticmethod
-    async def _await_retained_cleanup(cleanup: asyncio.Task[None]) -> None:
-        while not cleanup.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(cleanup),
-                    timeout=_STREAM_CLOSE_WAIT_SLICE_SECONDS,
-                )
-            except TimeoutError:
-                continue
-        await asyncio.shield(cleanup)
+    async def _await_cleanup_deadline(cleanup: asyncio.Task[None]) -> None:
+        await asyncio.wait_for(
+            asyncio.shield(cleanup),
+            timeout=_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS,
+        )
+
+    @staticmethod
+    def _observe_cleanup_completion(
+        record: _RoundRecord, cleanup: asyncio.Task[None]
+    ) -> None:
+        try:
+            cleanup.result()
+        except BaseException as error:  # noqa: BLE001
+            record.cleanup_error = error
 
     async def _close_coordinator(self) -> None:
         tasks = tuple(record.task for record in self._rounds.values())
@@ -908,6 +942,13 @@ class JiuWenSwarmRoundHarness:
             await asyncio.shield(
                 asyncio.gather(*cancel_coordinators, return_exceptions=True)
             )
+        cleanup_tasks = tuple(
+            record.cleanup_task
+            for record in self._rounds.values()
+            if record.cleanup_task is not None
+        )
+        if cleanup_tasks:
+            await asyncio.shield(asyncio.gather(*cleanup_tasks, return_exceptions=True))
         self._closed = True
 
     def _round_event(
