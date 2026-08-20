@@ -30,6 +30,8 @@ from .task_core import TaskCommand, TaskSpec
 if TYPE_CHECKING:
     from .production_task_intent import (
         BoundedClarificationOwner,
+        ProductionConfirmationConsumer,
+        ProductionOriginAuthority,
         ProductionTaskAuthorityReader,
         ProductionTaskIntentRequest,
         ProductionTaskResolution,
@@ -1087,17 +1089,22 @@ class VoiceTaskBridge:
         self,
         request: ProductionTaskIntentRequest,
         authority: ProductionTaskAuthorityReader,
-        clarification_owner: BoundedClarificationOwner | None = None,
+        origin_authority: ProductionOriginAuthority,
+        confirmation_consumer: ProductionConfirmationConsumer,
+        clarification_owner: BoundedClarificationOwner,
     ) -> ProductionTaskResolution:
         """Run the generalized production resolver through the real Bridge.
 
         The injected authority exposes authenticated Core reads only.  The
-        optional clarification owner is dedicated pre-command state and is not
-        retained by this Bridge instance.
+        origin, confirmation and clarification authorities are mandatory and
+        separate. The Bridge cannot substitute proposal data for their receipts.
         """
 
         from .production_task_intent import (
+            BoundedClarificationOwner,
             ProductionMultiTaskResolver,
+            ProductionConfirmationConsumer,
+            ProductionOriginAuthority,
             ProductionTaskAuthorityReader,
             ProductionTaskIntentRequest,
         )
@@ -1114,8 +1121,26 @@ class VoiceTaskBridge:
                 "production task resolution requires authenticated Core reads",
                 ErrorCode.UNAVAILABLE,
             )
+        if not isinstance(origin_authority, ProductionOriginAuthority):
+            raise VoiceTaskBridgeViolation(
+                "TRUSTED_ORIGIN_AUTHORITY_REQUIRED",
+                "production resolution requires trusted committed-origin proof",
+                ErrorCode.UNAVAILABLE,
+            )
+        if not isinstance(confirmation_consumer, ProductionConfirmationConsumer):
+            raise VoiceTaskBridgeViolation(
+                "TRUSTED_CONFIRMATION_CONSUMER_REQUIRED",
+                "production resolution requires atomic confirmation consumption",
+                ErrorCode.UNAVAILABLE,
+            )
+        if not isinstance(clarification_owner, BoundedClarificationOwner):
+            raise VoiceTaskBridgeViolation(
+                "TRUSTED_CLARIFICATION_OWNER_REQUIRED",
+                "production resolution requires clarification CAS authority",
+                ErrorCode.UNAVAILABLE,
+            )
         return ProductionMultiTaskResolver(clarification_owner).resolve(
-            request, authority
+            request, authority, origin_authority, confirmation_consumer
         )
 
     def resolve_unified(

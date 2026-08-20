@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Focused production-path and resolver-policy-only P3-6 corpus evidence."""
 
 from __future__ import annotations
 
@@ -7,13 +7,14 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier, Thread
 
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    CONTRACT_VERSION,
     ScopeRef,
+    TerminalOutcome,
     TurnCommit,
     canonical_json_bytes,
 )
@@ -21,135 +22,625 @@ from jiuwenswarm.server.live_voice.production_task_intent import (
     AuthenticatedTaskFact,
     BoundedClarificationOwner,
     ClarificationAnswer,
-    ProductionConfirmationFact,
+    ProductionConfirmationBinding,
+    ProductionFieldExtraction,
     ProductionIntentOrigin,
-    ProductionInteractionBinding,
+    ProductionOriginBinding,
     ProductionTaskIntentProposal,
     ProductionTaskIntentRequest,
     ProductionTaskPolicyOutcome,
     ProductionTaskResolution,
     TaskAuthorityRead,
+    TrustedConfirmationConsumptionReceipt,
+    TrustedProductionOriginReceipt,
 )
+from jiuwenswarm.server.live_voice.task_core import AttemptState, TaskState
 from jiuwenswarm.server.live_voice.voice_task_bridge import VoiceTaskBridge
 
+SCOPE = ScopeRef("subject-a", "project-a", "session-a", Assurance.AUTHENTICATED)
 CORPUS_DIR = (
     Path(__file__).resolve().parents[2]
     / "fixtures"
     / "live_voice_p3_6_intent_corpus_v1"
 )
-SCOPE = ScopeRef("subject-a", "project-a", "session-a", Assurance.AUTHENTICATED)
+CORPUS_EVIDENCE_SCOPE = (
+    "resolver-policy-only; expected-derived proposals are not classifier evidence"
+)
+# The preparation oracle predates D-088's claimed/running reprioritize conflict
+# and the Tier-3 requirement to validate operation arguments before target
+# clarification. Keep those disagreements visible instead of silently treating
+# expected-derived proposals as a production classifier or changing the corpus.
+CORPUS_POLICY_CORRECTIONS = {
+    "p012-reprioritize-natural_text": "TASK_REPRIORITIZE_STATE_CONFLICT",
+    "p012-reprioritize-structured": "TASK_REPRIORITIZE_STATE_CONFLICT",
+    "p012-reprioritize-voice": "TASK_REPRIORITIZE_STATE_CONFLICT",
+    "s012-zero-candidate": "TASK_INTENT_ARGUMENT_SCHEMA_MISMATCH",
+    "s013-multiple-candidates": "TASK_INTENT_ARGUMENT_SCHEMA_MISMATCH",
+}
+ZERO_EFFECTS = (
+    "agent_calls",
+    "tool_calls",
+    "task_writes",
+    "attempt_writes",
+    "command_writes",
+    "event_writes",
+    "result_writes",
+    "executor_calls",
+    "scheduler_calls",
+    "file_writes",
+    "network_calls",
+    "audio_tts_calls",
+    "history_writes",
+    "presentation_writes",
+    "other_scope_writes",
+)
 
 
-def _commit(text: str, *, commit_id: str = "commit-1") -> TurnCommit:
+def _commit(text: str, *, commit_id: str = "commit-a") -> TurnCommit:
     return TurnCommit.from_dict(
         {
-            "contract_version": "live-voice.contract.v2",
-            "interaction_id": "interaction-1",
-            "turn_id": f"turn-{commit_id}",
+            "contract_version": CONTRACT_VERSION,
             "commit_id": commit_id,
-            "scope": SCOPE.to_dict(),
+            "turn_id": f"turn-{commit_id}",
+            "interaction_id": "interaction-a",
             "text": text,
-            "hypothesis_provenance": {"provider": "test", "kind": "committed_text"},
+            "hypothesis_provenance": {},
+            "scope": SCOPE.to_dict(),
             "context_refs": [],
-            "committed_at": "2026-08-20T00:00:00Z",
+            "committed_at": "2026-08-20T10:00:00Z",
         }
+    )
+
+
+def _fact(
+    task_id: str = "task-a",
+    *,
+    name: str = "Task A",
+    state: TaskState = TaskState.ACCEPTED,
+    outcome: TerminalOutcome | None = None,
+    revision: int = 1,
+    capabilities: frozenset[str] = frozenset({"task.cancel"}),
+    result_digest: str | None = None,
+    decision_event: str | None = None,
+    dispatch_state: str = "unclaimed",
+    admission_revision: int | None = None,
+    successor_task_id: str | None = None,
+) -> AuthenticatedTaskFact:
+    attempt_state = {
+        TaskState.ACCEPTED: AttemptState.ACCEPTED,
+        TaskState.RUNNING: AttemptState.RUNNING,
+        TaskState.BLOCKED: AttemptState.RUNNING,
+        TaskState.DECISION_REQUIRED: AttemptState.RUNNING,
+        TaskState.TERMINAL: AttemptState.TERMINAL,
+    }[state]
+    return AuthenticatedTaskFact(
+        task_id=task_id,
+        stable_reference=f"ref-{task_id}",
+        name=name,
+        state=state,
+        outcome=outcome,
+        revision_number=revision,
+        event_head=revision,
+        event_head_id=f"event-{task_id}-{revision}",
+        terminal_event_id=(
+            f"terminal-{task_id}-{revision}" if outcome is not None else None
+        ),
+        attempt_id=f"attempt-{task_id}",
+        attempt_state=attempt_state,
+        attempt_outcome=outcome,
+        capability_profile_digest="a" * 64,
+        supported_operations=capabilities,
+        result_digest=result_digest,
+        decision_required_event_id=decision_event,
+        dispatch_state=dispatch_state,
+        admission_revision=admission_revision,
+        successor_task_id=successor_task_id,
     )
 
 
 class RecordingAuthority:
     def __init__(self, facts: tuple[AuthenticatedTaskFact, ...]) -> None:
         self.facts = facts
-        self.calls: list[tuple[str, str | None]] = []
+        self.calls: list[str] = []
+        self.changed_get: AuthenticatedTaskFact | None = None
+        self.changed_status: AuthenticatedTaskFact | None = None
 
     def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
-        self.calls.append(("list", None))
-        assert scope == SCOPE
-        return TaskAuthorityRead(scope, "generation-1", self.facts)
+        self.calls.append("list")
+        return TaskAuthorityRead(scope, "generation-a", self.facts)
 
     def get_task(self, scope: ScopeRef, task_id: str) -> AuthenticatedTaskFact | None:
-        self.calls.append(("get", task_id))
-        assert scope == SCOPE
-        return next((fact for fact in self.facts if fact.task_id == task_id), None)
+        self.calls.append("get")
+        return self.changed_get or next(
+            (fact for fact in self.facts if fact.task_id == task_id), None
+        )
 
     def task_status(
         self, scope: ScopeRef, task_id: str
     ) -> AuthenticatedTaskFact | None:
-        self.calls.append(("status", task_id))
-        return self.get_task(scope, task_id)
+        self.calls.append("status")
+        return self.changed_status or next(
+            (fact for fact in self.facts if fact.task_id == task_id), None
+        )
 
     def event_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str]:
-        self.calls.append(("events", task_id))
-        fact = self.get_task(scope, task_id)
-        assert fact is not None
+        self.calls.append("events")
+        fact = next(fact for fact in self.facts if fact.task_id == task_id)
         return fact.event_head, fact.event_head_id
 
     def result_digest(self, scope: ScopeRef, task_id: str) -> str | None:
-        self.calls.append(("result", task_id))
-        fact = self.get_task(scope, task_id)
-        assert fact is not None
-        return fact.result_digest
+        self.calls.append("result")
+        return next(
+            fact for fact in self.facts if fact.task_id == task_id
+        ).result_digest
 
     def unread_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str] | None:
-        self.calls.append(("unread", task_id))
-        fact = self.get_task(scope, task_id)
-        assert fact is not None
-        return (fact.event_head, fact.event_head_id)
+        self.calls.append("unread")
+        return None
 
 
-def _fact(
-    task_id: str,
-    ref: str,
-    name: str,
-    *,
-    state: str = "running",
-    generation: int = 1,
-    capabilities: frozenset[str] = frozenset({"task.adjust", "task.cancel"}),
-    result_digest: str | None = None,
-) -> AuthenticatedTaskFact:
-    terminal = state in {"completed", "failed", "cancelled", "interrupted", "unknown"}
-    return AuthenticatedTaskFact(
-        task_id=task_id,
-        stable_reference=ref,
-        name=name,
-        state=state,
-        terminal=terminal,
-        task_generation=generation,
-        event_head=7,
-        event_head_id=f"event-{task_id}",
-        attempt_id=f"attempt-{task_id}",
-        attempt_state=("terminal" if terminal else state),
-        capability_profile_digest="a" * 64,
-        supported_operations=capabilities,
-        result_digest=result_digest,
-        decision_required_event_id=(
-            "evt_fixture_decision_001" if state == "decision_required" else None
-        ),
-        dispatch_unclaimed=state == "accepted",
-    )
+class AcceptedOriginAuthority:
+    def __init__(self) -> None:
+        self.commits: dict[str, TurnCommit] = {}
+        self.calls: list[ProductionOriginBinding] = []
+
+    def accept(self, commit: TurnCommit) -> None:
+        self.commits[commit.commit_id] = commit
+
+    def verify_origin(
+        self, binding: ProductionOriginBinding
+    ) -> TrustedProductionOriginReceipt:
+        self.calls.append(binding)
+        if binding.origin is not ProductionIntentOrigin.STRUCTURED:
+            commit = self.commits.get(binding.commit_id or "")
+            if commit is None:
+                raise ValueError("unaccepted origin")
+            if (
+                hashlib.sha256(commit.canonical_bytes()).hexdigest()
+                != binding.commit_sha256
+            ):
+                raise ValueError("changed origin")
+            for extraction in binding.extractions:
+                content = commit.text[extraction.source_start : extraction.source_end]
+                if (
+                    hashlib.sha256(content.encode()).hexdigest()
+                    != extraction.content_sha256
+                ):
+                    raise ValueError("changed extraction")
+        return TrustedProductionOriginReceipt(
+            f"origin-{binding.source_id}",
+            binding.principal_id,
+            binding.fingerprint,
+        )
+
+
+class ExactConfirmationConsumer:
+    def __init__(self, *, reject: bool = False) -> None:
+        self.reject = reject
+        self.calls: list[ProductionConfirmationBinding] = []
+        self.consumed: set[str] = set()
+
+    def verify_and_consume(
+        self, confirmation_id: str, binding: ProductionConfirmationBinding
+    ) -> TrustedConfirmationConsumptionReceipt:
+        self.calls.append(binding)
+        if self.reject:
+            raise ValueError("confirmation binding mismatch")
+        replayed = confirmation_id in self.consumed
+        self.consumed.add(confirmation_id)
+        return TrustedConfirmationConsumptionReceipt(
+            confirmation_id,
+            f"consumption-{len(self.calls)}",
+            binding.fingerprint,
+            replayed,
+        )
+
+
+def _extractions(
+    proposal: ProductionTaskIntentProposal, text: str
+) -> tuple[ProductionFieldExtraction, ...]:
+    fields = ["dialogue"] if proposal.operation is None else ["operation"]
+    if proposal.operation is not None and proposal.target is not None:
+        fields.append("target")
+    if proposal.operation is not None:
+        fields.extend(f"arguments.{key}" for key in proposal.arguments)
+    return tuple(ProductionFieldExtraction(field, 0, len(text)) for field in fields)
 
 
 def _request(
     proposal: ProductionTaskIntentProposal,
+    origin_authority: AcceptedOriginAuthority,
     *,
     origin: ProductionIntentOrigin = ProductionIntentOrigin.NATURAL_TEXT,
-    commit_id: str = "commit-1",
+    text: str = "task intent",
+    commit_id: str = "commit-a",
+    command_id: str = "command-a",
+    clarification_answer: ClarificationAnswer | None = None,
+    confirmation_id: str | None = None,
 ) -> ProductionTaskIntentRequest:
-    if (
-        origin is not ProductionIntentOrigin.STRUCTURED
-        and proposal.operation is not None
-        and proposal.source_start is None
-    ):
-        proposal = replace(proposal, source_start=0, source_end=6)
+    if origin is ProductionIntentOrigin.STRUCTURED:
+        return ProductionTaskIntentRequest(
+            origin,
+            SCOPE,
+            command_id,
+            proposal,
+            source_id=commit_id,
+            clarification_answer=clarification_answer,
+            confirmation_id=confirmation_id,
+        )
+    if proposal.committed:
+        proposal = replace(proposal, extractions=_extractions(proposal, text))
+    commit = _commit(text, commit_id=commit_id)
+    origin_authority.accept(commit)
     return ProductionTaskIntentRequest(
-        origin=origin,
-        scope=SCOPE,
-        proposal=proposal,
-        commit=(
-            None
-            if origin is ProductionIntentOrigin.STRUCTURED
-            else _commit("intent", commit_id=commit_id)
-        ),
+        origin,
+        SCOPE,
+        command_id,
+        proposal,
+        commit,
+        source_id=commit_id,
+        clarification_answer=clarification_answer,
+        confirmation_id=confirmation_id,
     )
+
+
+def _resolve(
+    request: ProductionTaskIntentRequest,
+    authority: RecordingAuthority,
+    origin_authority: AcceptedOriginAuthority,
+    confirmation: ExactConfirmationConsumer | None = None,
+    clarifications: BoundedClarificationOwner | None = None,
+) -> ProductionTaskResolution:
+    return VoiceTaskBridge().resolve_production(
+        request,
+        authority,
+        origin_authority,
+        confirmation or ExactConfirmationConsumer(),
+        clarifications or BoundedClarificationOwner(boot_id="boot-a", capacity=64),
+    )
+
+
+def test_actual_voice_task_bridge_path_rereads_authenticated_core_facts() -> None:
+    fact = _fact()
+    authority = RecordingAuthority((fact,))
+    origin = AcceptedOriginAuthority()
+    request = _request(
+        ProductionTaskIntentProposal(
+            "task.status",
+            fact.task_id,
+            {"query_kind": "status"},
+            1.0,
+            True,
+            target_kind="task_id",
+        ),
+        origin,
+        text="status task-a",
+    )
+
+    result = _resolve(request, authority, origin)
+
+    assert result.outcome is ProductionTaskPolicyOutcome.PROPOSED
+    assert authority.calls == ["list", "get", "status"]
+    assert result.origin_receipt_id == "origin-commit-a"
+    assert result.origin_binding_fingerprint == origin.calls[0].fingerprint
+    assert result.origin_binding == origin.calls[0]
+    assert result.origin_binding.commit_id == "commit-a"
+    commit = request.commit
+    assert commit is not None
+    assert (
+        result.origin_binding.commit_sha256
+        == hashlib.sha256(commit.canonical_bytes()).hexdigest()
+    )
+    assert {item.field_name for item in result.origin_binding.extractions} == {
+        "operation",
+        "target",
+        "arguments.query_kind",
+    }
+    assert all(
+        item.content_sha256 != item.value_sha256
+        for item in result.origin_binding.extractions
+    )
+    assert result.zero_effects == ZERO_EFFECTS
+
+
+@pytest.mark.parametrize("origin_kind", list(ProductionIntentOrigin))
+def test_natural_voice_and_structured_share_closed_policy(
+    origin_kind: ProductionIntentOrigin,
+) -> None:
+    fact = _fact()
+    authority = RecordingAuthority((fact,))
+    origin = AcceptedOriginAuthority()
+    proposal = ProductionTaskIntentProposal(
+        "task.status",
+        fact.stable_reference,
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="stable_reference",
+    )
+
+    result = _resolve(
+        _request(proposal, origin, origin=origin_kind, text="status ref-task-a"),
+        authority,
+        origin,
+    )
+
+    assert result.canonical_policy_tuple() == (
+        "task_intent",
+        "task.status",
+        "task-a",
+        canonical_json_bytes({"query_kind": "status"}),
+        "not_required",
+        "proposed",
+    )
+
+
+def test_partial_input_has_no_authority_or_interaction_calls() -> None:
+    authority = RecordingAuthority((_fact(),))
+    origin = AcceptedOriginAuthority()
+    confirmation = ExactConfirmationConsumer()
+    clarifications = BoundedClarificationOwner(boot_id="boot-a", capacity=8)
+    proposal = ProductionTaskIntentProposal(None, None, {}, 1.0, False)
+    request = _request(proposal, origin, text="partial")
+
+    result = _resolve(request, authority, origin, confirmation, clarifications)
+
+    assert result.outcome is ProductionTaskPolicyOutcome.REJECTED
+    assert authority.calls == origin.calls == confirmation.calls == []
+    assert result.zero_effects == ZERO_EFFECTS
+
+
+def test_structured_ambiguity_uses_same_bounded_clarification_owner() -> None:
+    authority = RecordingAuthority((_fact("x"), _fact("y")))
+    origin = AcceptedOriginAuthority()
+    owner = BoundedClarificationOwner(boot_id="boot-a", capacity=8)
+    proposal = ProductionTaskIntentProposal(
+        "task.status",
+        "current",
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="hint",
+    )
+
+    result = _resolve(
+        _request(
+            proposal,
+            origin,
+            origin=ProductionIntentOrigin.STRUCTURED,
+            commit_id="structured-a",
+        ),
+        authority,
+        origin,
+        clarifications=owner,
+    )
+
+    assert result.outcome is ProductionTaskPolicyOutcome.CLARIFICATION
+    assert result.candidate_task_ids == ("x", "y")
+    assert result.clarification_handle_id is not None
+
+
+def test_target_reread_and_observed_revision_fail_closed() -> None:
+    fact = _fact(revision=2)
+    authority = RecordingAuthority((fact,))
+    origin = AcceptedOriginAuthority()
+    proposal = ProductionTaskIntentProposal(
+        "task.status",
+        fact.task_id,
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="task_id",
+        observed_task_revision=1,
+    )
+
+    stale = _resolve(
+        _request(proposal, origin, text="status task-a"), authority, origin
+    )
+    authority.changed_get = _fact(revision=3)
+    changed = _resolve(
+        _request(
+            replace(proposal, observed_task_revision=2),
+            origin,
+            text="status task-a",
+            commit_id="commit-b",
+            command_id="command-b",
+        ),
+        authority,
+        origin,
+    )
+
+    assert stale.reason == "TASK_SNAPSHOT_STALE"
+    assert changed.reason == "TASK_AUTHORITY_CHANGED"
+    assert stale.zero_effects == changed.zero_effects == ZERO_EFFECTS
+
+
+def test_clarification_is_new_commit_single_use_and_restart_invalidates() -> None:
+    authority = RecordingAuthority((_fact("x"), _fact("y")))
+    origin = AcceptedOriginAuthority()
+    owner = BoundedClarificationOwner(
+        boot_id="boot-a", capacity=4, per_subject_capacity=2
+    )
+    proposal = ProductionTaskIntentProposal(
+        "task.status",
+        "current",
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="hint",
+    )
+    issued = _resolve(
+        _request(proposal, origin, text="status current"),
+        authority,
+        origin,
+        clarifications=owner,
+    )
+    assert issued.clarification_handle_id is not None
+    assert issued.clarification_generation is not None
+    answer = ClarificationAnswer(
+        issued.clarification_handle_id,
+        issued.clarification_generation,
+        "x",
+        issued.task_set_fingerprint or "",
+    )
+    answer_proposal = replace(proposal, target="x", target_kind="task_id")
+    request = _request(
+        answer_proposal,
+        origin,
+        text="choose x",
+        commit_id="commit-b",
+        command_id="command-b",
+        clarification_answer=answer,
+    )
+
+    consumed = _resolve(request, authority, origin, clarifications=owner)
+    replay = _resolve(request, authority, origin, clarifications=owner)
+    owner.restart("boot-b")
+    after_restart = _resolve(request, authority, origin, clarifications=owner)
+
+    assert consumed.target_task_id == "x"
+    assert origin.calls[-1].clarification_answer_sha256 == answer.fingerprint
+    assert replay.reason == "CLARIFICATION_BINDING_CONFLICT"
+    assert after_restart.reason == "CLARIFICATION_BINDING_CONFLICT"
+
+
+def test_clarification_is_per_subject_bounded_and_never_evicts() -> None:
+    authority = RecordingAuthority((_fact("x"), _fact("y")))
+    origin = AcceptedOriginAuthority()
+    owner = BoundedClarificationOwner(
+        boot_id="boot-a", capacity=3, per_subject_capacity=1
+    )
+    proposal = ProductionTaskIntentProposal(
+        "task.status",
+        "current",
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="hint",
+    )
+    first = _resolve(
+        _request(proposal, origin, text="status", commit_id="commit-a"),
+        authority,
+        origin,
+        clarifications=owner,
+    )
+    overflow = _resolve(
+        _request(
+            proposal,
+            origin,
+            text="status again",
+            commit_id="commit-b",
+            command_id="command-b",
+        ),
+        authority,
+        origin,
+        clarifications=owner,
+    )
+
+    assert first.outcome is ProductionTaskPolicyOutcome.CLARIFICATION
+    assert overflow.reason == "CLARIFICATION_UNAVAILABLE"
+
+
+def test_clarification_changed_authorized_task_set_conflicts_without_consuming() -> (
+    None
+):
+    original_facts = (_fact("x"), _fact("y"))
+    authority = RecordingAuthority(original_facts)
+    origin = AcceptedOriginAuthority()
+    owner = BoundedClarificationOwner(boot_id="boot-a", capacity=4)
+    proposal = ProductionTaskIntentProposal(
+        "task.status",
+        "current",
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="hint",
+    )
+    issued = _resolve(
+        _request(proposal, origin, text="status current"),
+        authority,
+        origin,
+        clarifications=owner,
+    )
+    assert issued.clarification_handle_id is not None
+    assert issued.clarification_generation is not None
+    assert issued.task_set_fingerprint is not None
+    answer = ClarificationAnswer(
+        issued.clarification_handle_id,
+        issued.clarification_generation,
+        "x",
+        issued.task_set_fingerprint,
+    )
+    answer_proposal = replace(proposal, target="x", target_kind="task_id")
+    request = _request(
+        answer_proposal,
+        origin,
+        text="choose x",
+        commit_id="commit-b",
+        command_id="command-b",
+        clarification_answer=answer,
+    )
+    authority.facts = (*original_facts, _fact("z"))
+
+    changed = _resolve(request, authority, origin, clarifications=owner)
+    authority.facts = original_facts
+    recovered = _resolve(request, authority, origin, clarifications=owner)
+
+    assert changed.reason == "CLARIFICATION_BINDING_CONFLICT"
+    assert changed.zero_effects == ZERO_EFFECTS
+    assert recovered.target_task_id == "x"
+
+
+def test_clarification_owner_expiry_is_fail_closed() -> None:
+    owner = BoundedClarificationOwner(
+        boot_id="boot-a", capacity=2, ttl=timedelta(seconds=1)
+    )
+    source = ProductionOriginBinding(
+        SCOPE.subject_id,
+        SCOPE,
+        ProductionIntentOrigin.STRUCTURED,
+        "structured-source",
+        None,
+        None,
+        (),
+    )
+    source_receipt = TrustedProductionOriginReceipt(
+        "source-receipt", SCOPE.subject_id, source.fingerprint
+    )
+    now = datetime(2026, 8, 20, 10, tzinfo=UTC)
+    handle = owner.issue(
+        origin_binding=source,
+        origin_receipt=source_receipt,
+        operation="task.status",
+        arguments={"query_kind": "status"},
+        ambiguous_fields=("target",),
+        candidate_task_ids=("x",),
+        task_set_fingerprint="d" * 64,
+        now=now,
+    )
+    answer_origin = ProductionOriginBinding(
+        SCOPE.subject_id,
+        SCOPE,
+        ProductionIntentOrigin.NATURAL_TEXT,
+        "answer-source",
+        "answer-commit",
+        "e" * 64,
+        (),
+    )
+    answer_receipt = TrustedProductionOriginReceipt(
+        "answer-receipt", SCOPE.subject_id, answer_origin.fingerprint
+    )
+
+    with pytest.raises(ValueError, match="CLARIFICATION_HANDLE_EXPIRED"):
+        owner.consume(
+            ClarificationAnswer(handle.handle_id, handle.generation, "x", "d" * 64),
+            answer_origin=answer_origin,
+            answer_receipt=answer_receipt,
+            operation="task.status",
+            arguments={"query_kind": "status"},
+            task_set_fingerprint="d" * 64,
+            now=now + timedelta(seconds=2),
+        )
 
 
 def _matches_expected(
@@ -165,54 +656,53 @@ def _matches_expected(
     )
 
 
+def _corpus_fact(raw: dict[str, object]) -> AuthenticatedTaskFact:
+    raw_state = str(raw["state"])
+    terminal = bool(raw["terminal"])
+    outcome = TerminalOutcome(raw_state) if terminal else None
+    state = (
+        TaskState.TERMINAL
+        if terminal
+        else TaskState.DECISION_REQUIRED
+        if bool(raw["decision_required_event_current"])
+        else TaskState(raw_state)
+    )
+    capabilities = {"task.cancel"}
+    if state is TaskState.RUNNING:
+        capabilities.add("task.adjust")
+    if state is TaskState.ACCEPTED and raw["dispatch_outbox_state"] == "unclaimed":
+        capabilities.add("task.update")
+    result_digest = "b" * 64 if outcome is TerminalOutcome.COMPLETED else None
+    return _fact(
+        str(raw["task_id"]),
+        name=str(raw["name"]),
+        state=state,
+        outcome=outcome,
+        revision=int(raw["snapshot_version"]),
+        capabilities=frozenset(capabilities),
+        result_digest=result_digest,
+        decision_event=(
+            str(raw["decision_required_event_id"])
+            if raw["decision_required_event_id"] is not None
+            else None
+        ),
+        dispatch_state=str(raw["dispatch_outbox_state"]),
+    )
+
+
 def _from_corpus_case(
     case: dict[str, object],
-) -> tuple[RecordingAuthority, ProductionTaskIntentRequest]:
+) -> tuple[
+    RecordingAuthority,
+    AcceptedOriginAuthority,
+    ExactConfirmationConsumer,
+    BoundedClarificationOwner,
+    ProductionTaskIntentRequest,
+]:
     raw_facts = case["task_facts"]
     assert isinstance(raw_facts, list)
-    facts: list[AuthenticatedTaskFact] = []
-    for raw in raw_facts:
-        assert isinstance(raw, dict)
-        state = str(raw["state"])
-        terminal = bool(raw["terminal"])
-        raw_attempt_state = str(raw["current_attempt_state"])
-        attempt_state = (
-            "terminal"
-            if terminal
-            else "running"
-            if raw_attempt_state in {"blocked", "decision_required"}
-            else raw_attempt_state
-        )
-        capabilities = {"task.cancel"}
-        if state == "running":
-            capabilities.add("task.adjust")
-        if state == "accepted" and raw["dispatch_outbox_state"] == "unclaimed":
-            capabilities.add("task.update")
-        result_digest = "b" * 64 if terminal and state != "unknown" else None
-        facts.append(
-            AuthenticatedTaskFact(
-                task_id=str(raw["task_id"]),
-                stable_reference=str(raw["user_reference"]),
-                name=str(raw["name"]),
-                state=state,
-                terminal=terminal,
-                task_generation=int(raw["snapshot_version"]),
-                event_head=int(raw["snapshot_version"]),
-                event_head_id=f"event-head-{raw['task_id']}",
-                attempt_id=f"attempt-{raw['task_id']}",
-                attempt_state=attempt_state,
-                capability_profile_digest="a" * 64,
-                supported_operations=frozenset(capabilities),
-                result_digest=result_digest,
-                decision_required_event_id=(
-                    str(raw["decision_required_event_id"])
-                    if raw["decision_required_event_id"] is not None
-                    else None
-                ),
-                dispatch_unclaimed=raw["dispatch_outbox_state"] == "unclaimed",
-            )
-        )
-    authority = RecordingAuthority(tuple(facts))
+    facts = tuple(_corpus_fact(raw) for raw in raw_facts if isinstance(raw, dict))
+    authority = RecordingAuthority(facts)
     expected = case["expected"]
     partitions = case["partitions"]
     assert isinstance(expected, dict) and isinstance(partitions, dict)
@@ -234,12 +724,11 @@ def _from_corpus_case(
                 None, None, {}, 1.0, True, reason="REJECTED_UNSAFE_TASK_TEXT"
             )
     else:
-        target: str | None
         matching = next((fact for fact in facts if fact.task_id == target_id), None)
-        if target_partition in {"collection"}:
+        if target_partition == "collection":
             target = None
         elif target_partition == "explicit_task_id":
-            target = str(target_id) if target_id else "tsk_fixture_foreign_001"
+            target = str(target_id) if target_id else "foreign"
         elif target_partition in {
             "stable_user_reference",
             "stale_target",
@@ -258,456 +747,86 @@ def _from_corpus_case(
         elif target_partition == "current_recent_hint_only":
             target = "current"
         elif target_partition == "foreign_scope_project":
-            target = "tsk_fixture_foreign_001"
+            target = "foreign"
         else:
             target = None
-        observed = None
+        target_kind = (
+            "task_id"
+            if target_partition in {"explicit_task_id", "foreign_scope_project"}
+            else "stable_reference"
+            if target_partition
+            in {
+                "stable_user_reference",
+                "stale_target",
+                "terminal_predecessor",
+                "two_visible_tasks",
+                "zero_candidate",
+            }
+            else "name"
+            if target_partition
+            in {"unique_authorized_name", "duplicate_name", "multiple_candidates"}
+            else "hint"
+            if target_partition == "current_recent_hint_only"
+            else None
+        )
         snapshot = case.get("target_snapshot")
-        if isinstance(snapshot, dict):
-            observed = int(snapshot["observed_snapshot_version"])
         proposal = ProductionTaskIntentProposal(
-            operation=str(operation),
-            target=target,
-            arguments=expected["arguments"],
-            confidence=float(case["confidence"]),
-            committed=bool(case["committed"]),
-            target_kind=(
-                "task_id"
-                if target_partition in {"explicit_task_id", "foreign_scope_project"}
-                else "stable_reference"
-                if target_partition
-                in {
-                    "stable_user_reference",
-                    "stale_target",
-                    "terminal_predecessor",
-                    "two_visible_tasks",
-                    "zero_candidate",
-                }
-                else "name"
-                if target_partition
-                in {"unique_authorized_name", "duplicate_name", "multiple_candidates"}
-                else "hint"
-                if target_partition == "current_recent_hint_only"
+            str(operation),
+            target,
+            expected["arguments"],
+            float(case["confidence"]),
+            bool(case["committed"]),
+            target_kind=target_kind,
+            observed_task_revision=(
+                int(snapshot["observed_snapshot_version"])
+                if isinstance(snapshot, dict)
                 else None
             ),
-            source_start=(None if case["origin"] == "structured" else 0),
-            source_end=(
-                None if case["origin"] == "structured" else len(str(case["input_text"]))
-            ),
-            observed_task_generation=observed,
-        )
-        context = case.get("interaction_context")
-        if isinstance(context, dict):
-            current = authority.list_visible_tasks(SCOPE)
-            binding = ProductionInteractionBinding(
-                kind=str(context["kind"]),
-                binding_id=str(context["context_id"]),
-                operation=str(context["bound_operation"]),
-                target_task_id=(
-                    str(context["bound_target_task_id"])
-                    if context["bound_target_task_id"] is not None
-                    else None
-                ),
-                arguments=context["bound_arguments"],
-                candidate_task_ids=tuple(context["bound_candidate_task_ids"]),
-                task_set_fingerprint=(
-                    "d" * 64
-                    if "changed_task_set" in set(partitions["safety"])
-                    else current.fingerprint
-                ),
-            )
-            proposal = replace(proposal, interaction_binding=binding)
-            authority.calls.clear()
-
-    origin = ProductionIntentOrigin(str(case["origin"]))
-    commit = (
-        None
-        if origin is ProductionIntentOrigin.STRUCTURED
-        else _commit(str(case["input_text"]), commit_id=str(case["case_id"]))
-    )
-    return authority, ProductionTaskIntentRequest(
-        origin=origin,
-        scope=SCOPE,
-        proposal=proposal,
-        commit=commit,
-        source_id=str(case["case_id"]),
-    )
-
-
-def test_actual_voice_task_bridge_path_rereads_authenticated_core_facts() -> None:
-    authority = RecordingAuthority(
-        (_fact("task-a", "REF-A", "Build report", state="running"),)
-    )
-    proposal = ProductionTaskIntentProposal(
-        operation="task.status",
-        target="REF-A",
-        arguments={"query_kind": "status"},
-        confidence=0.99,
-        committed=True,
-        source_start=0,
-        source_end=6,
-    )
-
-    result = VoiceTaskBridge().resolve_production(_request(proposal), authority)
-
-    assert result == ProductionTaskResolution.task_intent(
-        operation="task.status",
-        target_task_id="task-a",
-        arguments={"query_kind": "status"},
-        confirmation="not_required",
-        outcome=ProductionTaskPolicyOutcome.PROPOSED,
-        task_set_fingerprint=result.task_set_fingerprint,
-        authority_fingerprint=result.authority_fingerprint,
-        reason="TASK_QUERY_POLICY_ACCEPTED",
-    )
-    assert [call[0] for call in authority.calls] == ["list", "get", "status", "get"]
-
-
-@pytest.mark.parametrize("origin", tuple(ProductionIntentOrigin))
-def test_natural_voice_and_structured_share_one_closed_policy(
-    origin: ProductionIntentOrigin,
-) -> None:
-    authority = RecordingAuthority((_fact("task-a", "REF-A", "Build report"),))
-    proposal = ProductionTaskIntentProposal(
-        operation="task.cancel",
-        target="task-a",
-        arguments={},
-        confidence=1.0,
-        committed=True,
-        source_start=0,
-        source_end=6,
-    )
-
-    result = VoiceTaskBridge().resolve_production(
-        _request(proposal, origin=origin), authority
-    )
-
-    assert result.operation == "task.cancel"
-    assert result.target_task_id == "task-a"
-    assert result.confirmation == "required"
-    assert result.outcome is ProductionTaskPolicyOutcome.PROPOSED
-
-
-@pytest.mark.parametrize(
-    ("proposal", "outcome"),
-    (
-        (
-            ProductionTaskIntentProposal.dialogue(reason="NEGATED_TASK_INTENT"),
-            ProductionTaskPolicyOutcome.DIALOGUE,
-        ),
-        (
-            ProductionTaskIntentProposal.dialogue(reason="ORDINARY_DIALOGUE"),
-            ProductionTaskPolicyOutcome.DIALOGUE,
-        ),
-        (
-            ProductionTaskIntentProposal(
-                operation="task.cancel",
-                target="REF-A",
-                arguments={},
-                confidence=0.2,
-                committed=True,
-            ),
-            ProductionTaskPolicyOutcome.REJECTED,
-        ),
-        (
-            ProductionTaskIntentProposal(
-                operation="task.cancel",
-                target="REF-A",
-                arguments={},
-                confidence=1.0,
-                committed=False,
-            ),
-            ProductionTaskPolicyOutcome.REJECTED,
-        ),
-    ),
-)
-def test_dialogue_negation_partial_and_low_confidence_have_zero_effects(
-    proposal: ProductionTaskIntentProposal,
-    outcome: ProductionTaskPolicyOutcome,
-) -> None:
-    authority = RecordingAuthority((_fact("task-a", "REF-A", "Build report"),))
-    result = VoiceTaskBridge().resolve_production(_request(proposal), authority)
-    assert result.outcome is outcome
-    assert result.zero_effects
-    assert authority.calls == []
-
-
-def test_explicit_id_and_ref_win_but_names_must_be_unique_and_hints_never_select() -> (
-    None
-):
-    facts = (
-        _fact("task-a", "REF-A", "Report"),
-        _fact("task-b", "REF-B", "Report"),
-    )
-    authority = RecordingAuthority(facts)
-    bridge = VoiceTaskBridge()
-
-    exact = bridge.resolve_production(
-        _request(
-            ProductionTaskIntentProposal.intent(
-                "task.status", "REF-B", {"query_kind": "status"}
-            )
-        ),
-        authority,
-    )
-    duplicate = bridge.resolve_production(
-        _request(
-            ProductionTaskIntentProposal.intent(
-                "task.status", "Report", {"query_kind": "status"}
-            )
-        ),
-        authority,
-    )
-    missing = bridge.resolve_production(
-        _request(
-            ProductionTaskIntentProposal.intent(
-                "task.status", "current", {"query_kind": "status"}
-            )
-        ),
-        authority,
-    )
-
-    assert exact.target_task_id == "task-b"
-    assert duplicate.outcome is ProductionTaskPolicyOutcome.CLARIFICATION
-    assert duplicate.candidate_task_ids == ("task-a", "task-b")
-    assert missing.outcome is ProductionTaskPolicyOutcome.CLARIFICATION
-    assert missing.target_task_id is None
-
-
-def test_target_reread_and_changed_task_set_fail_closed() -> None:
-    fact = _fact("task-a", "REF-A", "Report")
-
-    class DriftingAuthority(RecordingAuthority):
-        def get_task(
-            self, scope: ScopeRef, task_id: str
-        ) -> AuthenticatedTaskFact | None:
-            found = super().get_task(scope, task_id)
-            return None if found is None else replace(found, task_generation=2)
-
-    result = VoiceTaskBridge().resolve_production(
-        _request(ProductionTaskIntentProposal.intent("task.cancel", "REF-A", {})),
-        DriftingAuthority((fact,)),
-    )
-    assert result.outcome is ProductionTaskPolicyOutcome.CONFLICT
-    assert result.reason == "TASK_AUTHORITY_CHANGED"
-    assert result.zero_effects
-
-
-def test_foreign_authority_and_malformed_argument_bounds_fail_closed() -> None:
-    foreign_scope = ScopeRef(
-        "subject-a", "project-foreign", "session-a", Assurance.AUTHENTICATED
-    )
-
-    class ForeignAuthority(RecordingAuthority):
-        def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
-            self.calls.append(("list", None))
-            return TaskAuthorityRead(foreign_scope, "foreign-generation", self.facts)
-
-    authority = ForeignAuthority((_fact("task-a", "REF-A", "Report"),))
-    result = VoiceTaskBridge().resolve_production(
-        _request(
-            ProductionTaskIntentProposal.intent(
-                "task.status", "REF-A", {"query_kind": "status"}
-            )
-        ),
-        authority,
-    )
-    assert result.outcome is ProductionTaskPolicyOutcome.REJECTED
-    assert result.reason == "TASK_AUTHORITY_SCOPE_MISMATCH"
-    assert result.zero_effects
-    assert authority.calls == [("list", None)]
-
-    with pytest.raises(ValueError, match="INVALID_TASK_INTENT_ARGUMENT_VALUE"):
-        ProductionTaskIntentProposal.intent(
-            "task.update", "REF-A", {"instruction": {"nested": "forbidden"}}
-        )
-    with pytest.raises(ValueError, match="INVALID_TASK_INTENT_ARGUMENT"):
-        ProductionTaskIntentProposal.intent(
-            "task.update", "REF-A", {"instruction": "x" * 4_097}
         )
 
-
-def test_unsupported_controls_and_terminal_conflicts_never_invent_primitives() -> None:
-    running = RecordingAuthority(
-        (_fact("task-a", "REF-A", "Report", capabilities=frozenset()),)
-    )
-    terminal = RecordingAuthority(
-        (_fact("task-a", "REF-A", "Report", state="completed", result_digest="b" * 64),)
-    )
-    bridge = VoiceTaskBridge()
-
-    arguments_by_operation: dict[str, dict[str, object]] = {
-        "task.provide_input": {
-            "answer": "bounded answer",
-            "responds_to_event_id": "event-decision",
-        },
-        "task.pause": {},
-        "task.resume": {},
-        "task.reprioritize": {"priority": "high"},
-    }
-    for operation, arguments in arguments_by_operation.items():
-        result = bridge.resolve_production(
-            _request(
-                ProductionTaskIntentProposal.intent(operation, "REF-A", arguments)
-            ),
-            running,
+    origin_authority = AcceptedOriginAuthority()
+    origin_kind = ProductionIntentOrigin(str(case["origin"]))
+    clarification_answer = None
+    confirmation_id = None
+    context = case.get("interaction_context")
+    confirmation = ExactConfirmationConsumer()
+    if isinstance(context, dict) and context["kind"] == "clarification":
+        current = authority.list_visible_tasks(SCOPE)
+        authority.calls.clear()
+        clarification_answer = ClarificationAnswer(
+            str(context["context_id"]),
+            1,
+            str(context["bound_candidate_task_ids"][0]),
+            "d" * 64
+            if "changed_task_set" in set(partitions["safety"])
+            else current.fingerprint,
         )
-        assert result.outcome is ProductionTaskPolicyOutcome.UNSUPPORTED
-        assert result.zero_effects
-
-    terminal_result = bridge.resolve_production(
-        _request(ProductionTaskIntentProposal.intent("task.pause", "REF-A", {})),
-        terminal,
+    elif isinstance(context, dict) and context["kind"] == "confirmation":
+        confirmation_id = str(context["context_id"])
+        confirmation = ExactConfirmationConsumer(reject=True)
+    request = _request(
+        proposal,
+        origin_authority,
+        origin=origin_kind,
+        text=str(case["input_text"]),
+        commit_id=str(case["case_id"]),
+        command_id=f"command-{case['case_id']}",
+        clarification_answer=clarification_answer,
+        confirmation_id=confirmation_id,
     )
-    assert terminal_result.outcome is ProductionTaskPolicyOutcome.CONFLICT
-
-
-def test_successor_requires_exact_core_result_digest_and_rejects_unknown() -> None:
-    completed = RecordingAuthority(
-        (_fact("task-a", "REF-A", "Report", state="completed", result_digest="b" * 64),)
-    )
-    unknown = RecordingAuthority((_fact("task-a", "REF-A", "Report", state="unknown"),))
-    proposal = ProductionTaskIntentProposal.intent(
-        "task.create_successor",
-        "REF-A",
-        {"name": "Revision", "instruction": "Revise report."},
-    )
-    bridge = VoiceTaskBridge()
-
-    accepted = bridge.resolve_production(_request(proposal), completed)
-    refused = bridge.resolve_production(_request(proposal), unknown)
-
-    assert accepted.outcome is ProductionTaskPolicyOutcome.PROPOSED
-    assert accepted.predecessor_result_digest == "b" * 64
-    assert refused.outcome is ProductionTaskPolicyOutcome.CONFLICT
-
-
-def test_clarification_owner_is_bounded_single_use_cas_and_restart_invalidates_handles() -> (
-    None
-):
-    now = datetime(2026, 8, 20, tzinfo=UTC)
-    owner = BoundedClarificationOwner(
-        capacity=2, ttl=timedelta(minutes=2), boot_id="boot-a"
-    )
-    issued = owner.issue(
-        scope=SCOPE,
-        source_commit_id="commit-1",
-        operation="task.cancel",
-        ambiguous_fields=("target",),
-        candidate_task_ids=("task-a", "task-b"),
-        task_set_fingerprint="c" * 64,
-        now=now,
-    )
-    answer = ClarificationAnswer(
-        handle_id=issued.handle_id,
-        generation=issued.generation,
-        scope=SCOPE,
-        commit_id="answer-1",
-        selected_task_id="task-a",
-        task_set_fingerprint="c" * 64,
-    )
-
-    results: list[object] = []
-    barrier = Barrier(2)
-
-    def consume() -> None:
-        barrier.wait()
-        results.append(owner.consume(answer, now=now + timedelta(seconds=1)))
-
-    threads = [Thread(target=consume), Thread(target=consume)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    assert results[0] == results[1]
-    changed = replace(answer, commit_id="answer-2", selected_task_id="task-b")
-    with pytest.raises(ValueError, match="CLARIFICATION_ALREADY_CONSUMED"):
-        owner.consume(changed, now=now + timedelta(seconds=2))
-
-    owner.restart("boot-b")
-    with pytest.raises(ValueError, match="CLARIFICATION_HANDLE_INVALID_AFTER_RESTART"):
-        owner.consume(answer, now=now + timedelta(seconds=3))
-
-
-def test_clarification_capacity_and_expiry_are_safe_bounded_failures() -> None:
-    now = datetime(2026, 8, 20, tzinfo=UTC)
-    owner = BoundedClarificationOwner(
-        capacity=1, ttl=timedelta(seconds=1), boot_id="boot-a"
-    )
-    issued = owner.issue(
-        scope=SCOPE,
-        source_commit_id="commit-1",
-        operation="task.cancel",
-        ambiguous_fields=("target",),
-        candidate_task_ids=("task-a",),
-        task_set_fingerprint="c" * 64,
-        now=now,
-    )
-    with pytest.raises(ValueError, match="CLARIFICATION_CAPACITY_EXCEEDED"):
-        owner.issue(
-            scope=SCOPE,
-            source_commit_id="commit-2",
-            operation="task.cancel",
-            ambiguous_fields=("target",),
-            candidate_task_ids=("task-b",),
-            task_set_fingerprint="d" * 64,
-            now=now,
-        )
-    with pytest.raises(ValueError, match="CLARIFICATION_HANDLE_EXPIRED"):
-        owner.consume(
-            ClarificationAnswer(
-                handle_id=issued.handle_id,
-                generation=issued.generation,
-                scope=SCOPE,
-                commit_id="answer-1",
-                selected_task_id="task-a",
-                task_set_fingerprint="c" * 64,
-            ),
-            now=now + timedelta(seconds=1),
-        )
-
-
-def test_confirmation_must_bind_operation_target_arguments_and_task_set() -> None:
-    authority = RecordingAuthority((_fact("task-a", "REF-A", "Report"),))
-    base = ProductionTaskIntentProposal.intent("task.cancel", "REF-A", {})
-    proposed = VoiceTaskBridge().resolve_production(_request(base), authority)
-    assert proposed.task_set_fingerprint is not None
-    confirmation = ProductionConfirmationFact(
-        confirmation_id="confirmation-1",
-        operation="task.cancel",
-        target_task_id="task-a",
-        arguments_sha256=hashlib.sha256(canonical_json_bytes({})).hexdigest(),
-        task_set_fingerprint=proposed.task_set_fingerprint,
-    )
-
-    exact = VoiceTaskBridge().resolve_production(
-        _request(replace(base, confirmation=confirmation)), authority
-    )
-    changed = VoiceTaskBridge().resolve_production(
-        _request(
-            replace(
-                ProductionTaskIntentProposal.intent("task.pause", "REF-A", {}),
-                confirmation=confirmation,
-            )
-        ),
+    return (
         authority,
+        origin_authority,
+        confirmation,
+        BoundedClarificationOwner(boot_id="corpus-boot", capacity=128),
+        request,
     )
-    consumed = VoiceTaskBridge().resolve_production(
-        _request(replace(base, confirmation=replace(confirmation, consumed=True))),
-        authority,
-    )
-
-    assert exact.confirmation == "confirmed"
-    assert exact.outcome is ProductionTaskPolicyOutcome.PROPOSED
-    assert changed.outcome is ProductionTaskPolicyOutcome.CONFLICT
-    assert consumed.outcome is ProductionTaskPolicyOutcome.CONFLICT
-    assert changed.zero_effects
 
 
-def test_all_68_corpus_cases_and_14_parity_groups_use_production_bridge_policy() -> (
-    None
-):
+def test_all_68_cases_and_14_groups_are_resolver_policy_only_evidence() -> None:
+    """Evaluate supplied proposals, never claim production classifier accuracy."""
+
+    assert CORPUS_EVIDENCE_SCOPE.startswith("resolver-policy-only")
     cases = [
         json.loads(line)
         for line in (CORPUS_DIR / "cases.jsonl")
@@ -718,22 +837,27 @@ def test_all_68_corpus_cases_and_14_parity_groups_use_production_bridge_policy()
     assert len({case["parity_group"] for case in cases if case["parity_group"]}) == 14
 
     actual: dict[str, ProductionTaskResolution] = {}
+    observed_corrections: set[str] = set()
     for case in cases:
-        authority, request = _from_corpus_case(case)
-        actual[case["case_id"]] = VoiceTaskBridge().resolve_production(
-            request, authority
+        authority, origin, confirmation, clarifications, request = _from_corpus_case(
+            case
         )
-        assert _matches_expected(actual[case["case_id"]], case["expected"]), case[
-            "case_id"
-        ]
-        assert actual[case["case_id"]].zero_effects == tuple(
-            case["expected"]["zero_effects"]
-        )
+        result = _resolve(request, authority, origin, confirmation, clarifications)
+        actual[case["case_id"]] = result
+        if not _matches_expected(result, case["expected"]):
+            observed_corrections.add(case["case_id"])
+            assert result.reason == CORPUS_POLICY_CORRECTIONS[case["case_id"]]
+            assert result.outcome in {
+                ProductionTaskPolicyOutcome.REJECTED,
+                ProductionTaskPolicyOutcome.CONFLICT,
+            }
+        assert result.zero_effects == tuple(case["expected"]["zero_effects"])
 
-    for group in {case["parity_group"] for case in cases if case["parity_group"]}:
-        group_results = [
-            actual[case["case_id"]].canonical_policy_tuple()
-            for case in cases
-            if case["parity_group"] == group
-        ]
-        assert len(set(group_results)) == 1, group
+    groups = {case["parity_group"] for case in cases if case["parity_group"]}
+    assert observed_corrections == set(CORPUS_POLICY_CORRECTIONS)
+    for group in groups:
+        members = [case for case in cases if case["parity_group"] == group]
+        assert (
+            len({actual[case["case_id"]].canonical_policy_tuple() for case in members})
+            == 1
+        )
