@@ -306,6 +306,41 @@ _IN_PROCESS_LIMIT_SECONDS = 12 * 60
 _MAX_PROCESS_TERMINATION_SECONDS = 5.0
 _MAX_COMPOSITION_CLEANUP_SECONDS = 30.0
 _POLL_SECONDS = 0.25
+# Worker stdio is closed; this reserved Windows exit-code range carries only
+# exact allowlisted machine reasons back to the parent supervisor.
+_WORKER_REASON_EXIT_CODE_BASE = 0x4C560100
+_WORKER_GENERIC_FAILURE_EXIT_CODE = 2
+_WORKER_PASSTHROUGH_REASONS = (
+    "DIRECT_AUTHORITY_SNAPSHOT_UNAVAILABLE",
+    "EVIDENCE_OBSERVER_HEALTH_INVALID",
+    "EVIDENCE_SELECTION_UNAVAILABLE",
+    "PRODUCT_FACTORY_DISABLED",
+    "PRODUCTION_REGISTRATION_FAILED",
+    "PRODUCTION_REGISTRATION_REUSED",
+    "REAL_A1_CANCEL_A2_DEQUEUE_TIMEOUT",
+    "REAL_A2_ADJUST_TIMEOUT",
+    "REAL_A2_BUSY_TIMEOUT",
+    "REAL_A2_INITIAL_TOOL_TIMEOUT",
+    "REAL_B1_CANCEL_TIMEOUT",
+    "REAL_CONCURRENT_INITIAL_TIMEOUT",
+    "REAL_CREATE_RESULT_INVALID",
+    "REAL_MUTATION_REJECTED",
+    "REAL_SCENARIO_CLEANUP_FAILED",
+    "REAL_SCENARIO_DEADLINE_EXCEEDED",
+    "REAL_SCENARIO_FAILED",
+    "REAL_STAGE_OBSERVATION_FAILED",
+    "SOURCE_HEAD_UNAVAILABLE",
+    "SOURCE_SNAPSHOT_CHANGED",
+    "SOURCE_STATUS_UNAVAILABLE",
+    "SOURCE_TREE_DIRTY",
+)
+_WORKER_REASON_EXIT_CODES = {
+    reason: _WORKER_REASON_EXIT_CODE_BASE + index
+    for index, reason in enumerate(_WORKER_PASSTHROUGH_REASONS)
+}
+_WORKER_EXIT_CODE_REASONS = {
+    exit_code: reason for reason, exit_code in _WORKER_REASON_EXIT_CODES.items()
+}
 _ROOT_ENVIRONMENT = {
     "JIUWENSWARM_DATA_DIR",
     "JIUWENSWARM_HOME",
@@ -889,8 +924,8 @@ async def _wait_stage(
                 return
         except ClosedEvidenceFailure:
             raise
-        except BaseException:  # noqa: BLE001 -- private state never reaches output
-            pass
+        except BaseException as exc:  # noqa: BLE001 -- details stay private
+            raise ClosedEvidenceFailure("REAL_STAGE_OBSERVATION_FAILED") from exc
         await asyncio.sleep(_POLL_SECONDS)
     raise ClosedEvidenceFailure(reason)
 
@@ -1646,13 +1681,13 @@ def _producer_platform_name() -> str:
 
 def _worker_entry(arguments: list[str], remaining: float) -> int:
     if _producer_platform_name() != "nt":
-        return 2
+        return _WORKER_GENERIC_FAILURE_EXIT_CODE
     if (
         not math.isfinite(remaining)
         or remaining <= 0
         or remaining > _IN_PROCESS_LIMIT_SECONDS
     ):
-        return 2
+        return _WORKER_GENERIC_FAILURE_EXIT_CODE
     try:
         with _silence_process_fds():
             private_root, output_path = _cli_paths(arguments)
@@ -1663,8 +1698,15 @@ def _worker_entry(arguments: list[str], remaining: float) -> int:
                     hard_deadline=time.monotonic() + remaining,
                 )
             )
+    except ClosedEvidenceFailure as exc:
+        if type(exc.reason) is not str:
+            return _WORKER_GENERIC_FAILURE_EXIT_CODE
+        return _WORKER_REASON_EXIT_CODES.get(
+            exc.reason,
+            _WORKER_GENERIC_FAILURE_EXIT_CODE,
+        )
     except BaseException:  # noqa: BLE001 -- the parent owns the closed result
-        return 2
+        return _WORKER_GENERIC_FAILURE_EXIT_CODE
     return 0
 
 
@@ -1888,7 +1930,9 @@ def _supervise_production_worker(
     if time.monotonic() >= deadline:
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
     if return_code != 0:
-        raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED")
+        raise ClosedEvidenceFailure(
+            _WORKER_EXIT_CODE_REASONS.get(return_code, "REAL_PRODUCER_FAILED")
+        )
     aggregate = _validate_worker_output(private_root, output_path)
     if time.monotonic() >= deadline:
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")

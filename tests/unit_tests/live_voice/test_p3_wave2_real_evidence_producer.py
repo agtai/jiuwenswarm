@@ -77,6 +77,43 @@ def _private_cli_paths(tmp_path: Path, name: str) -> tuple[Path, Path]:
     return private_root, private_root / "raw-evidence.json"
 
 
+def _closed_failure_worker_command(
+    arguments: list[str],
+    remaining: float,
+    *,
+    reason: object,
+) -> list[str]:
+    failure = (
+        "async def fail(*_args, **_kwargs):\n"
+        f"    raise p.ClosedEvidenceFailure({reason!r})\n"
+    )
+    bootstrap = (
+        "import sys; from scripts.live_voice import "
+        "p3_wave2_real_evidence_producer as p; "
+        f"exec({failure!r}); p._run_production_cli=fail; "
+        "raise SystemExit(p._worker_entry(sys.argv[1:5],float(sys.argv[5])))"
+    )
+    return [sys.executable, "-c", bootstrap, *arguments, f"{remaining:.9f}"]
+
+
+def _runtime_failure_worker_command(
+    arguments: list[str],
+    remaining: float,
+    *,
+    message: str,
+) -> list[str]:
+    failure = (
+        f"async def fail(*_args, **_kwargs):\n    raise RuntimeError({message!r})\n"
+    )
+    bootstrap = (
+        "import sys; from scripts.live_voice import "
+        "p3_wave2_real_evidence_producer as p; "
+        f"exec({failure!r}); p._run_production_cli=fail; "
+        "raise SystemExit(p._worker_entry(sys.argv[1:5],float(sys.argv[5])))"
+    )
+    return [sys.executable, "-c", bootstrap, *arguments, f"{remaining:.9f}"]
+
+
 def _observation(
     *,
     sequence: int,
@@ -513,6 +550,190 @@ def test_registration_rejects_existing_windows_store_junction_before_effects(
     assert raised.value.reason == "PRIVATE_PATH_REPARSE_POINT"
     assert project_calls == []
     assert not outside_database.exists()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "REAL_CONCURRENT_INITIAL_TIMEOUT",
+        "REAL_A2_BUSY_TIMEOUT",
+        "REAL_A1_CANCEL_A2_DEQUEUE_TIMEOUT",
+        "REAL_A2_INITIAL_TOOL_TIMEOUT",
+        "REAL_A2_ADJUST_TIMEOUT",
+        "REAL_B1_CANCEL_TIMEOUT",
+    ],
+)
+@pytest.mark.skipif(os.name != "nt", reason="real producer is Windows-only")
+def test_supervisor_preserves_allowlisted_worker_stage_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    reason: str,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "closed-stage-reason")
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda arguments, remaining: _closed_failure_worker_command(
+            arguments,
+            remaining,
+            reason=reason,
+        ),
+    )
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+
+    assert not output.exists()
+    assert capsys.readouterr() == (
+        f'{{"ok":false,"reason":"{reason}"}}\n',
+        "",
+    )
+
+
+@pytest.mark.parametrize("predicate_kind", ["sync", "async"])
+@pytest.mark.asyncio
+async def test_wait_stage_maps_predicate_exception_without_polling(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate_kind: str,
+) -> None:
+    predicate_calls = 0
+    sleep_calls = 0
+
+    def failing_predicate() -> bool:
+        nonlocal predicate_calls
+        predicate_calls += 1
+        raise RuntimeError("RAW_PREDICATE_EXCEPTION_SENTINEL")
+
+    async def failing_async_predicate() -> bool:
+        nonlocal predicate_calls
+        predicate_calls += 1
+        raise RuntimeError("RAW_ASYNC_PREDICATE_EXCEPTION_SENTINEL")
+
+    async def forbidden_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        raise AssertionError("predicate failure must not poll")
+
+    monkeypatch.setattr(producer.asyncio, "sleep", forbidden_sleep)
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        await producer._wait_stage(
+            (
+                failing_predicate
+                if predicate_kind == "sync"
+                else failing_async_predicate
+            ),
+            deadline=time.monotonic() + 60,
+            reason="REAL_CONCURRENT_INITIAL_TIMEOUT",
+        )
+
+    assert raised.value.reason == "REAL_STAGE_OBSERVATION_FAILED"
+    assert predicate_calls == 1
+    assert sleep_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_stage_preserves_closed_failure_and_polls_normal_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter((False, True))
+    sleep_calls = 0
+
+    async def no_delay(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+
+    monkeypatch.setattr(producer.asyncio, "sleep", no_delay)
+    await producer._wait_stage(
+        lambda: next(results),
+        deadline=time.monotonic() + 60,
+        reason="REAL_CONCURRENT_INITIAL_TIMEOUT",
+    )
+    assert sleep_calls == 1
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        await producer._wait_stage(
+            lambda: (_ for _ in ()).throw(
+                ClosedEvidenceFailure("REAL_MUTATION_REJECTED")
+            ),
+            deadline=time.monotonic() + 60,
+            reason="REAL_CONCURRENT_INITIAL_TIMEOUT",
+        )
+    assert raised.value.reason == "REAL_MUTATION_REJECTED"
+
+
+@pytest.mark.parametrize(
+    "invalid_reason",
+    [
+        pytest.param(None, id="none"),
+        pytest.param([], id="non-hashable"),
+        pytest.param("", id="empty"),
+        pytest.param("RAW_NUL_REASON_SENTINEL\0", id="nul"),
+        pytest.param("R" * 4096, id="oversized"),
+    ],
+)
+def test_worker_entry_rejects_invalid_closed_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_reason: object,
+) -> None:
+    private_root = tmp_path / "invalid-closed-reason"
+    output = private_root / "raw-evidence.json"
+
+    async def fail_with_invalid_reason(*_args, **_kwargs) -> None:
+        raise ClosedEvidenceFailure(invalid_reason)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        producer,
+        "_cli_paths",
+        lambda _arguments: (private_root, output),
+    )
+    monkeypatch.setattr(producer, "_producer_platform_name", lambda: "nt")
+    monkeypatch.setattr(producer, "_run_production_cli", fail_with_invalid_reason)
+
+    assert producer._worker_entry(["ignored"], 1.0) == 2
+
+
+@pytest.mark.parametrize("failure_kind", ["closed", "exception", "crash"])
+@pytest.mark.skipif(os.name != "nt", reason="real producer is Windows-only")
+def test_supervisor_maps_unknown_worker_failure_to_one_closed_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    failure_kind: str,
+) -> None:
+    private_root, output = _private_cli_paths(
+        tmp_path,
+        f"unknown-worker-{failure_kind}",
+    )
+    sentinel = f"RAW_{failure_kind.upper()}_FAILURE_SENTINEL"
+
+    def command(arguments: list[str], remaining: float) -> list[str]:
+        if failure_kind == "closed":
+            return _closed_failure_worker_command(
+                arguments,
+                remaining,
+                reason=sentinel,
+            )
+        if failure_kind == "exception":
+            return _runtime_failure_worker_command(
+                arguments,
+                remaining,
+                message=sentinel,
+            )
+        return [sys.executable, "-c", "import os; os._exit(17)"]
+
+    monkeypatch.setattr(producer, "_worker_command", command)
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured == (
+        '{"ok":false,"reason":"REAL_PRODUCER_FAILED"}\n',
+        "",
+    )
+    assert sentinel not in captured.out
+    assert not output.exists()
 
 
 def test_blocking_private_preflight_is_bounded_by_worker_supervisor(
