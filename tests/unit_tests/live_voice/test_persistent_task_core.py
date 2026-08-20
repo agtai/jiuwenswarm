@@ -6668,3 +6668,173 @@ async def test_cancelled_claim_release_failure_has_explicit_precedence(
         ).fetchone()
     assert outbox == ("claimed", "failed-release", 1)
     assert executor.dispatches == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["ordinary", "process_control"])
+async def test_repeated_cancelled_claim_preserves_explicit_worker_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    database = tmp_path / f"claim-worker-{failure_kind}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    original_claim = store.claim_outbox
+    entered = threading.Event()
+    release = threading.Event()
+    failure: BaseException
+    if failure_kind == "ordinary":
+        failure = RuntimeError("claim worker ordinary failure")
+    else:
+        failure = GeneratorExit("claim worker process-control failure")
+
+    def failing_claim(_worker_id: str) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise failure
+
+    monkeypatch.setattr(store, "claim_outbox", failing_claim)
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="claim-owner"))
+    assert await asyncio.to_thread(entered.wait, 2)
+    draining.cancel("first claim caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("second claim caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("third claim caller cancellation")
+    await asyncio.sleep(0)
+    assert not draining.done()
+    release.set()
+
+    if failure_kind == "ordinary":
+        with pytest.raises(
+            asyncio.CancelledError,
+            match="first claim caller cancellation",
+        ) as raised:
+            await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    else:
+        with pytest.raises(GeneratorExit) as raised:
+            await draining
+        assert raised.value is failure
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    assert executor.dispatches == []
+    monkeypatch.setattr(store, "claim_outbox", original_claim)
+    reopened_executor = _Executor()
+    reopened = PersistentTaskCore(SqliteTaskStore(database), reopened_executor)
+    assert await reopened.drain_outbox_once(worker_id="claim-successor") is True
+    assert len(reopened_executor.dispatches) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["ordinary", "process_control"])
+async def test_repeated_cancelled_adjustment_preserves_worker_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    database = tmp_path / f"adjustment-worker-{failure_kind}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(worker_id="dispatch-owner") is True
+    command, grant = _adjust(
+        str(created.result["task_id"]),
+        "Move the museum visit to 10:00.",
+    )
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok
+    original_complete = store.complete_adjustment_outbox
+    entered = threading.Event()
+    release = threading.Event()
+    failure: BaseException
+    if failure_kind == "ordinary":
+        failure = RuntimeError("adjustment worker ordinary failure")
+    else:
+        failure = GeneratorExit("adjustment worker process-control failure")
+
+    def failing_complete(*_args, **_kwargs) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise failure
+
+    monkeypatch.setattr(store, "complete_adjustment_outbox", failing_complete)
+    draining = asyncio.create_task(
+        core.drain_outbox_once(worker_id="adjustment-failure-owner")
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+    draining.cancel("first adjustment caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("second adjustment caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("third adjustment caller cancellation")
+    await asyncio.sleep(0)
+    assert not draining.done()
+    release.set()
+
+    if failure_kind == "ordinary":
+        with pytest.raises(
+            asyncio.CancelledError,
+            match="first adjustment caller cancellation",
+        ) as raised:
+            await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    else:
+        with pytest.raises(GeneratorExit) as raised:
+            await draining
+        assert raised.value is failure
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    assert executor.adjustments == [command.command_id]
+    assert executor.adjustment_settlements == []
+    monkeypatch.setattr(store, "complete_adjustment_outbox", original_complete)
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT state, claimed_by FROM outbox WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+    assert row == ("claimed", "adjustment-failure-owner")
+
+
+@pytest.mark.asyncio
+async def test_retained_owner_preserves_its_own_exact_cancellation() -> None:
+    inner_cancellation = asyncio.CancelledError("retained owner cancelled itself")
+
+    async def cancel_self() -> None:
+        raise inner_cancellation
+
+    owner = asyncio.create_task(cancel_self())
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await PersistentTaskCore._await_retained(owner)
+
+    assert raised.value is inner_cancellation
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None

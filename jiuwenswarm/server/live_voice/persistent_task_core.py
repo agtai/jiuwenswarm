@@ -281,8 +281,14 @@ class PersistentTaskCore:
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError as error:
+                if task.done() and task.cancelled():
+                    break
                 if cancellation is None:
                     cancellation = error
+            except Exception:
+                # Read the settled task below so one earlier caller
+                # cancellation remains authoritative over ordinary failure.
+                break
         ordinary_failure: Exception | None = None
         try:
             result = task.result()
@@ -315,8 +321,14 @@ class PersistentTaskCore:
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError as error:
+                if task.done() and task.cancelled():
+                    break
                 if cancellation is None:
                     cancellation = error
+            except Exception:
+                # Apply the same caller-cancellation precedence as the common
+                # retained Store owner without swallowing BaseException.
+                break
         ordinary_failure: Exception | None = None
         try:
             item = task.result()
