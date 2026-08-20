@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import hmac
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ _P3_MUTATION_OPERATIONS = frozenset(
     {"task.create", "task.adjust", "task.cancel", "task.retry"}
 )
 _P3_RETRY_ELIGIBLE_OUTCOMES = frozenset({"cancelled", "completed"})
+_P3_REPLAY_FENCE_MARKER = "__p3_confirmation_replay_fence_v1__"
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:
@@ -70,6 +72,65 @@ def _validate_capacity(capacity: int) -> int:
             ErrorCode.INVALID_ARGUMENT,
         )
     return capacity
+
+
+def _binding_digest_from_values(
+    *,
+    principal_id: object,
+    scope_key: object,
+    operation: object,
+    command_id: object,
+    target_task_id: object,
+    intent_fingerprint: object,
+) -> str:
+    payload = {
+        "principal_id": principal_id,
+        "scope_key": scope_key,
+        "operation": operation,
+        "command_id": command_id,
+        "target_task_id": target_task_id,
+        "intent_fingerprint": intent_fingerprint,
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _binding_digest(binding: P3ConfirmationBinding) -> str:
+    return _binding_digest_from_values(
+        principal_id=binding.principal_id,
+        scope_key=_scope_key(binding.scope),
+        operation=binding.operation,
+        command_id=binding.command_id,
+        target_task_id=binding.target_task_id,
+        intent_fingerprint=binding.intent_fingerprint,
+    )
+
+
+def _owned_issue_digest_from_values(
+    *,
+    binding_digest: str,
+    expires_at: object,
+    owner_session_id: object,
+    owner_correlation_id: object,
+    owner_generation: object,
+) -> str:
+    payload = {
+        "binding_sha256": binding_digest,
+        "expires_at": expires_at,
+        "owner_session_id": owner_session_id,
+        "owner_correlation_id": owner_correlation_id,
+        "owner_generation": owner_generation,
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _owned_issue_digest(issue: TrustedP3ConfirmationIssue) -> str:
+    return _owned_issue_digest_from_values(
+        binding_digest=_binding_digest(issue.binding),
+        expires_at=issue.expires_at,
+        owner_session_id=issue.owner.session_id,
+        owner_correlation_id=issue.owner.correlation_id,
+        owner_generation=issue.owner.owner_generation,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,7 +440,7 @@ class P3ConfirmationVerifier(Protocol):
 
 
 class SqliteP3ConfirmationLedger:
-    """Bounded durable ledger; records are never evicted or overwritten."""
+    """Bounded durable ledger with live authority and compact replay fences."""
 
     def __init__(
         self,
@@ -498,6 +559,7 @@ class SqliteP3ConfirmationLedger:
                     "confirmation_id is already issued",
                     ErrorCode.CONFLICT,
                 )
+            self._prepare_new_admission(connection, now=now)
             self._require_capacity(connection)
             connection.execute(
                 """
@@ -570,6 +632,19 @@ class SqliteP3ConfirmationLedger:
                 issue.owner.owner_generation,
             )
             if existing is not None:
+                if self._is_replay_fence(existing):
+                    if not self._replay_fence_issue_matches(existing, issue):
+                        raise FormalTaskViolation(
+                            "P3_CONFIRMATION_CONFLICT",
+                            "confirmation_id is already issued for another request",
+                            ErrorCode.CONFLICT,
+                        )
+                    connection.commit()
+                    return IssuedP3Confirmation(
+                        confirmation_id=identifier,
+                        expires_at=str(existing["expires_at"]),
+                        replayed=True,
+                    )
                 actual = (
                     existing["principal_id"],
                     existing["scope_key"],
@@ -594,6 +669,7 @@ class SqliteP3ConfirmationLedger:
                     expires_at=str(existing["expires_at"]),
                     replayed=True,
                 )
+            self._prepare_new_admission(connection, now=now)
             self._require_capacity(connection)
             connection.execute(
                 """
@@ -638,9 +714,119 @@ class SqliteP3ConfirmationLedger:
         finally:
             connection.close()
 
+    @staticmethod
+    def _is_replay_fence(row: sqlite3.Row) -> bool:
+        return (
+            row["consumed_at"] is not None
+            and row["principal_id"] == _P3_REPLAY_FENCE_MARKER
+            and row["operation"] == _P3_REPLAY_FENCE_MARKER
+        )
+
+    @staticmethod
+    def _row_binding_digest(row: sqlite3.Row) -> str:
+        return _binding_digest_from_values(
+            principal_id=row["principal_id"],
+            scope_key=row["scope_key"],
+            operation=row["operation"],
+            command_id=row["command_id"],
+            target_task_id=row["target_task_id"],
+            intent_fingerprint=row["intent_fingerprint"],
+        )
+
+    @classmethod
+    def _row_owned_issue_digest(cls, row: sqlite3.Row) -> str:
+        return _owned_issue_digest_from_values(
+            binding_digest=cls._row_binding_digest(row),
+            expires_at=row["expires_at"],
+            owner_session_id=row["owner_session_id"],
+            owner_correlation_id=row["owner_correlation_id"],
+            owner_generation=row["owner_generation"],
+        )
+
+    @staticmethod
+    def _replay_fence_binding_matches(
+        row: sqlite3.Row,
+        binding: P3ConfirmationBinding,
+    ) -> bool:
+        stored_digest = row["scope_key"]
+        return type(stored_digest) is str and hmac.compare_digest(
+            stored_digest,
+            _binding_digest(binding),
+        )
+
+    @staticmethod
+    def _replay_fence_issue_matches(
+        row: sqlite3.Row,
+        issue: TrustedP3ConfirmationIssue,
+    ) -> bool:
+        stored_digest = row["command_id"]
+        return type(stored_digest) is str and hmac.compare_digest(
+            stored_digest,
+            _owned_issue_digest(issue),
+        )
+
+    def _prepare_new_admission(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        now: str,
+    ) -> None:
+        """Reclaim heavy terminal rows inside the caller's write transaction."""
+
+        current = _parse_utc(now, "now")
+        rows = connection.execute(
+            "SELECT * FROM p3_confirmations ORDER BY issued_at, confirmation_id"
+        ).fetchall()
+        for row in rows:
+            expired = (
+                _parse_utc(row["expires_at"], "confirmation.expires_at") <= current
+            )
+            if self._is_replay_fence(row):
+                continue
+            if row["consumed_at"] is None and not expired:
+                continue
+            binding_digest = self._row_binding_digest(row)
+            owned_issue_digest = self._row_owned_issue_digest(row)
+            connection.execute(
+                """
+                UPDATE p3_confirmations
+                SET principal_id=?, scope_key=?, operation=?, command_id=?,
+                    target_task_id=NULL, intent_fingerprint='',
+                    owner_session_id=NULL, owner_correlation_id=NULL,
+                    owner_generation=NULL, consumed_at=?
+                WHERE confirmation_id=?
+                """,
+                (
+                    _P3_REPLAY_FENCE_MARKER,
+                    binding_digest,
+                    _P3_REPLAY_FENCE_MARKER,
+                    owned_issue_digest,
+                    row["consumed_at"] or now,
+                    row["confirmation_id"],
+                ),
+            )
+        replay_fences = connection.execute(
+            """
+            SELECT confirmation_id
+            FROM p3_confirmations
+            WHERE consumed_at IS NOT NULL
+              AND principal_id=?
+              AND operation=?
+            ORDER BY consumed_at DESC, issued_at DESC, confirmation_id DESC
+            """,
+            (_P3_REPLAY_FENCE_MARKER, _P3_REPLAY_FENCE_MARKER),
+        ).fetchall()
+        for fence in replay_fences[self._capacity :]:
+            connection.execute(
+                "DELETE FROM p3_confirmations WHERE confirmation_id=?",
+                (fence["confirmation_id"],),
+            )
+
     def _require_capacity(self, connection: sqlite3.Connection) -> None:
         retained = int(
-            connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[0]
+            connection.execute(
+                "SELECT COUNT(*) FROM p3_confirmations WHERE consumed_at IS NULL"
+            ).fetchone()[0]
         )
         if retained >= self._capacity:
             raise FormalTaskViolation(
@@ -671,29 +857,39 @@ class SqliteP3ConfirmationLedger:
                     "formal task confirmation is unavailable or invalid",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            expected = (
-                binding.principal_id,
-                _scope_key(binding.scope),
-                binding.operation,
-                binding.command_id,
-                binding.target_task_id,
-                binding.intent_fingerprint,
-                owner.session_id,
-                owner.correlation_id,
-                owner.owner_generation,
-            )
-            actual = (
-                row["principal_id"],
-                row["scope_key"],
-                row["operation"],
-                row["command_id"],
-                row["target_task_id"],
-                row["intent_fingerprint"],
-                row["owner_session_id"],
-                row["owner_correlation_id"],
-                row["owner_generation"],
-            )
-            if actual != expected:
+            if self._is_replay_fence(row):
+                issue = TrustedP3ConfirmationIssue(
+                    binding=binding,
+                    owner=owner,
+                    expires_at=str(row["expires_at"]),
+                    confirmation_id=confirmation_id,
+                )
+                matched = self._replay_fence_issue_matches(row, issue)
+            else:
+                expected = (
+                    binding.principal_id,
+                    _scope_key(binding.scope),
+                    binding.operation,
+                    binding.command_id,
+                    binding.target_task_id,
+                    binding.intent_fingerprint,
+                    owner.session_id,
+                    owner.correlation_id,
+                    owner.owner_generation,
+                )
+                actual = (
+                    row["principal_id"],
+                    row["scope_key"],
+                    row["operation"],
+                    row["command_id"],
+                    row["target_task_id"],
+                    row["intent_fingerprint"],
+                    row["owner_session_id"],
+                    row["owner_correlation_id"],
+                    row["owner_generation"],
+                )
+                matched = actual == expected
+            if not matched:
                 raise FormalTaskViolation(
                     "P3_CONFIRMATION_BINDING_MISMATCH",
                     "formal task confirmation does not bind the exact owner invocation",
@@ -742,23 +938,28 @@ class SqliteP3ConfirmationLedger:
                     "formal task confirmation is unavailable or invalid",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            expected = (
-                binding.principal_id,
-                _scope_key(binding.scope),
-                binding.operation,
-                binding.command_id,
-                binding.target_task_id,
-                binding.intent_fingerprint,
-            )
-            actual = (
-                row["principal_id"],
-                row["scope_key"],
-                row["operation"],
-                row["command_id"],
-                row["target_task_id"],
-                row["intent_fingerprint"],
-            )
-            if actual != expected:
+            replay_fence = self._is_replay_fence(row)
+            if replay_fence:
+                matched = self._replay_fence_binding_matches(row, binding)
+            else:
+                expected = (
+                    binding.principal_id,
+                    _scope_key(binding.scope),
+                    binding.operation,
+                    binding.command_id,
+                    binding.target_task_id,
+                    binding.intent_fingerprint,
+                )
+                actual = (
+                    row["principal_id"],
+                    row["scope_key"],
+                    row["operation"],
+                    row["command_id"],
+                    row["target_task_id"],
+                    row["intent_fingerprint"],
+                )
+                matched = actual == expected
+            if not matched:
                 raise FormalTaskViolation(
                     "P3_CONFIRMATION_BINDING_MISMATCH",
                     "formal task confirmation does not bind the exact invocation",
@@ -772,7 +973,7 @@ class SqliteP3ConfirmationLedger:
                     "formal task confirmation has expired",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            replayed = row["consumed_at"] is not None
+            replayed = replay_fence or row["consumed_at"] is not None
             if not replayed:
                 connection.execute(
                     "UPDATE p3_confirmations SET consumed_at=? WHERE confirmation_id=?",
