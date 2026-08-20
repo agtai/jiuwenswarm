@@ -514,6 +514,14 @@ async def test_wire_codec_logs_are_content_free_across_all_public_paths(
     assert escaped_failures == []
     assert len(fallback_wires) == 4
     assert len(fallback_sent_payloads) == 4
+    assert fallback_wires[0]["request_id"] == "fallback-safe-unary-request"
+    assert fallback_wires[0]["channel"] == "web"
+    assert fallback_wires[0]["response_id"] == "fallback-safe-unary-response"
+    assert fallback_wires[0]["sequence"] == 3
+    assert fallback_wires[2]["request_id"] == "fallback-safe-chunk-request"
+    assert fallback_wires[2]["channel"] == "web"
+    assert fallback_wires[2]["response_id"] == "fallback-safe-chunk-response"
+    assert fallback_wires[2]["sequence"] == 4
     expected_failure_details = {
         "code": "E2A.WIRE_ENCODE_ERROR",
         "category": "wire_encode",
@@ -604,6 +612,150 @@ async def test_wire_codec_logs_are_content_free_across_all_public_paths(
     assert "status=" not in log_material
     assert "keys=" not in log_material
     assert not [record for record in records if record.exc_info is not None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("hostile_field", ("request_id", "channel_id"))
+async def test_wire_fallback_sanitizes_hostile_legacy_scalars_before_real_send(
+    form,
+    hostile_field,
+    caplog,
+    monkeypatch,
+) -> None:
+    hooks: list[str] = []
+
+    class HostileStr(str):
+        def __str__(self) -> str:
+            hooks.append("__str__")
+            raise AssertionError("sentinel-fallback-hostile-str-hook")
+
+        def __repr__(self) -> str:
+            hooks.append("__repr__")
+            raise AssertionError("sentinel-fallback-hostile-repr-hook")
+
+        def __deepcopy__(self, _memo):
+            hooks.append("__deepcopy__")
+            raise AssertionError("sentinel-fallback-hostile-deepcopy-hook")
+
+    private_cause = RuntimeError("sentinel-fallback-conversion-cause")
+    private_failure_type = type(
+        "SentinelFallbackConversionFailure",
+        (RuntimeError,),
+        {},
+    )
+    private_failure = private_failure_type("sentinel-fallback-conversion-message")
+
+    def fail_conversion(*_args, **_kwargs):
+        raise private_failure from private_cause
+
+    wire_logger = logging.getLogger("jiuwenswarm.common.e2a.wire_codec")
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.common.e2a.wire_codec.production_consumer"
+    )
+    for target_logger in (wire_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+
+    hostile = HostileStr(f"sentinel-fallback-{form}-{hostile_field}")
+    safe_request_id = f"safe-{form}-request"
+    safe_channel_id = f"safe-{form}-channel"
+    if form == "unary":
+        monkeypatch.setattr(
+            wire_codec,
+            "e2a_response_from_agent_response",
+            fail_conversion,
+        )
+        source = AgentResponse(
+            request_id=(hostile if hostile_field == "request_id" else safe_request_id),
+            channel_id=(hostile if hostile_field == "channel_id" else safe_channel_id),
+            ok=True,
+            payload={"result": "ordinary unary fallback"},
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+    else:
+        monkeypatch.setattr(
+            wire_codec,
+            "e2a_response_from_agent_chunk",
+            fail_conversion,
+        )
+        source = AgentResponseChunk(
+            request_id=(hostile if hostile_field == "request_id" else safe_request_id),
+            channel_id=(hostile if hostile_field == "channel_id" else safe_channel_id),
+            payload={"result": "ordinary chunk fallback"},
+            is_complete=False,
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_CHUNK_KEY
+
+    sent_payloads: list[str] = []
+
+    class RecordingWebSocket:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(payload)
+
+    escaped: BaseException | None = None
+    formatted = ""
+    wire: dict | None = None
+    try:
+        try:
+            if form == "unary":
+                wire = encode_agent_response_for_wire(
+                    source,
+                    response_id=f"safe-{form}-response",
+                    sequence=17,
+                )
+            else:
+                wire = encode_agent_chunk_for_wire(
+                    source,
+                    response_id=f"safe-{form}-response",
+                    sequence=17,
+                )
+            assert await ws_send.send_wire_payload(RecordingWebSocket(), wire) is True
+        except BaseException as exc:
+            escaped = exc
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("wire fallback consumer failed")
+    finally:
+        for target_logger in (wire_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert escaped is None
+    assert hooks == []
+    assert wire is not None
+    assert len(sent_payloads) == 1
+    assert json.loads(sent_payloads[0]) == wire
+    assert wire["response_id"] == f"safe-{form}-response"
+    assert wire["sequence"] == 17
+    assert wire["body"]["details"] == {
+        "code": "E2A.WIRE_ENCODE_ERROR",
+        "category": "wire_encode",
+    }
+    legacy = wire["metadata"][legacy_key]
+    assert legacy[hostile_field] == ""
+    if hostile_field == "request_id":
+        assert wire["request_id"] == ""
+        assert wire["channel"] == safe_channel_id
+        assert legacy["channel_id"] == safe_channel_id
+    else:
+        assert wire["request_id"] == safe_request_id
+        assert wire["channel"] is None
+        assert legacy["request_id"] == safe_request_id
+
+    diagnostics = f"{formatted}\n{caplog.text}\n{sent_payloads[0]}"
+    forbidden = (
+        "sentinel-fallback-unary-request_id",
+        "sentinel-fallback-unary-channel_id",
+        "sentinel-fallback-chunk-request_id",
+        "sentinel-fallback-chunk-channel_id",
+        "SentinelFallbackConversionFailure",
+        "sentinel-fallback-conversion-message",
+        "sentinel-fallback-conversion-cause",
+        "sentinel-fallback-hostile-str-hook",
+        "sentinel-fallback-hostile-repr-hook",
+        "sentinel-fallback-hostile-deepcopy-hook",
+    )
+    assert not [marker for marker in forbidden if marker in diagnostics]
+    assert not [record for record in caplog.records if record.exc_info is not None]
 
 
 # ---------------------------------------------------------------------------

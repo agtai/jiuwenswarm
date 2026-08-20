@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
@@ -79,6 +78,131 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return _json_safe(vars(value))
     return str(value)
+
+
+def _exact_legacy_scalar(value: Any) -> Any:
+    """Keep exact JSON scalars and replace subclasses/objects without hooks."""
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    return ""
+
+
+def _exact_legacy_text(value: Any, *, none_as_empty: bool) -> str:
+    """Match legacy builtin-to-text behavior without calling subclass hooks."""
+    value_type = type(value)
+    if value_type is str:
+        return value
+    if value is None:
+        return "" if none_as_empty else "None"
+    if value_type is bool:
+        return "True" if value else "False"
+    if value_type in (int, float):
+        return str(value)
+    return ""
+
+
+def _exact_legacy_channel_text(value: Any) -> str:
+    """Preserve legacy ``str(value or '')`` semantics for exact builtins."""
+    value_type = type(value)
+    if value is None:
+        return ""
+    if value_type is str:
+        return value
+    if value_type is bool:
+        return "True" if value else ""
+    if value_type in (int, float):
+        return str(value) if value else ""
+    return ""
+
+
+def _agent_response_legacy_snapshot(resp: AgentResponse) -> dict[str, Any]:
+    """Project known response fields without dataclass deepcopy hooks."""
+    if type(resp) is not AgentResponse:
+        return {
+            "request_id": "",
+            "channel_id": "",
+            "ok": False,
+            "payload": None,
+            "metadata": None,
+            "agent_ref": None,
+        }
+    fields = object.__getattribute__(resp, "__dict__")
+    if type(fields) is not dict:
+        return {
+            "request_id": "",
+            "channel_id": "",
+            "ok": False,
+            "payload": None,
+            "metadata": None,
+            "agent_ref": None,
+        }
+    return {
+        "request_id": _exact_legacy_scalar(fields.get("request_id")),
+        "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
+        "ok": fields.get("ok") if type(fields.get("ok")) is bool else False,
+        "payload": _json_safe(fields.get("payload")),
+        "metadata": _json_safe(fields.get("metadata")),
+        "agent_ref": _json_safe(fields.get("agent_ref")),
+    }
+
+
+def _agent_chunk_legacy_snapshot(chunk: AgentResponseChunk) -> dict[str, Any]:
+    """Project known chunk fields without dataclass deepcopy hooks."""
+    if type(chunk) is not AgentResponseChunk:
+        return {
+            "request_id": "",
+            "channel_id": "",
+            "payload": None,
+            "is_complete": False,
+            "agent_ref": None,
+            "metadata": {},
+        }
+    fields = object.__getattribute__(chunk, "__dict__")
+    if type(fields) is not dict:
+        return {
+            "request_id": "",
+            "channel_id": "",
+            "payload": None,
+            "is_complete": False,
+            "agent_ref": None,
+            "metadata": {},
+        }
+    return {
+        "request_id": _exact_legacy_scalar(fields.get("request_id")),
+        "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
+        "payload": _json_safe(fields.get("payload")),
+        "is_complete": (
+            fields.get("is_complete")
+            if type(fields.get("is_complete")) is bool
+            else False
+        ),
+        "agent_ref": _json_safe(fields.get("agent_ref")),
+        "metadata": _json_safe(fields.get("metadata")),
+    }
+
+
+def _sanitize_fallback_legacy_scalars(
+    legacy: dict[str, Any],
+    *,
+    chunk: bool,
+) -> dict[str, Any]:
+    """Ensure every fallback scalar later inspected is an exact builtin."""
+    if type(legacy) is not dict:
+        return {
+            "request_id": "",
+            "channel_id": "",
+            **({"is_complete": False} if chunk else {"ok": False}),
+        }
+    safe = dict(legacy)
+    safe["request_id"] = _exact_legacy_scalar(legacy.get("request_id", ""))
+    safe["channel_id"] = _exact_legacy_scalar(legacy.get("channel_id", ""))
+    if chunk:
+        complete = legacy.get("is_complete", False)
+        safe["is_complete"] = complete if type(complete) is bool else False
+    else:
+        ok = legacy.get("ok", False)
+        safe["ok"] = ok if type(ok) is bool else False
+    return safe
 
 
 def _raw_dict_to_agent_response(data: dict[str, Any]) -> AgentResponse:
@@ -266,7 +390,7 @@ def encode_agent_response_for_wire(
                 _safe_exception_class(te),
             )
             return _fallback_wire_unary_from_legacy(
-                _json_safe(asdict(resp)),
+                _agent_response_legacy_snapshot(resp),
                 response_id=response_id,
                 sequence=sequence,
             )
@@ -280,7 +404,7 @@ def encode_agent_response_for_wire(
             _safe_exception_class(e),
         )
         return _fallback_wire_unary_from_legacy(
-            _json_safe(asdict(resp)),
+            _agent_response_legacy_snapshot(resp),
             response_id=response_id,
             sequence=sequence,
         )
@@ -309,7 +433,7 @@ def encode_agent_chunk_for_wire(
                 _safe_exception_class(te),
             )
             return _fallback_wire_chunk_from_legacy(
-                _json_safe(asdict(chunk)),
+                _agent_chunk_legacy_snapshot(chunk),
                 response_id=response_id,
                 sequence=sequence,
                 is_stream=is_stream,
@@ -322,7 +446,7 @@ def encode_agent_chunk_for_wire(
             _safe_exception_class(e),
         )
         return _fallback_wire_chunk_from_legacy(
-            _json_safe(asdict(chunk)),
+            _agent_chunk_legacy_snapshot(chunk),
             response_id=response_id,
             sequence=sequence,
             is_stream=is_stream,
@@ -335,6 +459,7 @@ def _fallback_wire_unary_from_legacy(
     response_id: str,
     sequence: int,
 ) -> dict[str, Any]:
+    legacy = _sanitize_fallback_legacy_scalars(legacy, chunk=False)
     ts = utc_now_iso()
     prov = E2AProvenance(
         source_protocol=E2A_SOURCE_PROTOCOL_E2A,
@@ -344,9 +469,11 @@ def _fallback_wire_unary_from_legacy(
     )
     e2a = E2AResponse(
         protocol_version=E2A_PROTOCOL_VERSION,
-        response_id=response_id,
-        request_id=str(legacy.get("request_id", "")),
-        sequence=sequence,
+        response_id=_exact_legacy_scalar(response_id),
+        request_id=_exact_legacy_text(
+            legacy.get("request_id", ""), none_as_empty=False
+        ),
+        sequence=sequence if type(sequence) is int else 0,
         is_final=True,
         status=E2A_RESPONSE_STATUS_FAILED,
         response_kind=E2A_RESPONSE_KIND_E2A_ERROR,
@@ -357,7 +484,7 @@ def _fallback_wire_unary_from_legacy(
             "message": "Failed to encode AgentResponse as E2A; see metadata legacy blob",
             "details": dict(_WIRE_ENCODE_FAILURE_DETAILS),
         },
-        channel=str(legacy.get("channel_id") or "") or None,
+        channel=_exact_legacy_channel_text(legacy.get("channel_id")) or None,
         metadata={E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY: legacy},
         identity_origin=IdentityOrigin.AGENT,
         is_stream=False,
@@ -372,6 +499,7 @@ def _fallback_wire_chunk_from_legacy(
     sequence: int,
     is_stream: bool,
 ) -> dict[str, Any]:
+    legacy = _sanitize_fallback_legacy_scalars(legacy, chunk=True)
     ts = utc_now_iso()
     prov = E2AProvenance(
         source_protocol=E2A_SOURCE_PROTOCOL_E2A,
@@ -381,10 +509,12 @@ def _fallback_wire_chunk_from_legacy(
     )
     e2a = E2AResponse(
         protocol_version=E2A_PROTOCOL_VERSION,
-        response_id=response_id,
-        request_id=str(legacy.get("request_id", "")),
-        sequence=sequence,
-        is_final=bool(legacy.get("is_complete", False)),
+        response_id=_exact_legacy_scalar(response_id),
+        request_id=_exact_legacy_text(
+            legacy.get("request_id", ""), none_as_empty=False
+        ),
+        sequence=sequence if type(sequence) is int else 0,
+        is_final=legacy.get("is_complete", False),
         status=E2A_RESPONSE_STATUS_FAILED,
         response_kind=E2A_RESPONSE_KIND_E2A_ERROR,
         timestamp=ts,
@@ -394,10 +524,10 @@ def _fallback_wire_chunk_from_legacy(
             "message": "Failed to encode AgentResponseChunk as E2A; see metadata legacy blob",
             "details": dict(_WIRE_ENCODE_FAILURE_DETAILS),
         },
-        channel=str(legacy.get("channel_id") or "") or None,
+        channel=_exact_legacy_channel_text(legacy.get("channel_id")) or None,
         metadata={E2A_WIRE_LEGACY_AGENT_CHUNK_KEY: legacy},
         identity_origin=IdentityOrigin.AGENT,
-        is_stream=is_stream,
+        is_stream=is_stream if type(is_stream) is bool else True,
     )
     return e2a.to_dict()
 

@@ -11,6 +11,7 @@ from websockets.frames import Close
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.e2a.gateway_normalize import message_to_e2a
+from jiuwenswarm.common.e2a.models import E2AFileRef
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
@@ -290,6 +291,97 @@ def test_agent_client_log_refs_are_secret_keyed_and_sequence_is_shape_only():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_stream", (False, True))
+async def test_agent_client_preserves_exact_direct_file_ref_on_public_send(
+    monkeypatch,
+    is_stream,
+):
+    monkeypatch.setattr(agent_client, "_STREAM_TRAILING_MESSAGE_GRACE_SECONDS", 0.001)
+    request_id = f"exact-file-ref-{is_stream}"
+    file_ref = E2AFileRef(
+        uri="file:///safe-attachment.txt",
+        name="safe-attachment.txt",
+        mime_type="text/plain",
+        size=7,
+        _meta={"source": "trusted"},
+    )
+    envelope = e2a_from_agent_fields(
+        request_id=request_id,
+        channel_id="web",
+        session_id="exact-file-ref-session",
+        req_method="chat.send",
+        params={"file": file_ref, "content": "ordinary request"},
+        is_stream=is_stream,
+    )
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+
+    if is_stream:
+
+        async def collect_chunks():
+            return [chunk async for chunk in client.send_request_stream(envelope)]
+
+        operation = asyncio.create_task(collect_chunks())
+    else:
+        operation = asyncio.create_task(client.send_request(envelope))
+
+    for _ in range(100):
+        if ws.sent_payloads and client.has_message_queue_for_test(request_id):
+            break
+        await asyncio.sleep(0.001)
+    assert ws.sent_payloads
+    assert client.has_message_queue_for_test(request_id)
+
+    if is_stream:
+        await client.get_message_queue_for_test(request_id).put(
+            encode_agent_chunk_for_wire(
+                AgentResponseChunk(
+                    request_id=request_id,
+                    channel_id="web",
+                    payload={"is_complete": True},
+                    is_complete=True,
+                ),
+                response_id=request_id,
+                sequence=0,
+            )
+        )
+        chunks = await operation
+        assert len(chunks) == 1 and chunks[0].is_complete is True
+    else:
+        await client.get_message_queue_for_test(request_id).put(
+            encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id=request_id,
+                    channel_id="web",
+                    ok=True,
+                    payload={"result": "accepted"},
+                ),
+                response_id=request_id,
+            )
+        )
+        response = await operation
+        assert response.payload == {"result": "accepted"}
+
+    sent = json.loads(ws.sent_payloads[0])
+    assert sent["params"]["file"] == {
+        "uri": "file:///safe-attachment.txt",
+        "name": "safe-attachment.txt",
+        "mime_type": "text/plain",
+        "size": 7,
+        "_meta": {"source": "trusted"},
+    }
+    assert envelope.params["file"] is file_ref
+    assert file_ref == E2AFileRef(
+        uri="file:///safe-attachment.txt",
+        name="safe-attachment.txt",
+        mime_type="text/plain",
+        size=7,
+        _meta={"source": "trusted"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak(
     caplog,
 ):
@@ -325,6 +417,21 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
         def items(self):
             hooks.append("dict.items")
             raise AssertionError("sentinel-hostile-dict-hook")
+
+    class HostileFileRef(E2AFileRef):
+        def __getattribute__(self, name: str):
+            if name == "__dataclass_fields__":
+                hooks.append("file-ref.__getattribute__")
+                raise AssertionError("sentinel-hostile-file-ref-lookup-hook")
+            return super().__getattribute__(name)
+
+        def __str__(self) -> str:
+            hooks.append("file-ref.__str__")
+            raise AssertionError("sentinel-hostile-file-ref-str-hook")
+
+        def __repr__(self) -> str:
+            hooks.append("file-ref.__repr__")
+            raise AssertionError("sentinel-hostile-file-ref-repr-hook")
 
     summary = json.loads(
         agent_client._to_json(
@@ -436,6 +543,37 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
                 session_id="unsupported-nested-session",
                 req_method="chat.send",
                 params={"nested": [{"private": value}]},
+                is_stream=is_stream,
+            )
+            failures.append(
+                await invoke_public_path(client, envelope, is_stream=is_stream)
+            )
+            sent_payloads.extend(ws.sent_payloads)
+
+    exact_file_with_hostile_field = E2AFileRef(uri="file:///ordinary.txt")
+    exact_file_with_hostile_field.uri = HostileStr("sentinel-hostile-file-ref-field")
+    hostile_file_cases = (
+        (
+            "subclass",
+            {"file": HostileFileRef(uri="sentinel-hostile-file-ref-subclass")},
+        ),
+        ("field", {"file": exact_file_with_hostile_field}),
+        (
+            "nested-list",
+            {"files": [E2AFileRef(uri="sentinel-nested-list-file-ref")]},
+        ),
+    )
+    for case, params in hostile_file_cases:
+        for is_stream in (False, True):
+            client = AgentClientHarness()
+            ws = FakeWebSocket()
+            client.set_ws_for_test(ws)
+            envelope = e2a_from_agent_fields(
+                request_id=f"unsupported-file-ref-{case}-{is_stream}",
+                channel_id="web",
+                session_id="unsupported-file-ref-session",
+                req_method="chat.send",
+                params=params,
                 is_stream=is_stream,
             )
             failures.append(
@@ -560,6 +698,11 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
         "sentinel-hostile-nested-repr-hook",
         "sentinel-hostile-lookup-hook",
         "sentinel-hostile-dict-hook",
+        "sentinel-hostile-file-ref",
+        "sentinel-nested-list-file-ref",
+        "sentinel-hostile-file-ref-lookup-hook",
+        "sentinel-hostile-file-ref-str-hook",
+        "sentinel-hostile-file-ref-repr-hook",
     )
     assert sent_payloads == []
     assert hooks == []

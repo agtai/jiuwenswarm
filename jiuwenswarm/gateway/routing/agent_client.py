@@ -26,6 +26,7 @@ from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenswarm.common.e2a.models import (
     E2AAuth,
     E2AEnvelope,
+    E2AFileRef,
     E2AProvenance,
     IdentityOrigin,
 )
@@ -172,6 +173,30 @@ def _dump_exact_wire_json(
     return serialized
 
 
+def _validate_exact_file_ref(value: E2AFileRef) -> None:
+    """Validate the one trusted params dataclass without probing subclasses."""
+    if type(value) is not E2AFileRef:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    fields = object.__getattribute__(value, "__dict__")
+    if type(fields) is not dict:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    _validate_exact_wire_json(fields)
+
+
+def _validate_exact_envelope_params(value: Any) -> None:
+    """Mirror the model's direct-dict FileRef conversion and no deeper."""
+    if type(value) is not dict:
+        _validate_exact_wire_json(value)
+        return
+    for key, nested in value.items():
+        if type(key) is not str:
+            raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+        if type(nested) is E2AFileRef:
+            _validate_exact_file_ref(nested)
+        else:
+            _validate_exact_wire_json(nested)
+
+
 def _validate_exact_envelope_source(envelope: E2AEnvelope) -> None:
     """Preflight trusted model fields before its serializer can inspect values."""
     if type(envelope) is not E2AEnvelope:
@@ -193,6 +218,8 @@ def _validate_exact_envelope_source(envelope: E2AEnvelope) -> None:
             _validate_exact_wire_json(auth_fields)
         elif field_name == "identity_origin" and type(value) is IdentityOrigin:
             continue
+        elif field_name == "params":
+            _validate_exact_envelope_params(value)
         else:
             _validate_exact_wire_json(value)
 
