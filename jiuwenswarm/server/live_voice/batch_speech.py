@@ -798,7 +798,8 @@ class OpenAICompatibleBatchSpeechProvider:
             bytes(response.content),
             sample_rate_hz=_OPENAI_PCM_SAMPLE_RATE_HZ,
         )
-        audio = _resample_pcm16_mono_wav(
+        audio = await asyncio.to_thread(
+            _resample_pcm16_mono_wav,
             audio,
             target_sample_rate_hz=request.required_sample_rate_hz,
         )

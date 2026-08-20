@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import sys
+import threading
 import wave
 import zlib
 from array import array
@@ -18,6 +19,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from jiuwenswarm.server.live_voice import batch_speech as batch_speech_module
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ErrorCode,
@@ -1679,6 +1681,168 @@ async def test_openai_compatible_adapter_resamples_24khz_pcm_to_16khz() -> None:
     rate, channels, width, samples = _read_wav_samples(result.audio_wav)
     assert (rate, channels, width) == (16_000, 1, 2)
     assert samples == [0, 1_500, 3_000]
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_resampling_runs_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_thread_id = threading.get_ident()
+    resampler_threads: list[int] = []
+    original_resampler = batch_speech_module._resample_pcm16_mono_wav
+
+    def tracking_resampler(
+        audio: bytes,
+        *,
+        target_sample_rate_hz: int,
+    ) -> bytes:
+        resampler_threads.append(threading.get_ident())
+        return original_resampler(
+            audio,
+            target_sample_rate_hz=target_sample_rate_hz,
+        )
+
+    monkeypatch.setattr(
+        batch_speech_module,
+        "_resample_pcm16_mono_wav",
+        tracking_resampler,
+    )
+    provider = _openai_provider_returning(_pcm16_samples([0, 1_000, 2_000]))
+
+    result = await provider.synthesize(
+        ProviderSynthesisRequest("off-loop", "hello", "en-US", None, 48_000)
+    )
+
+    assert result.audio_wav.startswith(b"RIFF")
+    assert len(resampler_threads) == 1
+    assert resampler_threads[0] != loop_thread_id
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_resampling_keeps_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    started = threading.Event()
+    heartbeat = threading.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+    heartbeat_before_release: list[bool] = []
+    original_resampler = batch_speech_module._resample_pcm16_mono_wav
+
+    def blocking_resampler(
+        audio: bytes,
+        *,
+        target_sample_rate_hz: int,
+    ) -> bytes:
+        started.set()
+        try:
+            assert release.wait(2)
+            heartbeat_before_release.append(heartbeat.is_set())
+            return original_resampler(
+                audio,
+                target_sample_rate_hz=target_sample_rate_hz,
+            )
+        finally:
+            worker_finished.set()
+
+    def drive_heartbeat_and_release() -> None:
+        assert started.wait(1)
+        loop.call_soon_threadsafe(heartbeat.set)
+        heartbeat.wait(0.5)
+        release.set()
+
+    monkeypatch.setattr(
+        batch_speech_module,
+        "_resample_pcm16_mono_wav",
+        blocking_resampler,
+    )
+    controller = threading.Thread(target=drive_heartbeat_and_release, daemon=True)
+    controller.start()
+    provider = _openai_provider_returning(_pcm16_samples([0, 1_000, 2_000]))
+
+    try:
+        result = await provider.synthesize(
+            ProviderSynthesisRequest("responsive", "hello", "en-US", None, 48_000)
+        )
+    finally:
+        release.set()
+        controller.join(1)
+
+    assert result.audio_wav.startswith(b"RIFF")
+    assert worker_finished.is_set()
+    assert heartbeat_before_release == [True]
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_cancel_returns_before_worker_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    started = threading.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+    task_finished = threading.Event()
+    cancel_finished_before_release: list[bool] = []
+    task_holder: list[asyncio.Task[ProviderSynthesisResult]] = []
+    original_resampler = batch_speech_module._resample_pcm16_mono_wav
+
+    def blocking_resampler(
+        audio: bytes,
+        *,
+        target_sample_rate_hz: int,
+    ) -> bytes:
+        started.set()
+        try:
+            assert release.wait(2)
+            return original_resampler(
+                audio,
+                target_sample_rate_hz=target_sample_rate_hz,
+            )
+        finally:
+            worker_finished.set()
+
+    def cancel_and_release() -> None:
+        assert started.wait(1)
+        loop.call_soon_threadsafe(task_holder[0].cancel)
+        task_finished.wait(0.5)
+        cancel_finished_before_release.append(task_finished.is_set())
+        release.set()
+
+    monkeypatch.setattr(
+        batch_speech_module,
+        "_resample_pcm16_mono_wav",
+        blocking_resampler,
+    )
+    provider = _openai_provider_returning(_pcm16_samples([0, 1_000, 2_000]))
+    synthesis = asyncio.create_task(
+        provider.synthesize(
+            ProviderSynthesisRequest("cancel", "hello", "en-US", None, 48_000)
+        )
+    )
+    task_holder.append(synthesis)
+    synthesis.add_done_callback(lambda _: task_finished.set())
+    controller = threading.Thread(target=cancel_and_release, daemon=True)
+    controller.start()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await synthesis
+    finally:
+        release.set()
+        await asyncio.to_thread(worker_finished.wait, 1)
+        controller.join(1)
+
+    assert cancel_finished_before_release == [True]
+    assert worker_finished.is_set()
+    recovered = await provider.synthesize(
+        ProviderSynthesisRequest("after-cancel", "hello", "en-US", None, 16_000)
+    )
+    inspected = inspect_pcm16_mono_wav(
+        recovered.audio_wav,
+        expected_sample_rate_hz=16_000,
+    )
+    assert inspected.frame_count == 2
 
 
 @pytest.mark.asyncio
