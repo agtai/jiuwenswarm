@@ -758,6 +758,168 @@ async def test_wire_fallback_sanitizes_hostile_legacy_scalars_before_real_send(
     assert not [record for record in caplog.records if record.exc_info is not None]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize(
+    "hostile_field", ("payload", "metadata", "agent_ref", "nested")
+)
+async def test_wire_fallback_projects_every_legacy_field_without_object_hooks(
+    form,
+    hostile_field,
+    monkeypatch,
+) -> None:
+    hooks: list[str] = []
+
+    class HostileObject:
+        def __getattribute__(self, name):
+            if name in {"model_dump", "dict", "__dict__"}:
+                hooks.append(name)
+                raise AssertionError(f"sentinel-legacy-object-{name}")
+            return object.__getattribute__(self, name)
+
+        def __str__(self) -> str:
+            hooks.append("__str__")
+            raise AssertionError("sentinel-legacy-object-str")
+
+        def __repr__(self) -> str:
+            hooks.append("__repr__")
+            raise AssertionError("sentinel-legacy-object-repr")
+
+    class HostileKey(str):
+        def __str__(self) -> str:
+            hooks.append("key.__str__")
+            raise AssertionError("sentinel-legacy-key-str")
+
+        def __repr__(self) -> str:
+            hooks.append("key.__repr__")
+            raise AssertionError("sentinel-legacy-key-repr")
+
+    private_failure = RuntimeError("sentinel-legacy-conversion-failure")
+
+    def fail_conversion(*_args, **_kwargs):
+        raise private_failure
+
+    hostile = HostileObject()
+    values = {
+        "payload": {"safe": "ordinary"},
+        "metadata": {"safe": "ordinary"},
+        "agent_ref": "ordinary-agent",
+    }
+    if hostile_field == "nested":
+        values["metadata"] = {HostileKey("sentinel-private-key"): hostile}
+    else:
+        values[hostile_field] = hostile
+
+    if form == "unary":
+        monkeypatch.setattr(
+            wire_codec,
+            "e2a_response_from_agent_response",
+            fail_conversion,
+        )
+        source = AgentResponse(
+            request_id="safe-request",
+            channel_id="safe-channel",
+            ok=True,
+            **values,
+        )
+        wire = encode_agent_response_for_wire(
+            source,
+            response_id="safe-response",
+            sequence=19,
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+    else:
+        monkeypatch.setattr(
+            wire_codec,
+            "e2a_response_from_agent_chunk",
+            fail_conversion,
+        )
+        source = AgentResponseChunk(
+            request_id="safe-request",
+            channel_id="safe-channel",
+            is_complete=False,
+            **values,
+        )
+        wire = encode_agent_chunk_for_wire(
+            source,
+            response_id="safe-response",
+            sequence=19,
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_CHUNK_KEY
+
+    sent_payloads: list[str] = []
+
+    class RecordingWebSocket:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(payload)
+
+    assert await ws_send.send_wire_payload(RecordingWebSocket(), wire) is True
+    assert hooks == []
+    assert len(sent_payloads) == 1
+    assert json.loads(sent_payloads[0]) == wire
+    legacy = wire["metadata"][legacy_key]
+    if hostile_field == "nested":
+        assert legacy["metadata"] == {}
+    else:
+        assert legacy[hostile_field] is None
+    diagnostics = sent_payloads[0]
+    assert "sentinel-private-key" not in diagnostics
+    assert "sentinel-legacy" not in diagnostics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("hostile_field", ("request_id", "channel_id"))
+async def test_wire_fallback_bounds_exact_integer_identity_conversion(
+    form,
+    hostile_field,
+    monkeypatch,
+) -> None:
+    huge_integer = 10**5000
+
+    def fail_conversion(*_args, **_kwargs):
+        raise RuntimeError("sentinel-huge-identity-conversion")
+
+    values = {"request_id": "safe-request", "channel_id": "safe-channel"}
+    values[hostile_field] = huge_integer
+    if form == "unary":
+        monkeypatch.setattr(
+            wire_codec,
+            "e2a_response_from_agent_response",
+            fail_conversion,
+        )
+        source = AgentResponse(ok=True, payload={"safe": True}, **values)
+        wire = encode_agent_response_for_wire(
+            source,
+            response_id="safe-response",
+            sequence=23,
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+    else:
+        monkeypatch.setattr(
+            wire_codec,
+            "e2a_response_from_agent_chunk",
+            fail_conversion,
+        )
+        source = AgentResponseChunk(
+            payload={"safe": True},
+            is_complete=False,
+            **values,
+        )
+        wire = encode_agent_chunk_for_wire(
+            source,
+            response_id="safe-response",
+            sequence=23,
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_CHUNK_KEY
+
+    assert wire["metadata"][legacy_key][hostile_field] == ""
+    if hostile_field == "request_id":
+        assert wire["request_id"] == ""
+    else:
+        assert wire["channel"] is None
+
+
 # ---------------------------------------------------------------------------
 # SDD-0010 — wire truncation keeps budget / token_count / child meta
 # ---------------------------------------------------------------------------

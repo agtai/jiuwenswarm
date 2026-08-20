@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
+
+from openjiuwen.core.session.stream import OutputSchema
 
 from jiuwenswarm.common.e2a.constants import (
     E2A_RESPONSE_KIND_E2A_ERROR,
@@ -47,6 +49,9 @@ _WIRE_ENCODE_FAILURE_DETAILS = {
     "code": "E2A.WIRE_ENCODE_ERROR",
     "category": "wire_encode",
 }
+_MAX_LEGACY_JSON_DEPTH = 16
+_MAX_LEGACY_JSON_ITEMS = 1_024
+_MAX_LEGACY_INTEGER_BITS = 4_096
 
 
 def _safe_exception_class(exc: BaseException) -> str:
@@ -57,33 +62,108 @@ def _safe_exception_class(exc: BaseException) -> str:
     return "Exception"
 
 
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+def _bounded_exact_integer(value: Any) -> int | None:
+    if type(value) is not int or value.bit_length() > _MAX_LEGACY_INTEGER_BITS:
+        return None
+    return value
+
+
+def _legacy_json_project(
+    value: Any,
+    *,
+    depth: int = 0,
+    active_containers: set[int] | None = None,
+) -> Any:
+    """Project legacy wire data without invoking untrusted object hooks."""
+
+    value_type = type(value)
+    if value is None or value_type in (str, bool, float):
         return value
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
+    if value_type is int:
+        return _bounded_exact_integer(value)
+    if value_type is datetime:
+        tzinfo = value.tzinfo
+        if tzinfo is not None and type(tzinfo) is not timezone:
+            return None
+        return datetime.isoformat(value)
+    if value_type is date:
+        return date.isoformat(value)
+    if value_type is OutputSchema:
+        fields = object.__getattribute__(value, "__dict__")
+        if type(fields) is not dict:
+            return None
+        return _legacy_json_project(
+            fields,
+            depth=depth + 1,
+            active_containers=active_containers,
+        )
     if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(v) for v in value]
-    if hasattr(value, "model_dump"):
         try:
-            return _json_safe(value.model_dump(mode="json"))
+            enum_value = object.__getattribute__(value, "_value_")
         except Exception:
-            return _json_safe(value.model_dump())
-    if hasattr(value, "dict"):
-        return _json_safe(value.dict())
-    if hasattr(value, "__dict__"):
-        return _json_safe(vars(value))
-    return str(value)
+            return None
+        return _legacy_json_project(
+            enum_value,
+            depth=depth + 1,
+            active_containers=active_containers,
+        )
+    if depth >= _MAX_LEGACY_JSON_DEPTH or value_type not in (
+        dict,
+        list,
+        tuple,
+        set,
+    ):
+        return None
+    if active_containers is None:
+        active_containers = set()
+    marker = id(value)
+    if marker in active_containers:
+        return None
+    active_containers.add(marker)
+    try:
+        if value_type is dict:
+            projected: dict[Any, Any] = {}
+            for index, (key, nested) in enumerate(value.items()):
+                if index >= _MAX_LEGACY_JSON_ITEMS:
+                    break
+                key_type = type(key)
+                if key is None or key_type in (str, bool, float):
+                    projected_key = key
+                elif key_type is int:
+                    projected_key = _bounded_exact_integer(key)
+                    if projected_key is None:
+                        continue
+                else:
+                    continue
+                projected[projected_key] = _legacy_json_project(
+                    nested,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                )
+            return projected
+        projected_items: list[Any] = []
+        for index, nested in enumerate(value):
+            if index >= _MAX_LEGACY_JSON_ITEMS:
+                break
+            projected_items.append(
+                _legacy_json_project(
+                    nested,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                )
+            )
+        return projected_items
+    finally:
+        active_containers.remove(marker)
 
 
 def _exact_legacy_scalar(value: Any) -> Any:
     """Keep exact JSON scalars and replace subclasses/objects without hooks."""
-    if value is None or type(value) in (str, int, float, bool):
+    if value is None or type(value) in (str, float, bool):
         return value
+    if type(value) is int:
+        bounded = _bounded_exact_integer(value)
+        return bounded if bounded is not None else ""
     return ""
 
 
@@ -96,7 +176,11 @@ def _exact_legacy_text(value: Any, *, none_as_empty: bool) -> str:
         return "" if none_as_empty else "None"
     if value_type is bool:
         return "True" if value else "False"
-    if value_type in (int, float):
+    if value_type is int:
+        if _bounded_exact_integer(value) is None:
+            return ""
+        return str(value)
+    if value_type is float:
         return str(value)
     return ""
 
@@ -110,7 +194,11 @@ def _exact_legacy_channel_text(value: Any) -> str:
         return value
     if value_type is bool:
         return "True" if value else ""
-    if value_type in (int, float):
+    if value_type is int:
+        if _bounded_exact_integer(value) is None:
+            return ""
+        return str(value) if value else ""
+    if value_type is float:
         return str(value) if value else ""
     return ""
 
@@ -140,9 +228,9 @@ def _agent_response_legacy_snapshot(resp: AgentResponse) -> dict[str, Any]:
         "request_id": _exact_legacy_scalar(fields.get("request_id")),
         "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
         "ok": fields.get("ok") if type(fields.get("ok")) is bool else False,
-        "payload": _json_safe(fields.get("payload")),
-        "metadata": _json_safe(fields.get("metadata")),
-        "agent_ref": _json_safe(fields.get("agent_ref")),
+        "payload": _legacy_json_project(fields.get("payload")),
+        "metadata": _legacy_json_project(fields.get("metadata")),
+        "agent_ref": _legacy_json_project(fields.get("agent_ref")),
     }
 
 
@@ -170,14 +258,14 @@ def _agent_chunk_legacy_snapshot(chunk: AgentResponseChunk) -> dict[str, Any]:
     return {
         "request_id": _exact_legacy_scalar(fields.get("request_id")),
         "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
-        "payload": _json_safe(fields.get("payload")),
+        "payload": _legacy_json_project(fields.get("payload")),
         "is_complete": (
             fields.get("is_complete")
             if type(fields.get("is_complete")) is bool
             else False
         ),
-        "agent_ref": _json_safe(fields.get("agent_ref")),
-        "metadata": _json_safe(fields.get("metadata")),
+        "agent_ref": _legacy_json_project(fields.get("agent_ref")),
+        "metadata": _legacy_json_project(fields.get("metadata")),
     }
 
 
@@ -397,7 +485,7 @@ def encode_agent_response_for_wire(
         logger.info(
             "[E2A][wire][out] form=unary legacy_stashed=false",
         )
-        return _json_safe(wire)
+        return _legacy_json_project(wire)
     except Exception as e:
         logger.error(
             "[E2A][wire][out][FAIL] stage=encode form=unary exception_class=%s legacy_stashed=true",
@@ -439,7 +527,7 @@ def encode_agent_chunk_for_wire(
                 is_stream=is_stream,
             )
         logger.debug("[E2A][wire][out] form=chunk legacy_stashed=false")
-        return _json_safe(wire)
+        return _legacy_json_project(wire)
     except Exception as e:
         logger.error(
             "[E2A][wire][out][FAIL] stage=encode form=chunk exception_class=%s legacy_stashed=true",
@@ -473,7 +561,7 @@ def _fallback_wire_unary_from_legacy(
         request_id=_exact_legacy_text(
             legacy.get("request_id", ""), none_as_empty=False
         ),
-        sequence=sequence if type(sequence) is int else 0,
+        sequence=_bounded_exact_integer(sequence) or 0,
         is_final=True,
         status=E2A_RESPONSE_STATUS_FAILED,
         response_kind=E2A_RESPONSE_KIND_E2A_ERROR,
@@ -513,7 +601,7 @@ def _fallback_wire_chunk_from_legacy(
         request_id=_exact_legacy_text(
             legacy.get("request_id", ""), none_as_empty=False
         ),
-        sequence=sequence if type(sequence) is int else 0,
+        sequence=_bounded_exact_integer(sequence) or 0,
         is_final=legacy.get("is_complete", False),
         status=E2A_RESPONSE_STATUS_FAILED,
         response_kind=E2A_RESPONSE_KIND_E2A_ERROR,
