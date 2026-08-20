@@ -2914,6 +2914,93 @@ async def test_direct_cancel_flag_crosses_process_lease_without_widening(
 
 
 @pytest.mark.asyncio
+async def test_persisted_user_cancel_wins_normal_agent_completion_and_replays(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    allow_completion = asyncio.Event()
+
+    class CompletingExecutor(_DirectProjectExecutor):
+        async def process_background_code_task_stream(self, request):
+            self.requests.append(request)
+            self.started.set()
+            await allow_completion.wait()
+            worktree = Path(request.params["project_dir"]).resolve()
+            (worktree / "result.txt").write_text("must not apply\n", encoding="utf-8")
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": "done"},
+                is_complete=True,
+            )
+            self.finished.set()
+
+    database = tmp_path / "p3.sqlite3"
+    executor = CompletingExecutor(project)
+    owner = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        heartbeat_interval=60,
+    )
+    observer = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        heartbeat_interval=60,
+    )
+    delivered = await owner.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    cancel_item = replace(
+        _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+        executor_ref=delivered.executor_ref,
+    )
+
+    with pytest.raises(FormalTaskViolation) as pending:
+        await observer.cancel(cancel_item)
+    assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    persisted = project_code_executor._DirectProjectAttemptJournal(database).get(
+        "attempt-1"
+    )
+    assert persisted is not None
+    assert persisted.cancel_requested is True
+    assert persisted.state is FormalAttemptState.RUNNING
+
+    allow_completion.set()
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(owner)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await observer.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert terminal.observations[-1].raw_status == "cancelled"
+    assert terminal.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED"
+    assert not (project / "result.txt").exists()
+    assert len(executor.requests) == 1
+
+    replay_before = owner._journal.get("attempt-1")
+    replayed = await observer.cancel(cancel_item)
+    replay_after = owner._journal.get("attempt-1")
+    assert replayed.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert replay_after == replay_before
+    assert len(executor.requests) == 1
+
+    restarted = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+    )
+    assert await restarted.prepare_startup() == 0
+    reopened = await restarted.status(task, attempt)
+    assert isinstance(reopened, ExecutorDeliveryResult)
+    assert reopened.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert reopened.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED"
+    assert not (project / "result.txt").exists()
+    await owner.close()
+    await observer.close()
+    await restarted.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("behavior", "expected_error"),
     [
