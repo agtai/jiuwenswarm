@@ -25,6 +25,15 @@
 - **Latest physical product result:** `FAIL — P3-G0 CONTROLLED CANDIDATE NOT
   ACCEPTED` on exact clean product source `f24dd17d336c8266954f2d7299ca13bd0314d424`.
   See the sanitized [P3-G0 attempt](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md).
+- **Latest scoped P1/P2 physical result:** **FUNCTIONAL PASS / LATENCY PARTIAL**
+  on exact clean source `e1df8b452`. Repeated short/long audible responses,
+  automatic post-playout listening, foreground Stop and button/automatic
+  playout-time barge-in passed. The same run exposed variable 8.17–15.09 second
+  Agent presentation latency dominated by one-notification-per-RPC P2
+  head-of-line delay; see the sanitized
+  [physical validation and latency finding](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
+  This scoped result does not upgrade the failed controlled candidate or close
+  feature-complete latency acceptance.
 - **P3-G0 status:** **PASS — AUTHORITATIVE P3 FOUNDATION; CONTROLLED
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
@@ -77,19 +86,19 @@ risks, dependencies, acceptance and integration order.
 
 | Capability / module | Status and implemented fact | Remaining for feature complete | Dependency / acceptance |
 |---|---|---|---|
-| Audio Device & browser I/O | **PARTIAL; deferred from the P3-1 Gate.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist. `f24dd17d` twice entered `AUDIO_CAPTURE_DURATION_EXCEEDED` after TTS; the `P1/P2-T1` packet has since repaired the rotation mechanism (decaying local activity, utterance-budget bound, sanitized capture diagnostics) with source/affected automated evidence in the [repair record](evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md) — no physical credit | Physically verify the repaired post-TTS/overlap/idle rotation per the [deferred record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md); device/permission recovery; AEC/NS/AGC and double-talk; measured first-frame/loss/stop targets | P1/P2 completion before controlled-candidate/feature-complete acceptance; not a P3-1 dependency |
-| Speech Recognition | **PARTIAL.** Two real microphone finals reached the Agent, but each post-TTS failure also produced streaming-route abort, cleanup timeout and unacknowledged cancel | Exact capture/provider-speech-start attribution, robust fallback/cancel, Provider-neutral configuration, fixed accuracy/latency corpus and broader device/network validation | Audio I/O, media route and benchmark owner |
-| Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist | Provider-neutral configuration, first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation |
-| Realtime Media | **PARTIAL; deferred from the P3-1 Gate.** Dedicated transport, media registration and presentation ACK worked, but repeated post-TTS capture rotation did not preserve a usable media loop; the rotation seam is now repaired at source under `P1/P2-T1` with automated evidence only | Physically verify the repaired rotation/cancel seam; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; cumulative real network/device verification |
-| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist; manual retry admitted a second turn | Automatic continuation without recurrent recovery failure; **hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
+| Audio Device & browser I/O | **PARTIAL.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist. `P1/P2-T1` repaired the failed rotation mechanism, and the later exact-source `e1df8b452` physical run passed repeated short/long audible playout, automatic post-playout listening, foreground Stop and playback-time barge-in without the prior visible recovery failure | Fixed-boundary/idle rotation attribution across broader devices; permission recovery; AEC/NS/AGC and double-talk; measured first-frame/loss/stop targets | P1/P2 completion before controlled-candidate/feature-complete acceptance; scoped physical evidence in the [2026-08-20 run](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) |
+| Speech Recognition | **PARTIAL.** Real microphone finals now sustain repeated automatic turns on `e1df8b452`. Ordinary and barge-in capture both retain the 1.2-second server-VAD silence contract; one EOT-to-submit interval was 0.669 seconds | Fixed-corpus ordinary/barge-in p50/p95 and pause/truncation evidence before VAD tuning; exact provider speech-start attribution, robust fallback/cancel, Provider-neutral configuration and broader device/network validation | Audio I/O, media route and benchmark owner; no claim that recognition finalization is barge-in-specific |
+| Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist; repeated short/long TTS was physically audible on `e1df8b452` without the repaired ACK/receipt failures | Provider-neutral configuration, measured first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation; scoped physical PASS does not close feature-complete targets |
+| Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the scoped `e1df8b452` physical loop, including automatic post-playout listening and playout-time barge-in. The same run exposed variable P2 notification head-of-line delay | Remove the one-notification-per-RPC P2 bottleneck under a separately scoped Tier-3 boundary; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; cumulative real network/device verification |
+| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and button/automatic playout-time barge-in passed the scoped `e1df8b452` physical journey | **Hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; P2 notification delivery must avoid final head-of-line delay; complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; P3-1 PASS; P3-2 contract frozen.** SQLite schema v4, multiple non-terminal Tasks, explicit create/revision lineage, shared transition validation, addressed list/events/result/adjust behavior and fail-closed durable-authority reconstruction passed current-source Tier-3 review with no remaining P1/P2. D-087 now freezes the P3-2 six-item command contract without implementation credit | Implement P3-2 closed command dispositions, pre-dispatch update, truthful unsupported controls and successor creation; then P3-5 unread/presentation ACK, P3-6 target disambiguation, final legacy-fake relocation and one product Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix; exact evidence in the [P3-1 review](reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md) and [P3-2 contract freeze](reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md) |
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
-| Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses. A broader P3-1 diagnostic also reproduced the unchanged mounted Exit/immediate-re-enable presentation-ACK timing failure at 406/407; both remain outside the accepted Core/Store package | Complete P3 controls/projections while preserving profile semantics; later close capture/Exit recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus deferred P1/P2 completion |
-| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations now include a bounded content-free SLI calculator, complete declaration-only telemetry privacy profile and source-bound canonical OTel backend codec that reuses the current observability owner's calendar and private-carrier validation. The codec is not product-composed and owns no exporter/backend lifecycle | Compose the codec behind the existing adapter/exporter in the later owning package; add validated backend configuration and exact Task/Attempt/Command/activation/generation/ACK/Executor diagnostics; then execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with a fresh physical baseline, stable EOT/Agent/TTS/first-audible facts, authoritative ACK, formal sentence-level Agent→TTS overlap and fixed-corpus p50/p95 proof | Exact scoped evidence in the [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md); P3-8B composition/retirement after P3-7; fixed corpus/environment and Conversation Runtime/P1 media owners |
-| Automated verification and product acceptance | **PARTIAL.** Exact-source G0 affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review retain their source-bound credit; P3-1 affected automation/build/static and independent Tier-3 review pass, while its extra full-Web diagnostic is 406/407 on the unchanged deferred Runtime/Web seam. The physical candidate remains FAIL | Run each P3 package's affected evidence; later repair/rerun the P1/P2 seam and complete the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, current acceptance and exact clean source |
+| Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route and P2/P3 composition exist. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed without the prior ACK/receipt recovery failures; presentation latency remained highly variable. The unchanged mounted Exit/immediate-re-enable automated seam remains separately deferred | Complete P3 controls/projections while preserving profile semantics; close Agent-generation interruption, P2 presentation latency, mounted Exit/re-enable recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus remaining P1/P2 completion; exact scoped evidence in the [2026-08-20 run](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) |
+| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations exist. The `e1df8b452` physical diagnostic isolated a common 1.2-second server-VAD silence contract, one 0.669-second EOT-to-submit observation, a 1.683-second text-to-TTS-downlink interval and a dominant P2 one-notification-per-RPC tail: 64 remaining sequence intervals at an approximately 85 ms median round trip accounted for about 5.52 seconds after model completion. This is diagnostic evidence, not a fixed-corpus benchmark | Prioritize a separately scoped Tier-3 P2 batch/push/coalescing repair; then evaluate VAD finalization with pause/truncation oracles; then reduce first-audio startup. Compose the codec behind the existing adapter/exporter, add exact diagnostics, and execute the remaining [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with a frozen environment/corpus and p50/p95 proof | [Physical latency finding](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md), [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md), fixed corpus/environment and Conversation Runtime/P1 media owners |
+| Automated verification and product acceptance | **PARTIAL.** Existing exact-source automated/review credits remain source-bound. The later clean `e1df8b452` real microphone/speaker journey adds scoped functional PASS for audible playout, automatic continuation, Stop and playout-time barge-in, but latency is PARTIAL, the independent T2 review remains open, the combined P3 Task journey was not rerun and the controlled-candidate result remains FAIL | Scope and repair P2 notification delivery, complete independent affected review and fixed-corpus latency evidence, resolve the deferred Exit/re-enable seam, then run the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -266,8 +275,13 @@ integrated `P1/P2-T1`. Activation grants no implementation credit.
 - **Acceptance:** per the plan's §§3–7 measured evidence relative to the
   fresh baseline; targets become release gates only after environment, corpus
   and sample size are frozen.
+- **Current latency priority:** the latest physical run first routes the P2
+  one-notification-per-RPC head-of-line delay to a separate Tier-3 scope/risk
+  checkpoint, then VAD finalization, then text-to-first-audio startup. The
+  detailed observation is in the
+  [2026-08-20 physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
 
-#### T2-L2A — successor-capture ACK must not gate authoritative playout (SOURCE/AUTOMATED REPAIRED; PHYSICAL OPEN, 2026-08-20)
+#### T2-L2A — successor-capture ACK must not gate authoritative playout (SOURCE/AUTOMATED REPAIRED; SCOPED PHYSICAL PASS, 2026-08-20)
 
 - **Observed failure:** exact source `6cd8840d5` reached authoritative Agent
   text and obtained a streaming-TTS downlink descriptor, then failed before
@@ -309,11 +323,13 @@ integrated `P1/P2-T1`. Activation grants no implementation credit.
   **413/414** Integrated Web (only the unchanged recorded Exit/immediate-restart
   failure) plus **103/103** browser audio/processor. Source and automated
   evidence: [P1_T2_SUCCESSOR_CAPTURE_ACK_DECOUPLING_2026-08-20.md](evidence/P1_T2_SUCCESSOR_CAPTURE_ACK_DECOUPLING_2026-08-20.md).
-  Independent Tier-3 review and the recorded real microphone/speaker
-  acceptance remain open; no physical PASS or product-readiness credit is
-  claimed.
+  Independent Tier-3 review remains open. The later exact-source real
+  microphone/speaker run physically passed short/long audible playout,
+  automatic listening and playout-time barge-in as recorded in the
+  [physical validation](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md);
+  no broader product-readiness credit is claimed.
 
-#### T2-L2B — completed playout receipt must not require early duplex media (SOURCE/AUTOMATED REPAIRED; PHYSICAL OPEN, 2026-08-20)
+#### T2-L2B — completed playout receipt must not require early duplex media (SOURCE/AUTOMATED REPAIRED; SCOPED PHYSICAL PASS, 2026-08-20)
 
 - **Observed failure:** exact source `874cf327c` spoke the complete short TTS
   answer, then reported `PRODUCT_TTS_PLAYBACK_FAILED` and closed the successor
@@ -340,9 +356,31 @@ integrated `P1/P2-T1`. Activation grants no implementation credit.
   failed at the exact no-early-duplex boundary and pass after the repair.
   Gateway registration/synthesis/RPC/streaming suites, browser audio I/O,
   TypeScript and the affected Integrated Web suite pass except for the same
-  pre-existing Exit/immediate-re-enable case (414/415). A fresh real Chrome
-  audible turn and automatic successor listening remain user validation; no
-  physical PASS is claimed.
+  pre-existing Exit/immediate-re-enable case (414/415). A later exact-source
+  real Chrome journey physically passed audible short/long turns and automatic
+  successor listening without the repaired receipt failure, as recorded in the
+  [physical validation](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
+  The scoped PASS does not upgrade product readiness.
+
+#### T2-L2C — hands-free controls and scoped physical closure (FUNCTIONAL PASS / LATENCY PARTIAL, 2026-08-20)
+
+- **Source:** `e1df8b452` exposes the existing exact-response interrupt-and-speak
+  and Stop controls on the formal hands-free surface; automatic playout-time
+  barge-in continues to use the already-owned successor capture.
+- **Physical result:** repeated short/long audible TTS, automatic post-playout
+  listening, foreground Stop and button/automatic playout-time barge-in passed
+  in real Windows Chrome. Agent-generation speech interruption remains open.
+- **Performance result:** presentation latency varied from the earlier observed
+  1.26 seconds to 8.17–15.09 seconds in the retained run. The measured short
+  turn spent about 5.52 seconds draining 64 P2 sequence intervals after model
+  completion because the formal owner performs one notification RPC at a time.
+  A pre-control-exposure 8.59-second turn had the same mechanism, so the delay
+  is not caused by automatic barge-in.
+- **Disposition:** functional scope PASS; latency and overall acceptance remain
+  PARTIAL. The next latency change must separately scope/re-tier the shared P2
+  delivery boundary before implementation; VAD and first-audio optimization
+  follow. Exact evidence and limitations are in the
+  [physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
 
 ## Dependency route to feature complete
 
