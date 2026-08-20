@@ -2270,6 +2270,390 @@ async def test_terminal_synthesis_cancel_linearizes_with_blocked_publication(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retirement_trigger", ("caller_cancel", "provider_close"))
+async def test_terminal_recognition_retirement_owner_survives_cancel_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+    retirement_trigger: str,
+) -> None:
+    socket = FakeSocket((session_updated_event(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    session = provider._require_recognition(ref)
+    assert session.receive_task is not None
+    terminal_put_started = asyncio.Event()
+    release_terminal_put = asyncio.Event()
+    original_put = provider._put_bounded
+
+    async def blocked_terminal_put(queue, value) -> None:
+        if getattr(value, "kind", None) is RecognitionEventKind.FINAL:
+            terminal_put_started.set()
+            await release_terminal_put.wait()
+        await original_put(queue, value)
+
+    monkeypatch.setattr(provider, "_put_bounded", blocked_terminal_put)
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "retained-terminal-item",
+            "transcript": "sensitive retained terminal",
+        }
+    )
+    await asyncio.wait_for(terminal_put_started.wait(), timeout=1)
+
+    if retirement_trigger == "caller_cancel":
+        waiter = asyncio.create_task(provider.cancel_recognition(ref))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert session.retirement_task is not None
+        assert session.retirement_task.done() is False
+        assert tuple(provider._recognition.values()) == (session,)
+    else:
+        waiter = asyncio.create_task(provider.close())
+        await asyncio.sleep(0)
+        assert waiter.done() is False
+
+    assert session.events.empty()
+    release_terminal_put.set()
+    if retirement_trigger == "caller_cancel":
+        assert session.retirement_task is not None
+        await asyncio.wait_for(asyncio.shield(session.retirement_task), timeout=1)
+        await provider.close()
+    else:
+        await asyncio.wait_for(waiter, timeout=1)
+
+    assert session.receive_task.done()
+    assert session.events.empty()
+    assert session.partial_text == ""
+    assert provider._recognition == {}
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert_zero_business_effects(provider)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement_trigger", ("caller_cancel", "provider_close"))
+async def test_terminal_synthesis_retirement_owner_survives_cancel_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+    retirement_trigger: str,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1_000, -1_000, 0)
+    stream = FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args) -> FakeSseStream:
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    terminal_put_started = asyncio.Event()
+    release_terminal_put = asyncio.Event()
+    original_put = provider._put_bounded
+
+    async def blocked_terminal_put(queue, value) -> None:
+        if getattr(value, "kind", None) is SynthesisEventKind.COMPLETED:
+            terminal_put_started.set()
+            await release_terminal_put.wait()
+        await original_put(queue, value)
+
+    monkeypatch.setattr(provider, "_put_bounded", blocked_terminal_put)
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    session = provider._require_synthesis(request.ref)
+    assert session.task is not None
+    await asyncio.wait_for(terminal_put_started.wait(), timeout=1)
+
+    if retirement_trigger == "caller_cancel":
+        waiter = asyncio.create_task(provider.cancel_synthesis(request.ref))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert session.retirement_task is not None
+        assert session.retirement_task.done() is False
+        assert tuple(provider._synthesis.values()) == (session,)
+    else:
+        waiter = asyncio.create_task(provider.close())
+        await asyncio.sleep(0)
+        assert waiter.done() is False
+
+    assert session.events.empty()
+    release_terminal_put.set()
+    if retirement_trigger == "caller_cancel":
+        assert session.retirement_task is not None
+        await asyncio.wait_for(asyncio.shield(session.retirement_task), timeout=1)
+        await provider.close()
+    else:
+        await asyncio.wait_for(waiter, timeout=1)
+
+    assert session.task.done()
+    assert session.events.empty()
+    assert provider._synthesis == {}
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+
+
+@pytest.mark.asyncio
+async def test_terminal_recognition_put_timeout_clears_full_sensitive_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket = FakeSocket((session_updated_event(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, event_queue_wait_seconds=0.01
+    )
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    session = provider._require_recognition(ref)
+    assert session.receive_task is not None
+    retained_chars = 0
+    original_put = provider._put_bounded
+
+    async def fill_terminal_put(queue, value) -> None:
+        nonlocal retained_chars
+        if getattr(value, "kind", None) is RecognitionEventKind.FINAL:
+            while not queue.full():
+                queue.put_nowait(value)
+            retained_chars = sum(
+                len(event.hypothesis.selected.display_text)
+                for event in tuple(queue._queue)
+                if getattr(event, "hypothesis", None) is not None
+            )
+        await original_put(queue, value)
+
+    monkeypatch.setattr(provider, "_put_bounded", fill_terminal_put)
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "full-terminal-item",
+            "transcript": "x" * 16_000,
+        }
+    )
+    await asyncio.wait_for(session.receive_task, timeout=1)
+
+    assert retained_chars == session.events.maxsize * 16_000
+    assert session.events.empty()
+    assert session.partial_text == ""
+    assert provider._recognition == {}
+    assert provider.conformance.snapshot().active_recognition == 0
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_synthesis_put_timeout_clears_full_sensitive_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = b"\x01\x02" * 48_000
+    stream = FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args) -> FakeSseStream:
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), sse_factory=sse_factory, event_queue_wait_seconds=0.01
+    )
+    retained_pcm_bytes = 0
+    original_put = provider._put_bounded
+
+    async def fill_terminal_put(queue, value) -> None:
+        nonlocal retained_pcm_bytes
+        if getattr(value, "kind", None) is SynthesisEventKind.COMPLETED:
+            pcm_event = next(
+                event
+                for event in tuple(queue._queue)
+                if getattr(event, "pcm_s16le", None)
+            )
+            while not queue.full():
+                queue.put_nowait(pcm_event)
+            retained_pcm_bytes = sum(
+                len(event.pcm_s16le or b"") for event in tuple(queue._queue)
+            )
+        await original_put(queue, value)
+
+    monkeypatch.setattr(provider, "_put_bounded", fill_terminal_put)
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    session = provider._require_synthesis(request.ref)
+    assert session.task is not None
+    await asyncio.wait_for(session.task, timeout=1)
+
+    assert retained_pcm_bytes > 5_000_000
+    assert session.events.empty()
+    assert provider._synthesis == {}
+    assert provider.conformance.snapshot().active_synthesis == 0
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement_race", ("duplicate_cancel", "dequeue_first"))
+async def test_terminal_recognition_has_one_retirement_winner(
+    retirement_race: str,
+) -> None:
+    socket = FakeSocket((session_updated_event(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    session = provider._require_recognition(ref)
+    assert session.receive_task is not None
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "single-winner-item",
+            "transcript": "single retirement winner",
+        }
+    )
+    await asyncio.wait_for(session.receive_task, timeout=1)
+
+    if retirement_race == "duplicate_cancel":
+        results = await asyncio.gather(
+            provider.cancel_recognition(ref),
+            provider.cancel_recognition(ref),
+            return_exceptions=True,
+        )
+        assert sum(result is None for result in results) == 1
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert len(errors) == 1
+        assert isinstance(errors[0], OpenAIStreamingSpeechError)
+        assert errors[0].reason == "RECOGNITION_STREAM_NOT_FOUND"
+    else:
+        results = await asyncio.gather(
+            provider.next_recognition_event(ref, timeout_seconds=1),
+            provider.cancel_recognition(ref),
+            return_exceptions=True,
+        )
+        events = [
+            result
+            for result in results
+            if getattr(result, "kind", None) is RecognitionEventKind.FINAL
+        ]
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert len(events) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], OpenAIStreamingSpeechError)
+        assert errors[0].reason == "RECOGNITION_STREAM_NOT_FOUND"
+
+    assert provider._recognition == {}
+    assert session.events.empty()
+    assert provider.conformance.snapshot().active_recognition == 0
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement_race", ("duplicate_cancel", "dequeue_first"))
+async def test_terminal_synthesis_has_one_retirement_winner(
+    retirement_race: str,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1_000, -1_000, 0)
+    stream = FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args) -> FakeSseStream:
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    session = provider._require_synthesis(request.ref)
+    assert session.task is not None
+    await asyncio.wait_for(session.task, timeout=1)
+
+    if retirement_race == "duplicate_cancel":
+        results = await asyncio.gather(
+            provider.cancel_synthesis(request.ref),
+            provider.cancel_synthesis(request.ref),
+            return_exceptions=True,
+        )
+        assert sum(result is None for result in results) == 1
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert len(errors) == 1
+        assert isinstance(errors[0], OpenAIStreamingSpeechError)
+        assert errors[0].reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    else:
+        while session.events.qsize() > 1:
+            await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        results = await asyncio.gather(
+            provider.next_synthesis_event(request.ref, timeout_seconds=1),
+            provider.cancel_synthesis(request.ref),
+            return_exceptions=True,
+        )
+        events = [
+            result
+            for result in results
+            if getattr(result, "kind", None) is SynthesisEventKind.COMPLETED
+        ]
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert len(events) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], OpenAIStreamingSpeechError)
+        assert errors[0].reason == "SYNTHESIS_STREAM_NOT_FOUND"
+
+    assert provider._synthesis == {}
+    assert session.events.empty()
+    assert provider.conformance.snapshot().active_synthesis == 0
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_synthesis_cancel_closes_transport_without_cancelled_event() -> None:
     facts: list[SpeechDegradationFact] = []
     stream = BlockingSseStream()

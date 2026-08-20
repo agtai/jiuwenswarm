@@ -661,6 +661,9 @@ class _RecognitionSession:
     commit_owner: _RecognitionCommitOwner = _RecognitionCommitOwner.NONE
     closing: bool = False
     terminal: bool = False
+    terminal_output_accepted: bool = False
+    retirement_claimed: bool = False
+    retirement_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     @property
     def ref(self) -> RecognitionStreamRef:
@@ -679,6 +682,9 @@ class _SynthesisSession:
     wire_audio_bytes: int = 0
     closing: bool = False
     terminal: bool = False
+    terminal_output_accepted: bool = False
+    retirement_claimed: bool = False
+    retirement_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
 class _StreamingLinearResampler:
@@ -1156,6 +1162,7 @@ class OpenAIStreamingSpeechProvider:
         session = self._require_recognition(ref)
         event = await asyncio.wait_for(session.events.get(), timeout=timeout_seconds)
         if event.kind in {RecognitionEventKind.FINAL, RecognitionEventKind.CANCELLED}:
+            self._claim_recognition_retirement(session)
             await self._retire_recognition(session)
         return event
 
@@ -1164,7 +1171,8 @@ class OpenAIStreamingSpeechProvider:
     ) -> None:
         session = self._require_recognition(ref)
         if session.terminal:
-            await self._retire_queued_terminal_recognition(session)
+            retirement = self._start_queued_terminal_recognition_retirement(session)
+            await asyncio.shield(retirement)
             return
         self._conformance.request_recognition_cancel(ref, reason=reason)
         session.closing = True
@@ -1233,6 +1241,7 @@ class OpenAIStreamingSpeechProvider:
         session = self._require_synthesis(ref)
         event = await asyncio.wait_for(session.events.get(), timeout=timeout_seconds)
         if event.kind in {SynthesisEventKind.COMPLETED, SynthesisEventKind.CANCELLED}:
+            self._claim_synthesis_retirement(session)
             await self._retire_synthesis(session)
         return event
 
@@ -1241,7 +1250,8 @@ class OpenAIStreamingSpeechProvider:
     ) -> None:
         session = self._require_synthesis(ref)
         if session.terminal:
-            await self._retire_queued_terminal_synthesis(session)
+            retirement = self._start_queued_terminal_synthesis_retirement(session)
+            await asyncio.shield(retirement)
             return
         self._conformance.request_synthesis_cancel(ref, reason=reason)
         session.closing = True
@@ -1289,6 +1299,27 @@ class OpenAIStreamingSpeechProvider:
                 return_exceptions=True,
             )
             process_control = _first_process_control(process_control, results)
+        terminal_retirements: list[asyncio.Task[None]] = []
+        for recognition_session in tuple(self._recognition.values()):
+            if recognition_session.terminal:
+                retirement = recognition_session.retirement_task
+                if retirement is None and not recognition_session.retirement_claimed:
+                    retirement = self._start_queued_terminal_recognition_retirement(
+                        recognition_session
+                    )
+                if retirement is not None:
+                    terminal_retirements.append(retirement)
+        for synthesis_session in tuple(self._synthesis.values()):
+            if synthesis_session.terminal:
+                retirement = synthesis_session.retirement_task
+                if retirement is None and not synthesis_session.retirement_claimed:
+                    retirement = self._start_queued_terminal_synthesis_retirement(
+                        synthesis_session
+                    )
+                if retirement is not None:
+                    terminal_retirements.append(retirement)
+        for retirement in terminal_retirements:
+            await asyncio.shield(retirement)
         recognition = tuple(
             recognition_session
             for recognition_session in self._recognition.values()
@@ -1367,6 +1398,7 @@ class OpenAIStreamingSpeechProvider:
         recognition = ()
         synthesis = ()
         tasks = ()
+        terminal_retirements = []
         if process_control is not None:
             raise process_control from None
         if cleanup_failure is not None:
@@ -1619,7 +1651,11 @@ class OpenAIStreamingSpeechProvider:
         session.event_seq += 1
         if kind in {RecognitionEventKind.FINAL, RecognitionEventKind.CANCELLED}:
             session.terminal = True
+            session.terminal_output_accepted = True
         await self._put_bounded(session.events, accepted)
+        if session.retirement_claimed:
+            _discard_queued_events(session.events)
+            session.partial_text = ""
 
     async def _publish_recognition_boundary(
         self,
@@ -1875,7 +1911,10 @@ class OpenAIStreamingSpeechProvider:
         session.audio_cursor += sample_count
         if kind in {SynthesisEventKind.COMPLETED, SynthesisEventKind.CANCELLED}:
             session.terminal = True
+            session.terminal_output_accepted = True
         await self._put_bounded(session.events, accepted)
+        if session.retirement_claimed:
+            _discard_queued_events(session.events)
 
     async def _put_bounded(
         self, queue: asyncio.Queue[_QueueValue], value: _QueueValue
@@ -2056,6 +2095,10 @@ class OpenAIStreamingSpeechProvider:
         await asyncio.wait_for(session.socket.send(message), timeout=remaining)
 
     async def _retire_recognition(self, session: _RecognitionSession) -> None:
+        session.retirement_claimed = True
+        if session.terminal_output_accepted:
+            _discard_queued_events(session.events)
+            session.partial_text = ""
         key = _recognition_key(session.ref)
         async with self._lock:
             if self._recognition.get(key) is session:
@@ -2063,16 +2106,46 @@ class OpenAIStreamingSpeechProvider:
         self._conformance.reap_terminal()
 
     async def _retire_synthesis(self, session: _SynthesisSession) -> None:
+        session.retirement_claimed = True
+        if session.terminal_output_accepted:
+            _discard_queued_events(session.events)
         key = _synthesis_key(session.request.ref)
         async with self._lock:
             if self._synthesis.get(key) is session:
                 del self._synthesis[key]
         self._conformance.reap_terminal()
 
-    async def _retire_queued_terminal_recognition(
+    def _claim_recognition_retirement(self, session: _RecognitionSession) -> None:
+        if session.retirement_claimed:
+            raise OpenAIStreamingSpeechError(
+                "RECOGNITION_STREAM_NOT_FOUND",
+                "recognition stream is absent or stale",
+            )
+        session.retirement_claimed = True
+
+    def _claim_synthesis_retirement(self, session: _SynthesisSession) -> None:
+        if session.retirement_claimed:
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_STREAM_NOT_FOUND", "synthesis stream is absent or stale"
+            )
+        session.retirement_claimed = True
+
+    def _start_queued_terminal_recognition_retirement(
+        self, session: _RecognitionSession
+    ) -> asyncio.Task[None]:
+        self._claim_recognition_retirement(session)
+        _discard_queued_events(session.events)
+        session.partial_text = ""
+        retirement = asyncio.create_task(
+            self._finish_queued_terminal_recognition_retirement(session),
+            name="openai-recognition-terminal-retirement",
+        )
+        session.retirement_task = retirement
+        return retirement
+
+    async def _finish_queued_terminal_recognition_retirement(
         self, session: _RecognitionSession
     ) -> None:
-        _discard_queued_events(session.events)
         try:
             task = session.receive_task
             if (
@@ -2086,10 +2159,21 @@ class OpenAIStreamingSpeechProvider:
             session.partial_text = ""
             await self._retire_recognition(session)
 
-    async def _retire_queued_terminal_synthesis(
+    def _start_queued_terminal_synthesis_retirement(
+        self, session: _SynthesisSession
+    ) -> asyncio.Task[None]:
+        self._claim_synthesis_retirement(session)
+        _discard_queued_events(session.events)
+        retirement = asyncio.create_task(
+            self._finish_queued_terminal_synthesis_retirement(session),
+            name="openai-synthesis-terminal-retirement",
+        )
+        session.retirement_task = retirement
+        return retirement
+
+    async def _finish_queued_terminal_synthesis_retirement(
         self, session: _SynthesisSession
     ) -> None:
-        _discard_queued_events(session.events)
         try:
             task = session.task
             if (
