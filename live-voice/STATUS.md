@@ -35,8 +35,11 @@
   only after reproduced defects,
   affected verification and independent module review close; the
   [repair execution contract](reviews/LIVE_VOICE_STRICT_REVIEW_REPAIR_EXECUTION_2026-08-20.md)
-  owns the branch-local packet detail. P3-2 remains contract-frozen under D-087
-  and resumes after this packet closes or is explicitly re-routed. The deferred
+  owns the branch-local packet detail and its new-Session resume route. The
+  A2+B2 Streaming Speech candidate remains **uncredited** until an independent
+  Tier-3 review passes its complete four-commit module chain and Main verifies
+  the exact integration result. P3-2 remains contract-frozen under D-087 and
+  resumes after this packet closes or is explicitly re-routed. The deferred
   P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
   and must close before a later controlled-candidate or feature-complete claim.
@@ -174,13 +177,23 @@ exact-source Alpha result.
   their exact positive, negative, boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
+- **Remaining accounting:** 69 unique defects remain: 12 A findings, 33 B
+  findings, 21 L findings and D1-D3. A2+B2 are the only implemented but
+  unreviewed candidates; the other 67 remain unactivated in the owner-scoped
+  queue. C3 continues to alias B42 and B17 continues to alias B13, so neither
+  creates another unique repair.
 - **Excluded:** new product policy/classifier, schema migration, unrecorded
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** on explicit resume, independently re-review A2+B2, then route
-  the next owner-scoped repair packet; integrate only exact reviewed commits and
-  run affected and cumulative integration checks.
+- **Next action:** on explicit resume, follow §2.1 of the repair execution
+  contract, independently re-review the exact A2+B2 four-commit candidate,
+  and do not merge its stale worker branch. If it passes, Main applies only the
+  reviewed source/test commits to the latest integration branch, reruns the
+  provider and real-route seams, updates 19/88 to 21/88 and synchronizes this
+  STATUS plus the execution ledger. A review rejection leaves the numerator at
+  19/88 and returns the exact blocker to the packet owner. Only after A2+B2 is
+  resolved should the next owner-scoped queue packet be activated.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original

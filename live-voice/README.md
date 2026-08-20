@@ -10,6 +10,7 @@ command.
 | Task | Read after STATUS |
 |---|---|
 | Current implementation packet | STATUS `Current execution packet`; affected source/tests; its linked contract/evidence boundaries; applicable root `TESTING.md` risk sections |
+| Resume current strict-review remediation | STATUS `Current execution packet`; §§2.1, 6 and 7 of the linked repair execution contract; only the active candidate's source/tests and applicable root `TESTING.md` risk sections |
 | Another capability/module | That capability row and dependency route in STATUS; affected source/tests; only the relevant accepted design/ACG/decision sections |
 | Complete-project planning | STATUS completion boundaries, full capability matrix and dependency route; heading `D-084` in [decisions](decisions/DECISIONS.md); stable capability/contract sections (§§2, 4–5) of the [design snapshot](architecture/FULL_SOLUTION_2026-07-30.md) |
 | Candidate/product acceptance | Applicable acceptance contract; complete human journey; only required environment/start/cleanup sections of the runbook |
