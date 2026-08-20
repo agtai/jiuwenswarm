@@ -397,6 +397,53 @@ def test_cli_uses_fixed_private_production_path_and_accepts_no_runner(
     assert str(private_root) not in captured.out
 
 
+def test_registered_scenario_database_is_accepted_by_product_store_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.common import utils as common_utils
+    from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+        _resolve_database_path,
+    )
+    from jiuwenswarm.server.runtime.session import project_store, session_metadata
+
+    private_root = tmp_path / "private-database-root"
+    private_root.mkdir()
+    projects: list[SimpleNamespace] = []
+
+    def initialize_project(path: Path, *, title: str) -> None:
+        assert title in {"Wave 2 Project A", "Wave 2 Project B"}
+        path.mkdir()
+
+    def create_project(name: str, path: str, *, work_mode: str):
+        assert work_mode == "code"
+        project = SimpleNamespace(project_id=f"project-{len(projects)}", name=name)
+        projects.append(project)
+        assert Path(path).parent == private_root / "projects"
+        return project, False
+
+    monkeypatch.setattr(producer, "_initialize_private_project", initialize_project)
+    monkeypatch.setattr(project_store, "create_or_restore_project", create_project)
+    monkeypatch.setattr(session_metadata, "init_session_metadata", lambda **_kw: None)
+    monkeypatch.setattr(common_utils, "_workspace_base_dir", None)
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(private_root))
+
+    scenario = producer._register_private_scenario(private_root)
+    producer._configure_product_environment(scenario)
+    resolved = _resolve_database_path(
+        os.environ["JIUWENSWARM_LIVE_VOICE_P3_DATABASE"]
+    )
+    expected = (
+        private_root / "live_voice" / "p3alpha" / "p3-wave2.sqlite3"
+    ).resolve()
+
+    assert scenario.database == expected
+    assert resolved == expected
+    assert not expected.exists()
+    assert not expected.parent.exists()
+    assert len(projects) == 2
+
+
 def test_blocking_private_preflight_is_bounded_by_worker_supervisor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

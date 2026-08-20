@@ -1319,7 +1319,9 @@ def _register_private_scenario(private_root: Path) -> _RegisteredScenario:
         run_id=run_id,
         principal_id=principal_id,
         token=secrets.token_urlsafe(48),
-        database=private_root / "p3-wave2.sqlite3",
+        database=(
+            private_root / "live_voice" / "p3alpha" / "p3-wave2.sqlite3"
+        ),
         projects={"A1": project_a, "A2": project_a, "B1": project_b},
         project_paths=paths,
         sessions=sessions,
