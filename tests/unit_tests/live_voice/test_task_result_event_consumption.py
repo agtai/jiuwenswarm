@@ -7,6 +7,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Event
 
@@ -120,6 +121,11 @@ def _command_in_scope(command: CommandEnvelope, scope: ScopeRef) -> CommandEnvel
     payload = command.to_dict()
     payload["scope"] = scope.to_dict()
     return CommandEnvelope.from_dict(payload)
+
+
+def _after(timestamp: str, *, seconds: int = 1) -> str:
+    parsed = datetime.fromisoformat(timestamp[:-1] + "+00:00")
+    return (parsed + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
 def _unread_query(
@@ -327,8 +333,9 @@ def test_first_ack_persists_only_command_and_exact_class_watermark(
     before_counts = store.counts()
     before_authority = _nonconsumption_authority(database)
     before_schema = _schema_identity(database)
+    ack_time = _after(events[1].occurred_at)
 
-    result = store.ack_events(command, observed_at=NOW)
+    result = store.ack_events(command, observed_at=ack_time)
 
     assert result.ok and result.result == {
         "task_id": task_id,
@@ -356,7 +363,7 @@ def test_first_ack_persists_only_command_and_exact_class_watermark(
             "text",
             1,
             events[1].event_id,
-            NOW,
+            ack_time,
         )
     ]
     text_page = store.unread_events_page(
@@ -401,7 +408,11 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
         expected_event_head=3,
         command_id="command-ack-monotonic-first",
     )
-    first_result = store.ack_events(first, observed_at=NOW)
+    first_time = _after(events[-1].occurred_at)
+    lower_time = _after(first_time)
+    equal_time = _after(first_time, seconds=2)
+    higher_time = _after(first_time, seconds=3)
+    first_result = store.ack_events(first, observed_at=first_time)
     assert first_result.ok
     first_row = _consumer_rows(database)
     stable_authority = _nonconsumption_authority(database)
@@ -421,7 +432,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
         command_id="command-ack-lower",
     )
     lower = _command_in_scope(lower_base, new_session)
-    lower_result = store.ack_events(lower, observed_at="2026-08-05T12:00:01Z")
+    lower_result = store.ack_events(lower, observed_at=lower_time)
     assert lower_result.ok and lower_result.result == {
         "task_id": task_id,
         "presentation_class": "text",
@@ -440,7 +451,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
         command_id="command-ack-equal",
     )
     equal = _command_in_scope(equal_base, new_session)
-    equal_result = store.ack_events(equal, observed_at="2026-08-05T12:00:02Z")
+    equal_result = store.ack_events(equal, observed_at=equal_time)
     assert equal_result.ok and equal_result.result is not None
     assert equal_result.result["advanced"] is False
     assert _consumer_rows(database) == first_row
@@ -454,7 +465,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
         command_id="command-ack-higher",
     )
     higher = _command_in_scope(higher_base, new_session)
-    higher_result = store.ack_events(higher, observed_at="2026-08-05T12:00:03Z")
+    higher_result = store.ack_events(higher, observed_at=higher_time)
     assert higher_result.ok and higher_result.result is not None
     assert higher_result.result["advanced"] is True
     assert _consumer_rows(database) == [
@@ -465,7 +476,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
             "text",
             3,
             events[3].event_id,
-            "2026-08-05T12:00:03Z",
+            higher_time,
         )
     ]
     assert _nonconsumption_authority(database) == stable_authority
@@ -474,7 +485,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
 
     replay = store.ack_events(
         replace(higher, request_id="request-command-ack-higher-replay"),
-        observed_at="2026-08-05T12:00:04Z",
+        observed_at=_after(higher_time),
     )
 
     assert replay == higher_result.for_request("request-command-ack-higher-replay")
@@ -492,7 +503,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
     changed = _command_in_scope(changed_base, new_session)
     before_conflict_bytes = database.read_bytes()
     with pytest.raises(FormalTaskViolation) as conflict:
-        store.ack_events(changed, observed_at="2026-08-05T12:00:05Z")
+        store.ack_events(changed, observed_at=_after(higher_time, seconds=2))
     assert conflict.value.reason == "IDEMPOTENCY_CONFLICT"
     assert database.read_bytes() == before_conflict_bytes
     assert _consumer_rows(database)[0][4:6] == (3, events[3].event_id)
@@ -515,7 +526,8 @@ def test_committed_ack_reopens_with_exact_consumer_and_command_authority(
         expected_event_head=0,
         command_id="command-ack-reopen",
     )
-    committed = store.ack_events(command, observed_at=NOW)
+    committed_time = _after(event.occurred_at)
+    committed = store.ack_events(command, observed_at=committed_time)
     before_bytes = database.read_bytes()
 
     reopened = SqliteTaskStore(database)
@@ -527,7 +539,7 @@ def test_committed_ack_reopens_with_exact_consumer_and_command_authority(
     )
     replay = reopened.ack_events(
         replace(command, request_id="request-command-ack-reopen-2"),
-        observed_at="2026-08-05T12:00:01Z",
+        observed_at=_after(committed_time),
     )
 
     assert page.watermark == 0
@@ -540,19 +552,15 @@ def test_committed_ack_reopens_with_exact_consumer_and_command_authority(
 def test_task4_consumer_seed_accepts_a_first_noop_ack_and_reopens(
     tmp_path: Path,
 ) -> None:
-    """Catches the first Task5 command invalidating a reviewed schema-v5 seed."""
+    """Catches the first Task5 command invalidating the closed Task4 seed."""
 
     database = tmp_path / "ack-task4-seed.sqlite"
     store = SqliteTaskStore(database)
     task_id = _create_task(store, tmp_path, suffix="-ack-task4-seed")
-    item = store.claim_outbox("ack-task4-seed-worker")
-    assert item is not None
-    store.complete_outbox(
-        item,
-        executor_ref=f"legacy:{item.attempt_id}",
-        observations=_observations(item),
-    )
     events = store.events(task_id, _scope())
+    assert [(event.seq, event.event_type, event.occurred_at) for event in events] == [
+        (0, "task.accepted", NOW)
+    ]
     with sqlite3.connect(database) as connection:
         connection.execute(
             """INSERT INTO task_event_consumption(
@@ -563,41 +571,625 @@ def test_task4_consumer_seed_accepts_a_first_noop_ack_and_reopens(
                 _scope().subject_id,
                 _scope().project_id,
                 task_id,
-                1,
-                events[1].event_id,
-                NOW,
+                0,
+                events[0].event_id,
+                events[0].occurred_at,
             ),
         )
         connection.commit()
     reopened = SqliteTaskStore(database)
-    lower, _grant_unused = _ack_command(
+    equal, _grant_unused = _ack_command(
         task_id,
         presentation_class="text",
         acked_through_seq=0,
         acked_event_id=events[0].event_id,
-        expected_event_head=3,
-        command_id="command-ack-task4-seed-lower",
+        expected_event_head=0,
+        command_id="command-ack-task4-seed-equal",
     )
 
     result = reopened.ack_events(
-        lower,
+        equal,
         observed_at="2026-08-05T12:00:01Z",
     )
 
     assert result.ok and result.result == {
         "task_id": task_id,
         "presentation_class": "text",
-        "acked_through_seq": 1,
-        "acked_event_id": events[1].event_id,
+        "acked_through_seq": 0,
+        "acked_event_id": events[0].event_id,
         "advanced": False,
     }
-    assert _consumer_rows(database)[0][4:] == (1, events[1].event_id, NOW)
+    assert _consumer_rows(database)[0][4:] == (
+        0,
+        events[0].event_id,
+        events[0].occurred_at,
+    )
     assert SqliteTaskStore(database).unread_events_page(
         task_id,
         _scope(),
         presentation_class="text",
         limit=500,
-    ).watermark == 1
+    ).watermark == 0
+
+
+def test_unowned_consumer_outside_legacy_seed_v1_shape_is_corrupt(
+    tmp_path: Path,
+) -> None:
+    """Catches a later retained event being promoted into a broader raw seed."""
+
+    database = tmp_path / "ack-unowned-noninitial-seed.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-unowned-noninitial-seed")
+    item = store.claim_outbox("ack-unowned-noninitial-seed-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    accepted = events[0]
+    event = events[1]
+    assert event.event_type == "attempt.accepted"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'text', ?, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                event.seq,
+                event.event_id,
+                accepted.occurred_at,
+            ),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+def test_legacy_seed_anchor_survives_noop_and_multiple_higher_acks(
+    tmp_path: Path,
+) -> None:
+    """Catches an adopted seed losing provenance after its watermark advances."""
+
+    database = tmp_path / "ack-seed-noop-then-higher.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-seed-noop-then-higher")
+    accepted = store.events(task_id, _scope())[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'voice', 0, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                accepted.event_id,
+                accepted.occurred_at,
+            ),
+        )
+        connection.commit()
+    adopted = SqliteTaskStore(database)
+    equal, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=0,
+        acked_event_id=accepted.event_id,
+        expected_event_head=0,
+        command_id="command-ack-seed-adopt-equal",
+    )
+    equal_result = adopted.ack_events(equal, observed_at=_after(accepted.occurred_at))
+    assert equal_result.ok and equal_result.result is not None
+    assert equal_result.result["advanced"] is False
+
+    item = adopted.claim_outbox("ack-seed-noop-then-higher-worker")
+    assert item is not None
+    adopted.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = adopted.events(task_id, _scope())
+    first_higher, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-first-higher",
+    )
+    first_time = _after(events[-1].occurred_at)
+    first_result = adopted.ack_events(first_higher, observed_at=first_time)
+    assert first_result.ok and first_result.result is not None
+    assert first_result.result["advanced"] is True
+    assert _consumer_rows(database)[0][4:] == (
+        1,
+        events[1].event_id,
+        accepted.occurred_at,
+    )
+
+    final_higher, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=3,
+        acked_event_id=events[3].event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-final-higher",
+    )
+    final_result = adopted.ack_events(
+        final_higher,
+        observed_at=_after(first_time),
+    )
+    assert final_result.ok and final_result.result is not None
+    assert final_result.result["advanced"] is True
+    assert _consumer_rows(database)[0][4:] == (
+        3,
+        events[3].event_id,
+        accepted.occurred_at,
+    )
+
+    for label, seq in (("lower", 1), ("equal", 3)):
+        noop, _grant_unused = _ack_command(
+            task_id,
+            presentation_class="voice",
+            acked_through_seq=seq,
+            acked_event_id=events[seq].event_id,
+            expected_event_head=3,
+            command_id=f"command-ack-seed-final-{label}",
+        )
+        noop_result = adopted.ack_events(
+            noop,
+            observed_at=_after(first_time, seconds=2 if label == "lower" else 3),
+        )
+        assert noop_result.ok and noop_result.result is not None
+        assert noop_result.result["advanced"] is False
+        assert _consumer_rows(database)[0][4:] == (
+            3,
+            events[3].event_id,
+            accepted.occurred_at,
+        )
+
+    reopened = SqliteTaskStore(database)
+    before_replay_bytes = database.read_bytes()
+    replay = reopened.ack_events(
+        replace(final_higher, request_id="request-ack-seed-final-higher-replay"),
+        observed_at=_after(first_time, seconds=4),
+    )
+    assert replay == final_result.for_request(
+        "request-ack-seed-final-higher-replay"
+    )
+    assert database.read_bytes() == before_replay_bytes
+
+
+def test_legacy_seed_direct_two_store_higher_race_keeps_anchor(
+    tmp_path: Path,
+) -> None:
+    """Catches direct advancement or its losing ACK replacing seed provenance."""
+
+    database = tmp_path / "ack-seed-direct-higher-race.sqlite"
+    setup = SqliteTaskStore(database)
+    task_id = _create_task(setup, tmp_path, suffix="-ack-seed-direct-higher-race")
+    accepted = setup.events(task_id, _scope())[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'text', 0, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                accepted.event_id,
+                accepted.occurred_at,
+            ),
+        )
+        connection.commit()
+    setup = SqliteTaskStore(database)
+    item = setup.claim_outbox("ack-seed-direct-higher-race-worker")
+    assert item is not None
+    setup.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = setup.events(task_id, _scope())
+    lower, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-race-lower",
+    )
+    higher, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=3,
+        acked_event_id=events[3].event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-race-higher",
+    )
+    lower_store = SqliteTaskStore(database)
+    higher_store = SqliteTaskStore(database)
+    barrier = Barrier(2)
+
+    def apply(
+        store: SqliteTaskStore,
+        command: CommandEnvelope,
+        observed_at: str,
+    ):
+        barrier.wait(timeout=10)
+        return store.ack_events(command, observed_at=observed_at)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lower_future = pool.submit(
+            apply,
+            lower_store,
+            lower,
+            _after(events[-1].occurred_at),
+        )
+        higher_future = pool.submit(
+            apply,
+            higher_store,
+            higher,
+            _after(events[-1].occurred_at, seconds=2),
+        )
+        lower_result = lower_future.result(timeout=20)
+        higher_result = higher_future.result(timeout=20)
+
+    assert lower_result.ok and higher_result.ok
+    assert _consumer_rows(database)[0][4:] == (
+        3,
+        events[3].event_id,
+        accepted.occurred_at,
+    )
+    assert SqliteTaskStore(database).unread_events_page(
+        task_id,
+        _scope(),
+        presentation_class="text",
+        limit=500,
+    ).watermark == 3
+
+
+def test_runtime_first_ack_result_flip_remains_corrupt_after_a_higher_ack(
+    tmp_path: Path,
+) -> None:
+    """Catches later runtime state laundering a forged first-ACK disposition."""
+
+    database = tmp_path / "ack-runtime-result-flip-then-higher.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-runtime-flip-higher")
+    accepted = store.events(task_id, _scope())[0]
+    first, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=accepted.event_id,
+        expected_event_head=0,
+        command_id="command-ack-runtime-flip-higher-first",
+    )
+    assert store.ack_events(first, observed_at=_after(accepted.occurred_at)).ok
+    item = store.claim_outbox("ack-runtime-flip-higher-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    higher, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=3,
+        acked_event_id=events[3].event_id,
+        expected_event_head=3,
+        command_id="command-ack-runtime-flip-higher-final",
+    )
+    assert store.ack_events(
+        higher,
+        observed_at=_after(events[-1].occurred_at),
+    ).ok
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT result_json FROM commands WHERE command_id=?",
+            (first.command_id,),
+        ).fetchone()
+        assert row is not None
+        result_json = json.loads(row[0])
+        result_json["result"]["advanced"] = False
+        connection.execute(
+            "UPDATE commands SET result_json=? WHERE command_id=?",
+            (
+                json.dumps(
+                    result_json,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                first.command_id,
+            ),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+def test_runtime_first_ack_result_cannot_self_declare_a_legacy_seed(
+    tmp_path: Path,
+) -> None:
+    """Catches flipping advanced=true into a mutable legacy-seed claim."""
+
+    database = tmp_path / "ack-runtime-result-flip.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-runtime-result-flip")
+    event = store.events(task_id, _scope())[0]
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id="command-ack-runtime-result-flip",
+    )
+    applied = store.ack_events(
+        command,
+        observed_at="2026-08-05T12:00:01Z",
+    )
+    assert applied.ok and applied.result is not None
+    assert applied.result["advanced"] is True
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT result_json FROM commands WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+        assert row is not None
+        result_json = json.loads(row[0])
+        result_json["result"]["advanced"] = False
+        connection.execute(
+            "UPDATE commands SET result_json=? WHERE command_id=?",
+            (
+                json.dumps(
+                    result_json,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                command.command_id,
+            ),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+def test_deleted_runtime_ack_cannot_reopen_or_reuse_its_id_for_other_class(
+    tmp_path: Path,
+) -> None:
+    """Catches command deletion relabeling runtime authority as a raw seed."""
+
+    database = tmp_path / "ack-runtime-command-deleted.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-runtime-command-deleted")
+    event = store.events(task_id, _scope())[0]
+    original, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id="command-ack-runtime-deleted",
+    )
+    assert store.ack_events(
+        original,
+        observed_at="2026-08-05T12:00:01Z",
+    ).ok
+    with sqlite3.connect(database) as connection:
+        deleted = connection.execute(
+            "DELETE FROM commands WHERE command_id=?",
+            (original.command_id,),
+        ).rowcount
+        assert deleted == 1
+        connection.commit()
+    changed, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=original.command_id,
+    )
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database).ack_events(
+            changed,
+            observed_at="2026-08-05T12:00:02Z",
+        )
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+    assert _consumer_rows(database) == [
+        (
+            _scope().subject_id,
+            _scope().project_id,
+            task_id,
+            "text",
+            0,
+            event.event_id,
+            "2026-08-05T12:00:01Z",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "updated_at",
+    (
+        "not-a-timestamp",
+        "2026-08-05 12:00:00Z",
+        "2026-08-05T14:00:00+02:00",
+    ),
+)
+def test_unowned_legacy_seed_requires_canonical_accepted_event_timestamp(
+    tmp_path: Path,
+    updated_at: str,
+) -> None:
+    """Catches invalid or alternate-offset time self-authorizing a raw seed."""
+
+    database = tmp_path / f"ack-seed-invalid-time-{updated_at[:4]}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-seed-invalid-time")
+    event = store.events(task_id, _scope())[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'text', 0, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                event.event_id,
+                updated_at,
+            ),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+@pytest.mark.parametrize(
+    "tampered_at",
+    ("2026-08-05T11:59:59Z", "2026-08-05T12:00:02Z"),
+)
+def test_adopted_legacy_seed_timestamp_is_immutable(
+    tmp_path: Path,
+    tampered_at: str,
+) -> None:
+    """Catches a valid ISO timestamp replacing the immutable seed anchor."""
+
+    database = tmp_path / f"ack-seed-time-tamper-{tampered_at[-3:-1]}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-seed-time-tamper")
+    event = store.events(task_id, _scope())[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'voice', 0, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                event.event_id,
+                event.occurred_at,
+            ),
+        )
+        connection.commit()
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-seed-time-tamper-{tampered_at}",
+    )
+    adopted = SqliteTaskStore(database).ack_events(
+        command,
+        observed_at="2026-08-05T12:00:01Z",
+    )
+    assert adopted.ok and adopted.result is not None
+    assert adopted.result["advanced"] is False
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE task_event_consumption SET updated_at=?",
+            (tampered_at,),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    (NOW, "2026-08-05T11:59:59Z"),
+)
+def test_runtime_ack_at_or_before_event_is_durable_stale_without_consumption(
+    tmp_path: Path,
+    observed_at: str,
+) -> None:
+    """Catches a runtime row becoming indistinguishable from a Task4 seed."""
+
+    database = tmp_path / f"ack-temporal-stale-{observed_at[-3:-1]}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-temporal-stale")
+    event = store.events(task_id, _scope())[0]
+    assert event.occurred_at == NOW
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-temporal-stale-{observed_at}",
+    )
+    before_counts = store.counts()
+    before_authority = _nonconsumption_authority(database)
+    before_schema = _schema_identity(database)
+
+    rejected = store.ack_events(command, observed_at=observed_at)
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_ACK_PRECONDITION_STALE"
+    assert rejected.error.code is ErrorCode.STALE
+    assert store.counts() == {
+        **before_counts,
+        "commands": before_counts["commands"] + 1,
+    }
+    assert _consumer_rows(database) == []
+    assert _nonconsumption_authority(database) == before_authority
+    assert _schema_identity(database) == before_schema
+    reopened = SqliteTaskStore(database)
+    before_replay_bytes = database.read_bytes()
+    replay = reopened.ack_events(
+        replace(command, request_id=f"{command.request_id}-replay"),
+        observed_at="2026-08-05T12:00:02Z",
+    )
+    assert replay == rejected.for_request(f"{command.request_id}-replay")
+    assert database.read_bytes() == before_replay_bytes
 
 
 @pytest.mark.parametrize(
@@ -923,9 +1515,10 @@ def test_ack_failpoint_before_commit_rolls_back_every_effect(
     before_counts = store.counts()
     before_bytes = database.read_bytes()
     before_authority = _nonconsumption_authority(database)
+    ack_time = _after(event.occurred_at) if decision == "applied" else NOW
 
     with pytest.raises(RuntimeError, match="injected ACK crash"):
-        store.ack_events(command, observed_at=NOW)
+        store.ack_events(command, observed_at=ack_time)
 
     assert store.counts() == before_counts
     assert _consumer_rows(database) == []
@@ -970,6 +1563,8 @@ def test_two_store_ack_race_linearizes_to_the_greatest_exact_prefix(
     higher_store = SqliteTaskStore(database)
     barrier = Barrier(2)
     stable_authority = _nonconsumption_authority(database)
+    lower_time = _after(events[-1].occurred_at)
+    higher_time = _after(events[-1].occurred_at, seconds=2)
 
     def apply(
         store: SqliteTaskStore,
@@ -980,12 +1575,8 @@ def test_two_store_ack_race_linearizes_to_the_greatest_exact_prefix(
         return store.ack_events(command, observed_at=observed_at)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        lower_future = pool.submit(
-            apply, lower_store, lower, "2026-08-05T12:00:01Z"
-        )
-        higher_future = pool.submit(
-            apply, higher_store, higher, "2026-08-05T12:00:02Z"
-        )
+        lower_future = pool.submit(apply, lower_store, lower, lower_time)
+        higher_future = pool.submit(apply, higher_store, higher, higher_time)
         lower_result = lower_future.result(timeout=20)
         higher_result = higher_future.result(timeout=20)
 
@@ -1000,7 +1591,7 @@ def test_two_store_ack_race_linearizes_to_the_greatest_exact_prefix(
             "text",
             3,
             events[3].event_id,
-            "2026-08-05T12:00:02Z",
+            higher_time,
         )
     ]
     assert _nonconsumption_authority(database) == stable_authority
@@ -1059,7 +1650,7 @@ def test_unread_freezes_consumer_head_and_events_in_one_read_snapshot(
             expected_event_head=3,
             command_id="command-unread-frozen-snapshot",
         )
-        writer.ack_events(command, observed_at=NOW)
+        writer.ack_events(command, observed_at=_after(events[3].occurred_at))
         resume.set()
         page = page_future.result(timeout=20)
 
@@ -1180,7 +1771,7 @@ def test_core_routes_ack_only_after_full_new_session_authorization(
     assert denied.error.code is ErrorCode.PERMISSION_DENIED
     assert database.read_bytes() == before_bytes
 
-    applied = core.execute(command, full_grant, now=NOW)
+    applied = core.execute(command, full_grant, now=_after(event.occurred_at))
 
     assert applied.ok and applied.result is not None
     assert applied.result["acked_through_seq"] == 0
@@ -1329,7 +1920,10 @@ def test_terminal_result_stays_retained_across_pre_and_post_ack_restarts(
         expected_event_head=terminal.seq,
         command_id="command-terminal-ack-restart",
     )
-    applied = before_ack_restart.ack_events(command, observed_at=NOW)
+    applied = before_ack_restart.ack_events(
+        command,
+        observed_at=_after(terminal.occurred_at),
+    )
     assert applied.ok
     assert _nonconsumption_authority(database) == stable_authority
 
@@ -1371,7 +1965,8 @@ def test_ack_corruption_fails_closed_on_reopen_without_repair_writes(
         expected_event_head=0,
         command_id=f"command-ack-corrupt-{corruption}",
     )
-    result = store.ack_events(command, observed_at=NOW)
+    observed_at = _after(event.occurred_at) if corruption == "consumer" else NOW
+    result = store.ack_events(command, observed_at=observed_at)
     assert result.ok is (corruption == "consumer")
     with sqlite3.connect(database) as connection:
         if corruption == "consumer":

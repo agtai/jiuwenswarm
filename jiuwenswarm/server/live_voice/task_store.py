@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import re
 import sqlite3
 import time
 import uuid
@@ -79,6 +80,10 @@ _JOURNAL_MODE_RETRY_SECONDS = 10.0
 _JOURNAL_MODE_RETRY_INTERVAL_SECONDS = 0.01
 _DECISION_BINDING_TYPE = "live_voice.task_business_decision"
 _DECISION_BINDING_VERSION = 1
+_LEGACY_CONSUMPTION_SEED_TYPE = "legacy_seed_v1"
+_CANONICAL_UTC_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$"
+)
 _RETRY_BUSINESS_DECISIONS = {
     "TASK_RETRY_LIMIT_EXCEEDED": (
         TaskCommandDisposition.CONFLICT,
@@ -719,6 +724,17 @@ def _utc_datetime(value: str) -> datetime:
             ErrorCode.INVALID_ARGUMENT,
         )
     return parsed.astimezone(UTC)
+
+
+def _canonical_utc_datetime(value: object) -> datetime | None:
+    """Parse only the contract's canonical ``Z``-form UTC timestamp."""
+
+    if type(value) is not str or _CANONICAL_UTC_RE.fullmatch(value) is None:
+        return None
+    try:
+        return datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
 
 
 def _utc_plus_seconds(value: str, seconds: float) -> str:
@@ -2410,7 +2426,7 @@ class SqliteTaskStore:
         connection: sqlite3.Connection,
         consumer_rows: list[sqlite3.Row],
     ) -> None:
-        """Rebuild every durable consumer row from successful ACK commands."""
+        """Rebuild the exact union of legacy seeds and runtime ACK rows."""
 
         durable = {
             (
@@ -2425,6 +2441,39 @@ class SqliteTaskStore:
             )
             for row in consumer_rows
         }
+        legacy_anchors: dict[
+            tuple[str, str, str, str], tuple[int, str, str, datetime]
+        ] = {}
+        legacy_seeds: dict[
+            tuple[str, str, str, str], tuple[int, str, str, datetime]
+        ] = {}
+        for row in consumer_rows:
+            anchor = cls._legacy_consumption_anchor_v1(connection, row)
+            if anchor is None:
+                continue
+            seed_type, seed_seq, seed_event_id, seed_time, parsed_seed_time = anchor
+            if seed_type != _LEGACY_CONSUMPTION_SEED_TYPE:
+                raise cls._corrupt(
+                    "formal Task consumer seed version is not canonical"
+                )
+            key = (
+                row["subject_id"],
+                row["project_id"],
+                row["task_id"],
+                row["presentation_class"],
+            )
+            anchor_value = (
+                seed_seq,
+                seed_event_id,
+                seed_time,
+                parsed_seed_time,
+            )
+            legacy_anchors[key] = anchor_value
+            if (
+                row["acked_through_seq"] == seed_seq
+                and row["acked_event_id"] == seed_event_id
+            ):
+                legacy_seeds[key] = anchor_value
         reconstructed: dict[
             tuple[str, str, str, str], tuple[int, str, str]
         ] = {}
@@ -2473,7 +2522,7 @@ class SqliteTaskStore:
                 if type(acked_through_seq) is not int
                 or type(acked_event_id) is not str
                 else connection.execute(
-                    """SELECT 1 FROM task_events
+                    """SELECT event_id, occurred_at FROM task_events
                        WHERE task_id=? AND seq=? AND event_id=?""",
                     (
                         command.target_ref.id,
@@ -2481,6 +2530,12 @@ class SqliteTaskStore:
                         acked_event_id,
                     ),
                 ).fetchone()
+            )
+            command_time = _canonical_utc_datetime(row["created_at"])
+            event_time = (
+                None
+                if event_row is None
+                else _canonical_utc_datetime(event_row["occurred_at"])
             )
             if (
                 command.target_ref.kind.value != "task"
@@ -2500,6 +2555,9 @@ class SqliteTaskStore:
                 <= expected_event_head
                 <= int(task_row["event_head"])
                 or event_row is None
+                or command_time is None
+                or event_time is None
+                or command_time <= event_time
                 or command.scope.assurance is not Assurance.AUTHENTICATED
                 or task_scope.assurance is not Assurance.AUTHENTICATED
                 or command.scope.subject_id != task_scope.subject_id
@@ -2515,50 +2573,17 @@ class SqliteTaskStore:
                 presentation_class,
             )
             previous = reconstructed.get(key)
-            if (
-                previous is None
-                and type(value) is dict
-                and value.get("advanced") is False
-            ):
-                # A schema-v5 consumer seed can predate the Task5 command
-                # ledger. Its first lower/equal ACK exposes the logical seed
-                # in the result without changing the seed timestamp.
-                baseline_seq = value.get("acked_through_seq")
-                baseline_event_id = value.get("acked_event_id")
-                durable_value = durable.get(key)
-                baseline_event = (
-                    None
-                    if type(baseline_seq) is not int
-                    or type(baseline_event_id) is not str
-                    else connection.execute(
-                        """SELECT 1 FROM task_events
-                           WHERE task_id=? AND seq=? AND event_id=?""",
-                        (
-                            command.target_ref.id,
-                            baseline_seq,
-                            baseline_event_id,
-                        ),
-                    ).fetchone()
-                )
-                if (
-                    durable_value is None
-                    or baseline_event is None
-                    or baseline_seq < 0
-                    or baseline_seq > durable_value[0]
-                    or (
-                        baseline_seq == durable_value[0]
-                        and baseline_event_id != durable_value[1]
-                    )
-                ):
-                    raise cls._corrupt(
-                        "formal Task ACK seed authority is not canonical"
-                    )
-                previous = (
-                    baseline_seq,
-                    baseline_event_id,
-                    durable_value[2],
-                )
+            anchor = legacy_anchors.get(key)
+            if previous is None and anchor is not None and command_time > anchor[3]:
+                # A Task4 seed is inferred solely from the retained accepted
+                # event and its immutable timestamp. The first command result
+                # never gets to declare that the seed existed.
+                previous = anchor[:3]
                 reconstructed[key] = previous
+            elif previous is None:
+                # A matching-looking row owned by a first runtime ACK is not a
+                # legacy seed. Its result must independently reconstruct it.
+                legacy_seeds.pop(key, None)
             advanced = previous is None or acked_through_seq > previous[0]
             authoritative_seq = (
                 acked_through_seq if advanced else previous[0]
@@ -2588,17 +2613,63 @@ class SqliteTaskStore:
                 reconstructed[key] = (
                     acked_through_seq,
                     acked_event_id,
-                    row["created_at"],
+                    anchor[2] if anchor is not None else row["created_at"],
                 )
 
-        # Schema-v5 shipped before the ACK runtime and permitted structurally
-        # valid consumer seeds with no command ledger owner. Preserve those
-        # reviewed Task4 rows, while requiring every runtime-owned consumer to
-        # match its complete ACK history exactly.
-        if any(durable.get(key) != value for key, value in reconstructed.items()):
+        expected = {
+            key: seed[:3]
+            for key, seed in legacy_seeds.items()
+        }
+        expected.update(reconstructed)
+        if durable != expected:
             raise cls._corrupt(
                 "formal Task consumer ledger disagrees with ACK command history"
             )
+
+    @classmethod
+    def _legacy_consumption_anchor_v1(
+        cls,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> tuple[str, int, str, str, datetime] | None:
+        """Infer a Task4 seed-derived lineage from immutable event truth."""
+
+        accepted = connection.execute(
+            """SELECT event_id, event_type, occurred_at
+               FROM task_events WHERE task_id=? AND seq=0""",
+            (row["task_id"],),
+        ).fetchone()
+        current = connection.execute(
+            """SELECT event_id FROM task_events
+               WHERE task_id=? AND seq=? AND event_id=?""",
+            (
+                row["task_id"],
+                row["acked_through_seq"],
+                row["acked_event_id"],
+            ),
+        ).fetchone()
+        seed_time = _canonical_utc_datetime(row["updated_at"])
+        event_time = (
+            None
+            if accepted is None
+            else _canonical_utc_datetime(accepted["occurred_at"])
+        )
+        if (
+            accepted is None
+            or accepted["event_type"] != "task.accepted"
+            or current is None
+            or seed_time is None
+            or event_time is None
+            or row["updated_at"] != accepted["occurred_at"]
+        ):
+            return None
+        return (
+            _LEGACY_CONSUMPTION_SEED_TYPE,
+            0,
+            accepted["event_id"],
+            accepted["occurred_at"],
+            event_time,
+        )
 
     def _hit(self, name: str) -> None:
         if self._failpoint is not None:
@@ -5298,12 +5369,19 @@ class SqliteTaskStore:
             None
             if type(bound_head) is not int or acked_through_seq > bound_head
             else connection.execute(
-                "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                """SELECT event_id, occurred_at FROM task_events
+                   WHERE task_id=? AND seq=?""",
                 (binding["target_task_id"], acked_through_seq),
             ).fetchone()
         )
         actual_event_id = (
             None if actual_event is None else actual_event["event_id"]
+        )
+        decision_time = _canonical_utc_datetime(row["created_at"])
+        actual_event_time = (
+            None
+            if actual_event is None
+            else _canonical_utc_datetime(actual_event["occurred_at"])
         )
         if (
             _scope_key(command_scope) != row["scope_key"]
@@ -5324,6 +5402,8 @@ class SqliteTaskStore:
             or head_row is None
             or task["head_event_id"] != head_row["event_id"]
             or authority["event_at_ack_seq_id"] != actual_event_id
+            or decision_time is None
+            or (actual_event is not None and actual_event_time is None)
             or result.result is not None
             or error.code not in codes
             or authority["reason"] != error.reason
@@ -5340,7 +5420,11 @@ class SqliteTaskStore:
             else (
                 "TASK_ACK_EVENT_MISMATCH"
                 if actual_event_id != payload["acked_event_id"]
-                else None
+                else (
+                    "TASK_ACK_PRECONDITION_STALE"
+                    if decision_time <= actual_event_time
+                    else None
+                )
             )
         )
         if error.reason != expected_reason:
@@ -10580,7 +10664,7 @@ class SqliteTaskStore:
                 self._hit("ack_events.before_commit")
                 return result
             event = connection.execute(
-                """SELECT event_id FROM task_events
+                """SELECT event_id, occurred_at FROM task_events
                    WHERE task_id=? AND seq=? AND event_id=?""",
                 (
                     task_id,
@@ -10601,6 +10685,31 @@ class SqliteTaskStore:
                 )
                 self._hit("ack_events.before_commit")
                 return result
+            observed_time = _canonical_utc_datetime(observed_at)
+            event_time = _canonical_utc_datetime(event["occurred_at"])
+            if observed_time is None:
+                raise FormalTaskViolation(
+                    "TASK_ACK_INVALID",
+                    "task ACK observation time is not canonical UTC",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if event_time is None:
+                raise self._corrupt(
+                    "formal Task ACK event timestamp is not canonical"
+                )
+            if observed_time <= event_time:
+                result = self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.STALE,
+                    reason="TASK_ACK_PRECONDITION_STALE",
+                    message="task ACK does not postdate its retained event",
+                    observed_at=observed_at,
+                )
+                self._hit("ack_events.before_commit")
+                return result
             existing = connection.execute(
                 """SELECT * FROM task_event_consumption
                    WHERE subject_id=? AND project_id=? AND task_id=?
@@ -10612,6 +10721,11 @@ class SqliteTaskStore:
                     payload["presentation_class"],
                 ),
             ).fetchone()
+            legacy_anchor = (
+                None
+                if existing is None
+                else self._legacy_consumption_anchor_v1(connection, existing)
+            )
             advanced = existing is None or acked_through_seq > int(
                 existing["acked_through_seq"]
             )
@@ -10640,7 +10754,11 @@ class SqliteTaskStore:
                     (
                         acked_through_seq,
                         payload["acked_event_id"],
-                        observed_at,
+                        (
+                            existing["updated_at"]
+                            if legacy_anchor is not None
+                            else observed_at
+                        ),
                         reparsed.scope.subject_id,
                         reparsed.scope.project_id,
                         task_id,
