@@ -15,7 +15,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
-from websockets.exceptions import ConnectionClosed, PayloadTooBig
+from websockets.exceptions import (
+    ConnectionClosed,
+    ConnectionClosedError,
+    ConnectionClosedOK,
+    PayloadTooBig,
+)
 
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenswarm.common.e2a.models import E2AEnvelope
@@ -61,23 +66,22 @@ _LOG_SUMMARY_SHAPE_KEYS = (
     "auth",
     "provenance",
 )
-_SAFE_EXCEPTION_CLASS_NAMES = frozenset(
-    {
-        "ConnectionAbortedError",
-        "ConnectionClosed",
-        "ConnectionClosedError",
-        "ConnectionClosedOK",
-        "ConnectionError",
-        "ConnectionResetError",
-        "JSONDecodeError",
-        "OSError",
-        "PayloadTooBig",
-        "RuntimeError",
-        "TimeoutError",
-        "TypeError",
-        "ValueError",
-    }
+_SAFE_EXCEPTION_CLASSES: tuple[tuple[type[BaseException], str], ...] = (
+    (ConnectionClosedError, "ConnectionClosedError"),
+    (ConnectionClosedOK, "ConnectionClosedOK"),
+    (ConnectionClosed, "ConnectionClosed"),
+    (PayloadTooBig, "PayloadTooBig"),
+    (json.JSONDecodeError, "JSONDecodeError"),
+    (ConnectionAbortedError, "ConnectionAbortedError"),
+    (ConnectionResetError, "ConnectionResetError"),
+    (ConnectionError, "ConnectionError"),
+    (TimeoutError, "TimeoutError"),
+    (OSError, "OSError"),
+    (RuntimeError, "RuntimeError"),
+    (TypeError, "TypeError"),
+    (ValueError, "ValueError"),
 )
+_CONNECT_FAILURE_MESSAGE = "AgentServer WebSocket connection failed"
 
 
 class _ReceiverFailure:
@@ -94,9 +98,9 @@ def _wire_request_id_key(request_id: Any) -> str:
 
 def _log_value_shape(value: Any) -> dict[str, Any]:
     """Describe a payload-bearing value without inspecting or stringifying content."""
-    if isinstance(value, dict):
+    if type(value) is dict:
         return {"kind": "object", "field_count": len(value)}
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         return {"kind": "array", "item_count": len(value)}
     if value is None:
         return {"kind": "null"}
@@ -107,16 +111,16 @@ def _content_hidden_log_ref(field: str, value: Any) -> str:
     """Return a process-local keyed ref without exposing scalar content."""
     if value is None:
         return "[ABSENT]"
-    if isinstance(value, str):
+    if type(value) is str:
         value_type = b"str"
         raw = value.encode("utf-8", errors="surrogatepass")
-    elif isinstance(value, bool):
+    elif type(value) is bool:
         value_type = b"bool"
         raw = b"1" if value else b"0"
-    elif isinstance(value, int):
+    elif type(value) is int:
         value_type = b"int"
         raw = str(value).encode("ascii")
-    elif isinstance(value, float):
+    elif type(value) is float:
         value_type = b"float"
         raw = value.hex().encode("ascii")
     else:
@@ -132,29 +136,40 @@ def _content_hidden_log_ref(field: str, value: Any) -> str:
 
 
 def _log_boolean(value: Any) -> bool | str:
-    return value if isinstance(value, bool) else "[NON_BOOLEAN]"
+    return value if type(value) is bool else "[NON_BOOLEAN]"
 
 
 def _log_scalar_kind(value: Any) -> str:
     if value is None:
         return "null"
-    if isinstance(value, bool):
+    if type(value) is bool:
         return "boolean"
-    if isinstance(value, int):
+    if type(value) is int:
         return "integer"
-    if isinstance(value, float):
+    if type(value) is float:
         return "float"
-    if isinstance(value, str):
+    if type(value) is str:
         return "string"
     return "non_scalar"
 
 
 def _safe_exception_class(exc: BaseException) -> str:
     """Classify an exception without trusting its dynamic class name or text."""
-    for cls in type(exc).__mro__:
-        if cls.__name__ in _SAFE_EXCEPTION_CLASS_NAMES:
-            return cls.__name__
+    for cls, category in _SAFE_EXCEPTION_CLASSES:
+        if isinstance(exc, cls):
+            return category
     return "Exception"
+
+
+def _content_free_connect_exception(exc: Exception) -> Exception:
+    """Preserve a supported public exception family with a static safe message."""
+    if isinstance(exc, TimeoutError):
+        return TimeoutError(_CONNECT_FAILURE_MESSAGE)
+    if isinstance(exc, OSError):
+        return OSError(_CONNECT_FAILURE_MESSAGE)
+    if isinstance(exc, ValueError):
+        return ValueError(_CONNECT_FAILURE_MESSAGE)
+    return RuntimeError(_CONNECT_FAILURE_MESSAGE)
 
 
 def _safe_close_code(exc: BaseException) -> int | None:
@@ -205,7 +220,7 @@ def _format_transport_log_summary(
 
 def _project_log_summary(data: Any) -> dict[str, Any]:
     """Project an envelope/response into an allowlisted, content-free log summary."""
-    if not isinstance(data, dict):
+    if type(data) is not dict:
         return {"kind": "non_object"}
 
     summary = {
@@ -402,11 +417,18 @@ class WebSocketAgentServerClient(AgentServerClient):
         async with self._lifecycle_lock:
             if self._ws is not None:
                 await self._run_disconnect_cleanup()
+            safe_failure: Exception | None = None
             try:
                 await self._connect_transport(uri)
-            except BaseException:
+            except BaseException as exc:
                 await self._run_disconnect_cleanup()
-                raise
+                if isinstance(exc, asyncio.CancelledError) or not isinstance(
+                    exc, Exception
+                ):
+                    raise
+                safe_failure = _content_free_connect_exception(exc)
+            if safe_failure is not None:
+                raise safe_failure from None
 
     async def _connect_transport(self, uri: str) -> None:
         logger.info("[WebSocketAgentServerClient] 正在连接 AgentServer transport")
@@ -657,11 +679,18 @@ class WebSocketAgentServerClient(AgentServerClient):
                     "[WebSocketAgentServerClient] WebSocket 已断开，准备按需重连: %s",
                     _format_transport_log_summary(self._diagnostic_state()),
                 )
+                safe_failure: Exception | None = None
                 try:
                     await self._connect_transport(uri)
-                except BaseException:
+                except BaseException as exc:
                     await self._run_disconnect_cleanup()
-                    raise
+                    if isinstance(exc, asyncio.CancelledError) or not isinstance(
+                        exc, Exception
+                    ):
+                        raise
+                    safe_failure = _content_free_connect_exception(exc)
+                if safe_failure is not None:
+                    raise safe_failure from None
                 if self._ws is None:
                     raise RuntimeError("AgentServer WebSocket connection closed")
                 return self._ws, self._connection_generation
@@ -681,6 +710,7 @@ class WebSocketAgentServerClient(AgentServerClient):
     ) -> None:
         if not self._connection_matches(expected_ws, expected_generation):
             raise RuntimeError("AgentServer WebSocket connection closed")
+        send_failed = False
         try:
             await expected_ws.send(json.dumps(payload, ensure_ascii=False))
         except (ConnectionClosed, OSError) as exc:
@@ -700,7 +730,9 @@ class WebSocketAgentServerClient(AgentServerClient):
             )
             if self._connection_matches(expected_ws, expected_generation):
                 await self._stop_receiver_after_fatal_error(exc)
-            raise RuntimeError("AgentServer WebSocket connection closed") from exc
+            send_failed = True
+        if send_failed:
+            raise RuntimeError("AgentServer WebSocket connection closed") from None
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         (
@@ -848,7 +880,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 if isinstance(data, _ReceiverFailure):
                     raise RuntimeError(
                         "AgentServer WebSocket connection closed"
-                    ) from data.exc
+                    ) from None
             except asyncio.TimeoutError as e:
                 logger.warning(
                     "[WebSocketAgentServerClient] 非流式请求超时: request_id_ref=%s timeout=%ss",
@@ -935,7 +967,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 if isinstance(data, _ReceiverFailure):
                     raise RuntimeError(
                         "AgentServer WebSocket connection closed"
-                    ) from data.exc
+                    ) from None
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
                 if chunk_count <= 3:

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import traceback
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
@@ -286,6 +287,477 @@ def test_agent_client_log_refs_are_secret_keyed_and_sequence_is_shape_only():
     assert first != f"sha256:{public_digest}"
     assert first.removeprefix("ref:") != public_digest
     assert summary == {"field_count": 1, "sequence_kind": "integer"}
+
+
+@pytest.mark.asyncio
+async def test_agent_client_log_projection_ignores_hostile_scalar_subclass_hooks():
+    hooks: list[str] = []
+
+    class HostileStr(str):
+        def __str__(self) -> str:
+            hooks.append("str.__str__")
+            raise AssertionError("sentinel-hostile-str-hook")
+
+        def encode(self, *args, **kwargs):
+            hooks.append("str.encode")
+            raise AssertionError("sentinel-hostile-encode-hook")
+
+    class HostileInt(int):
+        def __str__(self) -> str:
+            hooks.append("int.__str__")
+            raise AssertionError("sentinel-hostile-int-hook")
+
+    class HostileFloat(float):
+        def hex(self) -> str:
+            hooks.append("float.hex")
+            raise AssertionError("sentinel-hostile-float-hook")
+
+    summary = json.loads(
+        agent_client._to_json(
+            {
+                "request_id": HostileStr("sentinel-hostile-request-id"),
+                "channel": HostileInt(41),
+                "method": HostileFloat(4.25),
+                "sequence": HostileInt(987654321),
+            }
+        )
+    )
+
+    assert summary == {
+        "channel_ref": "[NON_SCALAR]",
+        "field_count": 4,
+        "method_ref": "[NON_SCALAR]",
+        "request_id_ref": "[NON_SCALAR]",
+        "sequence_kind": "non_scalar",
+    }
+    assert hooks == []
+
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    envelope = e2a_from_agent_fields(
+        request_id="hostile-scalar-business-request",
+        channel_id="web",
+        session_id="hostile-scalar-business-session",
+        req_method="chat.send",
+        params={"content": "business-payload-must-still-send"},
+        is_stream=False,
+    )
+    envelope.channel = HostileStr("web")
+    envelope.method = HostileInt(42)
+    envelope.protocol_version = HostileFloat(4.25)
+
+    request = asyncio.create_task(client.send_request(envelope))
+    for _ in range(100):
+        if ws.sent_payloads:
+            break
+        await asyncio.sleep(0.001)
+    assert ws.sent_payloads
+    await client.get_message_queue_for_test("hostile-scalar-business-request").put(
+        encode_agent_response_for_wire(
+            AgentResponse(
+                request_id="hostile-scalar-business-request",
+                channel_id="web",
+                ok=True,
+                payload={"status": "business-success"},
+            ),
+            response_id="hostile-scalar-business-request",
+        )
+    )
+
+    assert (await request).payload == {"status": "business-success"}
+    assert hooks == []
+
+
+@pytest.mark.asyncio
+async def test_agent_client_public_transport_failures_are_content_free_for_consumers(
+    caplog, monkeypatch
+):
+    from websockets.legacy import client as legacy_client
+
+    agent_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.gateway.routing.agent_client.production_consumer"
+    )
+    for target_logger in (agent_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+
+    private_uri = (
+        "wss://sentinel-trace-user:sentinel-trace-password@"
+        "sentinel-trace-host/sentinel-trace-path"
+    )
+    private_close_reason = "sentinel-trace-close-reason"
+    private_message = "sentinel-trace-exception-message"
+    private_cause = "sentinel-trace-exception-cause"
+    formatted_failures: list[str] = []
+
+    def raise_private_os_error() -> None:
+        try:
+            raise RuntimeError(private_cause)
+        except RuntimeError as cause:
+            raise OSError(
+                f"{private_message} uri={private_uri} close={private_close_reason}"
+            ) from cause
+
+    async def failing_connect(_uri, **_kwargs):
+        raise_private_os_error()
+
+    class FailingSendWebSocket(FakeWebSocket):
+        async def send(self, _data: str) -> None:
+            raise_private_os_error()
+
+    async def capture_failure(awaitable):
+        try:
+            await awaitable
+        except Exception as exc:
+            formatted_failures.append("".join(traceback.format_exception(exc)))
+            consumer_logger.exception("Agent client operation failed")
+            return exc
+        raise AssertionError("expected a transport failure")
+
+    try:
+        monkeypatch.setattr(legacy_client, "connect", failing_connect)
+        connect_error = await capture_failure(AgentClientHarness().connect(private_uri))
+
+        unary_client = AgentClientHarness()
+        unary_client.set_uri_for_test(private_uri)
+        unary_client.set_ws_for_test(FailingSendWebSocket())
+        unary_error = await capture_failure(
+            unary_client.send_request(
+                e2a_from_agent_fields(
+                    request_id="sentinel-trace-unary-request",
+                    channel_id="web",
+                    session_id="sentinel-trace-unary-session",
+                    req_method="chat.send",
+                    params={"content": "sentinel-trace-unary-content"},
+                    is_stream=False,
+                )
+            )
+        )
+
+        stream_client = AgentClientHarness()
+        stream_client.set_uri_for_test(private_uri)
+        stream_client.set_ws_for_test(FailingSendWebSocket())
+        stream_error = await capture_failure(
+            anext(
+                stream_client.send_request_stream(
+                    e2a_from_agent_fields(
+                        request_id="sentinel-trace-stream-request",
+                        channel_id="web",
+                        session_id="sentinel-trace-stream-session",
+                        req_method="chat.send",
+                        params={"content": "sentinel-trace-stream-content"},
+                        is_stream=True,
+                    )
+                )
+            )
+        )
+
+        close_error = ConnectionClosedError(
+            Close(4001, private_close_reason),
+            Close(4001, "sentinel-trace-sent-close-reason"),
+            True,
+        )
+        unary_receiver_client = AgentClientHarness()
+        unary_receiver_client.set_uri_for_test(private_uri)
+        unary_receiver_client.set_ws_for_test(FakeWebSocket())
+        unary_receiver_operation = asyncio.create_task(
+            unary_receiver_client.send_request(
+                e2a_from_agent_fields(
+                    request_id="sentinel-trace-unary-receiver-request",
+                    channel_id="web",
+                    session_id="sentinel-trace-unary-receiver-session",
+                    req_method="chat.send",
+                    params={"content": "sentinel-trace-unary-receiver-content"},
+                    is_stream=False,
+                )
+            )
+        )
+        for _ in range(100):
+            if unary_receiver_client.has_message_queue_for_test(
+                "sentinel-trace-unary-receiver-request"
+            ):
+                break
+            await asyncio.sleep(0.001)
+        await unary_receiver_client.stop_receiver_after_fatal_error_for_test(
+            close_error
+        )
+        unary_receiver_error = await capture_failure(unary_receiver_operation)
+
+        stream_receiver_client = AgentClientHarness()
+        stream_receiver_client.set_uri_for_test(private_uri)
+        stream_receiver_client.set_ws_for_test(FakeWebSocket())
+        stream_receiver_operation = asyncio.create_task(
+            anext(
+                stream_receiver_client.send_request_stream(
+                    e2a_from_agent_fields(
+                        request_id="sentinel-trace-stream-receiver-request",
+                        channel_id="web",
+                        session_id="sentinel-trace-stream-receiver-session",
+                        req_method="chat.send",
+                        params={"content": "sentinel-trace-stream-receiver-content"},
+                        is_stream=True,
+                    )
+                )
+            )
+        )
+        for _ in range(100):
+            if stream_receiver_client.has_message_queue_for_test(
+                "sentinel-trace-stream-receiver-request"
+            ):
+                break
+            await asyncio.sleep(0.001)
+        await stream_receiver_client.stop_receiver_after_fatal_error_for_test(
+            close_error
+        )
+        stream_receiver_error = await capture_failure(stream_receiver_operation)
+    finally:
+        for target_logger in (agent_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert type(connect_error) is OSError
+    assert str(connect_error) == "AgentServer WebSocket connection failed"
+    assert type(unary_error) is RuntimeError
+    assert str(unary_error) == "AgentServer WebSocket connection closed"
+    assert type(stream_error) is RuntimeError
+    assert str(stream_error) == "AgentServer WebSocket connection closed"
+    assert type(unary_receiver_error) is RuntimeError
+    assert str(unary_receiver_error) == "AgentServer WebSocket connection closed"
+    assert type(stream_receiver_error) is RuntimeError
+    assert str(stream_receiver_error) == "AgentServer WebSocket connection closed"
+    assert all(
+        exc.__cause__ is None
+        for exc in (
+            connect_error,
+            unary_error,
+            stream_error,
+            unary_receiver_error,
+            stream_receiver_error,
+        )
+    )
+    assert all(
+        exc.__context__ is None
+        for exc in (
+            connect_error,
+            unary_error,
+            stream_error,
+            unary_receiver_error,
+            stream_receiver_error,
+        )
+    )
+
+    diagnostic_material = "\n".join([*formatted_failures, caplog.text])
+    private_sentinels = (
+        private_uri,
+        "sentinel-trace-user",
+        "sentinel-trace-password",
+        "sentinel-trace-host",
+        "sentinel-trace-path",
+        private_close_reason,
+        "sentinel-trace-sent-close-reason",
+        private_message,
+        private_cause,
+    )
+    assert not [
+        sentinel for sentinel in private_sentinels if sentinel in diagnostic_material
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_client_connect_preserves_cancelled_error(monkeypatch):
+    from websockets.legacy import client as legacy_client
+
+    cancellation = asyncio.CancelledError()
+
+    async def cancelled_connect(_uri, **_kwargs):
+        raise cancellation
+
+    monkeypatch.setattr(legacy_client, "connect", cancelled_connect)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await AgentClientHarness().connect("wss://cancelled.invalid")
+
+    assert raised.value is cancellation
+
+
+def _private_consumer_decode_wire(form: str, stage: str, request_id: str) -> dict:
+    if stage == "unrecognized":
+        return {
+            "request_id": request_id,
+            "sentinel-consumer-private-key": "sentinel-consumer-private-value",
+        }
+
+    if form == "unary":
+        if stage == "inverse":
+            return encode_agent_chunk_for_wire(
+                AgentResponseChunk(
+                    request_id=request_id,
+                    channel_id="sentinel-consumer-inverse-unary-channel",
+                    payload={"content": "sentinel-consumer-inverse-unary-payload"},
+                    is_complete=False,
+                ),
+                response_id="sentinel-consumer-inverse-unary-response",
+                sequence=987654321,
+            )
+        wire = encode_agent_response_for_wire(
+            AgentResponse(
+                request_id=request_id,
+                channel_id="sentinel-consumer-from-dict-unary-channel",
+                ok=True,
+                payload={"content": "sentinel-consumer-from-dict-unary-payload"},
+            ),
+            response_id="sentinel-consumer-from-dict-unary-response",
+        )
+    else:
+        if stage == "inverse":
+            wire = encode_agent_chunk_for_wire(
+                AgentResponseChunk(
+                    request_id=request_id,
+                    channel_id="sentinel-consumer-inverse-chunk-channel",
+                    payload={"content": "sentinel-consumer-inverse-chunk-payload"},
+                    is_complete=False,
+                ),
+                response_id="sentinel-consumer-inverse-chunk-response",
+                sequence=987654321,
+            )
+            wire["response_kind"] = "sentinel-consumer-inverse-chunk-kind"
+            wire["status"] = "sentinel-consumer-inverse-chunk-status"
+            return wire
+        wire = encode_agent_chunk_for_wire(
+            AgentResponseChunk(
+                request_id=request_id,
+                channel_id="sentinel-consumer-from-dict-chunk-channel",
+                payload={"content": "sentinel-consumer-from-dict-chunk-payload"},
+                is_complete=False,
+            ),
+            response_id="sentinel-consumer-from-dict-chunk-response",
+            sequence=987654321,
+        )
+    wire["identity_origin"] = "sentinel-consumer-private-identity-origin"
+    return wire
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("form", "stage"),
+    (
+        ("unary", "from_dict"),
+        ("unary", "inverse"),
+        ("unary", "unrecognized"),
+        ("chunk", "from_dict"),
+        ("chunk", "inverse"),
+        ("chunk", "unrecognized"),
+    ),
+)
+async def test_agent_client_real_codec_consumer_keeps_decode_failures_content_free(
+    form, stage, caplog
+):
+    wire_logger = logging.getLogger("jiuwenswarm.common.e2a.wire_codec")
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.gateway.routing.agent_client.production_consumer"
+    )
+    for target_logger in (wire_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+
+    request_id = f"consumer-{form}-{stage}"
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    envelope = e2a_from_agent_fields(
+        request_id=request_id,
+        channel_id="web",
+        session_id="consumer-decode-session",
+        req_method="chat.send",
+        params={"content": "consumer-decode-request-content"},
+        is_stream=form == "chunk",
+    )
+
+    if form == "unary":
+        operation = asyncio.create_task(client.send_request(envelope))
+    else:
+        operation = asyncio.create_task(anext(client.send_request_stream(envelope)))
+
+    try:
+        for _ in range(100):
+            if client.has_message_queue_for_test(request_id):
+                break
+            await asyncio.sleep(0.001)
+        assert client.has_message_queue_for_test(request_id)
+        await client.get_message_queue_for_test(request_id).put(
+            _private_consumer_decode_wire(form, stage, request_id)
+        )
+
+        raised_error: ValueError | None = None
+        formatted = ""
+        try:
+            await operation
+        except ValueError as exc:
+            raised_error = exc
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("Agent client decode failed")
+        else:
+            raise AssertionError("expected a decode failure")
+    finally:
+        for target_logger in (wire_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert type(raised_error) is ValueError
+    assert str(raised_error) == "invalid AgentServer wire response"
+    assert raised_error.__cause__ is None
+    assert raised_error.__context__ is None
+    diagnostic_material = f"{formatted}\n{caplog.text}"
+    private_sentinels = (
+        "sentinel-consumer-private-key",
+        "sentinel-consumer-private-value",
+        "sentinel-consumer-private-identity-origin",
+        "sentinel-consumer-from-dict-unary",
+        "sentinel-consumer-from-dict-chunk",
+        "sentinel-consumer-inverse-unary",
+        "sentinel-consumer-inverse-chunk",
+        "987654321",
+    )
+    assert not [
+        sentinel for sentinel in private_sentinels if sentinel in diagnostic_material
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ("from_dict", "inverse", "unrecognized"))
+async def test_message_handler_server_push_consumer_logs_static_decode_failure(
+    stage, caplog
+):
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+
+    target_logger = logging.getLogger(
+        "jiuwenswarm.gateway.message_handler.message_handler"
+    )
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger=target_logger.name)
+    handler = object.__new__(MessageHandler)
+
+    try:
+        await handler._handle_agent_server_push(
+            _private_consumer_decode_wire(
+                "chunk",
+                stage,
+                f"message-handler-consumer-{stage}",
+            )
+        )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    assert "invalid AgentServer wire response" in caplog.text
+    private_sentinels = (
+        "sentinel-consumer-private-key",
+        "sentinel-consumer-private-value",
+        "sentinel-consumer-private-identity-origin",
+        "sentinel-consumer-from-dict-chunk",
+        "sentinel-consumer-inverse-chunk",
+        "987654321",
+    )
+    assert not [sentinel for sentinel in private_sentinels if sentinel in caplog.text]
 
 
 @pytest.mark.asyncio

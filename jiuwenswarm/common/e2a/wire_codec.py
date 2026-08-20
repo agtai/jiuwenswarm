@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 from datetime import date, datetime
@@ -33,24 +34,23 @@ from jiuwenswarm.common.e2a.models import (
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
-_SAFE_EXCEPTION_CLASS_NAMES = frozenset(
-    {
-        "ConnectionError",
-        "JSONDecodeError",
-        "OSError",
-        "RuntimeError",
-        "TimeoutError",
-        "TypeError",
-        "ValueError",
-    }
+_SAFE_EXCEPTION_CLASSES: tuple[tuple[type[BaseException], str], ...] = (
+    (json.JSONDecodeError, "JSONDecodeError"),
+    (ConnectionError, "ConnectionError"),
+    (TimeoutError, "TimeoutError"),
+    (OSError, "OSError"),
+    (RuntimeError, "RuntimeError"),
+    (TypeError, "TypeError"),
+    (ValueError, "ValueError"),
 )
+_WIRE_DECODE_ERROR_MESSAGE = "invalid AgentServer wire response"
 
 
 def _safe_exception_class(exc: BaseException) -> str:
     """Classify an error without logging its dynamic name, message or traceback."""
-    for cls in type(exc).__mro__:
-        if cls.__name__ in _SAFE_EXCEPTION_CLASS_NAMES:
-            return cls.__name__
+    for cls, category in _SAFE_EXCEPTION_CLASSES:
+        if isinstance(exc, cls):
+            return category
     return "Exception"
 
 
@@ -131,6 +131,7 @@ def _deprecated_chunk_shape(data: dict[str, Any]) -> bool:
 def parse_agent_server_wire_unary(data: dict[str, Any]) -> AgentResponse:
     """将一条非流式 WebSocket JSON 解析为 ``AgentResponse``。"""
     if is_e2a_response_wire_dict(data):
+        e2a: E2AResponse | None
         try:
             e2a = E2AResponse.from_dict(dict(data))
         except Exception as e:
@@ -138,7 +139,9 @@ def parse_agent_server_wire_unary(data: dict[str, Any]) -> AgentResponse:
                 "[E2A][wire][in][FAIL] stage=from_dict form=unary exception_class=%s",
                 _safe_exception_class(e),
             )
-            raise
+            e2a = None
+        if e2a is None:
+            raise ValueError(_WIRE_DECODE_ERROR_MESSAGE) from None
         meta = dict(e2a.metadata or {})
         legacy = meta.get(E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY)
         if legacy is not None and isinstance(legacy, dict):
@@ -147,12 +150,12 @@ def parse_agent_server_wire_unary(data: dict[str, Any]) -> AgentResponse:
                 len(legacy),
             )
             return _raw_dict_to_agent_response(legacy)
+        out: AgentResponse | None
         try:
             out = e2a_response_to_agent_response(e2a)
             logger.debug(
                 "[E2A][wire][in] form=unary legacy_present=false",
             )
-            return out
         except Exception as e:
             logger.error(
                 "[E2A][wire][in][FAIL] stage=inverse form=unary exception_class=%s",
@@ -164,7 +167,10 @@ def parse_agent_server_wire_unary(data: dict[str, Any]) -> AgentResponse:
                     "[E2A][wire][in][fallback] stage=inverse form=unary legacy_present=true",
                 )
                 return _raw_dict_to_agent_response(legacy_inv)
-            raise
+            out = None
+        if out is None:
+            raise ValueError(_WIRE_DECODE_ERROR_MESSAGE) from None
+        return out
 
     if _deprecated_unary_shape(data):
         logger.warning(
@@ -173,14 +179,16 @@ def parse_agent_server_wire_unary(data: dict[str, Any]) -> AgentResponse:
         )
         return _raw_dict_to_agent_response(data)
 
-    raise ValueError(
-        f"parse_agent_server_wire_unary: unrecognized wire shape keys={list(data.keys())[:32]}"
+    logger.error(
+        "[E2A][wire][in][FAIL] stage=shape form=unary exception_class=ValueError"
     )
+    raise ValueError(_WIRE_DECODE_ERROR_MESSAGE) from None
 
 
 def parse_agent_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
     """将一条流式 WebSocket JSON 解析为 ``AgentResponseChunk``。"""
     if is_e2a_response_wire_dict(data):
+        e2a: E2AResponse | None
         try:
             e2a = E2AResponse.from_dict(dict(data))
         except Exception as e:
@@ -188,7 +196,9 @@ def parse_agent_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
                 "[E2A][wire][in][FAIL] stage=from_dict form=chunk exception_class=%s",
                 _safe_exception_class(e),
             )
-            raise
+            e2a = None
+        if e2a is None:
+            raise ValueError(_WIRE_DECODE_ERROR_MESSAGE) from None
         meta = dict(e2a.metadata or {})
         legacy = meta.get(E2A_WIRE_LEGACY_AGENT_CHUNK_KEY)
         if legacy is not None and isinstance(legacy, dict):
@@ -197,13 +207,13 @@ def parse_agent_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
                 len(legacy),
             )
             return _raw_dict_to_agent_chunk(legacy)
+        out: AgentResponseChunk | None
         try:
             out = e2a_response_to_agent_chunk(e2a)
             logger.debug(
                 "[E2A][wire][in] form=chunk is_final=%s legacy_present=false",
                 e2a.is_final,
             )
-            return out
         except Exception as e:
             logger.error(
                 "[E2A][wire][in][FAIL] stage=inverse form=chunk exception_class=%s",
@@ -215,7 +225,10 @@ def parse_agent_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
                     "[E2A][wire][in][fallback] stage=inverse form=chunk legacy_present=true",
                 )
                 return _raw_dict_to_agent_chunk(legacy_inv)
-            raise
+            out = None
+        if out is None:
+            raise ValueError(_WIRE_DECODE_ERROR_MESSAGE) from None
+        return out
 
     if _deprecated_chunk_shape(data):
         logger.warning(
@@ -224,9 +237,10 @@ def parse_agent_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
         )
         return _raw_dict_to_agent_chunk(data)
 
-    raise ValueError(
-        f"parse_agent_server_wire_chunk: unrecognized wire shape keys={list(data.keys())[:32]}"
+    logger.error(
+        "[E2A][wire][in][FAIL] stage=shape form=chunk exception_class=ValueError"
     )
+    raise ValueError(_WIRE_DECODE_ERROR_MESSAGE) from None
 
 
 def encode_agent_response_for_wire(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 from dataclasses import asdict
 
 import pytest
@@ -209,6 +210,99 @@ def test_inverse_raises_for_chunk_shape_on_unary_parser() -> None:
     )
     with pytest.raises(ValueError):
         parse_agent_server_wire_unary(chunk_wire)
+
+
+def _private_decode_failure_wire(form: str, stage: str) -> dict:
+    if stage == "unrecognized":
+        return {
+            "sentinel-decode-private-key": "sentinel-decode-private-value",
+        }
+
+    if form == "unary":
+        if stage == "inverse":
+            return encode_agent_chunk_for_wire(
+                AgentResponseChunk(
+                    request_id="sentinel-decode-inverse-unary-request",
+                    channel_id="sentinel-decode-inverse-unary-channel",
+                    payload={"content": "sentinel-decode-inverse-unary-payload"},
+                    is_complete=False,
+                ),
+                response_id="sentinel-decode-inverse-unary-response",
+                sequence=987654321,
+            )
+        wire = encode_agent_response_for_wire(
+            AgentResponse(
+                request_id="sentinel-decode-from-dict-unary-request",
+                channel_id="sentinel-decode-from-dict-unary-channel",
+                ok=True,
+                payload={"content": "sentinel-decode-from-dict-unary-payload"},
+            ),
+            response_id="sentinel-decode-from-dict-unary-response",
+        )
+    else:
+        if stage == "inverse":
+            wire = encode_agent_chunk_for_wire(
+                AgentResponseChunk(
+                    request_id="sentinel-decode-inverse-chunk-request",
+                    channel_id="sentinel-decode-inverse-chunk-channel",
+                    payload={"content": "sentinel-decode-inverse-chunk-payload"},
+                    is_complete=False,
+                ),
+                response_id="sentinel-decode-inverse-chunk-response",
+                sequence=987654321,
+            )
+            wire["response_kind"] = "sentinel-decode-inverse-chunk-kind"
+            wire["status"] = "sentinel-decode-inverse-chunk-status"
+            return wire
+        wire = encode_agent_chunk_for_wire(
+            AgentResponseChunk(
+                request_id="sentinel-decode-from-dict-chunk-request",
+                channel_id="sentinel-decode-from-dict-chunk-channel",
+                payload={"content": "sentinel-decode-from-dict-chunk-payload"},
+                is_complete=False,
+            ),
+            response_id="sentinel-decode-from-dict-chunk-response",
+            sequence=987654321,
+        )
+    wire["identity_origin"] = "sentinel-decode-private-identity-origin"
+    return wire
+
+
+@pytest.mark.parametrize(
+    ("form", "stage", "parser"),
+    (
+        ("unary", "from_dict", parse_agent_server_wire_unary),
+        ("unary", "inverse", parse_agent_server_wire_unary),
+        ("unary", "unrecognized", parse_agent_server_wire_unary),
+        ("chunk", "from_dict", parse_agent_server_wire_chunk),
+        ("chunk", "inverse", parse_agent_server_wire_chunk),
+        ("chunk", "unrecognized", parse_agent_server_wire_chunk),
+    ),
+)
+def test_decode_failures_are_static_value_errors_without_private_cause(
+    form, stage, parser
+) -> None:
+    wire = _private_decode_failure_wire(form, stage)
+
+    with pytest.raises(ValueError) as raised:
+        parser(wire)
+
+    assert type(raised.value) is ValueError
+    assert str(raised.value) == "invalid AgentServer wire response"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    formatted = "".join(traceback.format_exception(raised.value))
+    private_sentinels = (
+        "sentinel-decode-private-key",
+        "sentinel-decode-private-value",
+        "sentinel-decode-private-identity-origin",
+        "sentinel-decode-from-dict-unary",
+        "sentinel-decode-from-dict-chunk",
+        "sentinel-decode-inverse-unary",
+        "sentinel-decode-inverse-chunk",
+        "987654321",
+    )
+    assert not [sentinel for sentinel in private_sentinels if sentinel in formatted]
 
 
 def test_wire_codec_logs_are_content_free_across_all_public_paths(
