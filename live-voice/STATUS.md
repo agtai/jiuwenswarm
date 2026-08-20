@@ -30,7 +30,7 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects; **13/88 are closed** on this branch,
+  packet against 88 unique current defects; **14/88 are closed** on this branch,
   beginning with exact authority and privacy boundaries. Progress is counted
   only after reproduced defects,
   affected verification and independent module review close; the
@@ -141,7 +141,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — **13/88 closed**, 75 unique current
+- **Packet:** strict-review remediation — **14/88 closed**, 74 unique current
   defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
@@ -178,8 +178,8 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** repair the A21/A20/A8+B6 review findings, independently
-  review A23 and re-review A2+B2; integrate only exact reviewed commits, then
+- **Next action:** repair the A21/A20/A8+B6 review findings and independently
+  re-review A2+B2; integrate only exact reviewed commits, then
   run affected and cumulative integration checks.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.

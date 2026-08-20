@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 13/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 14/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -512,6 +512,7 @@ and risk checkpoint before implementation.
 | SRR-13 / A11 | 11/88 | `0c7db2994` + `870cb993f` + `73b308362`; every synchronous Task Store operation used by async drain/reconcile now runs off the event-loop while one retained owner survives repeated caller cancellation. The first caller cancellation wins ordinary worker/release failure, process-control and inner cancellation remain authoritative, exact claims are released or durably recoverable, and restart/successor delivery remains once-only; 12 focused asyncio-debug cases plus 231 Core and 101 composition tests passed, and independent Tier-3 review signed the final candidate |
 | SRR-16 / B16 | 12/88 | `90865abd4`; every natural-language P3 rejection now reports authority and P3 control as unavailable with package-only/no-runtime evidence instead of fabricating a trusted lease or observed runtime. Invalid bearer/structure, missing binding, resolver failure, duplicate/concurrent replay, other-session, stop and restart probes retain zero forbidden effects; 151 registry + 47 real AgentServer route tests passed after independent Tier-3 review and integration |
 | SRR-17 / A25 | 13/88 | `09d2239ff`; consumed and expired P3 confirmations are atomically compacted into a bounded durable replay fence, so only live authority consumes capacity. Exact retained replay and stable expiry remain truthful, evicted tokens never authorize, concurrent reopened issuers cannot exceed capacity, cleanup/insert failure rolls back without partial reclamation, and all forbidden Task mutations stay zero; 45 primary + 349 affected tests passed after independent Tier-3 review and integration |
+| SRR-18 / A23 | 14/88 | `3c85728fd`; submit, barge-in and presentation-ACK operations are frozen and durably checkpointed before pending retention or completed-replay eviction. UTF-8/serialization/checkpoint rejection leaves no ghost authority or network/Agent/Task/media/presentation effects, exact concurrent/restart replay remains once-only, and the 128-entry boundary preserves the old replay until durable successor admission; 90 focused tests plus full candidate/baseline Integrated Web comparison passed after independent Tier-3 review |
 
 ## 8. Global exclusions
 
