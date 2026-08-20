@@ -309,8 +309,12 @@ shared schema, classifier or another module owner without a new checkpoint.
   recovery.
 - Dependency: preserve integrated SRR-01/C5 exact Executor-observation binding
   and zero-write rejection semantics.
-- Worker-owned source/tests: `jiuwenswarm/server/live_voice/persistent_task_core.py`
-  and `tests/unit_tests/live_voice/test_persistent_task_core.py` only.
+- Worker-owned source/tests: `jiuwenswarm/server/live_voice/persistent_task_core.py`,
+  `tests/unit_tests/live_voice/test_persistent_task_core.py` and the affected
+  timing assertions in
+  `tests/unit_tests/live_voice/test_p3_authenticated_composition.py`. The
+  composition product source remains excluded; its tests must wait for durable
+  Store/settlement truth rather than treating Executor entry as Store commit.
 - Intended behavior: execute each blocking Store operation through the existing
   blocking runner or an equivalent owner-scoped thread boundary while keeping
   async Executor calls on the owning event loop. Cancellation cannot publish a
