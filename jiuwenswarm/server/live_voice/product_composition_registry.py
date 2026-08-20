@@ -2606,6 +2606,17 @@ class AgentServerProductCompositionRegistry:
                     self._unknown_turn_commits_by_commit[commit.commit_id] = commit
                     self._unknown_turn_commits_by_turn[commit.turn_id] = commit
                     self._unknown_voice_commit_routes[commit.commit_id] = route_key
+                elif (
+                    not result_unknown
+                    and commit.commit_id not in self._accepted_turn_commits_by_commit
+                    and commit.commit_id not in self._consumed_turn_commits_by_commit
+                ):
+                    # A definite failure keeps no critical-input identity and no
+                    # token-gate hold. Releasing by exact commit id leaves a
+                    # successor commit on the same interaction untouched.
+                    self._critical_input_commit_generations.pop(commit.commit_id, None)
+                    self._critical_input_guarded_commits.discard(commit.commit_id)
+                    self._critical_token_gate.release_commit(commit.commit_id)
                 if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
                     self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
                 if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:

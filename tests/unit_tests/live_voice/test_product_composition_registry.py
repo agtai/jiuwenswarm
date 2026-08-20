@@ -6245,6 +6245,87 @@ async def test_higher_generation_p2_replacement_drops_the_superseded_origin(
 
 
 @pytest.mark.asyncio
+async def test_post_gate_origin_admission_failure_releases_critical_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A definite post-gate failure retains no critical-input identity.
+
+    Failure cleanup settles the pending and unknown commit maps only, so a
+    gate-approved submit that later fails definitely leaves its exact
+    generation entry, its guarded-commit marker and its token-gate hold
+    behind.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-post-gate-failure",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    original_accept = route.activation_lease.accept_task_origin
+
+    observed: dict[str, object] = {}
+
+    async def fail_origin_admission(*_args: object, **_kwargs: object):
+        # Capture the identity that the gate has already granted, then fail
+        # definitely: no RESULT_UNKNOWN code.
+        observed["generations"] = dict(registry._critical_input_commit_generations)
+        observed["guarded"] = set(registry._critical_input_guarded_commits)
+        raise RuntimeError("injected definite origin admission failure")
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "accept_task_origin",
+        fail_origin_admission,
+    )
+    params = _p2_task_origin_params(
+        stem="post-gate-failure",
+        text="definite failure must retain no critical identity",
+    )
+    rejected = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-post-gate-failure",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert rejected.ok is False
+    error = cast(dict, rejected.payload["error"])
+    assert error["code"] != ErrorCode.RESULT_UNKNOWN.value
+    # The gate must actually have granted identity before the failure, or this
+    # scenario would not exercise the post-gate release path at all.
+    # The gate must actually have granted identity before the failure, or this
+    # scenario would not exercise the post-gate release path at all.
+    assert observed["generations"] != {}
+    assert observed["guarded"] != set()
+    assert manager.agent.calls == 0
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+
+    # A later submit on the same interaction is still admitted, so the exact
+    # release did not fence the successor out.
+    monkeypatch.setattr(
+        route.activation_lease, "accept_task_origin", original_accept
+    )
+    successor = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="post-gate-successor",
+            text="successor keeps its own critical identity",
+        ),
+        request_id="request-submit-post-gate-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    await registry.stop()
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+
+
+@pytest.mark.asyncio
 async def test_progress_authority_failure_allocates_no_subscription_or_sink(
     tmp_path: Path,
 ) -> None:
