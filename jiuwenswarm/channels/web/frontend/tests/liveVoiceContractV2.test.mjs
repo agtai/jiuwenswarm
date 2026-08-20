@@ -16,6 +16,7 @@ import {
   canonicalJsonBytes,
   classifyContract,
   commandFingerprint,
+  buildTaskUnreadEventsAck,
   defaultBargeInScopes,
   dispatchCancel,
   dispatchCommittedInput,
@@ -29,6 +30,7 @@ import {
   parseQueryEnvelope,
   parseResultEnvelope,
   parseScopeRef,
+  parseTaskUnreadEventsResult,
   parseTurnCommit,
   parseV2Envelope,
   parseWorkProgressEventV2,
@@ -159,6 +161,73 @@ function wave2QueryRaw(payload) {
     required_capabilities: ['task.unread_events'],
     payload: clone(payload),
     extensions: {},
+  };
+}
+
+function taskUnreadEventRaw(owner, options = {}) {
+  const seq = options.seq ?? 0;
+  const state = options.state ?? 'accepted';
+  return {
+    event_id: options.event_id ?? `event-${seq}`,
+    task_id: options.task_id ?? owner.target_ref.id,
+    attempt_id: options.attempt_id ?? 'attempt-1',
+    scope: {
+      ...clone(owner.scope),
+      session_id: options.session_id ?? 'session-at-event-time',
+      ...(options.scope ?? {}),
+    },
+    seq,
+    event_type: options.event_type ?? `task.${state}`,
+    state,
+    outcome: options.outcome ?? (state === 'terminal' ? 'completed' : null),
+    producer: options.producer ?? 'task_core',
+    source_event_id: options.source_event_id ?? null,
+    causation_id: options.causation_id ?? `cause-${seq}`,
+    correlation_id: options.correlation_id ?? 'task-correlation-1',
+    occurred_at: options.occurred_at ?? `2026-08-19T12:00:0${seq}Z`,
+    details: options.details ?? {},
+  };
+}
+
+function taskUnreadPageRaw(owner, options = {}) {
+  const watermark = options.watermark ?? -1;
+  const events = options.events ?? [taskUnreadEventRaw(owner, { seq: watermark + 1 })];
+  const headSeq = options.head_seq ?? events.at(-1)?.seq ?? watermark;
+  const hasMore = options.has_more ?? false;
+  return {
+    task_id: options.task_id ?? owner.target_ref.id,
+    presentation_class: options.presentation_class ?? owner.payload.presentation_class,
+    watermark,
+    acked_event_id: options.acked_event_id ?? (watermark === -1 ? null : `event-${watermark}`),
+    head_seq: headSeq,
+    events,
+    next_after_seq: options.next_after_seq ?? (hasMore ? (events.at(-1)?.seq ?? null) : null),
+    has_more: hasMore,
+  };
+}
+
+function taskUnreadResultRaw(owner, page = taskUnreadPageRaw(owner)) {
+  return {
+    contract_version: owner.contract_version,
+    request_id: owner.request_id,
+    command_id: null,
+    ok: true,
+    result: page,
+    error: null,
+    observed_at: '2026-08-19T12:01:00Z',
+    extensions: {},
+  };
+}
+
+function taskAckSeed(overrides = {}) {
+  return {
+    request_id: 'request-presentation-ack-1',
+    command_id: 'command-presentation-ack-1',
+    issued_at: '2026-08-19T12:01:01Z',
+    correlation_id: 'presentation-correlation-1',
+    causation_id: 'presentation-ack-1',
+    origin: { kind: 'structured', turn_id: null, commit_id: null },
+    ...overrides,
   };
 }
 
@@ -1320,6 +1389,329 @@ test('unread and ACK payloads close presentation class and safe integers', () =>
       ContractViolation,
     );
   }
+});
+
+test('unread result parser binds one authenticated consumer page and serializes its exact ACK prefix candidate', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 4 }));
+  const events = [
+    taskUnreadEventRaw(owner, {
+      seq: 0,
+      event_type: 'task.accepted',
+      state: 'accepted',
+      details: { prior_cursor: -1 },
+    }),
+    taskUnreadEventRaw(owner, { seq: 1, event_type: 'attempt.running', state: 'running' }),
+    taskUnreadEventRaw(owner, {
+      seq: 2,
+      event_type: 'attempt.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+    }),
+    taskUnreadEventRaw(owner, {
+      seq: 3,
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+    }),
+  ];
+  const raw = taskUnreadResultRaw(owner, taskUnreadPageRaw(owner, { events, head_seq: 3 }));
+
+  const parsed = parseTaskUnreadEventsResult(raw, owner);
+  const ack = buildTaskUnreadEventsAck(parsed, owner, taskAckSeed());
+
+  assert.equal(parsed.result.task_id, 'task-1');
+  assert.equal(parsed.result.presentation_class, 'text');
+  assert.deepEqual(
+    parsed.result.events.map(event => event.seq),
+    [0, 1, 2, 3],
+  );
+  assert.equal(parsed.result.events[0].scope.session_id, 'session-at-event-time');
+  assert.equal(Object.isFrozen(parsed), true);
+  assert.equal(Object.isFrozen(parsed.result), true);
+  assert.equal(Object.isFrozen(parsed.result.events), true);
+  assert.equal(Object.isFrozen(parsed.result.events[0].details), true);
+  assert.deepEqual(ack, {
+    contract_version: 'live-voice.contract.v2',
+    request_id: 'request-presentation-ack-1',
+    command_id: 'command-presentation-ack-1',
+    command_type: 'task.ack_events',
+    issued_at: '2026-08-19T12:01:01Z',
+    scope: owner.scope,
+    correlation_id: 'presentation-correlation-1',
+    causation_id: 'presentation-ack-1',
+    origin: { kind: 'structured', turn_id: null, commit_id: null },
+    target_ref: { kind: 'task', id: 'task-1' },
+    context_refs: owner.context_refs,
+    required_capabilities: ['task.ack_events'],
+    payload: {
+      presentation_class: 'text',
+      acked_through_seq: 3,
+      acked_event_id: 'event-3',
+      expected_event_head: 3,
+    },
+    extensions: {},
+  });
+  assert.equal(Object.isFrozen(ack), true);
+  assert.equal(Object.isFrozen(ack.payload), true);
+});
+
+test('unread result parser closes result, page, event, scope, class, and integer boundaries', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 2 }));
+  const invalid = [];
+  const add = mutate => {
+    const raw = taskUnreadResultRaw(owner);
+    mutate(raw);
+    invalid.push(raw);
+  };
+  add(raw => {
+    raw.contract_version = 'live-voice.contract.v1';
+  });
+  add(raw => {
+    raw.request_id = 'request-foreign';
+  });
+  add(raw => {
+    raw.command_id = 'command-forged';
+  });
+  add(raw => {
+    raw.extra = true;
+  });
+  add(raw => {
+    raw.result.extra = true;
+  });
+  add(raw => {
+    raw.result.events[0].extra = true;
+  });
+  add(raw => {
+    raw.result.task_id = 'task-foreign';
+  });
+  add(raw => {
+    raw.result.presentation_class = 'voice';
+  });
+  add(raw => {
+    raw.result.events[0].task_id = 'task-foreign';
+  });
+  add(raw => {
+    raw.result.events[0].attempt_id = '';
+  });
+  add(raw => {
+    raw.result.events[0].event_id = '';
+  });
+  add(raw => {
+    raw.result.events[0].scope.subject_id = 'subject-foreign';
+  });
+  add(raw => {
+    raw.result.events[0].scope.project_id = 'project-foreign';
+  });
+  add(raw => {
+    raw.result.events[0].scope.assurance = 'request_asserted';
+  });
+  add(raw => {
+    raw.result.events[0].seq = true;
+  });
+  add(raw => {
+    raw.result.events[0].seq = MAX_SAFE_INTEGER + 1;
+  });
+  add(raw => {
+    raw.result.watermark = -2;
+  });
+  add(raw => {
+    raw.result.head_seq = 0.5;
+  });
+  add(raw => {
+    raw.result.has_more = 1;
+  });
+  add(raw => {
+    raw.result.events[0].state = 'queued';
+  });
+  add(raw => {
+    raw.result.events[0].outcome = 'completed';
+  });
+  add(raw => {
+    raw.result.events[0].state = 'terminal';
+    raw.result.events[0].event_type = 'task.terminal';
+    raw.result.events[0].outcome = null;
+  });
+  add(raw => {
+    raw.result.events[0].event_type = 'task.terminal';
+  });
+  add(raw => {
+    raw.result.events[0].event_type = 'attempt.terminal';
+  });
+  add(raw => {
+    raw.result.events[0].event_type = 'task.running';
+    raw.result.events[0].state = 'terminal';
+    raw.result.events[0].outcome = 'completed';
+  });
+  add(raw => {
+    raw.result.events[0].details = { nested: {} };
+  });
+  add(raw => {
+    raw.result.events[0].details = { fraction: 0.5 };
+  });
+
+  for (const raw of invalid) {
+    assert.throws(() => parseTaskUnreadEventsResult(raw, owner), ContractViolation);
+  }
+
+  const wrongPrototype = taskUnreadResultRaw(owner);
+  Object.setPrototypeOf(wrongPrototype.result, { forged: true });
+  assert.throws(() => parseTaskUnreadEventsResult(wrongPrototype, owner), ContractViolation);
+
+  const accessor = taskUnreadResultRaw(owner);
+  Object.defineProperty(accessor.result.events[0], 'event_id', {
+    enumerable: true,
+    get() {
+      throw new Error('accessor must never execute');
+    },
+  });
+  assert.throws(() => parseTaskUnreadEventsResult(accessor, owner), ContractViolation);
+
+  const sparse = taskUnreadResultRaw(owner);
+  sparse.result.events = new Array(1);
+  assert.throws(() => parseTaskUnreadEventsResult(sparse, owner), ContractViolation);
+
+  const requestAsserted = wave2QueryRaw({ presentation_class: 'text', limit: 2 });
+  requestAsserted.scope.assurance = 'request_asserted';
+  const untrustedOwner = parseQueryEnvelope(requestAsserted);
+  assert.throws(
+    () => parseTaskUnreadEventsResult(taskUnreadResultRaw(untrustedOwner), untrustedOwner),
+    error => error instanceof ContractViolation && error.error.reason === 'AUTHENTICATED_CONSUMER_REQUIRED',
+  );
+
+  const wrongQuery = clone(owner);
+  wrongQuery.query_type = 'task.events';
+  wrongQuery.required_capabilities = ['task.events'];
+  wrongQuery.payload = {};
+  assert.throws(
+    () => parseTaskUnreadEventsResult(taskUnreadResultRaw(owner), wrongQuery),
+    error => error instanceof ContractViolation && error.error.reason === 'UNREAD_RESULT_OWNER_REQUIRED',
+  );
+});
+
+test('unread result parser accepts only one frozen contiguous page prefix', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 2 }));
+  const complete = taskUnreadPageRaw(owner, {
+    events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 1 })],
+    head_seq: 1,
+  });
+  const truncated = taskUnreadPageRaw(owner, {
+    events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 1 })],
+    head_seq: 2,
+    has_more: true,
+    next_after_seq: 1,
+  });
+  const empty = taskUnreadPageRaw(owner, {
+    watermark: 1,
+    acked_event_id: 'event-1',
+    events: [],
+    head_seq: 1,
+  });
+  for (const page of [complete, truncated, empty]) {
+    parseTaskUnreadEventsResult(taskUnreadResultRaw(owner, page), owner);
+  }
+
+  const invalidPages = [
+    { ...clone(complete), events: [taskUnreadEventRaw(owner, { seq: 1 })] },
+    {
+      ...clone(complete),
+      events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 0, event_id: 'duplicate-seq' })],
+    },
+    {
+      ...clone(complete),
+      events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 2 })],
+      head_seq: 2,
+    },
+    { ...clone(complete), head_seq: 2 },
+    { ...clone(truncated), next_after_seq: 0 },
+    { ...clone(truncated), next_after_seq: null },
+    { ...clone(truncated), head_seq: 1 },
+    { ...clone(empty), watermark: -1, acked_event_id: 'event-forged' },
+    { ...clone(empty), acked_event_id: null },
+    { ...clone(empty), head_seq: 2 },
+    {
+      ...clone(complete),
+      events: [...clone(complete.events), taskUnreadEventRaw(owner, { seq: 2 })],
+      head_seq: 2,
+    },
+  ];
+  for (const page of invalidPages) {
+    assert.throws(() => parseTaskUnreadEventsResult(taskUnreadResultRaw(owner, page), owner), ContractViolation);
+  }
+});
+
+test('unread ACK builder rejects forged presentation metadata and never ACKs an empty page', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'voice', limit: 2 }));
+  const emptyResult = parseTaskUnreadEventsResult(
+    taskUnreadResultRaw(
+      owner,
+      taskUnreadPageRaw(owner, {
+        watermark: 0,
+        acked_event_id: 'event-0',
+        events: [],
+        head_seq: 0,
+      }),
+    ),
+    owner,
+  );
+  assert.equal(buildTaskUnreadEventsAck(emptyResult, owner, taskAckSeed()), null);
+
+  const parsed = parseTaskUnreadEventsResult(taskUnreadResultRaw(owner), owner);
+  for (const seed of [
+    taskAckSeed({ delivery_id: 'delivery-forged' }),
+    taskAckSeed({ generation: 7 }),
+    taskAckSeed({ response_id: 'response-forged' }),
+    taskAckSeed({ command_id: '' }),
+    taskAckSeed({ causation_id: '' }),
+  ]) {
+    assert.throws(() => buildTaskUnreadEventsAck(parsed, owner, seed), ContractViolation);
+  }
+
+  const textOwnerRaw = wave2QueryRaw({ presentation_class: 'text', limit: 2 });
+  textOwnerRaw.request_id = 'request-unread-events-text';
+  const textOwner = parseQueryEnvelope(textOwnerRaw);
+  assert.throws(
+    () => buildTaskUnreadEventsAck(parsed, textOwner, taskAckSeed()),
+    error => error instanceof ContractViolation && error.error.reason === 'RESULT_OWNER_MISMATCH',
+  );
+});
+
+test('unread parser and ACK builder are pure and tolerate only Session drift in retained events', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 2 }));
+  const raw = taskUnreadResultRaw(
+    owner,
+    taskUnreadPageRaw(owner, {
+      events: [taskUnreadEventRaw(owner, { session_id: 'prior-session' })],
+    }),
+  );
+  const before = clone(raw);
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  let networkEffects = 0;
+  let domEffects = 0;
+  globalThis.fetch = () => {
+    networkEffects += 1;
+    throw new Error('network effect forbidden');
+  };
+  globalThis.document = new Proxy(
+    {},
+    {
+      get() {
+        domEffects += 1;
+        throw new Error('DOM effect forbidden');
+      },
+    },
+  );
+  try {
+    const parsed = parseTaskUnreadEventsResult(raw, owner);
+    buildTaskUnreadEventsAck(parsed, owner, taskAckSeed());
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+  assert.deepEqual(raw, before);
+  assert.equal(networkEffects, 0);
+  assert.equal(domEffects, 0);
 });
 
 test('command result extension is exact while legacy and query results stay unchanged', () => {
