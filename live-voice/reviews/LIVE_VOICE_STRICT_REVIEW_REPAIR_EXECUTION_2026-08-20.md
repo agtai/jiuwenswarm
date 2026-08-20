@@ -399,6 +399,43 @@ Tier-3 review and integration verification remain mandatory.
   policy, Task operation, generation/capacity cleanup, query-lock redesign,
   frontend behavior or new evidence vocabulary.
 
+## 5.6 Wave 6 activation — P3 confirmation durable capacity
+
+Wave 6 starts from candidate `9921e543208c10dab9d5ee01808823ce97e3eb5e`.
+That baseline includes the still-pending SRR-16/B16 candidate, but the two
+packets have no source or test ownership overlap.
+
+### SRR-17 — A25 P3 confirmation durable capacity and restart recovery
+
+- Capability/owner: durable P3 confirmation admission and replay authority.
+- Risk: Tier 3 durability, authorization and restart recovery.
+- Worker-owned source/primary tests:
+  `jiuwenswarm/server/live_voice/p3_confirmation.py` and
+  `tests/unit_tests/live_voice/test_p3_confirmation.py`. Existing product
+  forwarder/composition consumer tests are affected read-only evidence only.
+- Intended behavior: within the same `BEGIN IMMEDIATE` transaction and before
+  admitting a new confirmation, remove expired or consumed heavy records while
+  preserving every live confirmation. If the existing once-only replay
+  contract requires consumed identity after cleanup, retain only a minimal,
+  bounded durable replay fence; it may identify an exact replay but must never
+  let an old token authorize a new mutation.
+- Acceptance: at capacity one, consumed then new and expired then new admission
+  both recover capacity, while a live row still rejects the newcomer. Reopen
+  preserves live authority, cleanup and exact replay fencing; concurrent
+  independent issuers linearize so capacity is never exceeded. Injected cleanup
+  or insert failure rolls the whole transaction back. Invalid, stale, evicted
+  and mismatched confirmation paths have zero new confirmation, Task, Tool,
+  Agent, Executor, audio/history or other-scope authority effects, and existing
+  supported replay/forwarder consumers remain compatible.
+- Exclusions: no Product Registry or forwarder policy, token format or TTL
+  policy, external database migration, Task mutation semantics, new shared
+  schema or shared capacity/replay policy. Any required schema or shared-policy
+  change must be re-scoped with Main before implementation.
+
+SRR-17 applies the complete relevant D-032 P/N/B/S/T/C/R/F/I/K/X matrix. Its
+worker cannot independently sign the module, and no closure credit is recorded
+before independent Tier-3 review and exact integration verification.
+
 ## 6. Queued repair programs
 
 These groups route work after the currently active packets; they are not yet
@@ -409,7 +446,7 @@ freezes smaller owner-specific packets before editing.
   B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an alias of B13.
 - Cancellation/teardown/retained cleanup: A7, A8, A19, A20, A22, B6,
   B21, B23, B24, D1, D3 and L7.
-- Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, A25, B4, B11,
+- Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, B4, B11,
   B42, L5 and L18. C3 remains an alias of B42.
 - Event-loop, lock and filesystem responsiveness: A14, B15, B25 and B27.
 - Protocol/state/compatibility: A3, A23, B1, B3, B5, B8, B19,
