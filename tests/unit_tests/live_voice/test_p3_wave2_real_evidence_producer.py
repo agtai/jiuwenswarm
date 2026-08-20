@@ -397,20 +397,52 @@ def test_cli_uses_fixed_private_production_path_and_accepts_no_runner(
     assert str(private_root) not in captured.out
 
 
-@pytest.mark.parametrize(
-    ("existing_kind", "reason"),
-    [
-        ("regular", "PRIVATE_OUTPUT_EXISTS"),
-        ("symlink", "PRIVATE_PATH_REPARSE_POINT"),
-        ("junction", "PRIVATE_PATH_REPARSE_POINT"),
-    ],
-)
-def test_parent_preflight_never_spawns_for_any_existing_output_owner(
+def test_blocking_private_preflight_is_bounded_by_worker_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "blocking-preflight")
+    real_cli_paths = producer._cli_paths
+
+    def blocking_parent_preflight(arguments: list[str]) -> tuple[Path, Path]:
+        time.sleep(0.25)
+        return real_cli_paths(arguments)
+
+    def blocking_worker_command(arguments: list[str], remaining: float) -> list[str]:
+        bootstrap = (
+            "import sys,time; from scripts.live_voice import "
+            "p3_wave2_real_evidence_producer as p; real=p._cli_paths; "
+            "p._cli_paths=lambda argv:(time.sleep(0.25),real(argv))[1]; "
+            "raise SystemExit(p._worker_entry(sys.argv[1:5],float(sys.argv[5])))"
+        )
+        return [sys.executable, "-c", bootstrap, *arguments, f"{remaining:.9f}"]
+
+    monkeypatch.setattr(producer, "_IN_PROCESS_LIMIT_SECONDS", 0.05)
+    monkeypatch.setattr(producer, "_cli_paths", blocking_parent_preflight)
+    monkeypatch.setattr(producer, "_worker_command", blocking_worker_command)
+
+    started = time.monotonic()
+    exit_code = main(
+        ["--private-root", str(private_root), "--output", str(output)]
+    )
+    elapsed = time.monotonic() - started
+
+    assert exit_code == 2
+    assert elapsed < 0.20
+    assert not output.exists()
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_SCENARIO_DEADLINE_EXCEEDED"}\n',
+        "",
+    )
+
+
+@pytest.mark.parametrize("existing_kind", ["regular", "symlink", "junction"])
+def test_worker_preflight_rejects_existing_output_without_deleting_caller_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys,
     existing_kind: str,
-    reason: str,
 ) -> None:
     private_root, output = _private_cli_paths(
         tmp_path,
@@ -455,21 +487,7 @@ def test_parent_preflight_never_spawns_for_any_existing_output_owner(
             },
         )
         assert created.returncode == 0
-    spawned: list[bool] = []
-
-    def forbidden_spawn(*_args, **_kwargs):
-        spawned.append(True)
-        return {
-            "ok": True,
-            "observation_count": 4,
-            "paired_file_tool_count": 2,
-            "write_edit_pair_count": 1,
-        }
-
-    monkeypatch.setattr(producer, "_supervise_production_worker", forbidden_spawn)
-
     assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
-    assert spawned == []
     if existing_kind == "regular" or emulated_symlink:
         assert output.read_bytes() == sentinel
     elif existing_kind == "symlink":
@@ -478,8 +496,46 @@ def test_parent_preflight_never_spawns_for_any_existing_output_owner(
     else:
         assert (target / "sentinel.bin").read_bytes() == sentinel
     assert capsys.readouterr() == (
-        json.dumps({"ok": False, "reason": reason}, separators=(",", ":"), sort_keys=True)
-        + "\n",
+        '{"ok":false,"reason":"REAL_PRODUCER_FAILED"}\n',
+        "",
+    )
+
+
+def test_worker_preflight_rejects_broad_acl_without_creating_output(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    private_root = tmp_path / "worker-broad-acl"
+    (private_root / "config").mkdir(parents=True)
+    config = private_root / "config" / "config.yaml"
+    dotenv = private_root / ".env"
+    config.write_text("{}", encoding="utf-8")
+    dotenv.write_text("PRIVATE_ENV_SENTINEL", encoding="utf-8")
+    if os.name == "nt":
+        granted = subprocess.run(
+            [
+                "icacls",
+                str(private_root),
+                "/grant",
+                "*S-1-5-32-545:(OI)(CI)R",
+                "/T",
+                "/C",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        assert granted.returncode == 0
+    else:
+        private_root.chmod(0o755)
+    output = private_root / "raw-evidence.json"
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+
+    assert not output.exists()
+    assert config.read_text(encoding="utf-8") == "{}"
+    assert dotenv.read_text(encoding="utf-8") == "PRIVATE_ENV_SENTINEL"
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_PRODUCER_FAILED"}\n',
         "",
     )
 
@@ -710,6 +766,183 @@ def test_normal_worker_close_kills_owned_descendant_without_taskkill(
     time.sleep(1)
     assert not escaped.exists()
     assert taskkill_calls == []
+
+
+def test_posix_group_identity_must_equal_the_unreaped_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = SimpleNamespace(pid=4100)
+    group_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(producer.os, "getpgid", lambda _pid: 4101, raising=False)
+    monkeypatch.setattr(
+        producer.os,
+        "killpg",
+        lambda pgid, signal_number: group_signals.append((pgid, signal_number)),
+        raising=False,
+    )
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._require_posix_process_group(process)
+
+    assert raised.value.reason == "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
+    assert group_signals == []
+
+
+def test_posix_leader_probe_uses_wnowait_and_does_not_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = SimpleNamespace(pid=4100)
+    calls: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(producer.os, "P_PID", 1, raising=False)
+    monkeypatch.setattr(producer.os, "WEXITED", 2, raising=False)
+    monkeypatch.setattr(producer.os, "WNOHANG", 4, raising=False)
+    monkeypatch.setattr(producer.os, "WNOWAIT", 8, raising=False)
+    monkeypatch.setattr(
+        producer.os,
+        "waitid",
+        lambda id_type, pid, flags: calls.append((id_type, pid, flags)) or object(),
+        raising=False,
+    )
+
+    assert producer._posix_leader_exited_without_reaping(process) is True
+    assert calls == [(1, 4100, 2 | 4 | 8)]
+
+
+def test_posix_group_signal_precedes_leader_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class UnreapedLeader:
+        pid = 4100
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout > 0
+            events.append("reap-leader")
+            return 0
+
+    monkeypatch.setattr(
+        producer.os,
+        "killpg",
+        lambda _pgid, _signal: events.append("signal-owned-group"),
+        raising=False,
+    )
+
+    return_code = producer._terminate_posix_process_group(
+        UnreapedLeader(),
+        deadline=time.monotonic() + 1,
+    )
+
+    assert return_code == 0
+    assert events == ["signal-owned-group", "reap-leader"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="real POSIX process-group boundary")
+def test_posix_normal_exit_kills_owned_descendant_before_leader_reap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "posix-normal-tree")
+    escaped = private_root / "posix-normal-escaped.txt"
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda _arguments, _remaining: [
+            sys.executable,
+            "-c",
+            "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+            "'import pathlib,sys,time; time.sleep(0.5); '"
+            "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[1]])",
+            str(escaped),
+        ],
+    )
+    monkeypatch.setattr(
+        producer,
+        "_validate_worker_output",
+        lambda _root, _output: {
+            "ok": True,
+            "observation_count": 4,
+            "paired_file_tool_count": 2,
+            "write_edit_pair_count": 1,
+        },
+    )
+
+    aggregate = producer._supervise_production_worker(
+        ["--private-root", str(private_root), "--output", str(output)],
+        private_root,
+        output,
+        deadline=time.monotonic() + 3,
+    )
+
+    assert aggregate["ok"] is True
+    time.sleep(0.8)
+    assert not escaped.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="real POSIX process-group boundary")
+def test_posix_timeout_kills_owned_descendant_before_leader_reap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "posix-timeout-tree")
+    escaped = private_root / "posix-timeout-escaped.txt"
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda _arguments, _remaining: [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',"
+            "'import pathlib,sys,time; time.sleep(0.5); '"
+            "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[1]]); "
+            "time.sleep(5)",
+            str(escaped),
+        ],
+    )
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._supervise_production_worker(
+            ["--private-root", str(private_root), "--output", str(output)],
+            private_root,
+            output,
+            deadline=time.monotonic() + 0.15,
+        )
+
+    assert raised.value.reason == "REAL_SCENARIO_DEADLINE_EXCEEDED"
+    time.sleep(0.8)
+    assert not escaped.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="real POSIX process-group boundary")
+def test_posix_normal_exit_without_descendant_is_reaped_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "posix-no-descendant")
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda _arguments, _remaining: [sys.executable, "-c", "pass"],
+    )
+    monkeypatch.setattr(
+        producer,
+        "_validate_worker_output",
+        lambda _root, _output: {
+            "ok": True,
+            "observation_count": 4,
+            "paired_file_tool_count": 2,
+            "write_edit_pair_count": 1,
+        },
+    )
+
+    aggregate = producer._supervise_production_worker(
+        ["--private-root", str(private_root), "--output", str(output)],
+        private_root,
+        output,
+        deadline=time.monotonic() + 3,
+    )
+
+    assert aggregate["ok"] is True
 
 
 def test_invalid_worker_evidence_is_retained_for_cleanup_pending(

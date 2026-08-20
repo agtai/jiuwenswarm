@@ -1571,6 +1571,22 @@ def _cli_paths(argv: list[str]) -> tuple[Path, Path]:
     return _validated_private_paths(Path(argv[1]), Path(argv[3]))
 
 
+def _raw_cli_paths(argv: list[str]) -> tuple[Path, Path]:
+    if (
+        len(argv) != 4
+        or argv[0] != "--private-root"
+        or argv[2] != "--output"
+    ):
+        raise ClosedEvidenceFailure("PRIVATE_CLI_INVALID")
+    private_root = Path(argv[1])
+    output_path = Path(argv[3])
+    if not private_root.is_absolute():
+        raise ClosedEvidenceFailure("PRIVATE_ROOT_NOT_ABSOLUTE")
+    if not output_path.is_absolute():
+        raise ClosedEvidenceFailure("PRIVATE_OUTPUT_NOT_ABSOLUTE")
+    return private_root, output_path
+
+
 def _worker_command(arguments: list[str], remaining: float) -> list[str]:
     bootstrap = (
         "import sys; from scripts.live_voice import "
@@ -1725,8 +1741,9 @@ def _terminate_owned_worker(
     process: subprocess.Popen[bytes],
     *,
     windows_job: object | None,
+    posix_group_owned: bool = False,
     deadline: float,
-) -> None:
+) -> int:
     if os.name == "nt":
         if windows_job is None:
             with contextlib.suppress(OSError):
@@ -1734,12 +1751,73 @@ def _terminate_owned_worker(
         else:
             _terminate_windows_job(windows_job)
     else:
-        import signal
+        if posix_group_owned:
+            return _terminate_posix_process_group(process, deadline=deadline)
+        else:
+            with contextlib.suppress(OSError):
+                process.kill()
+    try:
+        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
 
-        with contextlib.suppress(OSError):
-            os.killpg(process.pid, signal.SIGKILL)
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+def _terminate_posix_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline: float,
+) -> int:
+    import signal
+
+    try:
+        os.killpg(process.pid, getattr(signal, "SIGKILL", 9))
+    except OSError as exc:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
+    try:
+        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
+
+
+def _require_posix_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        group_id = os.getpgid(process.pid)
+    except (AttributeError, OSError) as exc:
+        raise ClosedEvidenceFailure(
+            "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
+        ) from exc
+    if group_id != process.pid:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
+
+
+def _posix_leader_exited_without_reaping(
+    process: subprocess.Popen[bytes],
+) -> bool:
+    try:
+        result = os.waitid(
+            os.P_PID,
+            process.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except (AttributeError, ChildProcessError, OSError) as exc:
+        raise ClosedEvidenceFailure(
+            "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
+        ) from exc
+    return result is not None
+
+
+def _wait_posix_leader_without_reaping(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline: float,
+) -> bool:
+    while True:
+        if _posix_leader_exited_without_reaping(process):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
 
 
 def _validate_worker_output(
@@ -1780,6 +1858,7 @@ def _supervise_production_worker(
     worker_remaining = remaining - termination_reserve
     if worker_remaining <= 0:
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
+    worker_deadline = deadline - termination_reserve
     creationflags = (
         subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004
         if os.name == "nt"
@@ -1798,26 +1877,51 @@ def _supervise_production_worker(
     except OSError as exc:
         raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED") from exc
     windows_job: object | None = None
+    posix_group_owned = False
     terminated = False
     try:
-        windows_job = _create_windows_kill_job(process)
-        _resume_windows_worker(process)
-        try:
-            return_code = process.wait(timeout=worker_remaining)
-        except subprocess.TimeoutExpired:
-            terminated = True
-            _terminate_owned_worker(
+        if os.name == "nt":
+            windows_job = _create_windows_kill_job(process)
+            _resume_windows_worker(process)
+            try:
+                return_code = process.wait(
+                    timeout=max(0.0, worker_deadline - time.monotonic())
+                )
+            except subprocess.TimeoutExpired:
+                terminated = True
+                _terminate_owned_worker(
+                    process,
+                    windows_job=windows_job,
+                    deadline=deadline,
+                )
+                raise ClosedEvidenceFailure(
+                    "REAL_SCENARIO_DEADLINE_EXCEEDED"
+                ) from None
+        else:
+            _require_posix_process_group(process)
+            posix_group_owned = True
+            leader_exited = _wait_posix_leader_without_reaping(
                 process,
-                windows_job=windows_job,
+                deadline=worker_deadline,
+            )
+            terminated = True
+            return_code = _terminate_owned_worker(
+                process,
+                windows_job=None,
+                posix_group_owned=True,
                 deadline=deadline,
             )
-            raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED") from None
+            if not leader_exited:
+                raise ClosedEvidenceFailure(
+                    "REAL_SCENARIO_DEADLINE_EXCEEDED"
+                )
     except BaseException:
         if not terminated:
             terminated = True
             _terminate_owned_worker(
                 process,
                 windows_job=windows_job,
+                posix_group_owned=posix_group_owned,
                 deadline=deadline,
             )
         raise
@@ -1843,7 +1947,7 @@ def main(argv: list[str] | None = None) -> int:
                 contextlib.redirect_stderr(quiet),
                 _silence_process_fds(),
             ):
-                private_root, output_path = _cli_paths(arguments)
+                private_root, output_path = _raw_cli_paths(arguments)
                 aggregate = _supervise_production_worker(
                     arguments,
                     private_root,
