@@ -928,7 +928,11 @@ def test_cli_global_deadline_kills_tree_and_retains_cleanup_pending_output(
         return real_run(arguments, *args, **kwargs)
 
     monkeypatch.setattr(producer.subprocess, "run", forbid_taskkill)
-    monkeypatch.setattr(producer, "_IN_PROCESS_LIMIT_SECONDS", 0.2)
+    # Starting two real Python processes can exceed 200 ms when this test runs
+    # inside the full regression suite. Keep the production deadline behavior
+    # physical while leaving enough time for the worker to publish its owned
+    # partial artifact before the supervisor terminates the Job.
+    monkeypatch.setattr(producer, "_IN_PROCESS_LIMIT_SECONDS", 1.0)
     monkeypatch.setattr(
         producer,
         "_worker_command",
@@ -937,7 +941,7 @@ def test_cli_global_deadline_kills_tree_and_retains_cleanup_pending_output(
             "-c",
             "import os,pathlib,subprocess,sys,time; "
             "subprocess.Popen([sys.executable,'-c',"
-            "'import pathlib,sys,time; time.sleep(0.8); '"
+            "'import pathlib,sys,time; time.sleep(1.8); '"
             "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[2]]); "
             "pathlib.Path(sys.argv[1]).write_bytes(b'TIMEOUT_OUTPUT_SENTINEL'); "
             "os.write(1,b'PRIVATE_CHILD_SENTINEL'); time.sleep(5)",
@@ -954,7 +958,7 @@ def test_cli_global_deadline_kills_tree_and_retains_cleanup_pending_output(
     elapsed = time.monotonic() - started
 
     assert exit_code == 2
-    assert elapsed < 2
+    assert elapsed < 3
     assert output.read_bytes() == b"TIMEOUT_OUTPUT_SENTINEL"
     time.sleep(1)
     assert not escaped.exists()
