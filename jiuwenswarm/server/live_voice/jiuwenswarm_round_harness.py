@@ -968,10 +968,14 @@ class JiuWenSwarmRoundHarness:
             try:
                 await self._await_cleanup_deadline(cleanup)
             except asyncio.CancelledError as error:
-                if cleanup.cancelled():
-                    record.cleanup_error = error
-                else:
+                owner = asyncio.current_task()
+                if owner is not None and owner.cancelling():
                     raise
+                # A retained Future may complete with CancelledError via
+                # ``set_exception`` without being cancelled itself.  That is
+                # cleanup disposition, not cancellation of this terminal
+                # owner, so known business truth remains publishable.
+                record.cleanup_error = error
             except TimeoutError:
                 if cleanup.done():
                     self._observe_cleanup_completion(record, cleanup)

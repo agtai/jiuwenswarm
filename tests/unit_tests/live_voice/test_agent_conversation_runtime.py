@@ -2216,6 +2216,154 @@ async def test_stream_close_accepts_every_general_awaitable_shape(
         await asyncio.wait_for(harness.close(), timeout=1)
 
 
+@pytest.mark.parametrize(
+    ("business_case", "final", "expected_outcome", "expected_notifications"),
+    (
+        ("completed", "formal answer", "completed", 4),
+        ("cancelled", None, "cancelled", 3),
+        ("unknown", None, "failed", 3),
+    ),
+)
+@pytest.mark.asyncio
+async def test_future_cleanup_cancelled_error_is_cleanup_failure_not_owner_cancel(
+    business_case: str,
+    final: str | None,
+    expected_outcome: str,
+    expected_notifications: int,
+) -> None:
+    next_release = asyncio.Event() if business_case == "cancelled" else None
+    close_error = asyncio.CancelledError(
+        f"future cleanup process-control failure after {business_case} business"
+    )
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind="future",
+        final=final,
+        next_release=next_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"future-cancelled-error-{business_case}-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"future-cancelled-error-{business_case}-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(
+        current,
+        selected,
+        request_id=f"request-future-cancelled-error-{business_case}",
+        response_id=f"response-future-cancelled-error-{business_case}",
+    )
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    stream = current_facade.stream
+    assert isinstance(stream, GeneralAwaitableCloseStream)
+
+    try:
+        if business_case == "cancelled":
+            await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+            accepted = await current.close_interaction(
+                cancel_command(
+                    handle,
+                    selected,
+                    command_id="cancel-future-cleanup-cancelled-error",
+                )
+            )
+            assert accepted.accepted is True
+            assert accepted.replayed is False
+
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == expected_outcome
+
+        notifications = []
+        terminal_progress = None
+        while terminal_progress is None:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                terminal_progress = progress
+        assert terminal_progress.outcome is not None
+        assert terminal_progress.outcome.value == expected_outcome
+        assert (
+            sum(
+                item.progress_event is not None
+                and WorkProgressEventV2.from_dict(
+                    item.progress_event.payload
+                ).state.value
+                == "terminal"
+                for item in notifications
+            )
+            == 1
+        )
+
+        round_record = harness._rounds[handle.round_id]
+        cleanup_owner = round_record.cleanup_task
+        terminal_owner = round_record.terminal_task
+        assert cleanup_owner is stream.manual_future
+        assert cleanup_owner is not None
+        assert cleanup_owner.done()
+        assert cleanup_owner.cancelled() is False
+        assert cleanup_owner.exception() is close_error
+        assert round_record.cleanup_error is close_error
+        assert terminal_owner is not None
+        assert terminal_owner.done()
+        assert terminal_owner.cancelled() is False
+        assert terminal_owner.exception() is None
+        assert round_record.task.done()
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert current_facade.calls == 1
+
+        snapshot = current.snapshot()
+        assert snapshot.published_notifications == expected_notifications
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == ()
+        assert snapshot.bridge.active_requests == ()
+        assert snapshot.bridge.pending_dispatches == 0
+        assert history.users == [(selected, "web")]
+        assert history.assistant_intents == []
+        assert not any(
+            record.effect.effect_type
+            in {
+                "tool.call",
+                "task.create",
+                "task.cancel",
+                "round.cancel",
+            }
+            for record in snapshot.conversation.effects
+        )
+
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert await current.close(timeout_seconds=1) == closed
+        assert current.snapshot().harness.active_rounds == ()
+        assert current.snapshot().bridge.active_requests == ()
+    finally:
+        if next_release is not None:
+            next_release.set()
+        if stream.manual_future is not None and not stream.manual_future.done():
+            stream.settle_manual_close()
+        if stream.manual_future is not None and stream.manual_future.done():
+            stream.manual_future.exception()
+        await current.close(timeout_seconds=1)
+
+
 @pytest.mark.asyncio
 async def test_non_awaitable_stream_close_result_is_acquisition_failure() -> None:
     current_facade = GeneralAwaitableCloseFacade(
