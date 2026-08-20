@@ -136,10 +136,97 @@ Wave 1 files do not overlap. SRR-01/02/03 implementation workers cannot serve as
 their own independent reviewers. Main implements SRR-04/05 and assigns their
 independent review after the first worker wave returns.
 
-## 4. Queued repair programs
+## 4. Active Wave 2 ownership
 
-These groups route work after Wave 1; they are not yet worker write authority.
-Each activation will freeze smaller owner-specific packets before editing.
+Wave 2 may overlap the final SRR-02 work because all four owner surfaces below
+are disjoint from Wave 1 and from each other. A8 and B6 deliberately share one
+packet because both defects converge on the same Harness cleanup coordinator.
+
+### SRR-06 — A8+B6 Harness terminal truth and bounded cleanup
+
+- Capability/owner: Agent round Harness and terminal publication.
+- Risk: Tier 3 terminal authority across Agent Bridge and Work Progress.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/jiuwenswarm_round_harness.py` and the existing
+  Harness coverage in
+  `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` only.
+- Intended behavior: business completion/cancellation and cleanup disposition
+  are separate. A close failure never rewrites known completed or cancelled
+  truth; an otherwise unknown round with a known close failure becomes failed.
+  Cleanup has one total deadline, after which the business terminal is
+  publishable while one shielded retained-cleanup owner remains observable as
+  pending and can later converge.
+- Acceptance: deterministic completed+close-failure,
+  cancelled+close-failure, unknown+close-failure and never-returning `aclose`
+  cases; bounded outer close, no orphan/unowned task, no duplicate terminal or
+  Agent/Tool/Task/audio/history effect, and a second close converges after the
+  retained cleanup completes.
+- Exclusions: no EventEnvelope/shared protocol field, Agent/Bridge/Conversation
+  Runtime redesign, Task/Tool cancellation policy, persistence or restart
+  claim. Pending cleanup reuses the existing outer close/coordinator truth.
+
+### SRR-07 — A3 batch-recognition canonical transcript
+
+- Capability/owner: Batch Speech Provider boundary and recognition receipt.
+- Risk: Tier 3 speech-event and opaque TurnCommit-receipt authority.
+- Worker-owned source/tests: `jiuwenswarm/server/live_voice/batch_speech.py` and
+  `tests/unit_tests/live_voice/test_batch_speech.py` only.
+- Intended behavior: canonicalize Provider transcript once with `strip()` at
+  the Provider boundary; the identical canonical value feeds the Provider
+  result, final event, hash/receipt and claim. Empty or over-limit canonical
+  text still fails closed.
+- Acceptance: reproduce ASCII and Unicode surrounding-whitespace failure;
+  preserve internal text; prove one canonical event/receipt, exact operation
+  replay without a second Provider call, receipt claim/replay and zero partial
+  capture/Agent/Tool/Task effects on rejection.
+- Exclusions: no Unicode normalization, case/punctuation policy, speech schema,
+  receipt format, streaming recognition or TTS change.
+
+### SRR-08 — A20 Gateway all-owner shutdown
+
+- Capability/owner: Gateway lifecycle and process-safe teardown.
+- Risk: Tier 2 state, cancellation and recovery-sensitive lifecycle.
+- Worker-owned source/tests: `jiuwenswarm/gateway/app_gateway.py` and one focused
+  `tests/unit_tests/gateway/test_app_gateway_shutdown.py` module only.
+- Intended behavior: teardown remains ordered but independently guards every
+  owner. The first `BaseException` remains visible, later failures are recorded,
+  and every later channel/scheduler/heartbeat/forward/client/restart-cleanup
+  owner is attempted exactly once. Process restart occurs only after the
+  required successful safe boundary.
+- Acceptance: inject Web stop and each later phase failure; prove all remaining
+  owners run once in order, the first error wins, later errors remain
+  diagnosable, no restart/equivalent forbidden effect occurs after failed
+  teardown, and a clean shutdown preserves existing behavior.
+- Exclusions: no channel-internal stop repair, startup/configuration change,
+  remote operation or new process/restart policy.
+
+### SRR-09 — B7 critical-token successor index preservation
+
+- Capability/owner: Critical Token protected-route authorization gate.
+- Risk: Tier 3 authorization/authority.
+- Main-owned source/tests:
+  `jiuwenswarm/server/live_voice/critical_token_safety.py` and
+  `tests/unit_tests/live_voice/test_critical_token_safety.py` only.
+- Intended behavior: releasing an old commit removes an interaction's active
+  clarification or authorization index only when that index still maps to the
+  exact released identity. A successor remains active and once-only; old
+  authority remains unusable.
+- Acceptance: reproduce clarification and authorization replacement followed
+  by old release; prove the successor dispatches exactly once, old dispatch is
+  rejected with zero protected effects, another interaction is unchanged and
+  release/replay ordering remains linearized under the existing lock.
+- Exclusions: no classifier/token policy, capacity/tombstone repair, persistent
+  authorization, schema or protocol change.
+
+Wave 2 writer leases are owner-scoped. A worker cannot review its own lane, and
+Main integrates only the exact independently signed commits before advancing
+the numerator.
+
+## 5. Queued repair programs
+
+These groups route work after the active Wave 1/2 packets; they are not yet
+worker write authority. Each activation will freeze smaller owner-specific
+packets before editing.
 
 - Generation/successor/authority cleanup: B7, B12, B13, B14, B16, B18, B32,
   B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an alias of B13.
@@ -158,7 +245,7 @@ and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared
 schema/migration or another unrecorded module owner requires an explicit scope
 and risk checkpoint before implementation.
 
-## 5. Wave progress ledger
+## 6. Wave progress ledger
 
 | Checkpoint | Closed unique defects | State |
 |---|---:|---|
@@ -168,7 +255,7 @@ and risk checkpoint before implementation.
 | SRR-03 / B41 | 3/88 | `b200feff7` + `64236924a`; structured, malformed and separator-variant speech fields fail closed before development WebSocket persistence; focused/strict TypeScript 33/33, Prettier, `tsc` and Live Voice Vite build pass; independently signed |
 | SRR-01 / C5 | 4/88 | `ec2f7224b` + `c8f858dad`; exact four-field Executor-observation binding before first Store write, real Core mixed-observation failure with zero cross-task effects, reopen retry and replay; 219 module tests; independently signed |
 
-## 6. Global exclusions
+## 7. Global exclusions
 
 No remote update, `develop` integration, production authentication/tenancy,
 public deployment, provider/device configuration, physical product acceptance,
