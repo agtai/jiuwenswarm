@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 19/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 21/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -60,37 +60,38 @@ At the start of every new Session:
    upstream is a valid result. Git is authoritative if this prose is stale.
 2. Confirm that the integration branch is
    `codex/live-voice-strict-review-20260819`, then read `README.md`,
-   `STATUS.md` `Current execution packet`, this checkpoint, SRR-10, §6 and §7.
-   Read the historical revalidation only for a disputed finding mechanism.
-3. Preserve the current **19/88 closed, 69 remaining** count. The closed set is
-   C5, A3, A4, A8, A11, A12, A16, A18, A20, A21, A23, A25, B6, B7, B9, B10,
-   B16, B41 and L14. A8+B6 share SRR-06 but count as two unique defects.
-4. Treat A2+B2/SRR-10 as the only implemented, uncredited candidate. Its
-   isolated worktree is
-   `D:\XGG AI\openjiuwen\jiuwenswarm-srr10-stream-terminal`, branch
-   `codex/lv-srr10-stream-terminal`, with the exact source/test chain
-   `a79a2d7a3`, `1dfc04061`, `c5893879d`, `e97cee0bc`. The final candidate is
-   `e97cee0bc17c8d2981d9e4f82d194a5148799a02`.
-5. Assign an independent Tier-3 reviewer who did not implement SRR-10. Review
-   the complete four-commit diff and rerun recognition and synthesis terminal
-   dequeue/cancel, duplicate cancel, provider close, process-control,
-   neighbouring-stream and real-route seams. Do not increment the numerator
-   for a worker result or a focused green suite.
-6. The SRR-10 branch predates later integration work. Never merge that branch
-   or copy its documentation/history wholesale. After an independent PASS,
-   Main applies only the four reviewed commits above, in order, onto the latest
-   integration branch. Any semantic conflict or repair edit creates a new
-   candidate that requires review before integration credit.
-7. After integration, rerun the affected provider/route checks on the
-   integration branch, inspect status and diff, update the ledger and STATUS,
-   and commit one coherent closure record. If review rejects, leave 19/88
-   unchanged and return the exact reproducible blocker to the same packet.
-8. Only after SRR-10 closes or is explicitly paused may Main activate one or
-   more disjoint owner-scoped packets from §6. Remote refs, `develop` and
-   product acceptance remain excluded.
+   `STATUS.md` `Current execution packet`, this checkpoint, §6 and §7. Read a
+   closed wave record or the historical revalidation only for a disputed
+   finding mechanism.
+3. Preserve the current **21/88 closed, 67 remaining** count. The closed set is
+   A2, A3, A4, A8, A11, A12, A16, A18, A20, A21, A23, A25, B2, B6, B7, B9,
+   B10, B16, B41, C5 and L14. A8+B6 share SRR-06 and A2+B2 share SRR-10; each
+   pair still counts as two unique defects.
+4. No candidate is implemented or awaiting review. SRR-10/A2+B2 closed after an
+   independent Tier-3 review signed
+   `e97cee0bc17c8d2981d9e4f82d194a5148799a02` and Main applied its four
+   reviewed source/test commits onto this branch as `ea55258ff`, `8ecd38267`,
+   `90a5f17ad` and `b5e6dd6e7`. Its stale worker branch
+   `codex/lv-srr10-stream-terminal` was never merged and must not be.
+5. Activate one or more disjoint owner-scoped packets from §6. Freeze each
+   packet from the latest integration branch and record its capability/module,
+   risk tier, dependencies, scope, exclusions and acceptance before editing.
+6. A worker owns only its own task branch in its own worktree. Main is the only
+   Integration Owner and applies only reviewed source/test commits, in order,
+   onto the integration branch. Any semantic conflict or repair edit creates a
+   new candidate that requires review before integration credit.
+7. Assign an independent reviewer who did not implement the packet. The
+   reviewer reads the complete module diff cold and reruns the packet's focused
+   and affected seams. Do not increment the numerator for a worker result or a
+   focused green suite. A rejection leaves the numerator unchanged and returns
+   the exact reproducible blocker to the same packet owner.
+8. After integration, rerun the affected checks on the integration branch,
+   inspect status and diff, update the ledger and STATUS, and commit one
+   coherent closure record. Remote refs, `develop` and product acceptance
+   remain excluded.
 
 The last integrated defect-closure record before this documentation sync is
-`c96d1328d` (`docs(live-voice): record Harness cleanup closure`). A later
+`b5e6dd6e7` (`fix(live-voice): settle terminal retirement failures`). A later
 documentation-only HEAD is expected after this synchronization and does not
 change implementation credit.
 
@@ -281,7 +282,7 @@ Wave 2 writer leases were owner-scoped. No worker reviewed its own lane, and
 Main integrated only exact independently signed commits before advancing the
 numerator. All four packets are closed in the §7 ledger.
 
-## 5. Wave 3 ownership record — SRR-10 AWAITING INDEPENDENT REVIEW
+## 5. Wave 3 ownership record — CLOSED
 
 Wave 3 was frozen from integration baseline `9741b805c`. Its three writer
 surfaces are disjoint. A2 and B2 deliberately share one packet because both are
@@ -308,17 +309,28 @@ latest integration branch when routed.
 - Exclusions: no strict-conformance or route source change, new cancel ACK,
   identity/capacity policy, timeout attribution, queue limit, protocol/schema
   or physical Provider claim.
-- Candidate state — **IMPLEMENTED, UNREVIEWED, 0 closure credit:** the exact
-  four-commit chain `a79a2d7a3`, `1dfc04061`, `c5893879d`, `e97cee0bc` changes
-  only `openai_streaming_speech.py` and its focused test. The implementer
-  reported deterministic recognition/synthesis RED then 94/94 provider tests
-  under normal and asyncio-debug runs, plus 103 passing conformance/route cases
-  and one unchanged pre-existing fake-route failure. Those are worker evidence,
-  not an independent PASS. The reviewer reruns the focused provider file with
-  `python -m pytest tests/unit_tests/live_voice/test_openai_streaming_speech.py --no-cov --asyncio-debug`
-  and the affected `test_streaming_speech.py`, `test_streaming_speech_route.py`
-  and `test_streaming_synthesis_route.py` seams, then judges the complete chain
-  and the disclosed failure.
+- Candidate state — **CLOSED, 2 unique defects credited:** independent Tier-3
+  review signed `e97cee0bc17c8d2981d9e4f82d194a5148799a02` after a cold read of
+  the complete four-commit chain, and Main applied the four reviewed
+  source/test commits onto the integration branch as `ea55258ff`, `8ecd38267`,
+  `90a5f17ad` and `b5e6dd6e7`, byte-identical to the signed candidate. The
+  worker branch `codex/lv-srr10-stream-terminal` was not merged.
+- Reviewer-confirmed mechanism: on baseline `3d488e8c3` the candidate tests are
+  deterministically RED, including conformance `RECOGNITION_ALREADY_TERMINAL`
+  and `SYNTHESIS_ALREADY_TERMINAL` violations. A queued-terminal cancel used to
+  re-issue a Provider cancel against an already terminal stream, so the raised
+  violation left the sensitive transcript/PCM queue, `partial_text` and the
+  session map entry permanently retained.
+- Non-blocking observations routed to the owning boundary, not repaired here:
+  (1) in `_close_serialized`, an ordinary terminal-retirement failure now
+  surfaces as the authoritative cleanup failure while neighbouring
+  socket/stream/cancel failures remain filtered to process control only — an
+  intentional asymmetry frozen by the `[RuntimeError]` case;
+  (2) `_adopt_claimed_terminal_*_retirement` does not pre-drain the queue the
+  way `_start_queued_*` does, so its boundedness rests on the `_put_bounded`
+  wait budget rather than an immediate drain;
+  (3) the `removed_sessions` guard skips `reap_terminal()` when both maps are
+  empty, which is safe because both rollback paths reap on their own.
 
 ### SRR-11 — A4 Batch synthesis event-loop-safe resampling
 
@@ -580,10 +592,10 @@ packets.
 
 ## 6. Queued repair programs
 
-The 69 remaining unique defects consist of the two SRR-10 review candidates
-A2+B2 plus the 67 unactivated defects below. These groups are not worker write
-authority. Each activation removes its IDs from this queue and freezes smaller
-owner-specific packets before editing.
+The 67 remaining unique defects are the unactivated defects below; no
+candidate is in flight. These groups are not worker write authority. Each
+activation removes its IDs from this queue and freezes smaller owner-specific
+packets before editing.
 
 - Generation/successor/authority cleanup (**13**): B12, B13, B14, B18, B32,
   B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an inactive alias of
@@ -599,9 +611,9 @@ owner-specific packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `13 + 9 + 12 + 4 + 29 = 67`; adding A2+B2 gives the
-69 unique remaining defects. By historical family the same remainder is 12 A,
-33 B, 21 L and three D findings.
+The queue arithmetic is `13 + 9 + 12 + 4 + 29 = 67`, which is the complete
+remainder now that A2+B2 closed. By historical family the same remainder is
+11 A, 32 B, 21 L and three D findings.
 
 The queue excludes the already fixed A10, A24, B31 and L23; superseded B26;
 and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared
@@ -631,6 +643,7 @@ and risk checkpoint before implementation.
 | SRR-08 / A20 | 16/88 | `cf2d1a795`…`5aa2bb18c`; Gateway teardown now attempts every owner in order after failures, preserves chronological first-failure/caller-cancellation truth, keeps public diagnostics content-free, blocks restart across failed cleanup, and retains exact Feishu/Xiaoyi dynamic owner identity at registration rather than depending on fallible shutdown discovery. Descriptor/process-control, snapshot+pop+unregister, registry-only, hostile exception and clean-retry matrices pass; 90 focused shutdown + 66 ACP lifecycle tests passed after independent Tier-2 review and integration |
 | SRR-02 / A21 | 17/88 | `4567becf3`…`4b08240dc`; Agent-client, E2A codec and WebSocket-send diagnostics are content-free across unary/stream success, failure, fallback and reconnect cleanup. Hook-free physical classification, a whole-graph projection budget and strict UTF-8 preflight prevent hostile objects, oversized identifiers, cycles/aliases and lone surrogates from reaching logs, public exception contents or transport sends while preserving supported OutputSchema/E2A/legacy wire behavior; 142 focused plus 61 direct and 292 additional consumer tests passed after independent Tier-3 review |
 | SRR-06 / A8+B6 | 19/88 | `a9e3d6ab8`…`5affa2c8c`; Harness now separates business terminal truth from stream-cleanup disposition, retains one general Awaitable cleanup owner through deadline/cancellation, and preserves terminal ownership across startup and direct-cancel races. Real terminal-owner cancellation propagates without fabricated terminal/_END; public close adopts its abandoned stream cleanup exactly once, remains pending while blocked, and removes only the settled abandoned record. Known completed/cancelled truth survives cleanup failure, unknown+failure becomes failed, and normal rounds remain isolated; 99 Harness + 79 consumer tests and a 10-run race probe passed after independent Tier-3 review |
+| SRR-10 / A2+B2 | 21/88 | `ea55258ff`…`b5e6dd6e7`; a FINAL/COMPLETED that was published but not yet dequeued now retires locally on exact cancel — sensitive transcript/PCM queue released, `partial_text` cleared, session and transport converged — without issuing another Provider cancel or rewriting terminal truth. Active cancel is unchanged, and unknown, stale, wrong-generation and already-retired references still reject. Dequeue-vs-cancel and duplicate cancel linearize on one synchronous claim so only one winner reports success; caller cancellation mid-retirement leaves exactly one retained owner genuinely pending instead of a fabricated completion; provider close keeps cleaning neighbouring sessions, transports, queues, maps and owners through ordinary, cancellation and process-control failures while preserving chronological first-failure truth and content-free identity; reap and transport cleanup stay once-only. Independent Tier-3 review reproduced the defect on baseline `3d488e8c3` — candidate tests RED with conformance `RECOGNITION_ALREADY_TERMINAL`/`SYNTHESIS_ALREADY_TERMINAL` violations — then passed 94 provider and 155 affected conformance/route cases under asyncio debug, with the one disclosed pre-existing route failure byte-identical on baseline, candidate and integration, zero new Ruff findings and unchanged formatting |
 
 ### 7.1 Closed-fix revalidation entrypoints
 
@@ -655,6 +668,7 @@ mechanism and integration seam are reviewed again.
 | A25 | `python -m pytest tests/unit_tests/live_voice/test_p3_confirmation.py --no-cov` |
 | A20 | `python -m pytest tests/unit_tests/gateway/test_app_gateway_shutdown.py tests/unit_tests/gateway/test_app_gateway_acp.py --no-cov --asyncio-debug` |
 | A8, B6 | `python -m pytest tests/unit_tests/live_voice/test_agent_conversation_runtime.py --no-cov --asyncio-debug` |
+| A2, B2 | `python -m pytest tests/unit_tests/live_voice/test_openai_streaming_speech.py --no-cov --asyncio-debug` |
 | L14 | `python -m pytest tests/unit_tests/auto_harness/test_schedule_task_service.py --no-cov` |
 | A23 | From `jiuwenswarm/channels/web/frontend`: `npm run test:live-voice-integrated-web`; require the Product Web activation cases to pass and compare any full-suite failure with the disclosed mounted-panel baseline below |
 
@@ -667,8 +681,12 @@ credit:
   candidate and integration baseline; its focused Product Web activation suite
   remains the A23 closure oracle.
 - SRR-10's related route set has one pre-existing fake-provider cancellation
-  failure outside its two owned files. An independent reviewer must compare the
-  exact baseline/candidate mechanism and may not waive a new or changed failure.
+  failure at `tests/unit_tests/gateway/test_streaming_synthesis_route.py:1837`
+  (`test_cancel_api_caller_cancel_retries_cleanup_then_rethrows`), outside its
+  two owned files. Independent review compared baseline `3d488e8c3`, the signed
+  candidate and the integration result: same test, same assertion and a
+  byte-identical failure trace on all three. A new or changed failure there may
+  not be waived.
 - Existing Authlib deprecation and third-party `pysbd` SyntaxWarning output is
   not repair credit. Use the packet's recorded warning handling only when the
   same environment blocks collection, and report it explicitly.
