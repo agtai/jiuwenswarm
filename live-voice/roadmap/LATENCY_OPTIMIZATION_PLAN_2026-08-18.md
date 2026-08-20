@@ -25,6 +25,17 @@
 > baseline remains deliberately unclaimed until the runbook protocol is
 > executed on clean source.
 
+> **2026-08-21 targeted-measurement decision:** Hongxing's source-bound
+> physical run at `e1df8b4529b073beed21affffda952bdb8262fc8` identified a
+> separate P2 one-notification-per-RPC tail: approximately 64 notifications
+> remained after model completion and consumed about 5.44 seconds at an
+> approximately 85 ms Browser/RPC cycle. The immediate P2 optimization loop
+> therefore uses a deterministic, no-Browser causal baseline before changing
+> that transport. This is sufficient for a P2-specific A1/B/A2 decision, but
+> it is not a physical Live Voice or end-to-end baseline and grants no capture,
+> STT, TTS, WebAudio, playout or Production credit. A clean physical Browser
+> validation remains mandatory before claiming a product-path improvement.
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -32,13 +43,16 @@ responds early without speaking provisional or stale content, while preserving
 the existing response-generation, Task, history and cancel authorities.
 
 Current code has a real streaming media path, but it still serializes several
-waits on the first-audible critical path. The largest is that authoritative TTS
-starts only after `chat.final`; there is also a fixed one-second browser playout
+waits on the first-audible critical path. Newer source-bound physical evidence
+shows that, in the analyzed turn, the largest measured tail was the P2
+one-notification-per-RPC backlog after model completion. Authoritative TTS also
+starts only after `chat.final`; there is a fixed one-second browser playout
 lead, a 1.2-second server-VAD silence threshold, serial end-of-turn cleanup, and
 a successor-capture readiness wait before the TTS downlink is opened. The plan
-therefore has three layers:
+therefore has four layers:
 
-- measure the current physical path so improvements have a trustworthy oracle;
+- establish a current-source causal P2 baseline without making an E2E claim;
+- retain clean physical measurement as the product-path oracle;
 - remove avoidable pipeline waits without changing product truth;
 - overlap Agent generation and TTS at authoritative sentence boundaries.
 
@@ -148,7 +162,69 @@ This batch is done when the same response can be followed across all owners,
 each missing segment is explicitly `unknown` rather than zero, and a fixed
 current-source baseline can be reproduced without retaining private content.
 
+### 3.3 Two measurement lanes after the P2 physical finding
+
+The latency program now has two deliberately different lanes. They must not be
+pooled or described with the same acceptance label.
+
+The **P2 causal lane** requires no Browser, microphone, Speech Provider, TTS or
+physical playout. A deterministic Agent fixture publishes 10, 50 and 100
+ordered reasoning/delta notifications followed by one `chat.final`. The real
+P2 owner/protocol consumes that backlog under a controlled per-RPC delay and
+records, with a monotonic clock:
+
+- model-complete to final-consumed latency;
+- notification count, RPC count, batch size and remaining queue depth;
+- dequeue, dispatch and final presentation boundaries;
+- final/error/Task ordering, replay and terminal outcome;
+- duplicate Agent, Tool, Task, history and audio effects, all asserted as zero
+  where forbidden.
+
+The first current-source run is P2 A1. One named optimization runs as B in a
+separate worktree. Unchanged source then runs as A2. The environment, fixture,
+controlled delay, populations and result schema must be identical; A1 and A2
+must have the same commit, while B must have one different named source. This
+lane can accept or reject the P2 transport change, but cannot establish
+speech-end-to-first-audible, Browser playout or complete-round latency.
+
+The **physical Browser lane** retains the existing fixed-corpus probe and real
+Chrome validation. It is required after a P2 candidate succeeds causally and
+before any claim that the product, Live Voice journey or perceived latency
+improved. It also remains the only lane that can validate capture, VAD/STT
+quality, WebAudio scheduling, real playout/ACK, barge-in audio fencing and
+first-audible latency.
+
 ## 4. Remove avoidable waits on the existing authoritative path
+
+### Remove the P2 one-notification-per-RPC tail first
+
+Hongxing's 2026-08-20 physical run observed notification sequences 596 through
+685. Model completion was near sequence 621; requests 622 through 685 consumed
+about 5.38 seconds before the final presentation response, with an
+approximately 85 ms median complete cycle. An earlier pre-auto-barge run showed
+the same median and serial pattern. These values are evidence for Hongxing's
+tested source, not a baseline for this branch, but the current source retains
+the same structural one-request/one-notification owner and needs the causal A1
+defined in §3.3.
+
+The first implementation candidate should be **bounded batch pull**. One
+request may return a closed, ordered batch up to an explicit limit. The client
+processes the batch in order; final, error and Task notifications remain
+reliable and may not be dropped, coalesced behind lower-value deltas or reordered
+across presentation/ACK authority. Replay identity, activation generation,
+bounded ledgers and one in-flight poll remain fail closed.
+
+Server-side coalescing of non-critical reasoning/delta notifications is a
+possible later complement, but it changes observation semantics and must not
+hide final/error/Task truth. Server push is deferred for the first candidate
+because reconnect, replay, backpressure and single-writer ownership make it a
+larger protocol change than bounded pull.
+
+The P2 candidate receives causal credit only if it reduces final-consumption
+latency and RPC count against both A1 and A2 without moving the wait, changing
+the ordered terminal result, reviving a stale generation or adding duplicate
+Agent, Tool, Task, history or audio effects. Physical Browser confirmation is
+still required for product-path credit.
 
 ### Adaptive playout instead of a fixed one-second lead
 
@@ -286,13 +362,18 @@ project files.
 
 Work should be packetized in this dependency order:
 
-1. correlated physical measurement and a fresh fixed-corpus baseline;
-2. adaptive browser startup, first-downlink/capture decoupling, EOT overlap and
+1. current-source no-Browser P2 A1 with the deterministic 10/50/100 backlog;
+2. one named bounded P2 transport candidate B, followed by unchanged-source
+   A2 and an A1/B/A2 accept/revise/discard decision;
+3. clean physical Browser confirmation of an accepted P2 candidate, without
+   retroactively relabelling the causal run as E2E evidence;
+4. physical fixed-corpus baseline for capture/STT/TTS/playout work, then
+   adaptive browser startup, first-downlink/capture decoupling, EOT overlap and
    controlled VAD experiments;
-3. authoritative acknowledgement for genuinely long operations;
-4. Conversation Runtime-owned sentence streaming with bounded semantic
+5. authoritative acknowledgement for genuinely long operations;
+6. Conversation Runtime-owned sentence streaming with bounded semantic
    prefetch;
-5. Agent/model/tool-path changes only where the preceding evidence still shows
+7. Agent/model/tool-path changes only where the preceding evidence still shows
    material delay.
 
 This is an order of proof, not a request for one large patch. Each packet names
@@ -302,6 +383,10 @@ journey and applicable D-032/D-074 negative/review evidence from
 
 Initial targets are deliberately relative to the fresh baseline:
 
+- the P2 candidate reduces final-consumption latency and RPC count against both
+  causal baselines while preserving exact notification order, replay and zero
+  forbidden effects; its numeric threshold is frozen only after A1 records the
+  current-source 10/50/100 curves;
 - the low-risk pipeline batch reduces speech-end-to-first-audible p50 by at
   least 1.0 second, with no p95 false-EOT, underrun, fallback or cancel
   regression;
@@ -377,3 +462,10 @@ repair. Latency implementation starts as its own P1/P2 quality packet when the
 dependency route has a clean candidate and has migrated the applicable test
 oracles; compatible instrumentation may be included earlier in an affected
 defect packet only when its ownership and acceptance are explicit.
+
+The P2 causal lane does not require a rebase onto Hongxing's divergent
+`hx/0819_live_voice_p1p2` line. Run it first on the reviewed current source and,
+when useful, independently on Hongxing's tested source. Before physical product
+credit, compare Hongxing's three functional P1/P2 fixes in a clean worktree and
+integrate them as reviewed coherent packets if they are not already equivalent.
+A blind rebase of the active dirty W3 worktree is not part of this route.
