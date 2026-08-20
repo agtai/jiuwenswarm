@@ -15,7 +15,7 @@ interface RedactionResult {
 }
 
 const PRIVATE_KEY_IN_JSON_TEXT =
-  /"(?:data[-_]base64|media[-_]ticket|final[-_]*text|raw[-_]*text|voice[-_]*commit[-_]*receipt)"\s*:/i;
+  /"(?:data[-_]base64|media[-_]ticket|final[-_]*text|raw[-_]*text|display[-_]*text|spoken[-_]*text|voice[-_]*commit[-_]*receipt)"\s*:/i;
 
 function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionResult {
   if (typeof payload === 'string' && inspectJsonStrings) {
@@ -56,7 +56,7 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
       changed = true;
       return [key, MEDIA_TICKET_REDACTION] as const;
     }
-    if (compactKey === 'finaltext' || compactKey === 'rawtext') {
+    if (compactKey === 'finaltext' || compactKey === 'rawtext' || compactKey === 'displaytext' || compactKey === 'spokentext') {
       changed = true;
       return [key, SPEECH_TEXT_REDACTION] as const;
     }
@@ -76,8 +76,9 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
 }
 
 /**
- * Return a logging-only copy with raw Speech audio removed. The fixed marker is
- * intentionally not derived from the audio, so logs cannot correlate payloads.
+ * Return a logging-only copy with private Speech media and text removed. The
+ * fixed markers are not derived from private values, so logs cannot correlate
+ * payloads.
  */
 export function redactRawAudioForDevLog(payload: unknown): unknown {
   return redactValue(payload, false).value;
