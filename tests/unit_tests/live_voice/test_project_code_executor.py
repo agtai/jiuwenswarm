@@ -1285,6 +1285,41 @@ async def test_direct_d2_is_an_explicit_store_backed_candidate_only(
         await durable.close()
 
 
+@pytest.mark.asyncio
+async def test_direct_candidates_derive_d0_from_current_profile_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "candidate-profile-authority-project"
+    _git_project(project)
+    database = tmp_path / "candidate-profile-authority.sqlite3"
+    resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
+    changed_legacy = replace(
+        DirectProjectCodeExecutorAdapter.capability_profile(),
+        profile_id="live-voice.direct-project-code.d0.v2",
+    )
+    monkeypatch.setattr(
+        DirectProjectCodeExecutorAdapter,
+        "capability_profile",
+        classmethod(lambda cls: changed_legacy),
+    )
+    legacy = DirectProjectCodeExecutorAdapter(resolver, database)
+    durable = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+        durability_store=SqliteTaskStore(database),
+    )
+
+    try:
+        assert legacy.capability_profiles() == (changed_legacy,)
+        candidates = durable.capability_profiles()
+        assert candidates[0] is changed_legacy
+        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v1"
+    finally:
+        await legacy.close()
+        await durable.close()
+
+
 def test_direct_stream_observer_defaults_off_and_never_changes_profile(
     tmp_path: Path,
 ) -> None:

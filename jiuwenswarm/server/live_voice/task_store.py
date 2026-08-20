@@ -604,7 +604,7 @@ _TASK_STORE_UNIQUE_KEYS_V6 = {
     ),
     "durability_recoveries": frozenset({("recovery_id",), ("recovery_attempt_id",)}),
     "durability_mutator_leases": frozenset({("task_id",)}),
-    "durability_recovery_fences": frozenset({("task_id",), ("cancel_command_id",)}),
+    "durability_recovery_fences": frozenset({("task_id",)}),
 }
 _TASK_STORE_FOREIGN_KEYS_V3 = {
     "metadata": frozenset(),
@@ -1314,6 +1314,12 @@ class SqliteTaskStore:
                 "durability mutation requires one opaque Direct authorization",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if not authorization.is_authentic_for_store(self):
+            raise FormalTaskViolation(
+                "DURABILITY_MUTATION_AUTHORIZATION_INVALID",
+                "durability mutation authorization has no valid issuer binding",
+                ErrorCode.PERMISSION_DENIED,
+            )
         checkpoints = self._verified_checkpoint_prefix(connection, binding)
         effects = self._verified_effect_prefix(connection, binding)
         lease = connection.execute(
@@ -1321,8 +1327,7 @@ class SqliteTaskStore:
             (binding.task_id,),
         ).fetchone()
         if (
-            not authorization.is_for_store(self)
-            or authorization.operation != operation
+            authorization.operation != operation
             or authorization.scope != binding.scope
             or authorization.task_id != binding.task_id
             or authorization.producer_attempt_id != binding.origin_attempt_id
@@ -2319,7 +2324,7 @@ class SqliteTaskStore:
                     REFERENCES tasks(task_id) ON DELETE CASCADE,
                 producer_attempt_id TEXT NOT NULL
                     REFERENCES attempts(attempt_id) ON DELETE CASCADE,
-                cancel_command_id TEXT NOT NULL UNIQUE,
+                cancel_command_id TEXT NOT NULL,
                 created_at TEXT NOT NULL)""",
         )
         for statement in statements:
@@ -2601,7 +2606,7 @@ class SqliteTaskStore:
                     REFERENCES tasks(task_id) ON DELETE CASCADE,
                 producer_attempt_id TEXT NOT NULL
                     REFERENCES attempts(attempt_id) ON DELETE CASCADE,
-                cancel_command_id TEXT NOT NULL UNIQUE,
+                cancel_command_id TEXT NOT NULL,
                 created_at TEXT NOT NULL)""",
             """CREATE INDEX idx_durability_recoveries_producer
                 ON durability_recoveries(

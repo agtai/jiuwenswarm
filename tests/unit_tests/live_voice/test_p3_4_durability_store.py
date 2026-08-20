@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import sqlite3
 import threading
@@ -12,7 +13,9 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
     ErrorCode,
+    ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
 )
@@ -430,6 +433,121 @@ def test_populated_v5_migration_preserves_admission_consumer_and_restart_truth(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_same_cancel_command_id_is_scoped_across_v5_migration_and_reopen(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "scoped-cancel-migration.sqlite"
+    store = SqliteTaskStore(database)
+    selection = _selection()
+    core = PersistentTaskCore(store, _Executor())
+    first_invocation = _create(tmp_path, identity_suffix="-scope-one")
+    first_created = core.execute(
+        first_invocation.envelope,
+        first_invocation.authorization,
+        context=first_invocation.context,
+        now=NOW,
+        selection=selection,
+    )
+    assert first_created.ok and first_created.result is not None
+    first = store.get_task(str(first_created.result["task_id"]), _scope())
+
+    second_scope = ScopeRef("user-2", "project-2", "session-2", Assurance.AUTHENTICATED)
+    second_invocation = _create(tmp_path, identity_suffix="-scope-two")
+    second_created = core.execute(
+        replace(second_invocation.envelope, scope=second_scope),
+        replace(
+            second_invocation.authorization,
+            principal_id=second_scope.subject_id,
+            scope=second_scope,
+        ),
+        context=replace(
+            second_invocation.context,
+            stable_id=second_scope.project_id,
+            scope=second_scope,
+        ),
+        now=NOW,
+        selection=selection,
+    )
+    assert second_created.ok and second_created.result is not None
+    second = store.get_task(str(second_created.result["task_id"]), second_scope)
+
+    tasks_by_id = {first.task_id: first, second.task_id: second}
+    claimed_task_ids: set[str] = set()
+    for owner_id in ("producer-one", "producer-two"):
+        item = store.claim_outbox(owner_id, observed_at=NOW)
+        assert item is not None and item.task_id in tasks_by_id
+        claimed_task_ids.add(item.task_id)
+        store.complete_outbox(
+            item,
+            executor_ref=f"legacy:{item.attempt_id}",
+            observations=tuple(
+                replace(
+                    observation,
+                    adapter_id=selection.adapter_id,
+                    capability_profile_digest=selection.capability_profile_digest,
+                )
+                for observation in _observations(
+                    item, outcome=TerminalOutcome.INTERRUPTED
+                )
+            ),
+        )
+    assert claimed_task_ids == set(tasks_by_id)
+
+    with sqlite3.connect(database) as connection:
+        for table in _V6_TABLES:
+            connection.execute(f"DROP TABLE {table}")
+        connection.execute("UPDATE metadata SET value='5' WHERE key='schema_version'")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        migrated = tuple(pool.map(lambda _index: SqliteTaskStore(database), range(2)))
+
+    shared_command_id = "same-cancel-command"
+    first_cancel = replace(
+        _cancel(first.task_id).envelope,
+        command_id=shared_command_id,
+        request_id="cancel-request-scope-one",
+        correlation_id="cancel-correlation-scope-one",
+    )
+    second_cancel = replace(
+        _cancel(second.task_id).envelope,
+        command_id=shared_command_id,
+        request_id="cancel-request-scope-two",
+        correlation_id="cancel-correlation-scope-two",
+        scope=second_scope,
+    )
+    assert migrated[0].cancel(first_cancel, observed_at=LATER).error is not None
+    assert migrated[1].cancel(second_cancel, observed_at=LATER).error is not None
+
+    reopened = SqliteTaskStore(database)
+    assert reopened.get_task(first.task_id, first.scope).attempt_id == first.attempt_id
+    assert (
+        reopened.get_task(second.task_id, second.scope).attempt_id == second.attempt_id
+    )
+    with sqlite3.connect(database) as connection:
+        fences = connection.execute(
+            """SELECT t.scope_key, f.cancel_command_id
+               FROM durability_recovery_fences AS f
+               JOIN tasks AS t ON t.task_id=f.task_id
+               ORDER BY t.scope_key"""
+        ).fetchall()
+        assert len(fences) == 2
+        assert {row[1] for row in fences} == {shared_command_id}
+        assert len({row[0] for row in fences}) == 2
+        commands = connection.execute(
+            """SELECT scope_key, command_id FROM commands
+               WHERE command_id=? ORDER BY scope_key""",
+            (shared_command_id,),
+        ).fetchall()
+        assert len(commands) == 2
+        assert {row[1] for row in commands} == {shared_command_id}
+        assert len({row[0] for row in commands}) == 2
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 @pytest.mark.parametrize(
     "version,downgrade",
     (
@@ -549,6 +667,124 @@ def test_raw_authority_free_checkpoint_cannot_mutate_store(tmp_path: Path) -> No
     assert effect_rejected.value.reason == (
         "DURABILITY_MUTATION_AUTHORIZATION_REQUIRED"
     )
+    assert store.counts() == before
+    assert store.read_durability_checkpoints(binding).records == ()
+    assert store.read_durability_effects(binding).records == ()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "changed_value"),
+    (
+        ("operation", lambda authorization, _foreign: "effect.append"),
+        (
+            "scope",
+            lambda authorization, _foreign: replace(
+                authorization.scope, subject_id="foreign-subject"
+            ),
+        ),
+        ("task_id", lambda authorization, _foreign: "task-foreign"),
+        (
+            "producer_attempt_id",
+            lambda authorization, _foreign: "attempt-foreign",
+        ),
+        (
+            "candidate_attempt_id",
+            lambda authorization, _foreign: "attempt-candidate",
+        ),
+        (
+            "profile",
+            lambda authorization, _foreign: replace(
+                authorization.profile, profile_id="foreign-profile"
+            ),
+        ),
+        (
+            "executor_owner_id",
+            lambda authorization, _foreign: "foreign-runtime",
+        ),
+        (
+            "executor_owner_generation",
+            lambda authorization, _foreign: authorization.executor_owner_generation + 1,
+        ),
+        (
+            "checkpoint_head",
+            lambda authorization, _foreign: authorization.checkpoint_head + 1,
+        ),
+        (
+            "checkpoint_prefix_digest",
+            lambda authorization, _foreign: "a" * 64,
+        ),
+        (
+            "effect_head",
+            lambda authorization, _foreign: authorization.effect_head + 1,
+        ),
+        (
+            "effect_prefix_digest",
+            lambda authorization, _foreign: "b" * 64,
+        ),
+        ("payload_digest", lambda authorization, _foreign: "c" * 64),
+        ("claim_owner_id", lambda authorization, _foreign: "foreign-claim-owner"),
+        ("claim_token", lambda authorization, _foreign: "foreign-claim-token"),
+        (
+            "claim_generation",
+            lambda authorization, _foreign: authorization.claim_generation + 1,
+        ),
+        ("_store_identity", lambda authorization, foreign: foreign),
+    ),
+)
+def test_changed_receipt_field_is_not_transformable_authority(
+    tmp_path: Path,
+    field_name: str,
+    changed_value,
+) -> None:
+    store, _selection_value, task, binding = _selected_task(tmp_path)
+    checkpoint = _checkpoint(store, task, binding)
+    authorization = _mutation_authorization(
+        store,
+        binding,
+        operation="checkpoint.append",
+        payload_digest=hashlib.sha256(checkpoint.canonical_bytes()).hexdigest(),
+    )
+    foreign_store = SqliteTaskStore(tmp_path / "foreign-store.sqlite")
+    transformed = replace(
+        authorization,
+        **{field_name: changed_value(authorization, foreign_store)},
+    )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        store.append_durability_checkpoint(
+            checkpoint,
+            observed_at=NOW,
+            authorization=transformed,
+        )
+
+    assert rejected.value.reason == "DURABILITY_MUTATION_AUTHORIZATION_INVALID"
+    assert store.counts() == before
+    assert store.read_durability_checkpoints(binding).records == ()
+    assert store.read_durability_effects(binding).records == ()
+
+
+def test_copied_receipt_is_not_reusable_authority(tmp_path: Path) -> None:
+    store, _selection_value, task, binding = _selected_task(tmp_path)
+    checkpoint = _checkpoint(store, task, binding)
+    authorization = _mutation_authorization(
+        store,
+        binding,
+        operation="checkpoint.append",
+        payload_digest=hashlib.sha256(checkpoint.canonical_bytes()).hexdigest(),
+    )
+    copied = copy.copy(authorization)
+    assert copied is not authorization
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        store.append_durability_checkpoint(
+            checkpoint,
+            observed_at=NOW,
+            authorization=copied,
+        )
+
+    assert rejected.value.reason == "DURABILITY_MUTATION_AUTHORIZATION_INVALID"
     assert store.counts() == before
     assert store.read_durability_checkpoints(binding).records == ()
     assert store.read_durability_effects(binding).records == ()

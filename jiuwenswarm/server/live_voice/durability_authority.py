@@ -10,9 +10,13 @@ authoritative Store consumes its exact lease in the mutation transaction.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
+import secrets
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Final
+from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
@@ -22,6 +26,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from .durability_identity import DurabilityProfileBinding
 
 _CONSTRUCTION_TOKEN = object()
+_RECEIPT_SIGNING_KEY: Final = secrets.token_bytes(32)
+_RECEIPT_REGISTRY_LOCK = RLock()
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _OPERATIONS: Final = frozenset(
     {
@@ -40,7 +46,7 @@ def _text(value: object) -> bool:
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class DurabilityMutationAuthorization:
     """Opaque receipt exact-bound to one Store lease, prefix tip, and write."""
 
@@ -61,6 +67,8 @@ class DurabilityMutationAuthorization:
     claim_token: str
     claim_generation: int
     _store_identity: object = field(repr=False, compare=False)
+    _receipt_nonce: str = field(repr=False, compare=False)
+    _receipt_signature: bytes = field(repr=False, compare=False)
     _construction_token: object = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -89,11 +97,53 @@ class DurabilityMutationAuthorization:
             or not _text(self.claim_token)
             or type(self.claim_generation) is not int
             or self.claim_generation <= 0
+            or _SHA256.fullmatch(self._receipt_nonce) is None
+            or type(self._receipt_signature) is not bytes
+            or len(self._receipt_signature) != 32
         ):
             raise ValueError("invalid durability mutation authorization")
 
-    def is_for_store(self, store: object) -> bool:
-        return self._store_identity is store
+    def is_authentic_for_store(self, store: object) -> bool:
+        with _RECEIPT_REGISTRY_LOCK:
+            registered = _RECEIPT_REGISTRY.get(id(self))
+        if registered is not self or self._store_identity is not store:
+            return False
+        expected = hmac.digest(
+            _RECEIPT_SIGNING_KEY,
+            canonical_json_bytes(_receipt_payload(self)),
+            "sha256",
+        )
+        return hmac.compare_digest(self._receipt_signature, expected)
+
+
+_RECEIPT_REGISTRY: WeakValueDictionary[int, DurabilityMutationAuthorization] = (
+    WeakValueDictionary()
+)
+
+
+def _receipt_payload(
+    authorization: DurabilityMutationAuthorization,
+) -> dict[str, object]:
+    return {
+        "operation": authorization.operation,
+        "scope": authorization.scope.to_dict(),
+        "task_id": authorization.task_id,
+        "producer_attempt_id": authorization.producer_attempt_id,
+        "candidate_attempt_id": authorization.candidate_attempt_id,
+        "profile": authorization.profile.to_dict(),
+        "executor_owner_id": authorization.executor_owner_id,
+        "executor_owner_generation": authorization.executor_owner_generation,
+        "checkpoint_head": authorization.checkpoint_head,
+        "checkpoint_prefix_digest": authorization.checkpoint_prefix_digest,
+        "effect_head": authorization.effect_head,
+        "effect_prefix_digest": authorization.effect_prefix_digest,
+        "payload_digest": authorization.payload_digest,
+        "claim_owner_id": authorization.claim_owner_id,
+        "claim_token": authorization.claim_token,
+        "claim_generation": authorization.claim_generation,
+        "store_identity": id(authorization._store_identity),
+        "receipt_nonce": authorization._receipt_nonce,
+    }
 
 
 def _mint_durability_mutation_authorization(
@@ -118,7 +168,8 @@ def _mint_durability_mutation_authorization(
 ) -> DurabilityMutationAuthorization:
     """Private Direct/runtime issuer; callers outside the module get data only."""
 
-    return DurabilityMutationAuthorization(
+    nonce = secrets.token_hex(32)
+    unsigned = DurabilityMutationAuthorization(
         operation=operation,
         scope=scope,
         task_id=task_id,
@@ -136,8 +187,39 @@ def _mint_durability_mutation_authorization(
         claim_token=claim_token,
         claim_generation=claim_generation,
         _store_identity=store,
+        _receipt_nonce=nonce,
+        _receipt_signature=b"\x00" * 32,
         _construction_token=_CONSTRUCTION_TOKEN,
     )
+    authorization = DurabilityMutationAuthorization(
+        operation=unsigned.operation,
+        scope=unsigned.scope,
+        task_id=unsigned.task_id,
+        producer_attempt_id=unsigned.producer_attempt_id,
+        candidate_attempt_id=unsigned.candidate_attempt_id,
+        profile=unsigned.profile,
+        executor_owner_id=unsigned.executor_owner_id,
+        executor_owner_generation=unsigned.executor_owner_generation,
+        checkpoint_head=unsigned.checkpoint_head,
+        checkpoint_prefix_digest=unsigned.checkpoint_prefix_digest,
+        effect_head=unsigned.effect_head,
+        effect_prefix_digest=unsigned.effect_prefix_digest,
+        payload_digest=unsigned.payload_digest,
+        claim_owner_id=unsigned.claim_owner_id,
+        claim_token=unsigned.claim_token,
+        claim_generation=unsigned.claim_generation,
+        _store_identity=store,
+        _receipt_nonce=nonce,
+        _receipt_signature=hmac.digest(
+            _RECEIPT_SIGNING_KEY,
+            canonical_json_bytes(_receipt_payload(unsigned)),
+            "sha256",
+        ),
+        _construction_token=_CONSTRUCTION_TOKEN,
+    )
+    with _RECEIPT_REGISTRY_LOCK:
+        _RECEIPT_REGISTRY[id(authorization)] = authorization
+    return authorization
 
 
 def _durability_authorization_payload_digest(payload: object) -> str:

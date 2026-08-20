@@ -2659,9 +2659,10 @@ class DirectProjectCodeExecutorAdapter:
     def capability_profiles(self) -> tuple[ExecutorCapabilityProfile, ...]:
         """Return only candidates whose construction dependencies are present."""
 
+        legacy = self.capability_profile()
         if self._durability_store is None:
-            return (_DIRECT_D0_CAPABILITY_PROFILE,)
-        return (_DIRECT_D0_CAPABILITY_PROFILE, _DIRECT_CAPABILITY_PROFILE)
+            return (legacy,)
+        return (legacy, _DIRECT_CAPABILITY_PROFILE)
 
     def __init__(
         self,
@@ -5529,7 +5530,16 @@ class DirectProjectCodeExecutorAdapter:
                 "reconciliation must query the exact original formal attempt",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        self._parsed_selection(attempt.selection)
+        parsed = self._parsed_selection(attempt.selection)
+        if parsed is not None and parsed.profile not in self.capability_profiles():
+            return self._resolution_observation(
+                task.task_id,
+                attempt.attempt_id,
+                attempt.executor_ref,
+                ExecutorResolution.UNAVAILABLE,
+                "EXECUTOR_SELECTION_PROFILE_DRIFT",
+                selection=attempt.selection,
+            )
         record = await asyncio.to_thread(self._journal.get, attempt.attempt_id)
         if record is None:
             return self._resolution_observation(
@@ -5773,14 +5783,19 @@ class DirectProjectCodeExecutorAdapter:
             None,
         )
         if (
-            direct is None
-            or parsed.profile_digest != selection.capability_profile_digest
+            parsed.profile_digest != selection.capability_profile_digest
             or selection.adapter_id != parsed.profile.adapter_id
+            or parsed.profile.adapter_id != _DIRECT_D0_CAPABILITY_PROFILE.adapter_id
             or parsed.profile.executor_id != cls.executor_id
             or parsed.requirements.executor_id != cls.executor_id
             or parsed.requirements.side_effect_class != "project_mutation"
             or parsed.requirements.project_serialization
             != parsed.profile.project_serialization
+            or (
+                direct is None
+                and parsed.profile.profile_id
+                in {known.profile_id for known in _DIRECT_KNOWN_CAPABILITY_PROFILES}
+            )
         ):
             raise FormalTaskViolation(
                 "EXECUTOR_SELECTION_ADAPTER_MISMATCH",
