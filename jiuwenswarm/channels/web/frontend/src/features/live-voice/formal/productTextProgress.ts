@@ -489,3 +489,50 @@ export class ProductTextProgressAckOwner {
     return snapshot;
   }
 }
+
+export interface ProductTextProgressDomNode {
+  readonly isConnected: boolean;
+  getAttribute(name: string): string | null;
+}
+
+/**
+ * Converts real, exact DOM adoption into the existing delivery ACK.
+ *
+ * React state assignment is not presentation.  The mounted product carrier calls
+ * this owner from a layout effect with the actual connected element after commit.
+ */
+export class ProductTextProgressDomAdoptionOwner {
+  private readonly ackOwner: Pick<ProductTextProgressAckOwner, 'retain'>;
+
+  constructor(ackOwner: Pick<ProductTextProgressAckOwner, 'retain'>) {
+    if (!ackOwner || typeof ackOwner.retain !== 'function') {
+      throw new Error('product text-progress ACK owner is required');
+    }
+    this.ackOwner = ackOwner;
+  }
+
+  adopt(
+    event: Readonly<ProductTextProgressEvent>,
+    node: ProductTextProgressDomNode | null
+  ): ProductTextProgressAckSnapshot | null {
+    if (!node || node.isConnected !== true) return null;
+    const expected: Readonly<Record<string, string>> = {
+      'data-delivery-id': event.delivery_id,
+      'data-session-id': event.session_id,
+      'data-subject-id': event.source_event.scope.subject_id,
+      'data-project-id': event.project_id,
+      'data-task-id': event.task_id,
+      'data-attempt-id': event.attempt_id,
+      'data-event-id': event.source_event.event_id,
+      'data-event-seq': String(event.source_event.seq),
+      'data-generation-id': event.generation_id,
+      'data-generation': String(event.generation),
+    };
+    for (const [name, value] of Object.entries(expected)) {
+      if (node.getAttribute(name) !== value) {
+        throw new Error('DOM presentation binding mismatch');
+      }
+    }
+    return this.ackOwner.retain(event);
+  }
+}

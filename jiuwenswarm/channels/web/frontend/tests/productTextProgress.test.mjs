@@ -7,6 +7,7 @@ import {
   createProductTextProgressDeliveryAck,
   parseProductTextProgressEvent,
   ProductTextProgressAckOwner,
+  ProductTextProgressDomAdoptionOwner,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
 function progressEvent(overrides = {}) {
@@ -75,6 +76,46 @@ function progressEvent(overrides = {}) {
     },
   };
 }
+
+test('DOM adoption owner ACKs only an exact connected rendered delivery', () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const retained = [];
+  const ackOwner = {
+    retain: event => {
+      retained.push(event);
+      return { status: 'pending' };
+    },
+  };
+  const owner = new ProductTextProgressDomAdoptionOwner(ackOwner);
+  const node = {
+    isConnected: true,
+    getAttribute(name) {
+      return {
+        'data-delivery-id': parsed.delivery_id,
+        'data-session-id': parsed.session_id,
+        'data-subject-id': parsed.source_event.scope.subject_id,
+        'data-project-id': parsed.project_id,
+        'data-task-id': parsed.task_id,
+        'data-attempt-id': parsed.attempt_id,
+        'data-event-id': parsed.source_event.event_id,
+        'data-event-seq': String(parsed.source_event.seq),
+        'data-generation-id': parsed.generation_id,
+        'data-generation': String(parsed.generation),
+      }[name] ?? null;
+    },
+  };
+
+  assert.deepEqual(owner.adopt(parsed, { ...node, isConnected: false }), null);
+  assert.deepEqual(retained, []);
+  assert.throws(
+    () => owner.adopt(parsed, { ...node, getAttribute: name => (name === 'data-task-id' ? 'task-foreign' : node.getAttribute(name)) }),
+    /DOM presentation binding mismatch/,
+  );
+  assert.deepEqual(retained, []);
+  assert.deepEqual(owner.adopt(parsed, node), { status: 'pending' });
+  assert.deepEqual(retained, [parsed]);
+});
 
 test('parses an exact session/task/correlation/causation progress binding', () => {
   const parsed = parseProductTextProgressEvent(progressEvent());

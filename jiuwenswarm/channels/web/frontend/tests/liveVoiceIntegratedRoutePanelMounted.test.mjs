@@ -8,7 +8,7 @@ import { build } from 'esbuild';
 import i18next from 'i18next';
 import React from 'react';
 import { I18nextProvider } from 'react-i18next';
-import { act, create } from 'react-test-renderer';
+import { act, create as createRenderer } from 'react-test-renderer';
 
 import {
   LiveVoiceIntegratedRoutePanel,
@@ -19,6 +19,21 @@ import {
   encodeAudioFrame,
   serializeMediaControl,
 } from '../node_modules/.cache/live-voice-browser-dedicated-media/browserDedicatedMediaRoute.mjs';
+
+function create(element) {
+  return createRenderer(element, {
+    createNodeMock(node) {
+      if (node.type !== 'div' || typeof node.props?.['data-delivery-id'] !== 'string') return null;
+      return {
+        isConnected: true,
+        getAttribute(name) {
+          const value = node.props[name];
+          return value === undefined || value === null ? null : String(value);
+        },
+      };
+    },
+  });
+}
 
 function mountedProgressActivation(params, overrides = {}) {
   const requested = params.origin_kind === 'voice' ? 'voice' : 'text';
@@ -3008,8 +3023,8 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
           );
           assert.equal(
             renderer.root.findAllByType('code').some(node => node.children.some(child => child === terminalProgress.delivery_id)),
-            false,
-            'terminal truth must remain hidden while its exact ACK cannot be retained',
+            true,
+            'actual DOM adoption remains truthful when ACK retention fails; durable unread must replay it',
           );
         }
         if (outcome === 'failed') {
@@ -3035,8 +3050,8 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
         );
         await waitForMounted(() => calls.some(call => call.method === 'live_voice.composition.p3.progress.ack'), `mounted origin panel did not ACK ${outcome}`);
       });
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, outcome === 'completed' ? 3 : 5);
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, outcome === 'completed' ? 3 : 1);
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, outcome === 'completed' ? 2 : 5);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
 
       const terminalText = `Mounted ${outcome} notification for task-a.`;
       assert.notEqual(p2Binding, null);
@@ -3099,8 +3114,8 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
         0,
         'a late predecessor event must not repopulate the successor task projection',
       );
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, outcome === 'completed' ? 3 : 5);
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, outcome === 'completed' ? 3 : 1);
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, outcome === 'completed' ? 2 : 5);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
     } finally {
       if (renderer) {
         await act(async () => {

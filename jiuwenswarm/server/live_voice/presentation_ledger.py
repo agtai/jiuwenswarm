@@ -6,14 +6,26 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
+    Assurance,
+    CommandEnvelope,
     ErrorCode,
+    ResponseFence,
     ResponseRef,
+    ResultEnvelope,
+    ScopeRef,
+)
+
+from .formal_task_models import (
+    TaskAuthorizationGrant,
+    TaskResultRecord,
+    TaskUnreadPage,
 )
 
 
@@ -22,6 +34,14 @@ class PresentationLedgerViolation(ValueError):
         super().__init__(message)
         self.reason = reason
         self.code = code
+
+
+class TaskPresentationViolation(ValueError):
+    """Safe failure at the TaskEvent-to-presentation consumption seam."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class PresentationSurface(StrEnum):
@@ -495,4 +515,459 @@ class PresentationLedger:
                 "INVALID_PRESENTED_AT",
                 "presented_at must be an RFC3339 UTC timestamp",
                 ErrorCode.INVALID_ARGUMENT,
+            ) from error
+
+
+@dataclass(frozen=True, slots=True)
+class TaskPresentationDelivery:
+    """One ephemeral presentation attempt over a frozen durable unread head."""
+
+    scope: ScopeRef
+    presentation_class: str
+    task_id: str
+    attempt_id: str
+    event_id: str
+    event_seq: int
+    expected_event_head: int
+    result_source_event_id: str | None
+    response_ref: ResponseRef
+    delivery_id: str
+    unit_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.scope, ScopeRef)
+            or self.scope.assurance is not Assurance.AUTHENTICATED
+            or self.scope.project_id is None
+            or self.scope.session_id is None
+        ):
+            raise TaskPresentationViolation(
+                "PRESENTATION_AUTHENTICATION_REQUIRED",
+                "a presentation attempt requires a complete authenticated scope",
+            )
+        if self.presentation_class not in {"text", "voice"}:
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_CLASS",
+                "presentation_class must be text or voice",
+            )
+        for field_name in (
+            "task_id",
+            "attempt_id",
+            "event_id",
+            "delivery_id",
+            "unit_id",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not str or not value.strip():
+                raise TaskPresentationViolation(
+                    "INVALID_PRESENTATION_IDENTITY",
+                    f"{field_name} must be a non-empty exact identity",
+                )
+        if (
+            type(self.event_seq) is not int
+            or type(self.expected_event_head) is not int
+            or not 0 <= self.event_seq <= self.expected_event_head <= MAX_SAFE_INTEGER
+        ):
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_SEQUENCE",
+                "presentation event must be inside its frozen unread head",
+            )
+        if self.result_source_event_id is not None and (
+            type(self.result_source_event_id) is not str
+            or not self.result_source_event_id.strip()
+        ):
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_RESULT",
+                "result_source_event_id must be an exact identity",
+            )
+        if not isinstance(self.response_ref, ResponseRef):
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_RESPONSE",
+                "presentation attempt requires an exact response tuple",
+            )
+
+    @property
+    def consumer_key(self) -> tuple[str, str, str, str]:
+        assert self.scope.project_id is not None
+        return (
+            self.scope.subject_id,
+            self.scope.project_id,
+            self.task_id,
+            self.presentation_class,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TextPresentationAdoptionAck:
+    """Web-owner evidence that one exact text fact exists in the live DOM."""
+
+    scope: ScopeRef
+    presentation_class: str
+    task_id: str
+    attempt_id: str
+    event_id: str
+    event_seq: int
+    expected_event_head: int
+    result_source_event_id: str | None
+    response_ref: ResponseRef
+    delivery_id: str
+    unit_id: str
+    adopted_at: str
+
+    @classmethod
+    def from_delivery(
+        cls, delivery: TaskPresentationDelivery, *, adopted_at: str
+    ) -> TextPresentationAdoptionAck:
+        if not isinstance(delivery, TaskPresentationDelivery):
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_DELIVERY",
+                "text adoption requires one exact delivery",
+            )
+        return cls(
+            scope=delivery.scope,
+            presentation_class=delivery.presentation_class,
+            task_id=delivery.task_id,
+            attempt_id=delivery.attempt_id,
+            event_id=delivery.event_id,
+            event_seq=delivery.event_seq,
+            expected_event_head=delivery.expected_event_head,
+            result_source_event_id=delivery.result_source_event_id,
+            response_ref=delivery.response_ref,
+            delivery_id=delivery.delivery_id,
+            unit_id=delivery.unit_id,
+            adopted_at=adopted_at,
+        )
+
+
+class TaskPresentationConsumptionOwner:
+    """Ephemeral ACK composition; durable truth remains in ``task.ack_events``.
+
+    The owner deliberately has no Store, Task, Executor, network, DOM, TTS, audio,
+    or history Port.  A caller may invoke its injected command Port only after the
+    real Web or Runtime presentation owner supplies an exact accepted ACK.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._responses = ResponseFence()
+        self._deliveries: dict[str, TaskPresentationDelivery] = {}
+        self._text_acks: dict[str, TextPresentationAdoptionAck] = {}
+        self._voice_acks: set[str] = set()
+
+    def reserve_next(
+        self,
+        page: TaskUnreadPage,
+        *,
+        scope: ScopeRef,
+        response_ref: ResponseRef,
+        delivery_id: str,
+        unit_id: str,
+        result: TaskResultRecord | None = None,
+    ) -> TaskPresentationDelivery:
+        """Reserve only the next event of an authority-owned frozen prefix."""
+
+        if not isinstance(page, TaskUnreadPage) or not page.events:
+            raise TaskPresentationViolation(
+                "PRESENTATION_UNREAD_EVENT_REQUIRED",
+                "presentation reservation requires a non-empty unread page",
+            )
+        if (
+            not isinstance(scope, ScopeRef)
+            or scope.assurance is not Assurance.AUTHENTICATED
+            or scope.project_id is None
+            or scope.session_id is None
+        ):
+            raise TaskPresentationViolation(
+                "PRESENTATION_AUTHENTICATION_REQUIRED",
+                "presentation reservation requires a fresh authenticated scope",
+            )
+        event = page.events[0]
+        if event.seq != page.watermark + 1:
+            raise TaskPresentationViolation(
+                "PRESENTATION_PREFIX_GAP",
+                "only the next contiguous unread event may be reserved",
+            )
+        if (
+            event.task_id != page.task_id
+            or event.scope.subject_id != scope.subject_id
+            or event.scope.project_id != scope.project_id
+        ):
+            raise TaskPresentationViolation(
+                "PRESENTATION_SCOPE_MISMATCH",
+                "unread event does not belong to the authenticated consumer scope",
+            )
+
+        terminal = event.event_type == "task.terminal"
+        if terminal != (event.state == "terminal"):
+            raise TaskPresentationViolation(
+                "PRESENTATION_TERMINAL_MISMATCH",
+                "terminal presentation requires the exact canonical terminal event",
+            )
+
+        completed = terminal and event.outcome == "completed"
+        if completed:
+            if (
+                not isinstance(result, TaskResultRecord)
+                or result.task_id != event.task_id
+                or result.attempt_id != event.attempt_id
+                or event.source_event_id is None
+                or result.source_event_id != event.source_event_id
+            ):
+                raise TaskPresentationViolation(
+                    "COMPLETED_RESULT_REQUIRED",
+                    "completed presentation requires its exact legal TaskResult",
+                )
+            result_source_event_id = result.source_event_id
+        else:
+            if result is not None:
+                raise TaskPresentationViolation(
+                    "UNEXPECTED_PRESENTATION_RESULT",
+                    "non-completed events cannot fabricate a TaskResult",
+                )
+            result_source_event_id = None
+
+        delivery = TaskPresentationDelivery(
+            scope=scope,
+            presentation_class=page.presentation_class,
+            task_id=event.task_id,
+            attempt_id=event.attempt_id,
+            event_id=event.event_id,
+            event_seq=event.seq,
+            expected_event_head=page.head_seq,
+            result_source_event_id=result_source_event_id,
+            response_ref=response_ref,
+            delivery_id=delivery_id,
+            unit_id=unit_id,
+        )
+        with self._lock:
+            prior = self._deliveries.get(delivery.delivery_id)
+            if prior is not None:
+                if prior == delivery:
+                    return prior
+                raise TaskPresentationViolation(
+                    "PRESENTATION_DELIVERY_REWRITE",
+                    "delivery_id cannot be rebound to another attempt",
+                )
+            self._responses.begin(delivery.response_ref)
+            self._deliveries[delivery.delivery_id] = delivery
+        return delivery
+
+    def mark_text_adopted(self, ack: TextPresentationAdoptionAck) -> bool:
+        with self._lock:
+            if not isinstance(ack, TextPresentationAdoptionAck):
+                raise TaskPresentationViolation(
+                    "INVALID_TEXT_ADOPTION_ACK",
+                    "text adoption ACK has an unsupported type",
+                )
+            delivery = self._deliveries.get(ack.delivery_id)
+            if delivery is None:
+                raise TaskPresentationViolation(
+                    "PRESENTATION_DELIVERY_NOT_FOUND",
+                    "text adoption has no exact reserved delivery",
+                )
+            if delivery.presentation_class != "text":
+                raise TaskPresentationViolation(
+                    "TEXT_PRESENTATION_CLASS_REQUIRED",
+                    "DOM adoption can consume only the text class",
+                )
+            expected = TextPresentationAdoptionAck.from_delivery(
+                delivery, adopted_at=ack.adopted_at
+            )
+            self._validate_timestamp(ack.adopted_at)
+            if ack != expected:
+                raise TaskPresentationViolation(
+                    "TEXT_ADOPTION_ACK_MISMATCH",
+                    "text adoption ACK does not match its exact delivery tuple",
+                )
+
+            def apply() -> bool:
+                prior = self._text_acks.get(delivery.delivery_id)
+                if prior is not None:
+                    if prior == ack:
+                        return False
+                    raise TaskPresentationViolation(
+                        "TEXT_ADOPTION_ACK_REWRITE",
+                        "accepted text adoption cannot be rewritten",
+                    )
+                self._text_acks[delivery.delivery_id] = ack
+                return True
+
+            return self._responses.apply_if_current(delivery.response_ref, apply)
+
+    async def mark_voice_presented(
+        self,
+        delivery: TaskPresentationDelivery,
+        ack: PresentationAck,
+        runtime_ack_port: Callable[[PresentationAck], Awaitable[object]],
+    ) -> bool:
+        """Accept voice only through Runtime's canonical audio-ledger ACK Port."""
+
+        with self._lock:
+            owned = self._require_delivery(delivery)
+            if owned.presentation_class != "voice":
+                raise TaskPresentationViolation(
+                    "VOICE_PRESENTATION_CLASS_REQUIRED",
+                    "audio PresentationAck can consume only the voice class",
+                )
+            if not isinstance(ack, PresentationAck) or (
+                ack.ref != owned.response_ref
+                or ack.surface is not PresentationSurface.AUDIO
+                or ack.unit_id != owned.unit_id
+            ):
+                raise TaskPresentationViolation(
+                    "VOICE_PRESENTATION_ACK_MISMATCH",
+                    "audio ACK does not match the exact delivery tuple",
+                )
+            if not callable(runtime_ack_port):
+                raise TaskPresentationViolation(
+                    "RUNTIME_PRESENTATION_ACK_UNAVAILABLE",
+                    "voice presentation requires Runtime's audio ACK Port",
+                )
+
+        # Runtime owns TTS, the audio sink, and its presentation ledger.  Never
+        # hold this composition lock while asking that external owner to mutate.
+        outcome = await runtime_ack_port(ack)
+        from .agent_conversation_runtime import PresentationAckResult
+
+        if (
+            not isinstance(outcome, PresentationAckResult)
+            or outcome.ack != ack
+            or not (outcome.accepted or outcome.replayed)
+        ):
+            raise TaskPresentationViolation(
+                "RUNTIME_PRESENTATION_ACK_REJECTED",
+                "Runtime did not accept the exact audio PresentationAck",
+            )
+
+        with self._lock:
+            owned = self._require_delivery(delivery)
+
+            def apply() -> bool:
+                if owned.delivery_id in self._voice_acks:
+                    return False
+                self._voice_acks.add(owned.delivery_id)
+                return True
+
+            return self._responses.apply_if_current(owned.response_ref, apply)
+
+    def consume(
+        self,
+        delivery: TaskPresentationDelivery,
+        command: CommandEnvelope,
+        authorization: TaskAuthorizationGrant,
+        command_port: Callable[
+            [CommandEnvelope, TaskAuthorizationGrant], ResultEnvelope
+        ],
+    ) -> ResultEnvelope:
+        """Invoke the sole durable mutation only after an exact presentation ACK."""
+
+        with self._lock:
+            owned = self._require_delivery(delivery)
+            accepted = (
+                owned.delivery_id in self._text_acks
+                if owned.presentation_class == "text"
+                else owned.delivery_id in self._voice_acks
+            )
+            if not accepted:
+                raise TaskPresentationViolation(
+                    "PRESENTATION_ACK_REQUIRED",
+                    "durable consumption requires an accepted presentation ACK",
+                )
+            if (
+                not isinstance(command, CommandEnvelope)
+                or command.command_type != "task.ack_events"
+                or command.scope != owned.scope
+                or command.target_ref.kind != "task"
+                or command.target_ref.id != owned.task_id
+                or command.required_capabilities != ("task.ack_events",)
+                or command.payload
+                != {
+                    "presentation_class": owned.presentation_class,
+                    "acked_through_seq": owned.event_seq,
+                    "acked_event_id": owned.event_id,
+                    "expected_event_head": owned.expected_event_head,
+                }
+            ):
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_COMMAND_MISMATCH",
+                    "task.ack_events command does not bind the accepted presentation",
+                )
+            if (
+                not isinstance(authorization, TaskAuthorizationGrant)
+                or authorization.scope != owned.scope
+                or authorization.principal_id != owned.scope.subject_id
+                or authorization.operation != "task.ack_events"
+                or authorization.command_id != command.command_id
+                or authorization.target_task_id != owned.task_id
+                or authorization.allowed_capabilities != frozenset({"task.ack_events"})
+            ):
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_AUTHORIZATION_MISMATCH",
+                    "consumption requires a new complete exact authorization grant",
+                )
+            if not callable(command_port):
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_PORT_UNAVAILABLE",
+                    "task.ack_events command Port is unavailable",
+                )
+        # Fresh authorization and the sole durable command Port are passed per
+        # call.  This owner retains neither credential nor Core/Store authority.
+        result = command_port(command, authorization)
+        if not isinstance(result, ResultEnvelope):
+            raise TaskPresentationViolation(
+                "CONSUMPTION_RESULT_INVALID",
+                "task.ack_events returned no canonical result",
+            )
+        if (
+            result.request_id != command.request_id
+            or result.command_id != command.command_id
+        ):
+            raise TaskPresentationViolation(
+                "CONSUMPTION_RESULT_OWNER_MISMATCH",
+                "task.ack_events result does not belong to the exact command",
+            )
+        if result.ok:
+            value = result.result
+            if (
+                value is None
+                or value.get("task_id") != owned.task_id
+                or value.get("presentation_class") != owned.presentation_class
+                or value.get("acked_through_seq") != owned.event_seq
+                or value.get("acked_event_id") != owned.event_id
+            ):
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_RESULT_MISMATCH",
+                    "task.ack_events result does not match the accepted presentation",
+                )
+        return result
+
+    def _require_delivery(
+        self, delivery: TaskPresentationDelivery
+    ) -> TaskPresentationDelivery:
+        if not isinstance(delivery, TaskPresentationDelivery):
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_DELIVERY",
+                "presentation operation has an unsupported delivery type",
+            )
+        owned = self._deliveries.get(delivery.delivery_id)
+        if owned is None or owned != delivery:
+            raise TaskPresentationViolation(
+                "PRESENTATION_DELIVERY_NOT_FOUND",
+                "presentation operation does not match an exact reserved delivery",
+            )
+        return owned
+
+    @staticmethod
+    def _validate_timestamp(value: object) -> None:
+        if type(value) is not str or _UTC_PATTERN.fullmatch(value) is None:
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_ACK_TIME",
+                "presentation ACK time must be canonical UTC",
+            )
+        try:
+            datetime.fromisoformat(value[:-1] + "+00:00")
+        except ValueError as error:
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_ACK_TIME",
+                "presentation ACK time is invalid",
             ) from error

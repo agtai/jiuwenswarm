@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Activity, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 export { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
@@ -17,6 +17,7 @@ import {
 import {
   PRODUCT_TEXT_PROGRESS_EVENT,
   ProductTextProgressAckOwner,
+  ProductTextProgressDomAdoptionOwner,
   adoptParsedProductTextProgressEvent,
   parseProductTextProgressEvent,
   type ProductTextProgressEvent,
@@ -1328,6 +1329,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const pendingOwnedProgressRef = useRef(new Map<string, Readonly<ProductTextProgressEvent>>());
   const progressDrainRef = useRef<(() => void) | null>(null);
   const progressAckOwnerRef = useRef<ProductTextProgressAckOwner | null>(null);
+  const progressDomAdoptionOwnerRef = useRef<ProductTextProgressDomAdoptionOwner | null>(null);
+  const progressDomRef = useRef<HTMLDivElement | null>(null);
   const activationOwnerRef = useRef<ProductWebP2ActivationOwner | null>(null);
   const p2ActivationJournalRef = useRef<ProductP2ActivationJournal | null>(null);
   const p1VoiceOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
@@ -2106,26 +2109,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     });
     owner.setConnected(props.isConnected);
     progressAckOwnerRef.current = owner;
+    const domAdoptionOwner = new ProductTextProgressDomAdoptionOwner(owner);
+    progressDomAdoptionOwnerRef.current = domAdoptionOwner;
     let drainInFlight = false;
     let drainRetryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
     let effectClosed = false;
     const reconciliationFailures = new Map<string, number>();
     const exhaustedDeliveries = new Map<string, true>();
-    const retainForAcknowledgement = (event: Readonly<ProductTextProgressEvent>) => {
-      try {
-        const retained = owner.retain(event);
-        if (retained === null) {
-          throw Object.assign(new Error(PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED), {
-            reason: PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED,
-          });
-        }
-        return retained;
-      } catch {
-        throw Object.assign(new Error(PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED), {
-          reason: PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED,
-        });
-      }
-    };
     const scheduleDrain = () => {
       if (effectClosed || drainInFlight || drainRetryTimer !== null || progressAckOwnerRef.current !== owner) return;
       drainInFlight = true;
@@ -2155,7 +2145,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           const candidate = adoptParsedProductTextProgressEvent(progressRef.current, parsed, ownedSessionId);
           if (candidate === progressRef.current && progressRef.current?.delivery_id === parsed.delivery_id) {
             try {
-              const retained = retainForAcknowledgement(parsed);
+              const retained = domAdoptionOwner.adopt(parsed, progressDomRef.current);
+              if (retained === null) return;
               pendingOwnedProgressRef.current.delete(parsed.delivery_id);
               reconciliationFailures.delete(parsed.delivery_id);
               setProgressAck(retained.status);
@@ -2199,7 +2190,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             );
           };
           try {
-            const retention: { snapshot: ReturnType<typeof retainForAcknowledgement> | null } = { snapshot: null };
             const record = await reconcileProductP3ProgressEvent({
               request: productRequest,
               leaf,
@@ -2207,17 +2197,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               session_id: ownedSessionId,
               request_nonce: `${Date.now()}-${reconciliationGeneration}-${parsed.source_event.seq}`,
               is_current: isCurrent,
-              before_adopt: () => {
-                retention.snapshot = retainForAcknowledgement(parsed);
-              },
             });
             if (!isCurrent()) return;
-            const retained = retention.snapshot;
-            if (retained === null) {
-              throw Object.assign(new Error(PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED), {
-                reason: PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED,
-              });
-            }
             pendingOwnedProgressRef.current.delete(parsed.delivery_id);
             reconciliationFailures.delete(parsed.delivery_id);
             const adopted = adoptParsedProductTextProgressEvent(progressRef.current, parsed, ownedSessionId);
@@ -2230,7 +2211,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               setP3MutationStatus(terminalStatus);
               queueTerminalAnnouncement(parsed.task_id);
             }
-            setProgressAck(retained.status);
+            // The layout effect owns the first ACK only after React commits the
+            // exact delivery into the connected DOM.
+            return;
           } catch (error) {
             if (!isCurrent()) return;
             const reason = stableProductTextReason(error, 'PRODUCT_P3_PROGRESS_RECONCILIATION_FAILED');
@@ -2318,8 +2301,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingOwnedProgressRef.current.clear();
       if (progressDrainRef.current === scheduleDrain) progressDrainRef.current = null;
       if (progressAckOwnerRef.current === owner) progressAckOwnerRef.current = null;
+      if (progressDomAdoptionOwnerRef.current === domAdoptionOwner) progressDomAdoptionOwnerRef.current = null;
     };
   }, [props.activeSessionId, props.progressAckCapacity, props.progressSubscribe]);
+
+  useLayoutEffect(() => {
+    if (progress === null) return;
+    const adoptionOwner = progressDomAdoptionOwnerRef.current;
+    const node = progressDomRef.current;
+    if (adoptionOwner === null || node === null) return;
+    try {
+      const retained = adoptionOwner.adopt(progress, node);
+      if (retained === null) return;
+      setProgressAck(retained.status);
+      // The reconciliation coroutine clears its in-flight guard in `finally`.
+      // A task turn therefore starts the next prefix item only after both that
+      // guard and this committed-DOM adoption have settled.
+      globalThis.setTimeout(() => progressDrainRef.current?.(), 0);
+    } catch {
+      setProgressAck('failed');
+    }
+  }, [progress]);
 
   useEffect(() => {
     progressAckOwnerRef.current?.setConnected(props.isConnected);
@@ -5455,6 +5457,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       platform={platform}
       progress={progress}
       progressAck={progressAck}
+      progressDomRef={progressDomRef}
       p2Activation={props.isConnected ? p2Activation : null}
       p3Activation={p3Activation}
       productInput={productInput}
@@ -5653,6 +5656,7 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   platform: Readonly<WebPlatformDiagnosticsSnapshot> | null;
   progress?: Readonly<ProductTextProgressEvent> | null;
   progressAck?: 'idle' | 'pending' | 'acknowledged' | 'failed';
+  progressDomRef?: RefObject<HTMLDivElement>;
   p2Activation?: Readonly<ProductWebP2ActivationSnapshot> | null;
   p3Activation?: Readonly<ProductWebP3ProgressSnapshot> | null;
   productInput?: string;
@@ -5715,6 +5719,7 @@ export function LiveVoiceIntegratedRoutePanelView({
   platform,
   progress = null,
   progressAck = 'idle',
+  progressDomRef,
   p2Activation = null,
   p3Activation = null,
   productInput = '',
@@ -6154,9 +6159,21 @@ export function LiveVoiceIntegratedRoutePanelView({
 
         {progress && (
           <div
+            key={progress.delivery_id}
+            ref={progressDomRef}
             className="live-voice-integrated__section"
             aria-label={t('liveVoice.integrated.progress.title')}
             data-testid="live-voice-integrated-product-progress"
+            data-delivery-id={progress.delivery_id}
+            data-session-id={progress.session_id}
+            data-subject-id={progress.source_event.scope.subject_id}
+            data-project-id={progress.project_id}
+            data-task-id={progress.task_id}
+            data-attempt-id={progress.attempt_id}
+            data-event-id={progress.source_event.event_id}
+            data-event-seq={String(progress.source_event.seq)}
+            data-generation-id={progress.generation_id}
+            data-generation={String(progress.generation)}
           >
             <strong>{t('liveVoice.integrated.progress.title')}</strong>
             <span className="live-voice-integrated__progress-note">{t('liveVoice.integrated.progress.disclosure')}</span>
