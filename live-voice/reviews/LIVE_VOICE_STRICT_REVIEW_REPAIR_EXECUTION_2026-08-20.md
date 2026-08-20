@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 16/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 17/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -558,6 +558,7 @@ and risk checkpoint before implementation.
 | SRR-18 / A23 | 14/88 | `3c85728fd`; submit, barge-in and presentation-ACK operations are frozen and durably checkpointed before pending retention or completed-replay eviction. UTF-8/serialization/checkpoint rejection leaves no ghost authority or network/Agent/Task/media/presentation effects, exact concurrent/restart replay remains once-only, and the 128-entry boundary preserves the old replay until durable successor admission; 90 focused tests plus full candidate/baseline Integrated Web comparison passed after independent Tier-3 review |
 | SRR-19 / L14 | 15/88 | `7f9dac8fe`; both public scheduling entry points now return the exact UTF-8 owner-scope diagnostic with the existing `TASK_SCOPE_REQUIRED` code. Eight invalid-scope cases prove zero Store, scheduler and retained execution-context effects; the full auto-harness suite passed 129/129 under the Tier-1 literal-only boundary |
 | SRR-08 / A20 | 16/88 | `cf2d1a795`…`5aa2bb18c`; Gateway teardown now attempts every owner in order after failures, preserves chronological first-failure/caller-cancellation truth, keeps public diagnostics content-free, blocks restart across failed cleanup, and retains exact Feishu/Xiaoyi dynamic owner identity at registration rather than depending on fallible shutdown discovery. Descriptor/process-control, snapshot+pop+unregister, registry-only, hostile exception and clean-retry matrices pass; 90 focused shutdown + 66 ACP lifecycle tests passed after independent Tier-2 review and integration |
+| SRR-02 / A21 | 17/88 | `4567becf3`…`4b08240dc`; Agent-client, E2A codec and WebSocket-send diagnostics are content-free across unary/stream success, failure, fallback and reconnect cleanup. Hook-free physical classification, a whole-graph projection budget and strict UTF-8 preflight prevent hostile objects, oversized identifiers, cycles/aliases and lone surrogates from reaching logs, public exception contents or transport sends while preserving supported OutputSchema/E2A/legacy wire behavior; 142 focused plus 61 direct and 292 additional consumer tests passed after independent Tier-3 review |
 
 ## 8. Global exclusions
 
