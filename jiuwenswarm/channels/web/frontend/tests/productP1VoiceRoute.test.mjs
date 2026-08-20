@@ -4024,7 +4024,7 @@ async function runConcurrentCaptureJourney(options = {}) {
           status: 'media_playout_acknowledged',
           reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
           receipt_id: 'media-playout-duplex-1',
-          duplex_media_observed: true,
+          duplex_media_observed: options.serverDuplexMediaObserved ?? true,
           ...params,
         };
       }
@@ -6151,6 +6151,23 @@ test('formal P1 accepts a delayed successor ACK inside the readiness window', as
   assert.equal(journey.owner.captureDiagnostics().successor_readiness_reason, null);
   assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms >= 450);
   assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms < 1_000);
+  await journey.owner.close();
+});
+
+test('formal P1 keeps completed TTS when the Gateway reports no early duplex media', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    secondCaptureAckDelayMs: 500,
+    serverDuplexMediaObserved: false,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.environment.contexts[0].sourceStartCount, 1);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(
+    journey.calls.some(([method]) => method.includes('agent') || method.includes('tool') || method.includes('task') || method.includes('history')),
+    false,
+  );
   await journey.owner.close();
 });
 

@@ -31,15 +31,16 @@ export function webReconnectDelayMs(attempt: number): number {
   return Math.min(1000 * 2 ** Math.min(attempt - 1, 1), 2000);
 }
 
-export function extractWebErrorReason(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+export function extractWebErrorReason(payload: unknown, fallbackCode?: unknown): string | undefined {
+  const fallback = typeof fallbackCode === 'string' && fallbackCode.trim() ? fallbackCode.trim() : undefined;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return fallback;
   const record = payload as Record<string, unknown>;
   const detail =
     record.error && typeof record.error === 'object' && !Array.isArray(record.error)
       ? (record.error as Record<string, unknown>)
       : null;
   const reason = detail?.reason ?? record.reason;
-  return typeof reason === 'string' && reason.trim() ? reason.trim() : undefined;
+  return typeof reason === 'string' && reason.trim() ? reason.trim() : fallback;
 }
 
 const LEGACY_EVENT_MAP: Record<string, string> = {
@@ -478,7 +479,7 @@ class WebClient {
       this.isRetriableCode(message.code),
       message.payload
     );
-    error.reason = extractWebErrorReason(message.payload);
+    error.reason = extractWebErrorReason(message.payload, message.code);
     pending.reject(error);
   }
 

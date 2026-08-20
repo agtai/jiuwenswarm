@@ -3077,7 +3077,6 @@ class DedicatedMediaProductRegistry:
                 and result.configured_max_pending_bytes == 131_072
                 and 0 < result.peak_pending_frames <= 8
                 and 0 < result.peak_pending_bytes <= 131_072
-                and record.downlink_overlap_observed
             )
             if response is None or unit_id is None:
                 return False
@@ -3204,7 +3203,7 @@ class DedicatedMediaProductRegistry:
             if (
                 downlink is None
                 or downlink.get("complete") is not True
-                or downlink.get("overlap_observed") is not True
+                or not isinstance(downlink.get("overlap_observed"), bool)
                 or downlink.get("content_sha256")
                 != record.synthesis_content_sha256.get(key)
                 or downlink.get("sent_frames") != rendered_chunks
@@ -3255,7 +3254,7 @@ class DedicatedMediaProductRegistry:
                 "playout_peak_depth": queue_peak_depth,
                 "capture_control_ack": "capture_flush_acked",
                 "playout_state": "render_completed",
-                "duplex_media_observed": True,
+                "duplex_media_observed": downlink["overlap_observed"],
             }
             previous = record.playout_receipts.get(key)
             previous_content_sha256 = record.playout_receipt_content_sha256.get(key)
