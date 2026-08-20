@@ -436,6 +436,38 @@ SRR-17 applies the complete relevant D-032 P/N/B/S/T/C/R/F/I/K/X matrix. Its
 worker cannot independently sign the module, and no closure credit is recorded
 before independent Tier-3 review and exact integration verification.
 
+## 5.7 Wave 7 activation — Web durable admission truth
+
+### SRR-18 — A23 Web activation durable pending ownership
+
+- Capability/owner: Integrated Web product activation for submit, barge-in and
+  presentation acknowledgement operations.
+- Risk: Tier 3 durable authority, retry identity and network-effect boundary.
+- Main-owned source/tests:
+  `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productWebActivation.ts`
+  and
+  `jiuwenswarm/channels/web/frontend/tests/productWebActivation.test.mjs` only.
+- Intended behavior: an operation becomes pending only after its exact request
+  is frozen and its durable checkpoint succeeds. UTF-8 size rejection,
+  serialization or journal failure leaves no result-less pending identity and
+  performs no network, media, presentation or Task effect; the same identity
+  can be retried only under the existing exact replay contract.
+- Acceptance: deterministically reproduce submit, barge-in and presentation
+  ghost entries at the multibyte byte boundary and injected checkpoint failure;
+  assert zero retained pending/result entries and zero send/Agent/Task/media/
+  presentation effect, then retry a valid exact operation successfully. Cover
+  concurrent identical and conflicting callers, journal throw/false/late
+  failure, close/session replacement fencing and existing successful replay.
+  Preserve request bytes, operation ordering and wire protocol.
+- Exclusions: no backend/Gateway change, journal schema or storage-provider
+  redesign, retry classifier, media/P1 ownership, Task policy, session rollover
+  policy, UI component change or new protocol field.
+
+Wave 6 applies all relevant D-032 P/N/B/S/T/C/R/F/I/K/X dimensions recorded in
+the acceptance above. Persistence restart is represented by the existing
+journal reconstruction seam; physical browser/network acceptance remains a
+candidate-level exclusion.
+
 ## 6. Queued repair programs
 
 These groups route work after the currently active packets; they are not yet
@@ -449,7 +481,7 @@ freezes smaller owner-specific packets before editing.
 - Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, B4, B11,
   B42, L5 and L18. C3 remains an alias of B42.
 - Event-loop, lock and filesystem responsiveness: A14, B15, B25 and B27.
-- Protocol/state/compatibility: A3, A23, B1, B3, B5, B8, B19,
+- Protocol/state/compatibility: A3, B1, B3, B5, B8, B19,
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L14, L15, L16, L17 and L22.
 
