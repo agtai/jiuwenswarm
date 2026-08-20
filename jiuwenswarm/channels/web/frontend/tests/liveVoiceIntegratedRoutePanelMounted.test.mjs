@@ -2514,7 +2514,7 @@ test('mounted Task intent response loss reconnects by content-free status with o
   }
 });
 
-test('mounted auto-submitted speech stays bound to the pre-rollover P2 activation', async () => {
+test('mounted auto-submitted speech stays bound to the pre-rollover P2 activation without successor capture before presentation', async () => {
   const i18n = await createI18n();
   const calls = [];
   const p2Activations = [];
@@ -2638,6 +2638,7 @@ test('mounted auto-submitted speech stays bound to the pre-rollover P2 activatio
     await act(async () => {
       rejectFirstNotification();
       await waitForMounted(() => p2Activations.length === 3, 'closed notification did not activate one exact P2 successor');
+      await new Promise(resolve => setTimeout(resolve, 20));
     });
     assert.equal(p2Activations[2].session_id, firstBinding.session_id);
     assert.equal(p2Activations[2].activation_generation, firstBinding.activation_generation + 1);
@@ -2646,6 +2647,16 @@ test('mounted auto-submitted speech stays bound to the pre-rollover P2 activatio
     assert.equal(unified.params.activation_id, firstBinding.activation_id);
     assert.equal(unified.params.activation_generation, firstBinding.activation_generation);
     assert.equal(unified.params.text, 'Mounted stale activation speech');
+    assert.equal(
+      browser.counts.getUserMedia,
+      1,
+      'P2 recovery must not open a successor microphone while foreground presentation is pending',
+    );
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.media.activate').length,
+      1,
+      'P2 recovery must produce zero successor media authority before foreground presentation',
+    );
     assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length, 0);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);

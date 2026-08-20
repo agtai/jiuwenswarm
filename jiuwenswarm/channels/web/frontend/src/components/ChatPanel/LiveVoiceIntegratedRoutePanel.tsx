@@ -1461,6 +1461,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (
         voiceLoopEnabledRef.current &&
         voiceLoopGenerationRef.current === loopGeneration &&
+        !foregroundPresentationPendingRef.current &&
         pendingUnifiedFinalRef.current === null &&
         pendingProductTurnRef.current === null &&
         pendingPresentationAttemptRef.current === null &&
