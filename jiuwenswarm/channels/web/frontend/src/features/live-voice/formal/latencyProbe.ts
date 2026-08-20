@@ -201,6 +201,10 @@ export interface BrowserLatencyProbe {
   exportBatch(sessionId: string, batch: Readonly<LatencyBatch>): Promise<void>;
 }
 
+export type BrowserLatencyBatchSettlement = Readonly<{
+  disposition: 'written' | 'idempotent' | 'unknown';
+}>;
+
 export interface LatencyProbeStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -214,6 +218,7 @@ export interface BrowserLatencyProbeDependencies {
   readonly randomId: () => string;
   readonly request: (method: string, params: Record<string, unknown>) => unknown;
   readonly experimentPoints?: readonly string[];
+  readonly onBatchSettled?: (batch: Readonly<LatencyBatch>, receipt: BrowserLatencyBatchSettlement) => void;
 }
 
 type Identity = Readonly<{
@@ -784,6 +789,7 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
   readonly #randomId: () => string;
   readonly #request: (method: string, params: Record<string, unknown>) => unknown;
   readonly #points: ReadonlySet<string>;
+  readonly #onBatchSettled: ((batch: Readonly<LatencyBatch>, receipt: BrowserLatencyBatchSettlement) => void) | null;
   readonly #ownedBatches = new WeakSet<object>();
   readonly #batchContexts = new WeakMap<object, LatencyProbeContext>();
   readonly #settledExports = new WeakSet<object>();
@@ -799,6 +805,7 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
     randomId: () => string;
     request: (method: string, params: Record<string, unknown>) => unknown;
     experimentPoints: ReadonlySet<string>;
+    onBatchSettled: ((batch: Readonly<LatencyBatch>, receipt: BrowserLatencyBatchSettlement) => void) | null;
   }) {
     this.#selection = input.selection;
     this.#storage = input.storage;
@@ -809,6 +816,7 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
     this.#randomId = input.randomId;
     this.#request = input.request;
     this.#points = new Set([...CORE_POINTS, ...input.experimentPoints]);
+    this.#onBatchSettled = input.onBatchSettled;
   }
 
   beginRound(identity: LatencyIdentityPatch): BrowserLatencyRound {
@@ -863,7 +871,18 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
       const provenance = this.#batchContexts.get(batch);
       if (provenance === undefined || !validateProducedBatch(batch, this.#selection, this.#points, provenance)) return;
       this.#settledExports.add(batch);
-      await this.#request(LATENCY_PROBE_BATCH_METHOD, { session_id: sessionId, batch });
+      const result = await this.#request(LATENCY_PROBE_BATCH_METHOD, { session_id: sessionId, batch });
+      const disposition =
+        result !== null && typeof result === 'object' && 'status' in result && result.status === 'written'
+          ? 'written'
+          : result !== null && typeof result === 'object' && 'status' in result && result.status === 'idempotent'
+            ? 'idempotent'
+            : 'unknown';
+      try {
+        this.#onBatchSettled?.(batch, Object.freeze({ disposition }));
+      } catch {
+        // An observer only consumes a closed export receipt.
+      }
     } catch {
       // Export is a one-shot diagnostic side channel; product work never retries it.
     }
@@ -899,6 +918,7 @@ export function createBrowserLatencyProbe(dependencies: Readonly<BrowserLatencyP
       randomId: dependencies.randomId,
       request: dependencies.request,
       experimentPoints,
+      onBatchSettled: typeof dependencies.onBatchSettled === 'function' ? dependencies.onBatchSettled : null,
     });
   } catch {
     return null;

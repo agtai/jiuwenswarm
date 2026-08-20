@@ -63,6 +63,7 @@ function harness(overrides = {}) {
       return overrides.requestResult ?? Promise.resolve({ status: 'written' });
     },
     experimentPoints: overrides.experimentPoints ?? [],
+    onBatchSettled: overrides.onBatchSettled,
   };
   return {
     dependencies,
@@ -108,6 +109,25 @@ test('feature-off returns null before reading browser, storage, clock, randomnes
 
   assert.equal(createBrowserLatencyProbe(dependencies), null);
   assert.equal(reads, 0);
+});
+
+test('batch settlement observer sees only the closed diagnostic receipt after export', async () => {
+  const settlements = [];
+  const h = harness({
+    onBatchSettled(batch, receipt) {
+      settlements.push([batch, receipt]);
+      throw new Error('observer failures are contained');
+    },
+    requestResult: Promise.resolve({ status: 'idempotent' }),
+  });
+  const probe = createBrowserLatencyProbe(h.dependencies);
+  const batch = finishedBatch(probe);
+
+  await probe.exportBatch('web_benchmark_session', batch);
+
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0][0], batch);
+  assert.deepEqual(settlements[0][1], { disposition: 'idempotent' });
 });
 
 test('malformed or throwing dependency setup fails locally without escaping private content', () => {
@@ -393,10 +413,7 @@ test('explicit scheduling times are retained exactly without sampling the record
   const probe = createBrowserLatencyProbe(h.dependencies);
   const round = probe.beginRound(initialIdentity);
 
-  assert.equal(
-    round.mark('browser.playout_first_frame_scheduled', initialIdentity, { monotonic_ms: 123.5 }),
-    true,
-  );
+  assert.equal(round.mark('browser.playout_first_frame_scheduled', initialIdentity, { monotonic_ms: 123.5 }), true);
   assert.equal(
     round.mark('browser.playout_first_frame_started_estimate', initialIdentity, {
       monotonic_ms: 456.75,
@@ -406,10 +423,13 @@ test('explicit scheduling times are retained exactly without sampling the record
   );
 
   const batch = round.finish('completed');
-  assert.deepEqual(batch.marks.map(mark => [mark.point, mark.monotonic_ms, mark.uncertainty_ms]), [
-    ['browser.playout_first_frame_scheduled', 123.5, null],
-    ['browser.playout_first_frame_started_estimate', 456.75, 2.5],
-  ]);
+  assert.deepEqual(
+    batch.marks.map(mark => [mark.point, mark.monotonic_ms, mark.uncertainty_ms]),
+    [
+      ['browser.playout_first_frame_scheduled', 123.5, null],
+      ['browser.playout_first_frame_started_estimate', 456.75, 2.5],
+    ],
+  );
   assert.equal(h.counts().clockCalls, 0);
 });
 
