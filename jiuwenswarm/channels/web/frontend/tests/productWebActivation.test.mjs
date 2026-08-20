@@ -645,33 +645,42 @@ test('durable submit ACK and barge-in checkpoint before transport and settle onl
 
 test('durable checkpoint failure creates zero submit ACK or barge-in transport effect', async () => {
   const operations = [
-    owner =>
-      owner.submitText({
-        commit_id: 'commit-blocked',
-        turn_id: 'turn-blocked',
-        response_id: 'response-blocked',
-        committed_at: '2026-08-10T00:00:00Z',
-        text: 'blocked turn',
-      }),
-    owner =>
-      owner.acknowledgePresentation({
-        response_id: 'response-blocked',
-        response_generation: 0,
-        surface: 'text',
-        unit_id: 'unit-blocked',
-        contiguous_cursor: 0,
-        presented_at: '2026-08-10T00:00:01Z',
-      }),
-    owner =>
-      owner.bargeIn({
-        action_id: 'barge-blocked',
-        response_id: 'response-blocked',
-        response_generation: 0,
-        cancel_response: true,
-      }),
+    {
+      invoke: owner =>
+        owner.submitText({
+          commit_id: 'commit-blocked',
+          turn_id: 'turn-blocked',
+          response_id: 'response-blocked',
+          committed_at: '2026-08-10T00:00:00Z',
+          text: 'blocked turn',
+        }),
+      hasPending: owner => owner.hasPendingSubmission(),
+    },
+    {
+      invoke: owner =>
+        owner.acknowledgePresentation({
+          response_id: 'response-blocked',
+          response_generation: 0,
+          surface: 'text',
+          unit_id: 'unit-blocked',
+          contiguous_cursor: 0,
+          presented_at: '2026-08-10T00:00:01Z',
+        }),
+      hasPending: owner => owner.hasPendingPresentationAck(),
+    },
+    {
+      invoke: owner =>
+        owner.bargeIn({
+          action_id: 'barge-blocked',
+          response_id: 'response-blocked',
+          response_generation: 0,
+          cancel_response: true,
+        }),
+      hasPending: owner => owner.hasPendingBargeIn(),
+    },
   ];
 
-  for (const invoke of operations) {
+  for (const { invoke, hasPending } of operations) {
     let businessCalls = 0;
     const owner = new ProductWebP2ActivationOwner({
       enabled: true,
@@ -692,7 +701,149 @@ test('durable checkpoint failure creates zero submit ACK or barge-in transport e
     await owner.start(binding);
     await assert.rejects(invoke(owner), /checkpoint unavailable/);
     assert.equal(businessCalls, 0);
+    assert.equal(hasPending(owner), false);
   }
+});
+
+test('rejected durable checkpoints do not block a distinct valid retry', async () => {
+  const cases = [
+    {
+      first: owner =>
+        owner.submitText({
+          commit_id: 'commit-checkpoint-first',
+          turn_id: 'turn-checkpoint-first',
+          response_id: 'response-checkpoint-first',
+          committed_at: '2026-08-10T00:00:00Z',
+          text: 'first submit',
+        }),
+      second: owner =>
+        owner.submitText({
+          commit_id: 'commit-checkpoint-second',
+          turn_id: 'turn-checkpoint-second',
+          response_id: 'response-checkpoint-second',
+          committed_at: '2026-08-10T00:00:01Z',
+          text: 'second submit',
+        }),
+      hasPending: owner => owner.hasPendingSubmission(),
+    },
+    {
+      first: owner =>
+        owner.acknowledgePresentation({
+          response_id: 'response-checkpoint',
+          response_generation: 0,
+          surface: 'text',
+          unit_id: 'unit-checkpoint-first',
+          contiguous_cursor: 0,
+          presented_at: '2026-08-10T00:00:00Z',
+        }),
+      second: owner =>
+        owner.acknowledgePresentation({
+          response_id: 'response-checkpoint',
+          response_generation: 0,
+          surface: 'text',
+          unit_id: 'unit-checkpoint-second',
+          contiguous_cursor: 1,
+          presented_at: '2026-08-10T00:00:01Z',
+        }),
+      hasPending: owner => owner.hasPendingPresentationAck(),
+    },
+    {
+      first: owner =>
+        owner.bargeIn({
+          action_id: 'barge-checkpoint-first',
+          response_id: 'response-checkpoint',
+          response_generation: 0,
+          cancel_response: true,
+        }),
+      second: owner =>
+        owner.bargeIn({
+          action_id: 'barge-checkpoint-second',
+          response_id: 'response-checkpoint',
+          response_generation: 0,
+          cancel_response: true,
+        }),
+      hasPending: owner => owner.hasPendingBargeIn(),
+    },
+  ];
+
+  for (const current of cases) {
+    let rejectCheckpoint = true;
+    let businessCalls = 0;
+    const owner = new ProductWebP2ActivationOwner({
+      enabled: true,
+      durable_operation_journal: {
+        checkpointOperation: () => {
+          if (rejectCheckpoint) {
+            rejectCheckpoint = false;
+            throw new Error('checkpoint unavailable');
+          }
+        },
+        settleOperation: () => {},
+      },
+      request: async (method, params, requestId) => {
+        if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+        businessCalls += 1;
+        if (method === PRODUCT_P2_SUBMIT_METHOD) return agentSubmitResponse(requestId, params);
+        if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) return presentationAckResponse(requestId);
+        if (method === PRODUCT_P2_BARGE_IN_METHOD) {
+          return durableResponse(requestId, 'barge_in_applied', {
+            action_id: params.action_id,
+            response_id: params.response_id,
+            response_generation: params.response_generation,
+            cancel_response: params.cancel_response,
+            applied: true,
+            replayed: false,
+            effect_ids: ['effect-checkpoint-retry'],
+          });
+        }
+        throw new Error(`unexpected ${method}`);
+      },
+    });
+    await owner.start(binding);
+
+    await assert.rejects(current.first(owner), /checkpoint unavailable/);
+    assert.equal(current.hasPending(owner), false);
+    await current.second(owner);
+    assert.equal(businessCalls, 1);
+    assert.equal(current.hasPending(owner), false);
+  }
+});
+
+test('multibyte durable validation failure leaves no submission ghost and a valid retry succeeds', async () => {
+  let businessCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      businessCalls += 1;
+      return agentSubmitResponse(requestId, params);
+    },
+  });
+  await owner.start(binding);
+
+  await assert.rejects(
+    owner.submitText({
+      commit_id: 'commit-multibyte-overflow',
+      turn_id: 'turn-multibyte-overflow',
+      response_id: 'response-multibyte-overflow',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: '你'.repeat(50_000),
+    }),
+    /durable product operation exceeds its bound/,
+  );
+  assert.equal(owner.hasPendingSubmission(), false);
+  assert.equal(businessCalls, 0);
+
+  const retried = await owner.submitText({
+    commit_id: 'commit-multibyte-retry',
+    turn_id: 'turn-multibyte-retry',
+    response_id: 'response-multibyte-retry',
+    committed_at: '2026-08-10T00:00:01Z',
+    text: 'valid retry',
+  });
+  assert.equal(retried.status, 'round_accepted');
+  assert.equal(owner.hasPendingSubmission(), false);
+  assert.equal(businessCalls, 1);
 });
 
 test('direct durable replay reuses the exact request and accepts a server-owned task response', async () => {
@@ -1222,6 +1373,60 @@ test('completed Web submission capacity recovers and old replay fails closed', a
 
   await assert.rejects(owner.submitText(first), /replay has expired/);
   assert.equal(submissionCalls, 129);
+});
+
+test('checkpoint rejection at capacity preserves the completed replay until replacement commits', async () => {
+  let rejectCheckpoint = false;
+  let submissionCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    durable_operation_journal: {
+      checkpointOperation: () => {
+        if (rejectCheckpoint) throw new Error('checkpoint unavailable at capacity');
+      },
+      settleOperation: () => {},
+    },
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      submissionCalls += 1;
+      return agentSubmitResponse(requestId, params, { round_id: `round-checkpoint-${submissionCalls}` });
+    },
+  });
+  await owner.start(binding);
+  const first = {
+    commit_id: 'commit-checkpoint-capacity-0',
+    turn_id: 'turn-checkpoint-capacity-0',
+    response_id: 'response-checkpoint-capacity-0',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'checkpoint capacity 0',
+  };
+  for (let index = 0; index < 128; index += 1) {
+    await owner.submitText({
+      commit_id: `commit-checkpoint-capacity-${index}`,
+      turn_id: `turn-checkpoint-capacity-${index}`,
+      response_id: `response-checkpoint-capacity-${index}`,
+      committed_at: '2026-08-07T10:00:00Z',
+      text: `checkpoint capacity ${index}`,
+    });
+  }
+
+  const successor = {
+    commit_id: 'commit-checkpoint-capacity-successor',
+    turn_id: 'turn-checkpoint-capacity-successor',
+    response_id: 'response-checkpoint-capacity-successor',
+    committed_at: '2026-08-07T10:00:01Z',
+    text: 'checkpoint capacity successor',
+  };
+  rejectCheckpoint = true;
+  await assert.rejects(owner.submitText(successor), /checkpoint unavailable at capacity/);
+  assert.equal(owner.hasPendingSubmission(), false);
+  assert.equal((await owner.submitText(first)).round_id, 'round-checkpoint-1');
+  assert.equal(submissionCalls, 128);
+
+  rejectCheckpoint = false;
+  assert.equal((await owner.submitText(successor)).round_id, 'round-checkpoint-129');
+  assert.equal(submissionCalls, 129);
+  await assert.rejects(owner.submitText(first), /replay has expired/);
 });
 
 test('P2 operations fail before transport unless the exact activation is active', async () => {
