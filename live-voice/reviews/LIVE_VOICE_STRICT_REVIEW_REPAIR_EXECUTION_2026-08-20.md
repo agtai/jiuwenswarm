@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 0/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 2/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -163,6 +163,8 @@ and risk checkpoint before implementation.
 | Checkpoint | Closed unique defects | State |
 |---|---:|---|
 | Activation | 0/88 | Wave 1 packets frozen; no implementation credit yet |
+| SRR-04 / B9 | 1/88 | `6b219bd39` + `d47ef7e58`; mixed-field and wrong-span regressions, real pending-token attack with zero confirmation/Task/Tool/ledger effects; 80 Bridge + 150 registry tests; independently signed |
+| SRR-05 / B10 | 2/88 | `9b5b9286e` + `5a0d04917`; typed candidate/config failure, environment-factory zero construction and supported ASCII `compare_digest`; 101 module tests; independently signed |
 
 ## 6. Global exclusions
 

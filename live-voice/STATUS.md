@@ -30,8 +30,9 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects, beginning with exact authority and
-  privacy boundaries. Progress is counted only after reproduced defects,
+  packet against 88 unique current defects; **2/88 are closed** on this branch,
+  beginning with exact authority and privacy boundaries. Progress is counted
+  only after reproduced defects,
   affected verification and independent module review close; the
   [repair execution contract](reviews/LIVE_VOICE_STRICT_REVIEW_REPAIR_EXECUTION_2026-08-20.md)
   owns the branch-local packet detail. P3-2 remains contract-frozen under D-087
@@ -140,7 +141,8 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — 88 unique current defects.
+- **Packet:** strict-review remediation — **2/88 closed**, 86 unique current
+  defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
   ownership and closure contract are in the
@@ -162,9 +164,9 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** commit this activation contract, create three isolated worker
-  worktrees from the same commit, write failing Wave 1 regressions and implement
-  only the assigned non-overlapping repairs.
+- **Next action:** close the remaining C5, A21 and B41 independent-review
+  findings, integrate their exact reviewed commits, run the cumulative Wave 1
+  checks, then freeze the next non-overlapping owner packets.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original
@@ -227,7 +229,8 @@ exact-source Alpha result.
   [P3 implementation coverage and historical reuse audit](reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md).
   Its estimates remain a committed pre-G0 nine-package coverage snapshot; its
   current routing records the P3-G0 scoped PASS, accepted P3-1 package and
-  active P3-2 package. It also
+  contract-frozen P3-2 package, which is now paused behind the user-routed
+  strict-review repair packet. It also
   records the wave-to-asset migration overlay and per-commit extraction gates
   for the old 3A/3B/reader/S8.5 lines. Its companion
   [source-asset manifest](reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md)
@@ -270,7 +273,8 @@ exact-source Alpha result.
   records the current-source pure SLI/privacy/OTel codec scope, corrected
   `ca3d7780` findings, exact affected evidence and independent Tier-3 PASS. The
   assets are uncomposed and do not make P3-8, product readiness or Production
-  operations complete; P3-2 remains the active packet.
+  operations complete; P3-2 remains contract-frozen rather than active while
+  the strict-review repair packet owns current priority.
 - **Local artifacts:** coverage, caches, `dist`, `node_modules`, logs and private
   runtime databases/audio remain ignored and excluded from final integration.
 
@@ -297,7 +301,8 @@ exact-source Alpha result.
   [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md),
   but its repeated physical continuation failure prevents immutable PASS.
 - D-086 records P3-G0 PASS only for the expansion-foundation Gate and originally
-  activated P3-1; P3-1 now passes its own scoped evidence and activates P3-2. It
+  activated P3-1; P3-1 then passed its own scoped evidence and activated P3-2,
+  which the newer user-routed strict-review packet now pauses. D-086
   explicitly transfers, rather than passes, the missing physical Journey and
   [P1/P2 continuation defect](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
 - A documentation-only commit never upgrades product readiness.
