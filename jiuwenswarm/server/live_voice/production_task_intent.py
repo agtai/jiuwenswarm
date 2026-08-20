@@ -130,6 +130,15 @@ def _require_opaque(value: object, name: str) -> str:
     return value
 
 
+def _require_persistent_identity(value: object, name: str) -> str:
+    """Match PersistentTaskRecord's syntax-free closed identity bounds."""
+
+    identity = _require_opaque(value, name)
+    if len(identity) > 256 or len(identity.encode("utf-8")) > 1_024:
+        raise ValueError(f"INVALID_{name.upper()}")
+    return identity
+
+
 def _canonical_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("INVALID_TASK_INTENT_ARGUMENTS")
@@ -181,8 +190,8 @@ class AuthenticatedTaskFact:
     successor_task_id: str | None = None
 
     def __post_init__(self) -> None:
-        _require_opaque(self.task_id, "task_id")
-        _require_opaque(self.stable_reference, "stable_task_reference")
+        _require_persistent_identity(self.task_id, "task_id")
+        _require_persistent_identity(self.stable_reference, "stable_task_reference")
         _require_text(self.name, "task_name", maximum=256)
         if not isinstance(self.state, TaskState):
             raise ValueError("INVALID_TASK_STATE_FACT")
@@ -191,16 +200,19 @@ class AuthenticatedTaskFact:
         terminal = self.state is TaskState.TERMINAL
         if terminal != (self.outcome is not None):
             raise ValueError("INVALID_TASK_OUTCOME_FACT")
-        if type(self.revision_number) is not int or self.revision_number < 1:
+        if (
+            type(self.revision_number) is not int
+            or not 1 <= self.revision_number <= 1_000_000
+        ):
             raise ValueError("INVALID_TASK_REVISION")
         if type(self.event_head) is not int or self.event_head < 0:
             raise ValueError("INVALID_TASK_EVENT_HEAD")
-        _require_opaque(self.event_head_id, "task_event_head_id")
+        _require_persistent_identity(self.event_head_id, "task_event_head_id")
         if terminal != (self.terminal_event_id is not None):
             raise ValueError("INVALID_TERMINAL_EVENT_FACT")
         if self.terminal_event_id is not None:
-            _require_opaque(self.terminal_event_id, "terminal_event_id")
-        _require_opaque(self.attempt_id, "attempt_id")
+            _require_persistent_identity(self.terminal_event_id, "terminal_event_id")
+        _require_persistent_identity(self.attempt_id, "attempt_id")
         if not isinstance(self.attempt_state, AttemptState):
             raise ValueError("INVALID_ATTEMPT_STATE_FACT")
         if self.attempt_outcome is not None and not isinstance(
@@ -239,7 +251,7 @@ class AuthenticatedTaskFact:
         elif self.result_digest is not None:
             raise ValueError("NONCOMPLETED_RESULT_FORBIDDEN")
         if self.decision_required_event_id is not None:
-            _require_opaque(
+            _require_persistent_identity(
                 self.decision_required_event_id, "decision_required_event_id"
             )
         if (self.state is TaskState.DECISION_REQUIRED) != (
@@ -257,9 +269,11 @@ class AuthenticatedTaskFact:
             ("successor_task_id", self.successor_task_id),
         ):
             if value is not None:
-                _require_opaque(value, name)
+                _require_persistent_identity(value, name)
                 if value == self.task_id:
                     raise ValueError("INVALID_TASK_LINEAGE")
+        if (self.revision_number == 1) != (self.predecessor_task_id is None):
+            raise ValueError("TASK_REVISION_LINEAGE_MISMATCH")
         if self.successor_task_id is not None and (
             not terminal or self.outcome is TerminalOutcome.UNKNOWN
         ):
@@ -408,6 +422,7 @@ class ProductionOriginBinding:
     commit_id: str | None
     commit_sha256: str | None
     extractions: tuple[BoundProductionFieldExtraction, ...]
+    structured_semantic_sha256: str | None = None
     clarification_answer_sha256: str | None = None
 
     def __post_init__(self) -> None:
@@ -435,6 +450,13 @@ class ProductionOriginBinding:
             raise ValueError("DUPLICATE_ORIGIN_EXTRACTION")
         if not natural and self.extractions:
             raise ValueError("STRUCTURED_ORIGIN_FORBIDS_EXTRACTIONS")
+        if natural == (self.structured_semantic_sha256 is not None):
+            raise ValueError("INVALID_STRUCTURED_SEMANTIC_BINDING")
+        if (
+            self.structured_semantic_sha256 is not None
+            and _SHA256.fullmatch(self.structured_semantic_sha256) is None
+        ):
+            raise ValueError("INVALID_STRUCTURED_SEMANTIC_DIGEST")
         if (
             self.clarification_answer_sha256 is not None
             and _SHA256.fullmatch(self.clarification_answer_sha256) is None
@@ -453,6 +475,7 @@ class ProductionOriginBinding:
                 "principal_id": self.principal_id,
                 "scope": self.scope.to_dict(),
                 "source_id": self.source_id,
+                "structured_semantic_sha256": self.structured_semantic_sha256,
             }
         )
 
@@ -920,6 +943,19 @@ def _expected_extraction_fields(
     return frozenset(fields)
 
 
+def _structured_semantic_digest(proposal: ProductionTaskIntentProposal) -> str:
+    semantic: dict[str, object] = {
+        "arguments": dict(proposal.arguments),
+        "observed_task_revision": proposal.observed_task_revision,
+        "operation": proposal.operation,
+        "target": proposal.target,
+        "target_kind": proposal.target_kind,
+    }
+    if proposal.operation is None:
+        semantic["dialogue_reason"] = proposal.reason
+    return _sha256(semantic)
+
+
 def _build_origin_binding(
     request: ProductionTaskIntentRequest,
 ) -> ProductionOriginBinding:
@@ -932,6 +968,7 @@ def _build_origin_binding(
             commit_id=None,
             commit_sha256=None,
             extractions=(),
+            structured_semantic_sha256=_structured_semantic_digest(request.proposal),
             clarification_answer_sha256=(
                 None
                 if request.clarification_answer is None
@@ -967,6 +1004,7 @@ def _build_origin_binding(
         commit_id=commit.commit_id,
         commit_sha256=hashlib.sha256(commit.canonical_bytes()).hexdigest(),
         extractions=tuple(bound),
+        structured_semantic_sha256=None,
         clarification_answer_sha256=(
             None
             if request.clarification_answer is None
@@ -1012,11 +1050,13 @@ def _validate_arguments(operation: str, arguments: Mapping[str, object]) -> str 
     }.get(operation, ())
     for field_name in text_fields:
         try:
-            _require_text(
+            material = _require_text(
                 arguments[field_name],
                 field_name,
                 maximum=256 if field_name == "name" else 4_096,
             )
+            if not material.strip():
+                raise ValueError("WHITESPACE_ONLY_MATERIAL_FIELD")
         except ValueError:
             return "TASK_INTENT_ARGUMENT_VALUE_INVALID"
     if operation == "task.provide_input":
@@ -1608,7 +1648,7 @@ class ProductionMultiTaskResolver:
             return target.capability_profile_digest
         return _sha256(
             [
-                (item.task_id, item.capability_profile_digest)
+                [item.task_id, item.capability_profile_digest]
                 for item in sorted(visible.tasks, key=lambda fact: fact.task_id)
             ]
         )

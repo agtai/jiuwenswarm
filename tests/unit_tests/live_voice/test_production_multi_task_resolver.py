@@ -134,6 +134,7 @@ def _fact(
         decision_required_event_id=decision_event,
         dispatch_state=dispatch_state,
         admission_revision=admission_revision,
+        predecessor_task_id=(f"predecessor-{task_id}" if revision > 1 else None),
         successor_task_id=successor_task_id,
     )
 
@@ -207,8 +208,11 @@ class AcceptedOriginAuthority:
                     != extraction.content_sha256
                 ):
                     raise ValueError("changed extraction")
+        receipt_id = f"origin-{binding.source_id}"
+        if binding.origin is ProductionIntentOrigin.STRUCTURED:
+            receipt_id = f"{receipt_id}-{binding.fingerprint[:16]}"
         return TrustedProductionOriginReceipt(
-            f"origin-{binding.source_id}",
+            receipt_id,
             binding.principal_id,
             binding.fingerprint,
         )
@@ -373,6 +377,79 @@ def test_natural_voice_and_structured_share_closed_policy(
         "not_required",
         "proposed",
     )
+
+
+def test_structured_origin_binds_every_canonical_semantic_field() -> None:
+    authority = RecordingAuthority((_fact("task-a"), _fact("task-b")))
+    origin = AcceptedOriginAuthority()
+    base = ProductionTaskIntentProposal(
+        "task.status",
+        "task-a",
+        {"query_kind": "status"},
+        1.0,
+        True,
+        target_kind="task_id",
+    )
+    proposals = (
+        base,
+        replace(base, operation="task.get", arguments={"query_kind": "get"}),
+        replace(base, target="task-b"),
+        replace(base, target="ref-task-a", target_kind="stable_reference"),
+        replace(base, arguments={"query_kind": "changed"}),
+        replace(base, observed_task_revision=1),
+        ProductionTaskIntentProposal.dialogue(reason="DIALOGUE_ONE"),
+        ProductionTaskIntentProposal.dialogue(reason="DIALOGUE_TWO"),
+    )
+
+    resolutions = [
+        _resolve(
+            _request(
+                proposal,
+                origin,
+                origin=ProductionIntentOrigin.STRUCTURED,
+                commit_id="same-accepted-structured-source",
+                command_id=f"structured-command-{index}",
+            ),
+            authority,
+            origin,
+        )
+        for index, proposal in enumerate(proposals)
+    ]
+
+    bindings = [result.origin_binding for result in resolutions]
+    assert all(binding is not None for binding in bindings)
+    semantic_digests = [
+        binding.structured_semantic_sha256
+        for binding in bindings
+        if binding is not None
+    ]
+    assert all(digest is not None for digest in semantic_digests)
+    assert len(set(semantic_digests)) == len(proposals)
+    assert len({result.origin_binding_fingerprint for result in resolutions}) == len(
+        proposals
+    )
+    assert len({result.origin_receipt_id for result in resolutions}) == len(proposals)
+    with pytest.raises(ValueError, match="INVALID_STRUCTURED_SEMANTIC_BINDING"):
+        ProductionOriginBinding(
+            SCOPE.subject_id,
+            SCOPE,
+            ProductionIntentOrigin.STRUCTURED,
+            "source",
+            None,
+            None,
+            (),
+        )
+    with pytest.raises(ValueError, match="INVALID_STRUCTURED_SEMANTIC_BINDING"):
+        ProductionOriginBinding(
+            SCOPE.subject_id,
+            SCOPE,
+            ProductionIntentOrigin.NATURAL_TEXT,
+            "source",
+            "commit",
+            "a" * 64,
+            (),
+            structured_semantic_sha256="b" * 64,
+        )
 
 
 def test_partial_input_has_no_authority_or_interaction_calls() -> None:
@@ -603,6 +680,7 @@ def test_clarification_owner_expiry_is_fail_closed() -> None:
         None,
         None,
         (),
+        structured_semantic_sha256="f" * 64,
     )
     source_receipt = TrustedProductionOriginReceipt(
         "source-receipt", SCOPE.subject_id, source.fingerprint

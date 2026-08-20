@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime
+from threading import Barrier
 
 import pytest
 
@@ -80,6 +83,8 @@ def _fact(
     result_digest: str | None = None,
     name: str = "Task A",
     admission_revision: int | None = None,
+    revision: int = 1,
+    predecessor_task_id: str | None = None,
 ) -> AuthenticatedTaskFact:
     attempt_state = {
         TaskState.ACCEPTED: AttemptState.ACCEPTED,
@@ -94,7 +99,7 @@ def _fact(
         name=name,
         state=state,
         outcome=outcome,
-        revision_number=1,
+        revision_number=revision,
         event_head=1,
         event_head_id=f"event-{task_id}",
         terminal_event_id=f"terminal-{task_id}" if outcome is not None else None,
@@ -107,6 +112,7 @@ def _fact(
         decision_required_event_id=decision_event,
         dispatch_state=dispatch_state,
         admission_revision=admission_revision,
+        predecessor_task_id=predecessor_task_id,
     )
 
 
@@ -501,6 +507,199 @@ def test_completed_terminal_requires_canonical_result_digest() -> None:
             outcome=TerminalOutcome.COMPLETED,
             dispatch_state="none",
         )
+
+
+def test_persistent_identity_and_revision_lineage_bounds_are_closed() -> None:
+    with pytest.raises(ValueError, match="INVALID_TASK_ID"):
+        _fact("x" * 100_000)
+    with pytest.raises(ValueError, match="INVALID_PREDECESSOR_TASK_ID"):
+        _fact("x", revision=2, predecessor_task_id="p" * 100_000)
+    with pytest.raises(ValueError, match="TASK_REVISION_LINEAGE_MISMATCH"):
+        _fact("x", revision=2)
+    with pytest.raises(ValueError, match="TASK_REVISION_LINEAGE_MISMATCH"):
+        _fact("x", revision=1, predecessor_task_id="p")
+    with pytest.raises(ValueError, match="INVALID_TASK_REVISION"):
+        _fact("x", revision=1_000_001, predecessor_task_id="p")
+
+    legal = _fact("x", revision=2, predecessor_task_id="p")
+    assert legal.task_id == "x"
+    assert legal.predecessor_task_id == "p"
+
+
+@pytest.mark.parametrize(
+    ("operation", "arguments"),
+    (
+        ("task.create", {"name": " \t", "instruction": "material"}),
+        ("task.update", {"instruction": " \r\n"}),
+    ),
+)
+def test_whitespace_only_material_fields_reject_before_authority_or_interaction(
+    operation: str, arguments: dict[str, object]
+) -> None:
+    authority = RecordingAuthority(_fact())
+    origin = RecordingOriginAuthority()
+    confirmation = RecordingConfirmationConsumer()
+    clarifications = RecordingClarificationOwner(boot_id="boot-a", capacity=8)
+    text = "material task command"
+    proposal = _proposal(operation, None, arguments, text)
+
+    result = _resolve(
+        _request(proposal, origin, text=text, confirmation_id="confirmation-a"),
+        authority,
+        origin,
+        confirmation,
+        clarifications,
+    )
+
+    assert result.outcome is ProductionTaskPolicyOutcome.REJECTED
+    assert result.reason == "TASK_INTENT_ARGUMENT_VALUE_INVALID"
+    assert authority.read_calls == []
+    assert confirmation.calls == []
+    assert clarifications.issue_calls == clarifications.consume_calls == 0
+    _assert_no_effects(result, authority)
+
+
+def test_create_confirmation_uses_canonical_collection_capability_binding() -> None:
+    authority = RecordingAuthority(_fact())
+    origin = RecordingOriginAuthority()
+    confirmation = RecordingConfirmationConsumer()
+    clarifications = RecordingClarificationOwner(boot_id="boot-a", capacity=8)
+    text = "create material task"
+    proposal = _proposal(
+        "task.create", None, {"name": "Material", "instruction": "Build it"}, text
+    )
+
+    result = _resolve(
+        _request(proposal, origin, text=text, confirmation_id="confirmation-a"),
+        authority,
+        origin,
+        confirmation,
+        clarifications,
+    )
+
+    assert result.outcome is ProductionTaskPolicyOutcome.PROPOSED
+    assert result.confirmation == "confirmed"
+    assert authority.read_calls == ["list"]
+    assert len(confirmation.calls) == 1
+    assert clarifications.issue_calls == clarifications.consume_calls == 0
+    _assert_no_effects(result, authority)
+
+
+def _clarification_race_fixture(
+    *, capacity: int = 2, per_subject_capacity: int = 2
+) -> tuple[
+    BoundedClarificationOwner,
+    ProductionOriginBinding,
+    TrustedProductionOriginReceipt,
+    datetime,
+]:
+    owner = BoundedClarificationOwner(
+        boot_id="threaded-boot",
+        capacity=capacity,
+        per_subject_capacity=per_subject_capacity,
+    )
+    source = ProductionOriginBinding(
+        SCOPE.subject_id,
+        SCOPE,
+        ProductionIntentOrigin.NATURAL_TEXT,
+        "source",
+        "source-commit",
+        "a" * 64,
+        (),
+    )
+    receipt = TrustedProductionOriginReceipt(
+        "source-receipt", SCOPE.subject_id, source.fingerprint
+    )
+    return owner, source, receipt, datetime(2026, 8, 20, 10, tzinfo=UTC)
+
+
+def test_clarification_consume_is_a_real_threaded_single_winner_cas() -> None:
+    owner, source, receipt, now = _clarification_race_fixture()
+    handle = owner.issue(
+        origin_binding=source,
+        origin_receipt=receipt,
+        operation="task.status",
+        arguments={"query_kind": "status"},
+        ambiguous_fields=("target",),
+        candidate_task_ids=("x", "y"),
+        task_set_fingerprint="d" * 64,
+        now=now,
+    )
+    answer = ClarificationAnswer(handle.handle_id, handle.generation, "x", "d" * 64)
+    answer_origin = ProductionOriginBinding(
+        SCOPE.subject_id,
+        SCOPE,
+        ProductionIntentOrigin.NATURAL_TEXT,
+        "answer",
+        "answer-commit",
+        "b" * 64,
+        (),
+        clarification_answer_sha256=answer.fingerprint,
+    )
+    answer_receipt = TrustedProductionOriginReceipt(
+        "answer-receipt", SCOPE.subject_id, answer_origin.fingerprint
+    )
+    barrier = Barrier(2)
+
+    def consume() -> str:
+        barrier.wait()
+        try:
+            return owner.consume(
+                answer,
+                answer_origin=answer_origin,
+                answer_receipt=answer_receipt,
+                operation="task.status",
+                arguments={"query_kind": "status"},
+                task_set_fingerprint="d" * 64,
+                now=now,
+            )
+        except ValueError as error:
+            return str(error)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(lambda _: consume(), range(2)))
+
+    assert sorted(outcomes) == ["CLARIFICATION_ALREADY_CONSUMED", "x"]
+
+
+@pytest.mark.parametrize(
+    ("capacity", "per_subject_capacity", "closed_loser"),
+    (
+        (1, 1, "CLARIFICATION_CAPACITY_EXCEEDED"),
+        (4, 1, "CLARIFICATION_SUBJECT_CAPACITY_EXCEEDED"),
+    ),
+)
+def test_clarification_concurrent_issue_never_exceeds_capacity(
+    capacity: int, per_subject_capacity: int, closed_loser: str
+) -> None:
+    owner, source, receipt, now = _clarification_race_fixture(
+        capacity=capacity, per_subject_capacity=per_subject_capacity
+    )
+    barrier = Barrier(2)
+
+    def issue() -> str:
+        barrier.wait()
+        try:
+            return owner.issue(
+                origin_binding=source,
+                origin_receipt=receipt,
+                operation="task.status",
+                arguments={"query_kind": "status"},
+                ambiguous_fields=("target",),
+                candidate_task_ids=("x", "y"),
+                task_set_fingerprint="d" * 64,
+                now=now,
+            ).handle_id
+        except ValueError as error:
+            return str(error)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(lambda _: issue(), range(2)))
+
+    handles = [value for value in outcomes if value.startswith("clarification.")]
+    losers = [value for value in outcomes if value.endswith("CAPACITY_EXCEEDED")]
+    assert len(handles) == 1
+    assert losers == [closed_loser]
 
 
 @pytest.mark.parametrize(
