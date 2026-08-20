@@ -8351,6 +8351,483 @@ async def test_closed_p2_voice_origin_is_consumed_once_by_exact_p3_create(
         )
 
 
+_ABANDONED_VOICE_ORIGIN_GRACE = 8
+
+
+def _routed_task_origin_params(
+    *,
+    stem: str,
+    text: str,
+    interaction_id: str,
+    activation_id: str = "activation-1",
+    activation_generation: int = 1,
+) -> dict[str, object]:
+    """One task-origin submit bound to an explicit P2 route of its own."""
+
+    params = _p2_task_origin_params(stem=stem, text=text)
+    params["interaction_id"] = interaction_id
+    params["activation_id"] = activation_id
+    params["activation_generation"] = activation_generation
+    claim = cast(dict[str, object], params["gateway_voice_claim"])
+    claim["interaction_id"] = interaction_id
+    return params
+
+
+def _abandoned_origin_text(stem: str) -> str:
+    return f"abandoned task origin {stem}"
+
+
+async def _abandon_task_origin_route(
+    registry: AgentServerProductCompositionRegistry,
+    *,
+    stem: str,
+) -> None:
+    """Activate one route, accept one task origin, then close without a create."""
+
+    interaction_id = f"interaction-{stem}"
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_id=interaction_id),
+        request_id=f"request-activate-{stem}",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True, activated.payload
+    submitted = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem=stem,
+            text=_abandoned_origin_text(stem),
+            interaction_id=interaction_id,
+        ),
+        request_id=f"request-submit-{stem}",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True, submitted.payload
+    closed = await registry.handle_p2_close(
+        params=_p2_params(interaction_id=interaction_id),
+        request_id=f"request-close-{stem}",
+        session_id="session-product",
+    )
+    assert closed.ok is True, closed.payload
+
+
+def _abandoned_accepted_commits(
+    registry: AgentServerProductCompositionRegistry,
+) -> list[str]:
+    return [
+        commit_id
+        for commit_id, route_key in registry._accepted_voice_commit_routes.items()
+        if route_key not in registry._p2_routes
+    ]
+
+
+@pytest.mark.asyncio
+async def test_abandoned_closed_route_origins_never_exhaust_new_submits(
+    tmp_path: Path,
+) -> None:
+    """A13: submit-then-close must not consume the commit ledger forever.
+
+    An accepted task origin deliberately outlives its P2 route so that a late
+    P3 create can still consume it, but nothing released the origins of a route
+    that was abandoned without one.  `_TURN_COMMIT_CAPACITY` therefore filled
+    with abandoned identities and refused every later task-origin submit for the
+    whole registry lifetime; only `stop` released them.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
+    abandoned = registry._TURN_COMMIT_CAPACITY
+    for index in range(abandoned):
+        await _abandon_task_origin_route(registry, stem=f"abandoned-{index}")
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_id="interaction-live"),
+        request_id="request-activate-live-after-abandoned",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    fresh = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem="live-after-abandoned",
+            text="a new task origin after every earlier route was abandoned",
+            interaction_id="interaction-live",
+        ),
+        request_id="request-submit-live-after-abandoned",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    # The defect: abandoning `_TURN_COMMIT_CAPACITY` routes used to refuse this
+    # submit with PRODUCT_TURN_COMMIT_LEDGER_FULL for the registry lifetime.
+    assert fresh.ok is True, fresh.payload
+    assert cast(dict, fresh.payload["result"])["status"] == "task_origin_accepted"
+
+    # Only the bounded grace survives, oldest abandoned origins released first,
+    # and the live route's own origin is never a grace candidate.
+    assert _abandoned_accepted_commits(registry) == [
+        f"commit-abandoned-{index}"
+        for index in range(abandoned - _ABANDONED_VOICE_ORIGIN_GRACE, abandoned)
+    ]
+    assert "commit-live-after-abandoned" in registry._accepted_turn_commits_by_commit
+    assert len(registry._accepted_turn_commits_by_commit) == (
+        _ABANDONED_VOICE_ORIGIN_GRACE + 1
+    )
+
+    # The released identity keeps only its compact retirement fence.
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-abandoned-0", "commit-abandoned-0"),
+            SCOPE,
+        )
+    revived = await registry.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-abandoned-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-abandoned-0-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert revived.ok is True
+    retired_params = _routed_task_origin_params(
+        stem="abandoned-0",
+        text=_abandoned_origin_text("abandoned-0"),
+        interaction_id="interaction-abandoned-0",
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    replays = [
+        await registry.handle_p2_submit(
+            params=retired_params,
+            request_id=f"request-submit-abandoned-0-retired-{attempt}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        for attempt in range(2)
+    ]
+
+    # A retired identity is refused stably, not revived by its own successor.
+    for replayed in replays:
+        assert replayed.ok is False, replayed.payload
+        error = cast(dict, replayed.payload["error"])
+        assert error["reason"] == "TURN_COMMIT_RETIRED"
+        assert error["code"] == ErrorCode.CONFLICT.value
+    # Zero forbidden Agent, Task or origin effect on the refused path.
+    assert manager.agent.calls == 0
+    assert "commit-abandoned-0" not in registry._accepted_turn_commits_by_commit
+    assert registry._voice_task_origins == {}
+    assert registry._pending_task_intents == {}
+    assert registry._ABANDONED_VOICE_ORIGIN_GRACE == _ABANDONED_VOICE_ORIGIN_GRACE
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_abandoned_voice_origin_late_create_is_bounded_by_its_grace(
+    tmp_path: Path,
+) -> None:
+    """A13: the late-create window stays real, bounded, and fails closed after it.
+
+    A browser may close its P2 route before forwarding the confirmed create, so
+    the accepted origin has to remain actionable for a bounded grace.  Once
+    newer abandoned origins age it out, the heavy state is released and only the
+    compact retirement fence remains.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-grace",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    inside_text = "create the task this route asked for before it closed"
+    outside_text = "create the task nobody ever forwarded"
+    inside = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(stem="grace-inside", text=inside_text),
+        request_id="request-submit-grace-inside",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert inside.ok is True, inside.payload
+    outside = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(stem="grace-outside", text=outside_text),
+        request_id="request-submit-grace-outside",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert outside.ok is True, outside.payload
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-close-grace",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+
+    def _late_create(stem: str, text: str) -> dict[str, object]:
+        return {
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "operation": "task.create",
+            "command_id": f"command-{stem}",
+            "issued_at": NOW,
+            "correlation_id": f"correlation-{stem}",
+            "name": f"Late create {stem}",
+            "instruction": text,
+            "source": "voice",
+            "interaction_id": "interaction-1",
+            "turn_id": f"turn-{stem}",
+            "commit_id": f"commit-{stem}",
+        }
+
+    inside_create = _late_create("grace-inside", inside_text)
+    outside_create = _late_create("grace-outside", outside_text)
+    inside_issue = await registry.handle_p3_confirmation_issue(
+        params=inside_create,
+        request_id="request-issue-grace-inside",
+        session_id="session-product",
+    )
+    outside_issue = await registry.handle_p3_confirmation_issue(
+        params=outside_create,
+        request_id="request-issue-grace-outside",
+        session_id="session-product",
+    )
+    assert inside_issue.ok is True, inside_issue.payload
+    assert outside_issue.ok is True, outside_issue.payload
+    inside_receipt = cast(dict[str, object], inside_issue.payload["result"])
+    outside_receipt = cast(dict[str, object], outside_issue.payload["result"])
+
+    created = await registry.handle_p3_mutation(
+        params={
+            **inside_create,
+            "confirmation_id": inside_receipt["confirmation_id"],
+        },
+        request_id="request-mutate-grace-inside",
+        session_id="session-product",
+    )
+    # Positive: one late create inside the grace still reaches formal authority.
+    assert created.ok is True, created.payload
+    assert len(composition.mutation_calls) == 1
+
+    # Boundary: exactly `_ABANDONED_VOICE_ORIGIN_GRACE` newer abandoned origins
+    # age the surviving one out.
+    for index in range(_ABANDONED_VOICE_ORIGIN_GRACE - 1):
+        await _abandon_task_origin_route(registry, stem=f"grace-filler-{index}")
+    assert "commit-grace-outside" in registry._accepted_turn_commits_by_commit
+    await _abandon_task_origin_route(
+        registry,
+        stem=f"grace-filler-{_ABANDONED_VOICE_ORIGIN_GRACE - 1}",
+    )
+
+    prepared_before = len(composition.prepare_calls)
+    refused = [
+        await registry.handle_p3_mutation(
+            params={
+                **outside_create,
+                "confirmation_id": outside_receipt["confirmation_id"],
+            },
+            request_id=f"request-mutate-grace-outside-{attempt}",
+            session_id="session-product",
+        )
+        for attempt in range(2)
+    ]
+
+    # Negative: the aged-out origin fails closed, stably, with zero effect.
+    for rejected in refused:
+        assert rejected.ok is False, rejected.payload
+        error = cast(dict, rejected.payload["error"])
+        assert error["reason"] == "VOICE_TASK_ROUTE_MISMATCH"
+        assert error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert len(composition.mutation_calls) == 1
+    assert len(composition.prepare_calls) == prepared_before
+    assert registry._voice_task_origins == {}
+
+    # The identity is released, not merely unreachable through one lookup.
+    assert "commit-grace-outside" not in registry._accepted_turn_commits_by_commit
+    assert "commit-grace-outside" not in registry._accepted_voice_commit_routes
+    assert "commit-grace-outside" not in registry._critical_input_guarded_commits
+    assert "commit-grace-outside" not in registry._critical_input_commit_generations
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-grace-outside",
+                "commit-grace-outside",
+            ),
+            SCOPE,
+        )
+    assert registry._ABANDONED_VOICE_ORIGIN_GRACE == _ABANDONED_VOICE_ORIGIN_GRACE
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_origin_accepted_after_its_close_still_enters_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound reaches an acceptance that linearizes after its route closed.
+
+    `accept_task_origin` completes under the lease operation lock, so a close
+    may already be waiting for it and may publish the closed route before the
+    accepted maps are written.  That origin is abandoned the moment it is
+    recorded and no further close ever runs for its own route, so the bound has
+    to be enforced by the retention pressure itself.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-late-accept",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    original_accept = runtime.accept_task_origin
+    canonical_accepted = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_after_canonical_accept(**kwargs: object):
+        response_ref = await original_accept(**kwargs)
+        canonical_accepted.set()
+        await release.wait()
+        return response_ref
+
+    monkeypatch.setattr(runtime, "accept_task_origin", blocked_after_canonical_accept)
+    submit = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=_p2_task_origin_params(
+                stem="late-accept",
+                text="an acceptance that lands after its own route closed",
+            ),
+            request_id="request-submit-late-accept",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(canonical_accepted.wait(), timeout=1)
+    close = asyncio.create_task(
+        registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-close-late-accept",
+            session_id="session-product",
+        )
+    )
+
+    async def wait_for_closing() -> None:
+        while route.activation_lease.snapshot().state.value != "closing":
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_closing(), timeout=1)
+    release.set()
+    submitted, closed = await asyncio.gather(submit, close)
+
+    assert submitted.ok is True, submitted.payload
+    assert closed.ok is True, closed.payload
+    # The canonical acceptance is retained even though its close already ran.
+    assert "commit-late-accept" in registry._accepted_turn_commits_by_commit
+    assert ("session-product", "interaction-1") not in registry._p2_routes
+
+    for index in range(_ABANDONED_VOICE_ORIGIN_GRACE):
+        await _abandon_task_origin_route(registry, stem=f"late-accept-filler-{index}")
+
+    assert "commit-late-accept" not in registry._accepted_turn_commits_by_commit
+    assert _abandoned_accepted_commits(registry) == [
+        f"commit-late-accept-filler-{index}"
+        for index in range(_ABANDONED_VOICE_ORIGIN_GRACE)
+    ]
+    assert manager.agent.calls == 0
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-late-accept", "commit-late-accept"),
+            SCOPE,
+        )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_retired_abandoned_origin_fence_is_not_durable_across_a_restart(
+    tmp_path: Path,
+) -> None:
+    """Characterization: the retirement fence lives exactly one registry lifetime.
+
+    `_evicted_operation_replay_fence` is in-memory by design, the same lifetime
+    as the bounded structures it protects, and `_retire_voice_origin_locked`
+    also releases the shared `TurnCommitLedger` origin.  A restarted registry
+    therefore re-admits the identity as a fresh commit instead of refusing it
+    forever.  This records the real durability boundary; it is not a claim that
+    retirement survives a process restart.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, _p3, _manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
+    for index in range(_ABANDONED_VOICE_ORIGIN_GRACE + 1):
+        await _abandon_task_origin_route(registry, stem=f"restart-{index}")
+    retired_params = _routed_task_origin_params(
+        stem="restart-0",
+        text=_abandoned_origin_text("restart-0"),
+        interaction_id="interaction-restart-0",
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    revived = await registry.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-restart-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-restart-0-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert revived.ok is True
+    refused = await registry.handle_p2_submit(
+        params=retired_params,
+        request_id="request-submit-restart-0-before-restart",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert refused.ok is False
+    assert cast(dict, refused.payload["error"])["reason"] == "TURN_COMMIT_RETIRED"
+    await registry.stop()
+
+    restarted, _p3_restarted, _manager_restarted, _pushed_restarted = _registry(
+        tmp_path, commit_ledger=ledger
+    )
+    reactivated = await restarted.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-restart-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-restart-0-restarted",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert reactivated.ok is True
+    readmitted = await restarted.handle_p2_submit(
+        params=retired_params,
+        request_id="request-submit-restart-0-after-restart",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    # Characterization, not a durability claim: a restarted registry keeps no
+    # memory of the retired identity and admits it as a new commit.
+    assert readmitted.ok is True, readmitted.payload
+    assert cast(dict, readmitted.payload["result"])["status"] == (
+        "task_origin_accepted"
+    )
+    await restarted.stop()
+
+
 @pytest.mark.asyncio
 async def test_concurrent_p3_creates_reserve_one_exact_voice_origin(
     tmp_path: Path,

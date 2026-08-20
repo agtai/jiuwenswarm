@@ -623,6 +623,11 @@ class AgentServerProductCompositionRegistry:
     _PRODUCT_OPERATION_CAPACITY = 128
     _TURN_COMMIT_CAPACITY = 128
     _TURN_COMMIT_CAPACITY_PER_ROUTE = 32
+    # An accepted task origin outlives its P2 route on purpose so a late
+    # P3 create can still consume it. That grace is bounded: eight abandoned
+    # origins keep 120 of the 128 shared committed-turn slots available for
+    # live routes, and an aged-out origin keeps only its retirement fence.
+    _ABANDONED_VOICE_ORIGIN_GRACE = 8
 
     def __init__(
         self,
@@ -2638,6 +2643,11 @@ class AgentServerProductCompositionRegistry:
         self, commit: TurnCommit, route_key: tuple[str, str]
     ) -> None:
         self._preflight_turn_commit_identity_locked(commit)
+        # Runs after the identity preflight so this exact commit can never be
+        # retired and re-admitted, and before the capacity refusal so an
+        # acceptance that linearized after its own route closed is still
+        # reached even though no further close runs for that route.
+        self._enforce_abandoned_voice_origin_grace_locked()
         retained_count = (
             len(self._pending_turn_commits_by_commit)
             + len(self._accepted_turn_commits_by_commit)
@@ -2757,6 +2767,36 @@ class AgentServerProductCompositionRegistry:
         self._mark_evicted_product_request("voice.commit", commit.commit_id)
         self._mark_evicted_product_request("voice.turn", commit.turn_id)
         self._release_voice_origin_locked(commit)
+
+    def _enforce_abandoned_voice_origin_grace_locked(self) -> None:
+        """Bound how long an abandoned route's accepted origins stay retained.
+
+        An accepted origin survives its route close so a late P3 create can
+        still consume it, but a route abandoned without one released nothing:
+        repeating submit-then-close filled ``_TURN_COMMIT_CAPACITY`` with
+        origins no request could ever reach and refused every later submit
+        until ``stop``. Retirement past the grace releases the heavy commit
+        state and keeps only the compact ``_evicted_operation_replay_fence``
+        membership, so the released identity stays refusable without being
+        retained. Insertion order is acceptance order, so the oldest
+        abandoned origins are released first and a live route's own origins
+        are never candidates.
+        """
+
+        abandoned = [
+            commit_id
+            for commit_id, route_key in self._accepted_voice_commit_routes.items()
+            if route_key not in self._p2_routes
+        ]
+        excess = len(abandoned) - self._ABANDONED_VOICE_ORIGIN_GRACE
+        if excess <= 0:
+            return
+        for commit_id in abandoned[:excess]:
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is None:
+                self._accepted_voice_commit_routes.pop(commit_id, None)
+                continue
+            self._retire_voice_origin_locked(commit)
 
     def _consume_voice_origin_locked(self, commit: TurnCommit) -> None:
         self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
@@ -5949,6 +5989,7 @@ class AgentServerProductCompositionRegistry:
             key = (routed_session, interaction_id)
             self._p2_routes.pop(key, None)
             self._drop_voice_task_origins_for_route_locked(key)
+            self._enforce_abandoned_voice_origin_grace_locked()
             self._retain_closed_p2_route(
                 key,
                 _ClosedP2Route(
@@ -8925,6 +8966,7 @@ class AgentServerProductCompositionRegistry:
                     ),
                 )
                 self._critical_token_gate.release_interaction(p2_key[1])
+            self._enforce_abandoned_voice_origin_grace_locked()
             remaining_orphans: list[_P2FailedCleanupLease] = []
             for cleanup in self._p2_orphan_cleanups:
                 try:
