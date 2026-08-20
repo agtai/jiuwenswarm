@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
 import hashlib
+import hmac
 import json
+import logging
+import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
@@ -23,11 +25,6 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
-from jiuwenswarm.common.ws_diagnostics import (
-    describe_ws_exception,
-    describe_ws_peer,
-    format_ws_diagnostics,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +33,7 @@ AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
 _DISCONNECT_CLOSE_TIMEOUT_SECONDS = 6.0
 _DISCONNECT_TASK_SETTLE_TIMEOUT_SECONDS = 1.0
+_LOG_REF_KEY = secrets.token_bytes(32)
 _LOG_SUMMARY_REFERENCE_KEYS = (
     "type",
     "event",
@@ -54,9 +52,7 @@ _LOG_SUMMARY_BOOLEAN_KEYS = (
     "is_complete",
     "is_final",
 )
-_LOG_SUMMARY_INTEGER_KEYS = (
-    "sequence",
-)
+_LOG_SUMMARY_SHAPE_ONLY_SCALAR_KEYS = ("sequence",)
 _LOG_SUMMARY_SHAPE_KEYS = (
     "params",
     "payload",
@@ -64,6 +60,23 @@ _LOG_SUMMARY_SHAPE_KEYS = (
     "channel_context",
     "auth",
     "provenance",
+)
+_SAFE_EXCEPTION_CLASS_NAMES = frozenset(
+    {
+        "ConnectionAbortedError",
+        "ConnectionClosed",
+        "ConnectionClosedError",
+        "ConnectionClosedOK",
+        "ConnectionError",
+        "ConnectionResetError",
+        "JSONDecodeError",
+        "OSError",
+        "PayloadTooBig",
+        "RuntimeError",
+        "TimeoutError",
+        "TypeError",
+        "ValueError",
+    }
 )
 
 
@@ -91,7 +104,7 @@ def _log_value_shape(value: Any) -> dict[str, Any]:
 
 
 def _content_hidden_log_ref(field: str, value: Any) -> str:
-    """Return a fixed-length correlation ref without exposing scalar content."""
+    """Return a process-local keyed ref without exposing scalar content."""
     if value is None:
         return "[ABSENT]"
     if isinstance(value, str):
@@ -109,21 +122,85 @@ def _content_hidden_log_ref(field: str, value: Any) -> str:
     else:
         return "[NON_SCALAR]"
 
-    digest = hashlib.sha256()
-    digest.update(field.encode("ascii"))
+    digest = hmac.new(_LOG_REF_KEY, digestmod=hashlib.sha256)
+    digest.update(field.encode("utf-8", errors="surrogatepass"))
     digest.update(b"\0")
     digest.update(value_type)
     digest.update(b"\0")
     digest.update(raw)
-    return f"sha256:{digest.hexdigest()}"
+    return f"ref:{digest.hexdigest()}"
 
 
 def _log_boolean(value: Any) -> bool | str:
     return value if isinstance(value, bool) else "[NON_BOOLEAN]"
 
 
-def _log_integer(value: Any) -> int | str:
-    return value if isinstance(value, int) and not isinstance(value, bool) else "[NON_INTEGER]"
+def _log_scalar_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "string"
+    return "non_scalar"
+
+
+def _safe_exception_class(exc: BaseException) -> str:
+    """Classify an exception without trusting its dynamic class name or text."""
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _SAFE_EXCEPTION_CLASS_NAMES:
+            return cls.__name__
+    return "Exception"
+
+
+def _safe_close_code(exc: BaseException) -> int | None:
+    """Return only a protocol-bounded numeric close code, never a reason."""
+    candidates: list[Any] = []
+    try:
+        candidates.append(getattr(exc, "code", None))
+    except Exception:
+        pass
+    for frame_name in ("rcvd", "sent"):
+        try:
+            frame = getattr(exc, frame_name, None)
+            candidates.append(getattr(frame, "code", None))
+        except Exception:
+            pass
+    for candidate in candidates:
+        if type(candidate) is int and 1000 <= candidate <= 4999:
+            return candidate
+    return None
+
+
+def _format_transport_log_summary(
+    state: dict[str, bool | int],
+    exc: BaseException | None = None,
+    *,
+    request_id_ref: str | None = None,
+    channel_ref: str | None = None,
+    method_ref: str | None = None,
+) -> str:
+    """Format only locally derived state, safe exception class/code and opaque refs."""
+    fields: list[tuple[str, bool | int | str | None]] = list(state.items())
+    if exc is not None:
+        fields.extend(
+            (
+                ("exception_class", _safe_exception_class(exc)),
+                ("close_code", _safe_close_code(exc)),
+            )
+        )
+    for key, value in (
+        ("request_id_ref", request_id_ref),
+        ("channel_ref", channel_ref),
+        ("method_ref", method_ref),
+    ):
+        if value is not None:
+            fields.append((key, value))
+    return " ".join(f"{key}={value}" for key, value in fields)
 
 
 def _project_log_summary(data: Any) -> dict[str, Any]:
@@ -145,8 +222,8 @@ def _project_log_summary(data: Any) -> dict[str, Any]:
     )
     summary.update(
         {
-            key: _log_integer(data[key])
-            for key in _LOG_SUMMARY_INTEGER_KEYS
+            f"{key}_kind": _log_scalar_kind(data[key])
+            for key in _LOG_SUMMARY_SHAPE_ONLY_SCALAR_KEYS
             if key in data
         }
     )
@@ -294,17 +371,17 @@ class WebSocketAgentServerClient(AgentServerClient):
         """注册 Agent 主动推送处理回调（metadata 含 ``E2A_WIRE_SERVER_PUSH_KEY`` 的帧）。"""
         self._on_server_push = handler
 
-    def _diagnostic_state(self, ws: Any | None = None) -> dict[str, Any]:
+    def _diagnostic_state(self, ws: Any | None = None) -> dict[str, bool | int]:
         target_ws = self._ws if ws is None else ws
         return {
-            "uri": self._uri,
+            "uri_present": self._uri is not None,
             "running": self._running,
             "server_ready": self._server_ready,
             "pending_requests": len(self._message_queues),
             "cancelled_requests": len(self._cancelled_request_ids),
-            "ping_interval": self._ping_interval,
-            "ping_timeout": self._ping_timeout,
-            **describe_ws_peer(target_ws),
+            "ping_interval_configured": self._ping_interval is not None,
+            "ping_timeout_configured": self._ping_timeout is not None,
+            "ws_present": target_ws is not None,
         }
 
     def set_or_update_server_config(
@@ -332,7 +409,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 raise
 
     async def _connect_transport(self, uri: str) -> None:
-        logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
+        logger.info("[WebSocketAgentServerClient] 正在连接 AgentServer transport")
         self._uri = uri
         self._server_ready = False
         origin = _build_ws_origin(uri)
@@ -353,7 +430,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             max_size=AGENT_WS_MAX_MESSAGE_BYTES,
         )
         self._connection_generation += 1
-        logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
+        logger.info("[WebSocketAgentServerClient] 已连接 AgentServer transport")
 
         # 读取 AgentServer 的 connection.ack 事件
         try:
@@ -377,7 +454,8 @@ class WebSocketAgentServerClient(AgentServerClient):
             logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时")
         except Exception as e:
             logger.warning(
-                "[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e
+                "[WebSocketAgentServerClient] 读取 connection.ack 失败: %s",
+                _format_transport_log_summary(self._diagnostic_state(), e),
             )
 
         # 启动消息接收和分发任务
@@ -438,40 +516,28 @@ class WebSocketAgentServerClient(AgentServerClient):
                 except PayloadTooBig as e:
                     logger.error(
                         "[WebSocketAgentServerClient] AgentServer 消息超过 WebSocket 限制: %s",
-                        format_ws_diagnostics(
-                            self._diagnostic_state(),
-                            describe_ws_exception(e),
-                        ),
+                        _format_transport_log_summary(self._diagnostic_state(), e),
                     )
                     await self._stop_receiver_after_fatal_error(e)
                     break
                 except ConnectionClosed as e:
                     logger.info(
                         "[WebSocketAgentServerClient] AgentServer WebSocket 已关闭: %s",
-                        format_ws_diagnostics(
-                            self._diagnostic_state(),
-                            describe_ws_exception(e),
-                        ),
+                        _format_transport_log_summary(self._diagnostic_state(), e),
                     )
                     await self._stop_receiver_after_fatal_error(e)
                     break
                 except Exception as e:
-                    logger.exception(
+                    logger.error(
                         "[WebSocketAgentServerClient] 消息接收循环异常: %s",
-                        format_ws_diagnostics(
-                            self._diagnostic_state(),
-                            describe_ws_exception(e),
-                        ),
+                        _format_transport_log_summary(self._diagnostic_state(), e),
                     )
                     await asyncio.sleep(0.1)  # 避免快速循环
         finally:
             logger.info("[WebSocketAgentServerClient] 消息接收任务已停止")
 
     async def _stop_receiver_after_fatal_error(self, exc: BaseException) -> None:
-        detail = format_ws_diagnostics(
-            self._diagnostic_state(),
-            describe_ws_exception(exc),
-        )
+        detail = _format_transport_log_summary(self._diagnostic_state(), exc)
         self._running = False
         self._server_ready = False
         self._ws = None
@@ -524,7 +590,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 except Exception as exc:
                     logger.warning(
                         "AgentServer receiver stopped with an error during disconnect: %s",
-                        describe_ws_exception(exc),
+                        _format_transport_log_summary(self._diagnostic_state(ws), exc),
                     )
 
             disconnect_failure = _ReceiverFailure(
@@ -547,10 +613,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 except Exception as exc:
                     logger.warning(
                         "关闭 AgentServer WebSocket 时异常: %s",
-                        format_ws_diagnostics(
-                            self._diagnostic_state(ws),
-                            describe_ws_exception(exc),
-                        ),
+                        _format_transport_log_summary(self._diagnostic_state(ws), exc),
                     )
 
             if retained_tasks:
@@ -592,7 +655,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                     raise RuntimeError("AgentServer WebSocket connection closed")
                 logger.info(
                     "[WebSocketAgentServerClient] WebSocket 已断开，准备按需重连: %s",
-                    format_ws_diagnostics(self._diagnostic_state(), uri=uri),
+                    _format_transport_log_summary(self._diagnostic_state()),
                 )
                 try:
                     await self._connect_transport(uri)
@@ -623,18 +686,16 @@ class WebSocketAgentServerClient(AgentServerClient):
         except (ConnectionClosed, OSError) as exc:
             logger.info(
                 "[WebSocketAgentServerClient] AgentServer WebSocket 发送失败，连接将重置: %s",
-                format_ws_diagnostics(
+                _format_transport_log_summary(
                     self._diagnostic_state(expected_ws),
-                    describe_ws_exception(exc),
+                    exc,
                     request_id_ref=_content_hidden_log_ref(
                         "request_id", payload.get("request_id")
                     ),
                     channel_ref=_content_hidden_log_ref(
                         "channel", payload.get("channel")
                     ),
-                    method_ref=_content_hidden_log_ref(
-                        "method", payload.get("method")
-                    ),
+                    method_ref=_content_hidden_log_ref("method", payload.get("method")),
                 ),
             )
             if self._connection_matches(expected_ws, expected_generation):
@@ -642,9 +703,10 @@ class WebSocketAgentServerClient(AgentServerClient):
             raise RuntimeError("AgentServer WebSocket connection closed") from exc
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        connection_ws, connection_generation = (
-            await self._ensure_connected_for_request()
-        )
+        (
+            connection_ws,
+            connection_generation,
+        ) = await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
@@ -708,10 +770,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                         connection_ws,
                         connection_generation,
                     ),
-                    name=(
-                        "agent-server-unary:"
-                        f"{_content_hidden_log_ref('request_id', rid)}"
-                    ),
+                    name="agent-server-unary",
                 )
                 self._unary_operations[rid] = (
                     fingerprint,
@@ -811,9 +870,10 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
-        connection_ws, connection_generation = (
-            await self._ensure_connected_for_request()
-        )
+        (
+            connection_ws,
+            connection_generation,
+        ) = await self._ensure_connected_for_request()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
         logger.info(
@@ -880,9 +940,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 chunk_count += 1
                 if chunk_count <= 3:
                     _pl = getattr(chunk, "payload", None) or {}
-                    _has_event_type = (
-                        isinstance(_pl, dict) and "event_type" in _pl
-                    )
+                    _has_event_type = isinstance(_pl, dict) and "event_type" in _pl
                     logger.info(
                         "[WebSocketAgentServerClient] stream chunk received:"
                         " request_id_ref=%s seq=%s has_event_type=%s",
@@ -1030,7 +1088,11 @@ async def mock_agent_server_handler(ws: Any) -> None:
     except websockets.exceptions.ConnectionClosed:
         pass
     except Exception as e:
-        logger.exception("[MockAgentServer] 处理异常: %s", e)
+        logger.error(
+            "[MockAgentServer] 处理异常: exception_class=%s close_code=%s",
+            _safe_exception_class(e),
+            _safe_close_code(e),
+        )
 
 
 async def run_mock_agent_server(
@@ -1050,7 +1112,11 @@ async def run_mock_agent_server(
         import websockets
 
         server = await websockets.serve(mock_agent_server_handler, host, port)
-    logger.info("[MockAgentServer] 已启动: ws://%s:%s", host, port)
+    logger.info(
+        "[MockAgentServer] 已启动: host_present=%s port_configured=%s",
+        bool(host),
+        type(port) is int,
+    )
     return server
 
 
@@ -1066,7 +1132,7 @@ async def _run_verification() -> None:
     port = 18765
     uri = f"ws://127.0.0.1:{port}"
     server = await run_mock_agent_server("127.0.0.1", port)
-    logger.info("[main] Mock AgentServer 已启动: %s", uri)
+    logger.info("[main] Mock AgentServer 已启动")
 
     client = WebSocketAgentServerClient()
     try:

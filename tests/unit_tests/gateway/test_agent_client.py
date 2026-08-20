@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import json
 import logging
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -36,12 +38,13 @@ class ClosingSendWebSocket:
 
 
 class ClosingRecvWebSocket:
-    def __init__(self) -> None:
+    def __init__(self, exc: BaseException | None = None) -> None:
         self.recv_calls = 0
+        self.exc = exc or ConnectionClosedError(None, None)
 
     async def recv(self) -> str:
         self.recv_calls += 1
-        raise ConnectionClosedError(None, None)
+        raise self.exc
 
 
 class BlockingSendWebSocket(FakeWebSocket):
@@ -105,6 +108,9 @@ class AgentClientHarness(WebSocketAgentServerClient):
 
     def has_unary_operation_for_test(self, request_id: str) -> bool:
         return request_id in self._unary_operations
+
+    def get_unary_task_name_for_test(self, request_id: str) -> str:
+        return self._unary_operations[request_id][3].get_name()
 
     def set_message_queue_for_test(self, request_id: str, queue) -> None:
         self._message_queues[request_id] = queue
@@ -179,6 +185,7 @@ def test_agent_client_log_json_is_content_free_without_mutating_payload():
             return "sentinel-private-repr"
 
     private_value = PrivateValue()
+    private_sequence = 9876543210123456789
     payload = {
         "type": "sentinel-private-type",
         "event": "sentinel-private-event",
@@ -193,7 +200,7 @@ def test_agent_client_log_json_is_content_free_without_mutating_payload():
         "is_stream": False,
         "ok": "sentinel-private-ok",
         "is_complete": "sentinel-private-complete",
-        "sequence": "sentinel-private-sequence",
+        "sequence": private_sequence,
         "params": {
             "auth_token": "formal-route-secret",
             "Final-Text": "mixed-case-transcript",
@@ -210,16 +217,16 @@ def test_agent_client_log_json_is_content_free_without_mutating_payload():
     rendered = agent_client._to_json(payload)
     rendered_summary = json.loads(rendered)
 
-    assert '"request_id_ref": "sha256:' in rendered
-    assert '"response_id_ref": "sha256:' in rendered
-    assert '"channel_ref": "sha256:' in rendered
-    assert '"channel_id_ref": "sha256:' in rendered
-    assert '"method_ref": "sha256:' in rendered
-    assert '"status_ref": "sha256:' in rendered
+    assert '"request_id_ref": "ref:' in rendered
+    assert '"response_id_ref": "ref:' in rendered
+    assert '"channel_ref": "ref:' in rendered
+    assert '"channel_id_ref": "ref:' in rendered
+    assert '"method_ref": "ref:' in rendered
+    assert '"status_ref": "ref:' in rendered
     assert '"is_stream": false' in rendered
     assert '"ok": "[NON_BOOLEAN]"' in rendered
     assert '"is_complete": "[NON_BOOLEAN]"' in rendered
-    assert '"sequence": "[NON_INTEGER]"' in rendered
+    assert rendered_summary["sequence_kind"] == "integer"
     for ref_key in (
         "type_ref",
         "event_ref",
@@ -232,8 +239,9 @@ def test_agent_client_log_json_is_content_free_without_mutating_payload():
         "status_ref",
         "response_kind_ref",
     ):
-        assert rendered_summary[ref_key].startswith("sha256:")
-        assert len(rendered_summary[ref_key]) == 71
+        assert rendered_summary[ref_key].startswith("ref:")
+        assert len(rendered_summary[ref_key]) == 68
+    assert "sha256:" not in rendered
     assert "sentinel-private-type" not in rendered
     assert "sentinel-private-event" not in rendered
     assert "sentinel-private-version" not in rendered
@@ -246,7 +254,7 @@ def test_agent_client_log_json_is_content_free_without_mutating_payload():
     assert "sentinel-private-response-kind" not in rendered
     assert "sentinel-private-ok" not in rendered
     assert "sentinel-private-complete" not in rendered
-    assert "sentinel-private-sequence" not in rendered
+    assert str(private_sequence) not in rendered
     assert "formal-route-secret" not in rendered
     assert "mixed-case-transcript" not in rendered
     assert "separator-secret" not in rendered
@@ -256,22 +264,41 @@ def test_agent_client_log_json_is_content_free_without_mutating_payload():
     assert "sentinel-private-repr" not in rendered
     assert payload["params"]["auth_token"] == "formal-route-secret"
     assert payload["params"]["Final-Text"] == "mixed-case-transcript"
-    assert payload["params"]["nested-list"][0]["AUTH TOKEN"] == (
-        "separator-secret"
-    )
-    assert payload["params"]["nested-list"][1]["raw_audio"] == (
-        "deep-audio-secret"
-    )
+    assert payload["params"]["nested-list"][0]["AUTH TOKEN"] == ("separator-secret")
+    assert payload["params"]["nested-list"][1]["raw_audio"] == ("deep-audio-secret")
     assert payload["payload"] is private_value
+
+
+def test_agent_client_log_refs_are_secret_keyed_and_sequence_is_shape_only():
+    candidate = "1"
+    public_digest = hashlib.sha256(
+        b"request_id\0str\0" + candidate.encode("ascii")
+    ).hexdigest()
+
+    first = agent_client._content_hidden_log_ref("request_id", candidate)
+    repeated = agent_client._content_hidden_log_ref("request_id", candidate)
+    other_field = agent_client._content_hidden_log_ref("response_id", candidate)
+    summary = json.loads(agent_client._to_json({"sequence": 9876543210123456789}))
+
+    assert first.startswith("ref:")
+    assert first == repeated
+    assert first != other_field
+    assert first != f"sha256:{public_digest}"
+    assert first.removeprefix("ref:") != public_digest
+    assert summary == {"field_count": 1, "sequence_kind": "integer"}
 
 
 @pytest.mark.asyncio
 async def test_agent_client_unary_and_stream_logs_never_include_payload_content(
     caplog, monkeypatch
 ):
-    target_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
-    target_logger.addHandler(caplog.handler)
-    caplog.set_level(logging.DEBUG, logger=target_logger.name)
+    target_loggers = (
+        logging.getLogger("jiuwenswarm.gateway.routing.agent_client"),
+        logging.getLogger("jiuwenswarm.common.e2a.wire_codec"),
+    )
+    for target_logger in target_loggers:
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
     monkeypatch.setattr(agent_client, "_STREAM_TRAILING_MESSAGE_GRACE_SECONDS", 0.001)
 
     unary_success_params = {
@@ -312,13 +339,14 @@ async def test_agent_client_unary_and_stream_logs_never_include_payload_content(
                 break
             await asyncio.sleep(0.001)
         assert unary_ws.sent_payloads
+        unary_task_name = unary_client.get_unary_task_name_for_test(
+            unary_success_request_id
+        )
         unary_response_payload = {
             "Final-Text": "sentinel-unary-response-text",
             "nested": [{"credential": "sentinel-unary-response-credential"}],
         }
-        await unary_client.get_message_queue_for_test(
-            unary_success_request_id
-        ).put(
+        await unary_client.get_message_queue_for_test(unary_success_request_id).put(
             encode_agent_response_for_wire(
                 AgentResponse(
                     request_id=unary_success_request_id,
@@ -410,12 +438,13 @@ async def test_agent_client_unary_and_stream_logs_never_include_payload_content(
             async for _ in stream_error_client.send_request_stream(stream_error_env):
                 pass
     finally:
-        target_logger.removeHandler(caplog.handler)
+        for target_logger in target_loggers:
+            target_logger.removeHandler(caplog.handler)
 
-    agent_logs = "\n".join(
+    captured_logs = "\n".join(
         record.getMessage()
         for record in caplog.records
-        if record.name == target_logger.name
+        if record.name in {target_logger.name for target_logger in target_loggers}
     )
     private_sentinels = (
         "sentinel-unary-success-text",
@@ -438,14 +467,193 @@ async def test_agent_client_unary_and_stream_logs_never_include_payload_content(
         "rid-private-stream-success",
         "rid-private-stream-error",
     )
-    assert not [sentinel for sentinel in private_sentinels if sentinel in agent_logs]
-    assert "request_id_ref=sha256:" in agent_logs
-    assert "channel_ref=sha256:" in agent_logs
-    assert "method_ref=sha256:" in agent_logs
+    assert not [sentinel for sentinel in private_sentinels if sentinel in captured_logs]
+    assert "request_id_ref=ref:" in captured_logs
+    assert "channel_ref=ref:" in captured_logs
+    assert "method_ref=ref:" in captured_logs
+    assert "sha256:" not in captured_logs
+    assert unary_success_request_id not in unary_task_name
+    assert "ref:" not in unary_task_name
+    assert "sha256:" not in unary_task_name
+    assert {record.name for record in caplog.records}.issuperset(
+        {target_logger.name for target_logger in target_loggers}
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if record.name in {target_logger.name for target_logger in target_loggers}
+        and record.exc_info is not None
+    ]
     assert unary_success_params["FINAL_TEXT"] == "sentinel-unary-success-text"
     assert unary_error_params["spoken-text"] == "sentinel-unary-error-text"
     assert stream_success_params["Transcript"] == "sentinel-stream-success-text"
     assert stream_error_params["raw_audio"] == "sentinel-stream-error-audio"
+
+
+@pytest.mark.asyncio
+async def test_agent_client_transport_logs_hide_uri_peer_exception_and_close_reason(
+    caplog, monkeypatch
+):
+    from websockets.legacy import client as legacy_client
+
+    target_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger=target_logger.name)
+    private_uri = (
+        "wss://sentinel-private-user:sentinel-private-password@"
+        "sentinel-private-host/private-path?token=sentinel-private-query"
+    )
+
+    class AckThenBlockingWebSocket(FakeWebSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self.recv_calls = 0
+            self.release_recv = asyncio.Event()
+            self.remote_address = ("sentinel-private-remote-address", 43123)
+            self.local_address = ("sentinel-private-local-address", 43124)
+            self.state = "sentinel-private-ws-state"
+
+        def __repr__(self) -> str:
+            return "sentinel-private-ws-repr"
+
+        async def recv(self) -> str:
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return json.dumps(
+                    {
+                        "type": "event",
+                        "event": "connection.ack",
+                        "request_id": "sentinel-private-ack-id",
+                        "metadata": {"AUTH TOKEN": "sentinel-private-ack-token"},
+                    }
+                )
+            await self.release_recv.wait()
+            raise asyncio.CancelledError
+
+        async def close(self) -> None:
+            self.release_recv.set()
+            await super().close()
+
+    connected_ws = AckThenBlockingWebSocket()
+
+    async def fake_connect(uri, **kwargs):
+        assert uri == private_uri
+        assert kwargs["origin"].endswith("sentinel-private-host")
+        return connected_ws
+
+    monkeypatch.setattr(legacy_client, "connect", fake_connect)
+
+    try:
+        connected_client = AgentClientHarness()
+        await connected_client.connect(private_uri)
+        await connected_client.disconnect()
+
+        close_exc = ConnectionClosedError(
+            Close(4001, "sentinel-private-close-reason"),
+            Close(4001, "sentinel-private-sent-reason"),
+            True,
+        )
+        closing_ws = ClosingRecvWebSocket(close_exc)
+        closing_ws.remote_address = ("sentinel-private-close-remote", 43125)
+        closing_ws.local_address = ("sentinel-private-close-local", 43126)
+        closing_client = AgentClientHarness()
+        closing_client.set_uri_for_test(private_uri)
+        closing_client.set_ws_for_test(closing_ws)
+        closing_client.set_running_for_test(True)
+        closing_client.set_server_ready_for_test(True)
+        closing_client.set_message_queue_for_test(
+            "sentinel-private-pending-id", asyncio.Queue()
+        )
+        await closing_client.run_message_receiver_loop_for_test()
+
+        private_failure = type(
+            "SentinelPrivateExceptionClass",
+            (RuntimeError,),
+            {},
+        )
+
+        class ExplodingWebSocket:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.remote_address = ("sentinel-private-error-remote", 43127)
+                self.local_address = ("sentinel-private-error-local", 43128)
+
+            async def recv(self) -> str:
+                self.recv_calls += 1
+                if self.recv_calls == 1:
+                    raise private_failure("sentinel-private-exception-message")
+                raise asyncio.CancelledError
+
+        error_client = AgentClientHarness()
+        error_client.set_uri_for_test(private_uri)
+        error_client.set_ws_for_test(ExplodingWebSocket())
+        error_client.set_running_for_test(True)
+        await error_client.run_message_receiver_loop_for_test()
+
+        out_of_range_error = RuntimeError("sentinel-private-out-of-range-close-message")
+        out_of_range_error.code = 9876543210123456789
+        out_of_range_client = AgentClientHarness()
+        out_of_range_client.set_uri_for_test(private_uri)
+        out_of_range_client.set_ws_for_test(FakeWebSocket())
+        await out_of_range_client.stop_receiver_after_fatal_error_for_test(
+            out_of_range_error
+        )
+
+        class PrivateCloseCode:
+            def __str__(self) -> str:
+                return "sentinel-private-close-code-string"
+
+            def __repr__(self) -> str:
+                return "sentinel-private-close-code-repr"
+
+        object_code_error = RuntimeError("sentinel-private-object-code-message")
+        object_code_error.code = PrivateCloseCode()
+        object_code_client = AgentClientHarness()
+        object_code_client.set_uri_for_test(private_uri)
+        object_code_client.set_ws_for_test(FakeWebSocket())
+        await object_code_client.stop_receiver_after_fatal_error_for_test(
+            object_code_error
+        )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    records = [record for record in caplog.records if record.name == target_logger.name]
+    log_material = "\n".join(
+        f"{record.getMessage()} args={record.args!r}" for record in records
+    )
+    private_sentinels = (
+        private_uri,
+        "sentinel-private-user",
+        "sentinel-private-password",
+        "sentinel-private-host",
+        "sentinel-private-query",
+        "sentinel-private-remote-address",
+        "sentinel-private-local-address",
+        "sentinel-private-ws-state",
+        "sentinel-private-ws-repr",
+        "sentinel-private-ack-id",
+        "sentinel-private-ack-token",
+        "sentinel-private-close-reason",
+        "sentinel-private-sent-reason",
+        "sentinel-private-close-remote",
+        "sentinel-private-close-local",
+        "sentinel-private-pending-id",
+        "SentinelPrivateExceptionClass",
+        "sentinel-private-exception-message",
+        "sentinel-private-error-remote",
+        "sentinel-private-error-local",
+        "sentinel-private-out-of-range-close-message",
+        "9876543210123456789",
+        "sentinel-private-close-code-string",
+        "sentinel-private-close-code-repr",
+        "sentinel-private-object-code-message",
+    )
+    assert not [sentinel for sentinel in private_sentinels if sentinel in log_material]
+    assert "ws_id=" not in log_material
+    assert "close_code=4001" in log_material
+    assert "exception_class=ConnectionClosedError" in log_material
+    assert "exception_class=RuntimeError" in log_material
+    assert not [record for record in records if record.exc_info is not None]
 
 
 @pytest.mark.asyncio
@@ -592,7 +800,13 @@ async def test_message_receiver_loop_logs_close_diagnostics(caplog):
     caplog.set_level(logging.INFO, logger=target_logger.name)
 
     client = AgentClientHarness()
-    ws = ClosingRecvWebSocket()
+    ws = ClosingRecvWebSocket(
+        ConnectionClosedError(
+            Close(4001, "sentinel-private-close-reason"),
+            Close(4001, "sentinel-private-sent-reason"),
+            True,
+        )
+    )
     client.set_ws_for_test(ws)
     client.set_running_for_test(True)
     client.set_server_ready_for_test(True)
@@ -604,11 +818,13 @@ async def test_message_receiver_loop_logs_close_diagnostics(caplog):
         target_logger.removeHandler(caplog.handler)
 
     assert "AgentServer WebSocket 已关闭" in caplog.text
-    assert "exc_type='ConnectionClosedError'" in caplog.text
-    assert "message='no close frame received or sent'" in caplog.text
-    assert "close_code=1006" in caplog.text
+    assert "exception_class=ConnectionClosedError" in caplog.text
+    assert "sentinel-private-close-reason" not in caplog.text
+    assert "sentinel-private-sent-reason" not in caplog.text
+    assert "close_code=4001" in caplog.text
     assert "pending_requests=1" in caplog.text
     assert "server_ready=True" in caplog.text
+    assert not [record for record in caplog.records if record.exc_info is not None]
 
 
 @pytest.mark.asyncio
@@ -958,10 +1174,7 @@ async def test_old_stream_cleanup_cannot_remove_same_id_queue_after_reconnect():
     assert new_queue is not old_queue
 
     await old_stream.aclose()
-    assert (
-        client.get_message_queue_for_test("rid-stream-generation-reuse")
-        is new_queue
-    )
+    assert client.get_message_queue_for_test("rid-stream-generation-reuse") is new_queue
 
     await new_queue.put(
         encode_agent_chunk_for_wire(
@@ -995,10 +1208,7 @@ async def test_old_delayed_marker_cleanup_cannot_clear_replacement_owner(monkeyp
         "rid-marker-reuse",
         old_token,
     )
-    assert (
-        client.get_cancelled_marker_for_test("rid-marker-reuse")
-        is replacement_token
-    )
+    assert client.get_cancelled_marker_for_test("rid-marker-reuse") is replacement_token
 
     await client._delayed_cleanup_cancelled_request_id(
         "rid-marker-reuse",
