@@ -50,6 +50,7 @@ class SegmentDefinition:
     phase_tags: tuple[str, ...]
     primary_capability: str
     applicable_profiles: tuple[str, ...]
+    measurement_kind: str = "exact"
 
 
 def _segment(
@@ -60,8 +61,12 @@ def _segment(
     phases: tuple[str, ...],
     capability: str,
     profiles: tuple[str, ...] = _BROWSER_PROFILES,
+    measurement_kind: str = "exact",
 ) -> SegmentDefinition:
-    return SegmentDefinition(segment_id, start_point, end_point, component, phases, capability, profiles)
+    return SegmentDefinition(
+        segment_id, start_point, end_point, component, phases, capability,
+        profiles, measurement_kind,
+    )
 
 
 FIXED_SEGMENTS: Final[tuple[SegmentDefinition, ...]] = (
@@ -71,11 +76,11 @@ FIXED_SEGMENTS: Final[tuple[SegmentDefinition, ...]] = (
     _segment("presentation_to_tts_request", "browser.presentation_received", "browser.tts_request_started", "browser", ("P1", "P2", "P3"), "integrated_web"),
     _segment("tts_request_to_first_downlink", "browser.tts_request_started", "browser.downlink_first_frame_received", "browser", ("P1", "P2", "P3"), "cross_component_seam"),
     _segment("first_downlink_to_schedule", "browser.downlink_first_frame_received", "browser.playout_first_frame_scheduled", "browser", ("P1",), "audio_io"),
-    _segment("schedule_to_start_estimate", "browser.playout_first_frame_scheduled", "browser.playout_first_frame_started_estimate", "browser", ("P1",), "audio_io"),
+    _segment("schedule_to_start_estimate", "browser.playout_first_frame_scheduled", "browser.playout_first_frame_started_estimate", "browser", ("P1",), "audio_io", measurement_kind="estimate"),
     _segment("estimated_start_to_playout_complete", "browser.playout_first_frame_started_estimate", "browser.playout_completed", "browser", ("P1",), "audio_io"),
     _segment("playout_to_ack", "browser.playout_completed", "browser.playout_ack_received", "browser", ("P1", "P2", "P3"), "cross_component_seam"),
     _segment("ack_to_next_capture", "browser.playout_ack_received", "browser.next_turn_capture_activated", "browser", ("P1", "P2"), "conversation_runtime"),
-    _segment("response_total", "browser.eot_received", "browser.playout_first_frame_started_estimate", "browser", ("P1", "P2", "P3"), "integrated_web"),
+    _segment("response_total", "browser.eot_received", "browser.playout_first_frame_started_estimate", "browser", ("P1", "P2", "P3"), "integrated_web", measurement_kind="estimate"),
     _segment("round_total", "browser.eot_received", "browser.next_turn_capture_activated", "browser", ("P1", "P2", "P3"), "integrated_web"),
     _segment("capture_device_startup", "browser.capture_start_requested", "browser.capture_device_started", "browser", ("P1",), "audio_io"),
     _segment("capture_first_frame_readiness", "browser.capture_start_requested", "browser.capture_first_ack_received", "browser", ("P1", "P2"), "realtime_media"),
@@ -126,6 +131,7 @@ class SegmentSummary:
         return {
             "segment_id": self.segment.segment_id, "start_point": self.segment.start_point,
             "end_point": self.segment.end_point, "component": self.segment.component,
+            "measurement_kind": self.segment.measurement_kind,
             "phase_tags": list(self.segment.phase_tags), "primary_capability": self.segment.primary_capability,
             "applicable_profiles": list(self.segment.applicable_profiles), "attempts": self.attempts,
             "successful_samples": self.successful_samples, "unknown": self.unknown, "failed": self.failed,
@@ -233,10 +239,123 @@ def _same_identity(start: LatencyMark, end: LatencyMark) -> bool:
         "response_generation", "task_id",
     )
     return all(getattr(start, field) == getattr(end, field) for field in required) and all(
-        getattr(start, field) is None or getattr(end, field) is None
-        or getattr(start, field) == getattr(end, field)
+        getattr(start, field) is None
+        or getattr(end, field) == getattr(start, field)
         for field in optional
     )
+
+
+def _round_identity_compatible(batches: tuple[LatencyBatch, ...]) -> bool:
+    if not batches or len({batch.input_case_id for batch in batches}) != 1:
+        return False
+    marks = tuple(
+        mark
+        for batch in batches
+        for mark in batch.marks
+        if mark.point != "probe.capacity"
+    )
+    if not marks:
+        return False
+    if len({mark.correlation_id for mark in marks}) != 1 or len(
+        {mark.interaction_id for mark in marks}
+    ) != 1:
+        return False
+    identity_fields = (
+        "activation_id",
+        "activation_generation",
+        "turn_id",
+        "response_id",
+        "response_generation",
+        "task_id",
+    )
+    for field in identity_fields:
+        values = {
+            getattr(mark, field)
+            for mark in marks
+            if getattr(mark, field) is not None
+        }
+        if len(values) > 1:
+            return False
+    for component in {batch.component for batch in batches}:
+        if len(
+            {
+                batch.source_instance_id
+                for batch in batches
+                if batch.component == component
+            }
+        ) != 1:
+            return False
+    required_by_phase = {
+        "browser_round": ("activation_id", "activation_generation"),
+        "gateway_stt": ("activation_id", "activation_generation"),
+        "gateway_tts": ("response_id", "response_generation"),
+        "agent_foreground": (
+            "activation_id",
+            "activation_generation",
+            "turn_id",
+        ),
+    }
+    browser_response_required_points = {
+        "browser.presentation_received",
+        "browser.tts_request_started",
+        "browser.downlink_first_frame_received",
+        "browser.playout_first_frame_scheduled",
+        "browser.playout_first_frame_started_estimate",
+        "browser.playout_completed",
+        "browser.playout_ack_received",
+        "browser.next_turn_capture_activated",
+        "browser.successor_capture_requested",
+        "browser.successor_capture_ready",
+        "browser.downlink_attach_started",
+        "browser.downlink_attached",
+        "browser.playout_underrun",
+        "browser.playout_rebuffer",
+    }
+    response_required_points = browser_response_required_points | {
+        "agent.agent_started",
+        "agent.agent_first_delta",
+        "agent.tool_execution_started",
+        "agent.tool_execution_completed",
+        "agent.agent_final",
+        "agent.presentation_produced",
+        "agent.presentation_dispatched",
+    }
+    task_required_points = browser_response_required_points | {
+        "agent.task_command_accepted",
+        "agent.presentation_produced",
+        "agent.presentation_dispatched",
+    }
+    for batch in batches:
+        retained: dict[str, object] = {}
+        ordinary = tuple(
+            mark for mark in batch.marks if mark.point != "probe.capacity"
+        )
+        if not ordinary:
+            return False
+        for mark in ordinary:
+            if any(
+                getattr(mark, field) is None
+                for field in required_by_phase[batch.phase]
+            ):
+                return False
+            if mark.point in response_required_points and (
+                mark.response_id is None or mark.response_generation is None
+            ):
+                return False
+            if (
+                batch.profile_id in {"task_create", "task_status", "task_cancel"}
+                and mark.point in task_required_points
+                and mark.task_id is None
+            ):
+                return False
+            for field in identity_fields:
+                value = getattr(mark, field)
+                prior = retained.get(field)
+                if prior is not None and value != prior:
+                    return False
+                if value is not None:
+                    retained[field] = value
+    return True
 
 
 def _experiment_segments(run: LatencyRunConfig) -> tuple[SegmentDefinition, ...]:
@@ -280,10 +399,15 @@ def _nearest_rank(samples: Sequence[float], percentile: int) -> float | None:
     return ordered[index]
 
 
-def _summary(definition: SegmentDefinition, groups: Iterable[tuple[tuple[LatencyBatch, ...], tuple[LatencyMark, ...]]]) -> SegmentSummary:
+def _summary(
+    definition: SegmentDefinition,
+    groups: Iterable[
+        tuple[tuple[LatencyBatch, ...], tuple[LatencyMark, ...], bool]
+    ],
+) -> SegmentSummary:
     attempts = successful = unknown = failed = cancelled = fallback = underrun = rebuffer = 0
     samples: list[float] = []
-    for batches, marks in groups:
+    for batches, marks, identity_compatible in groups:
         attempts += 1
         points = [mark for mark in marks if mark.component == definition.component]
         failed_here = any(batch.terminal_outcome == "failed" or mark.outcome == "failed" for batch in batches for mark in batch.marks)
@@ -300,7 +424,15 @@ def _summary(definition: SegmentDefinition, groups: Iterable[tuple[tuple[Latency
             batch.terminal_outcome == "unknown" or mark.outcome == "unknown"
             for batch in batches for mark in batch.marks
         )
-        if failed_here or cancelled_here or fallback_here or unknown_here or len(starts) != 1 or len(ends) != 1:
+        if (
+            not identity_compatible
+            or failed_here
+            or cancelled_here
+            or fallback_here
+            or unknown_here
+            or len(starts) != 1
+            or len(ends) != 1
+        ):
             unknown += 1
             continue
         start, end = starts[0], ends[0]
@@ -317,7 +449,10 @@ def _summary(definition: SegmentDefinition, groups: Iterable[tuple[tuple[Latency
 
 
 def _validated_batches(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -> tuple[LatencyBatch, ...]:
-    seen: dict[str, bytes] = {}
+    seen: dict[tuple[str, str], bytes] = {}
+    seen_slots: dict[
+        tuple[str, str, str, str, int], tuple[tuple[str, str], bytes]
+    ] = {}
     valid: list[LatencyBatch] = []
     for batch in batches:
         if not isinstance(batch, LatencyBatch):
@@ -327,12 +462,24 @@ def _validated_batches(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -
             encoded = batch.canonical_bytes()
         except Exception:
             raise LatencyProbeViolation("INVALID_BATCH") from None
-        previous = seen.get(batch.batch_id)
+        receipt_key = (batch.component, batch.batch_id)
+        previous = seen.get(receipt_key)
         if previous is not None and previous != encoded:
             raise LatencyProbeViolation("BATCH_CONFLICT")
         if previous is not None:
             continue
-        seen[batch.batch_id] = encoded
+        slot = (
+            batch.component,
+            batch.phase,
+            batch.profile_id,
+            batch.input_case_id,
+            batch.round_index,
+        )
+        previous_slot = seen_slots.get(slot)
+        if previous_slot is not None and previous_slot != (receipt_key, encoded):
+            raise LatencyProbeViolation("BATCH_CONFLICT")
+        seen[receipt_key] = encoded
+        seen_slots[slot] = (receipt_key, encoded)
         valid.append(batch)
     return tuple(valid)
 
@@ -349,10 +496,23 @@ def reduce_latency_run(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -
         grouped[(batch.profile_id, batch.input_case_id, batch.round_index)].append(batch)
     profiles: list[ProfileLatencyReport] = []
     for profile_id in run.profile_ids:
-        profile_groups = tuple(
-            (tuple(items), tuple(mark for batch in items for mark in batch.marks))
-            for (current_profile, _, _), items in sorted(grouped.items()) if current_profile == profile_id
-        )
+        profile_groups = []
+        for round_index in range(run.intended_attempts):
+            items = tuple(
+                batch
+                for (current_profile, _, current_round), batches_for_key in sorted(
+                    grouped.items()
+                )
+                if current_profile == profile_id and current_round == round_index
+                for batch in batches_for_key
+            )
+            profile_groups.append(
+                (
+                    items,
+                    tuple(mark for batch in items for mark in batch.marks),
+                    _round_identity_compatible(items),
+                )
+            )
         summaries = tuple(
             _summary(definition, profile_groups)
             for definition in _segment_definitions(run) if profile_id in definition.applicable_profiles
@@ -405,13 +565,15 @@ def write_latency_report(report: LatencyRunReport, output_dir: Path) -> None:
         writer.writerows(rows)
     chunks = ["# Live Voice latency report", ""]
     for profile in report.profiles:
-        chunks.extend([f"## {profile.profile_id}", "", "| Segment | Samples | p50 ms | p95 ms | Unknown |", "|---|---:|---:|---:|---:|"])
+        chunks.extend([f"## {profile.profile_id}", "", "| Segment | Measurement | Samples | p50 ms | p95 ms | Unknown |", "|---|---|---:|---:|---:|---:|"])
         for summary in profile.segments:
-            chunks.append(f"| {summary.segment.segment_id} | {summary.successful_samples} | {summary.p50_ms if summary.p50_ms is not None else 'unknown'} | {summary.p95_ms if summary.p95_ms is not None else 'unknown'} | {summary.unknown} |")
+            chunks.append(f"| {summary.segment.segment_id} | {summary.segment.measurement_kind} | {summary.successful_samples} | {summary.p50_ms if summary.p50_ms is not None else 'unknown'} | {summary.p95_ms if summary.p95_ms is not None else 'unknown'} | {summary.unknown} |")
         chunks.extend(["", "### Waterfall", ""])
         for summary in profile.segments:
             value = "unknown" if summary.p50_ms is None else f"{summary.p50_ms:.3f} ms"
-            chunks.append(f"{summary.segment.segment_id}: {value}")
+            chunks.append(
+                f"{summary.segment.segment_id} [{summary.segment.measurement_kind}]: {value}"
+            )
         chunks.append("")
     (output / "report.md").write_text("\n".join(chunks), encoding="utf-8")
 
@@ -545,7 +707,7 @@ def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunRep
 _REPORT_KEYS: Final = frozenset({"schema_version", "run", "profiles"})
 _PROFILE_REPORT_KEYS: Final = frozenset({"profile_id", "segments"})
 _SEGMENT_REPORT_KEYS: Final = frozenset({
-    "segment_id", "start_point", "end_point", "component", "phase_tags",
+    "segment_id", "start_point", "end_point", "component", "measurement_kind", "phase_tags",
     "primary_capability", "applicable_profiles", "attempts", "successful_samples",
     "unknown", "failed", "cancelled", "fallback", "underrun", "rebuffer",
     "minimum_ms", "p50_ms", "p95_ms", "maximum_ms",
@@ -578,11 +740,16 @@ def _report_number(value: object) -> float:
     return number
 
 
-def _parse_summary(value: object, definition: SegmentDefinition) -> SegmentSummary:
+def _parse_summary(
+    value: object,
+    definition: SegmentDefinition,
+    intended_attempts: int,
+) -> SegmentSummary:
     raw = _exact_mapping(value, _SEGMENT_REPORT_KEYS)
     expected = {
         "segment_id": definition.segment_id, "start_point": definition.start_point,
         "end_point": definition.end_point, "component": definition.component,
+        "measurement_kind": definition.measurement_kind,
         "phase_tags": list(definition.phase_tags), "primary_capability": definition.primary_capability,
         "applicable_profiles": list(definition.applicable_profiles),
     }
@@ -590,7 +757,11 @@ def _parse_summary(value: object, definition: SegmentDefinition) -> SegmentSumma
         raise ValueError
     counts = tuple(_report_count(raw[field]) for field in _SUMMARY_COUNT_FIELDS)
     attempts, successful, unknown, failed, cancelled, fallback, underrun, rebuffer = counts
-    if any(value > attempts for value in counts[1:]) or successful + unknown > attempts:
+    if (
+        attempts != intended_attempts
+        or any(value > attempts for value in counts[1:])
+        or successful + unknown != attempts
+    ):
         raise ValueError
     values = tuple(raw[field] for field in _SUMMARY_VALUE_FIELDS)
     if successful == 0:
@@ -633,7 +804,14 @@ def _load_report(path: Path) -> LatencyRunReport:
             expected_segments = expected_by_profile[profile_id]
             if not isinstance(segments_raw, list) or len(segments_raw) != len(expected_segments):
                 raise ValueError
-            summaries = tuple(_parse_summary(item, definition) for item, definition in zip(segments_raw, expected_segments, strict=True))
+            summaries = tuple(
+                _parse_summary(item, definition, run.intended_attempts)
+                for item, definition in zip(
+                    segments_raw,
+                    expected_segments,
+                    strict=True,
+                )
+            )
             profiles.append(ProfileLatencyReport(profile_id, summaries))
         if tuple(item.profile_id for item in profiles) != run.profile_ids:
             raise ValueError

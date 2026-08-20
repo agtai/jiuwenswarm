@@ -1,7 +1,7 @@
 # Live Voice minimal latency probe specification
 
-> **Status:** APPROVED DESIGN — implementation and current-source measurement
-> have not started.
+> **Status:** IMPLEMENTED CANDIDATE — final independent Tier-3 review and
+> current-source warm/cold measurement remain pending.
 >
 > **Date:** 2026-08-19
 >
@@ -80,7 +80,9 @@ Task profiles stop at the foreground response, playout receipt, and next-turn
 transition. Background attempt execution, result application, Task terminal
 state, and later terminal notification are outside v0 latency totals.
 
-Every profile uses a tracked public `input_case_id`. Runtime transcript,
+Every profile uses exactly one tracked public `input_case_id`. The ordered
+`input_case_ids` manifest list maps one-to-one to the fixed ordered
+`profile_ids` list; a different pairing is incompatible evidence. Runtime transcript,
 prompt, response, Tool content, Task description, and Task result content are
 forbidden from probe records.
 
@@ -131,6 +133,17 @@ showing the other outcome counts beside them.
 One experiment run has one immutable `run.json` and a random non-secret
 `run_id`. Each attempted profile round has a zero-based `round_index` within
 that profile.
+
+Browser capture preparation is provisional: it may carry the next candidate
+context to Gateway, but it does not advance the durable `round_index` or create
+an attempted round. The Browser admits that candidate only at the first exact
+server `speech_started`, accepted server EOT, or explicit stop-and-recognize
+boundary. Closing/reloading an unused prepared successor abandons it without a
+Browser batch; Gateway likewise abandons a pre-speech provisional recognition
+operation. Once admitted, every completed, failed, cancelled, fallback,
+underrun, rebuffer, or missing observation retains its index and denominator
+position. This prevents capture/playout overlap from manufacturing a phantom
+attempt between real spoken inputs.
 
 Marks retain the applicable existing identities:
 
@@ -296,8 +309,11 @@ with conflicting time or binding makes that segment unknown.
 buckets. Browser segments and totals are alternative resolutions; reports do
 not add `response_total` to its child segments.
 
-Segments ending at B7 are estimated and retain B7's uncertainty. Other valid
-same-Browser-clock segments are exact observations. In particular,
+Segments ending at B7 are estimated. B7's numeric `uncertainty_ms` remains in
+the raw Browser JSONL evidence; the minimal aggregate report does not derive a
+second uncertainty distribution, so it labels these rows with
+`measurement_kind=estimate` in JSON/CSV/Markdown. Other valid
+same-Browser-clock segments are labelled `measurement_kind=exact`. In particular,
 `response_total` is an operational estimate while `round_total` is an exact
 Browser-clock lifecycle duration; neither is physical first-audible truth.
 
@@ -354,7 +370,13 @@ gateway.stt_session_ready
 gateway.vad_speech_stopped
 gateway.eot_control_sent
 gateway.stt_final_available
+gateway.stt_fallback_selected
 ```
+
+`gateway.stt_fallback_selected` is a content-free outcome boundary, not a
+numeric segment endpoint. A real streaming-recognition degradation records it
+with `outcome=fallback` and `reason_code=FALLBACK`; it must remain in the run
+denominator and never be reported as an ordinary success.
 
 Fixed local segments:
 
@@ -461,8 +483,8 @@ When enabled:
 1. each producer records marks in a bounded in-memory list;
 2. Browser emits one batch only after B10 or a stable failed/cancelled terminal;
 3. Gateway writes the accepted Browser batch as one JSONL line;
-4. Gateway writes each local STT/TTS batch as one JSONL line;
-5. Agent Server writes its local foreground batch as one JSONL line; and
+4. Gateway queues each local STT/TTS batch for one JSONL write;
+5. Agent Server queues its local foreground batch for one JSONL write; and
 6. the offline reducer reads all files after the run.
 
 The private output layout is:
@@ -477,8 +499,13 @@ The private output layout is:
 
 `<output-root>` is a private runtime setting and never appears in tracked
 evidence. Gateway and Agent Server write separate files; no two processes share
-an append handle. Full JSON serialization, file I/O, reporting, and percentile
-calculation are outside the measured event path.
+an append handle. Each Python producer uses one bounded 256-batch diagnostic
+queue; `finish` submits without waiting for serialization or disk, and queue
+exhaustion only makes that diagnostic shard absent/unknown. Gateway and Agent
+Server shutdown each perform a bounded drain before report generation. The
+Browser RPC awaits its durable receipt, but executes the write off the shared
+Gateway event loop. Full JSON serialization, file I/O, reporting, and
+percentile calculation are outside the measured event path.
 
 The Browser uses one development-only Gateway batch method. The handler accepts
 only a bounded closed batch for the dispatcher-owned session and declared run.
@@ -561,6 +588,7 @@ The reducer performs a fixed sequence:
 For every profile and segment, report:
 
 ```text
+measurement_kind: exact | estimate
 attempts
 successful_samples
 unknown
@@ -584,9 +612,11 @@ The required outputs are:
 - `report.csv` for stage/time-series analysis; and
 - `report.md` for one table and simple waterfall per profile.
 
-The report includes `component`, `phase_tags`, and `primary_capability` for each
-segment. These dimensions support filtering and graphs; they are not additional
-latency totals.
+The report includes `component`, `measurement_kind`, `phase_tags`, and
+`primary_capability` for each segment. These dimensions support filtering and
+graphs; they are not additional latency totals. `measurement_kind=estimate`
+prevents B7-derived operational estimates from being presented as exact; the
+per-sample uncertainty remains available in the raw JSONL evidence.
 
 ## 13. Baseline/candidate comparison
 

@@ -630,6 +630,26 @@ async def test_web_channel_stop_closes_streaming_and_batch_speech_owners() -> No
 
 
 @pytest.mark.asyncio
+async def test_web_channel_stop_drains_latency_export_runtime() -> None:
+    class Runtime:
+        def __init__(self) -> None:
+            self.close_calls: list[float] = []
+
+        def close(self, timeout: float) -> bool:
+            self.close_calls.append(timeout)
+            return True
+
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    runtime = Runtime()
+    channel.live_voice_latency_probe_runtime = runtime
+
+    await channel.stop()
+
+    assert runtime.close_calls == [5.0]
+    assert channel.live_voice_latency_probe_runtime is None
+
+
+@pytest.mark.asyncio
 async def test_web_channel_stop_drops_injected_speech_claim_without_closing_service() -> None:
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
     injected = _CloseOwner()

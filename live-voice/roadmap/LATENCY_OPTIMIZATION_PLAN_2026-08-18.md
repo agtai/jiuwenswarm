@@ -108,19 +108,25 @@ substitution receives credit.
 
 ### 3.2 Implemented minimal v0 boundary
 
-The first implementation batch adds one correlated timeline across browser,
-Gateway and Agent runtime. Every observation must carry the applicable
-`correlation_id`, interaction, activation generation and response generation;
-Task observations also carry Task/Attempt identity. Required timestamps are:
+The minimal implementation candidate writes one Browser additive timeline and
+separate Gateway/Agent same-clock drill-down batches. The offline reducer joins
+only compatible run/profile/case/round shards and rejects conflicting
+correlation, interaction, activation, response or Task identity; it never
+subtracts clocks across processes. Implemented boundaries include:
 
 - Provider speech-stopped/EOT; browser EOT receipt; capture stopped; last frame
   sent and ACKed; uplink closed; STT final available; unified submit accepted;
-- Agent request start, first delta, first stable speakable sentence and
-  `chat.final`;
+- authoritative commit admission, semantic route resolution, Agent start,
+  first delta, Tool execution, `chat.final`, Task command acceptance and
+  presentation production/dispatch;
 - TTS request, Provider first audio, downlink ticket, successor capture ready,
   browser first frame, WebAudio first frame scheduled and actually started;
-- playout underrun/rebuffer, sentence gap, barge-in, fence/cancel completion,
-  fallback and discarded prefetch work.
+- playout underrun/rebuffer and explicit streaming-STT fallback.
+
+Sentence-level speakable output, prefetch waste, barge-in timing and a dynamic
+cross-process critical path are outside minimal v0. They require a separately
+declared experiment or later instrumentation packet rather than inference from
+missing marks.
 
 Raw audio, transcript content, credentials and private machine configuration
 must not enter metrics. Existing `live_voice.segment_latency_ms` can carry

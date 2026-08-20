@@ -17,9 +17,11 @@ import hashlib
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Lock
+from queue import Full, Queue
+from threading import Condition, Lock, Thread
+import time
 from typing import Final
 
 
@@ -28,9 +30,11 @@ CONTEXT_SCHEMA_VERSION: Final = "live-voice.latency-context.v0"
 MARK_SCHEMA_VERSION: Final = "live-voice.latency-probe.v0"
 BATCH_SCHEMA_VERSION: Final = "live-voice.latency-batch.v0"
 MAX_STRING_UTF8_BYTES: Final = 256
+MAX_JSON_SAFE_INTEGER: Final = (1 << 53) - 1
 MAX_MARKS_PER_BATCH: Final = 64
 MAX_ORDINARY_MARKS: Final = MAX_MARKS_PER_BATCH - 1
 MAX_WRITER_RECEIPTS: Final = 256
+MAX_PENDING_EXPORT_BATCHES: Final = 256
 MAX_RUN_COLLECTION_ITEMS: Final = 64
 MAX_INTENDED_ATTEMPTS: Final = 256
 LATENCY_PROBE_ENABLED_ENV: Final = "JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_ENABLED"
@@ -118,6 +122,7 @@ CORE_POINTS_BY_COMPONENT: Final[Mapping[str, tuple[str, ...]]] = {
         "gateway.vad_speech_stopped",
         "gateway.eot_control_sent",
         "gateway.stt_final_available",
+        "gateway.stt_fallback_selected",
         "gateway.tts_request_received",
         "gateway.tts_provider_transport_open",
         "gateway.tts_provider_first_audio",
@@ -245,7 +250,12 @@ def _bounded_descriptor(value: object) -> str:
 
 
 def _non_negative_integer(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAX_JSON_SAFE_INTEGER
+    ):
         raise LatencyProbeViolation("INVALID_INTEGER")
     return value
 
@@ -395,6 +405,12 @@ class LatencyRunConfig:
             for declared in self.experiment.declared_experiment_points
         )
 
+    def input_case_for_profile(self, profile_id: str) -> str | None:
+        try:
+            return self.input_case_ids[self.profile_ids.index(profile_id)]
+        except (ValueError, IndexError):
+            return None
+
 
 @dataclass(frozen=True, slots=True)
 class LatencyProbeContext:
@@ -488,7 +504,12 @@ class LatencyMark:
             raise LatencyProbeViolation("INCOMPATIBLE_RUN")
         profile_id = _bounded_string(raw["profile_id"])
         input_case_id = _bounded_string(raw["input_case_id"])
-        if profile_id not in run.profile_ids or input_case_id not in run.input_case_ids:
+        round_index = _non_negative_integer(raw["round_index"])
+        if (
+            profile_id not in run.profile_ids
+            or input_case_id != run.input_case_for_profile(profile_id)
+            or round_index >= run.intended_attempts
+        ):
             raise LatencyProbeViolation("INCOMPATIBLE_RUN")
         if raw["outcome"] not in MARK_OUTCOMES:
             raise LatencyProbeViolation("INVALID_OUTCOME")
@@ -507,7 +528,7 @@ class LatencyMark:
             run_id=run.run_id,
             profile_id=profile_id,
             input_case_id=input_case_id,
-            round_index=_non_negative_integer(raw["round_index"]),
+            round_index=round_index,
             source_instance_id=_bounded_string(raw["source_instance_id"]),
             mark_index=_non_negative_integer(raw["mark_index"]),
             component=component,
@@ -593,7 +614,11 @@ class LatencyBatch:
         input_case_id = _bounded_string(raw["input_case_id"])
         round_index = _non_negative_integer(raw["round_index"])
         source_instance_id = _bounded_string(raw["source_instance_id"])
-        if profile_id not in run.profile_ids or input_case_id not in run.input_case_ids:
+        if (
+            profile_id not in run.profile_ids
+            or input_case_id != run.input_case_for_profile(profile_id)
+            or round_index >= run.intended_attempts
+        ):
             raise LatencyProbeViolation("INCOMPATIBLE_RUN")
         points: set[str] = set()
         capacity_count = 0
@@ -752,6 +777,9 @@ def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
         "playout_configuration",
     )
     parsed = {field: _bounded_descriptor(value[field]) for field in fields}
+    input_case_ids = _unique_bounded_strings(value["input_case_ids"])
+    if len(input_case_ids) != len(profile_ids):
+        raise LatencyProbeViolation("INVALID_ATTEMPT_POLICY")
     return LatencyRunConfig(
         schema_version=RUN_SCHEMA_VERSION,
         run_id=run_id,
@@ -759,7 +787,7 @@ def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
         source_state=value["source_state"],
         allowlisted_feature_flags=tuple(sorted(parsed_flags)),
         cold_or_warm=value["cold_or_warm"],
-        input_case_ids=_unique_bounded_strings(value["input_case_ids"]),
+        input_case_ids=input_case_ids,
         profile_ids=profile_ids,
         intended_attempts=intended_attempts,
         required_successes=required_successes,
@@ -812,7 +840,8 @@ def try_parse_latency_probe_context(
         if (
             run_id != run.run_id
             or profile_id not in run.profile_ids
-            or input_case_id not in run.input_case_ids
+            or input_case_id != run.input_case_for_profile(profile_id)
+            or round_index >= run.intended_attempts
         ):
             return None
         return LatencyProbeContext(
@@ -988,7 +1017,7 @@ class LatencyProbeRecorder:
 
 
 class LatencyProbeBatchWriter:
-    """Append complete canonical batches with bounded process-local deduplication."""
+    """Append canonical batches with bounded cache and durable deduplication."""
 
     def __init__(
         self,
@@ -1016,8 +1045,75 @@ class LatencyProbeBatchWriter:
         self._component = component
         self._allowed_components = frozenset(allowed)
         self._run_dir = Path(output_root) / self._run_id
-        self._receipts: OrderedDict[str, str] = OrderedDict()
+        self._receipts: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._slot_receipts: OrderedDict[
+            tuple[str, str, str, int], tuple[str, str]
+        ] = OrderedDict()
         self._run_dir.mkdir(parents=True, exist_ok=True)
+
+    def _remember_receipt(
+        self,
+        component: str,
+        batch_id: str,
+        digest: str,
+    ) -> None:
+        key = (component, batch_id)
+        self._receipts[key] = digest
+        self._receipts.move_to_end(key)
+        while len(self._receipts) > MAX_WRITER_RECEIPTS:
+            self._receipts.popitem(last=False)
+
+    @staticmethod
+    def _semantic_slot(batch: LatencyBatch) -> tuple[str, str, str, int]:
+        return (
+            batch.phase,
+            batch.profile_id,
+            batch.input_case_id,
+            batch.round_index,
+        )
+
+    def _remember_slot_receipt(
+        self,
+        slot: tuple[str, str, str, int],
+        batch_id: str,
+        digest: str,
+    ) -> None:
+        self._slot_receipts[slot] = (batch_id, digest)
+        self._slot_receipts.move_to_end(slot)
+        while len(self._slot_receipts) > MAX_WRITER_RECEIPTS:
+            self._slot_receipts.popitem(last=False)
+
+    def _read_durable_receipts(
+        self,
+        path: Path,
+        batch: LatencyBatch,
+    ) -> tuple[str | None, tuple[str, str] | None]:
+        if not path.exists():
+            return None, None
+        found_batch: str | None = None
+        found_slot: tuple[str, str] | None = None
+        requested_slot = self._semantic_slot(batch)
+        with path.open("rb") as handle:
+            for line in handle:
+                if not line.endswith(b"\n"):
+                    raise LatencyProbeViolation("INVALID_BATCH")
+                parsed = LatencyBatch.from_dict(
+                    json.loads(line),
+                    self._run_config,
+                )
+                if parsed.component not in self._allowed_components:
+                    raise LatencyProbeViolation("INCOMPATIBLE_RUN")
+                digest = hashlib.sha256(parsed.canonical_bytes()).hexdigest()
+                if parsed.batch_id == batch.batch_id:
+                    if found_batch is not None and found_batch != digest:
+                        raise LatencyProbeViolation("BATCH_CONFLICT")
+                    found_batch = digest
+                if self._semantic_slot(parsed) == requested_slot:
+                    receipt = (parsed.batch_id, digest)
+                    if found_slot is not None and found_slot != receipt:
+                        raise LatencyProbeViolation("BATCH_CONFLICT")
+                    found_slot = receipt
+        return found_batch, found_slot
 
     def write(self, batch: LatencyBatch) -> LatencyProbeWriteResult:
         if not isinstance(batch, LatencyBatch):
@@ -1041,16 +1137,46 @@ class LatencyProbeBatchWriter:
         except Exception:
             return LatencyProbeWriteResult("failed", validated.batch_id, "EXPORT_FAILED")
         with _WRITE_LOCK:
-            existing = self._receipts.get(validated.batch_id)
-            if existing is not None:
-                if existing == digest:
-                    return LatencyProbeWriteResult("idempotent", validated.batch_id, None)
+            receipt_key = (validated.component, validated.batch_id)
+            existing = self._receipts.get(receipt_key)
+            slot = self._semantic_slot(validated)
+            existing_slot = self._slot_receipts.get(slot)
+            path = self._run_dir / COMPONENT_OUTPUT_FILES[validated.component]
+            if existing is None or existing_slot is None:
+                try:
+                    durable_batch, durable_slot = self._read_durable_receipts(
+                        path,
+                        validated,
+                    )
+                except Exception:
+                    return LatencyProbeWriteResult(
+                        "failed", validated.batch_id, "EXPORT_FAILED"
+                    )
+                if existing is None:
+                    existing = durable_batch
+                if existing_slot is None:
+                    existing_slot = durable_slot
+            if existing is not None or existing_slot is not None:
+                if existing is not None:
+                    self._remember_receipt(
+                        validated.component,
+                        validated.batch_id,
+                        existing,
+                    )
+                if existing_slot is not None:
+                    self._remember_slot_receipt(slot, *existing_slot)
+                if (
+                    existing == digest
+                    and existing_slot == (validated.batch_id, digest)
+                ):
+                    return LatencyProbeWriteResult(
+                        "idempotent", validated.batch_id, None
+                    )
                 return LatencyProbeWriteResult(
                     "rejected", validated.batch_id, "BATCH_CONFLICT"
                 )
             offset: int | None = None
             created_output = False
-            path = self._run_dir / COMPONENT_OUTPUT_FILES[validated.component]
             try:
                 created_output = not path.exists()
                 with path.open("ab") as handle:
@@ -1076,11 +1202,108 @@ class LatencyProbeBatchWriter:
                     except Exception:
                         pass
                 return LatencyProbeWriteResult("failed", validated.batch_id, "EXPORT_FAILED")
-            self._receipts[validated.batch_id] = digest
-            self._receipts.move_to_end(validated.batch_id)
-            while len(self._receipts) > MAX_WRITER_RECEIPTS:
-                self._receipts.popitem(last=False)
+            self._remember_receipt(
+                validated.component,
+                validated.batch_id,
+                digest,
+            )
+            self._remember_slot_receipt(slot, validated.batch_id, digest)
         return LatencyProbeWriteResult("written", validated.batch_id, None)
+
+
+class LatencyProbeBatchExporter:
+    """Move serialization and durable writes off measured product paths."""
+
+    def __init__(self, writer: object) -> None:
+        self._writer = writer
+        self._queue: Queue[LatencyBatch | object] = Queue(
+            maxsize=MAX_PENDING_EXPORT_BATCHES
+        )
+        self._stop = object()
+        self._condition = Condition()
+        self._pending = 0
+        self._closed = False
+        self._thread: Thread | None = None
+
+    def submit(self, batch: LatencyBatch) -> bool:
+        if (
+            not isinstance(batch, LatencyBatch)
+            or not callable(getattr(self._writer, "write", None))
+        ):
+            return False
+        with self._condition:
+            if self._closed:
+                return False
+            try:
+                self._queue.put_nowait(batch)
+            except Full:
+                return False
+            self._pending += 1
+            if self._thread is None:
+                thread = Thread(
+                    target=self._run,
+                    name="live-voice-latency-export",
+                    daemon=True,
+                )
+                self._thread = thread
+                try:
+                    thread.start()
+                except BaseException:
+                    self._thread = None
+                    self._queue.get_nowait()
+                    self._queue.task_done()
+                    self._pending -= 1
+                    self._condition.notify_all()
+                    return False
+            return True
+
+    def _run(self) -> None:
+        while True:
+            batch = self._queue.get()
+            if batch is self._stop:
+                return
+            try:
+                self._writer.write(batch)
+            except BaseException:
+                # This diagnostic worker owns no product or process authority.
+                pass
+            finally:
+                with self._condition:
+                    self._pending -= 1
+                    self._condition.notify_all()
+
+    def drain(self, timeout: float) -> bool:
+        try:
+            deadline = time.monotonic() + _finite_non_negative(timeout)
+        except Exception:
+            return False
+        with self._condition:
+            while self._pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
+    def close(self, timeout: float) -> bool:
+        try:
+            deadline = time.monotonic() + _finite_non_negative(timeout)
+        except Exception:
+            return False
+        with self._condition:
+            self._closed = True
+        if not self.drain(max(0.0, deadline - time.monotonic())):
+            return False
+        with self._condition:
+            thread = self._thread
+            if thread is None:
+                return True
+            try:
+                self._queue.put_nowait(self._stop)
+            except Full:
+                return False
+        thread.join(max(0.0, deadline - time.monotonic()))
+        return not thread.is_alive()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,6 +1311,27 @@ class LatencyProbeRuntime:
     run_config: LatencyRunConfig
     component: str
     writer: LatencyProbeBatchWriter
+    source_instance_id: str = field(
+        default_factory=lambda: secrets.token_urlsafe(18)
+    )
+    _exporter: LatencyProbeBatchExporter = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "source_instance_id",
+            _bounded_string(self.source_instance_id),
+        )
+        object.__setattr__(self, "_exporter", LatencyProbeBatchExporter(self.writer))
+
+    def submit(self, batch: LatencyBatch) -> bool:
+        return self._exporter.submit(batch)
+
+    def drain(self, timeout: float) -> bool:
+        return self._exporter.drain(timeout)
+
+    def close(self, timeout: float) -> bool:
+        return self._exporter.close(timeout)
 
     def create_recorder(
         self,
@@ -1096,7 +1340,6 @@ class LatencyProbeRuntime:
         phase: str,
         clock_domain_id: str,
         monotonic_ms: Callable[[], float],
-        source_instance_id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
         batch_id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
     ) -> LatencyProbeRecorder | None:
         try:
@@ -1115,7 +1358,7 @@ class LatencyProbeRuntime:
                 component=self.component,
                 phase=phase,
                 run_config=run_config,
-                source_instance_id_factory=source_instance_id_factory,
+                source_instance_id_factory=lambda: self.source_instance_id,
                 batch_id_factory=batch_id_factory,
                 clock_domain_id=clock_domain_id,
                 monotonic_ms=monotonic_ms,
@@ -1142,6 +1385,6 @@ def create_latency_probe_runtime_from_environment(
             component,
             mode="gateway_with_browser" if component == "gateway" else "single_component",
         )
+        return LatencyProbeRuntime(run_config, component, writer)
     except Exception:
         return None
-    return LatencyProbeRuntime(run_config, component, writer)

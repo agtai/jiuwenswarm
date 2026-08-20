@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Plan status:** READY FOR REVIEW — no implementation or measurement credit.
+> **Plan status:** CODE/REVIEW READY — the final independent Tier-3 review
+> closed on 2026-08-20 with no open Critical, Important, or Minor finding in
+> probe scope. Real warm/cold measurement remains pending; no baseline credit.
 >
 > **Planning code baseline:** `62605dd103dafa5a988a9f63f42b4cad45a2d902`.
 > Revalidate Git and current owners before execution; Git remains the code fact.
@@ -15,11 +17,25 @@
 
 **Spec:** [`live-voice/roadmap/LATENCY_PROBE_SPEC_2026-08-19.md`](LATENCY_PROBE_SPEC_2026-08-19.md)
 
+## Final Tier-3 review record
+
+The independent cumulative re-review covered the Python/TypeScript contracts,
+Browser provisional admission, Product N/N+1 ownership, Gateway pre-speech
+abandonment, durable writer/export lifecycle, reducer/report truth, privacy,
+feature-off behavior, and the executable five-profile reload cycle. Its final
+verdict was `READY` with no open finding. Fresh review evidence was 25/25
+Browser latency-probe tests, 407/407 affected Integrated Web tests, and 6/6
+focused Gateway admission/abandon/completed/fallback tests. This grants only
+code/review readiness; the runbook's real browser/device/Provider warm and cold
+runs remain the sole source of physical baseline credit.
+
 ## Global Constraints
 
 - This packet implements the minimal spec only. Do not import or reproduce the `FULL_` graph, catalog, span, dynamic critical-path, or hot-path designs.
 - Before Task 1, re-run `git status --short --branch`, `git rev-parse HEAD`, and the selected README/STATUS route. Record any owner drift against this planning baseline before editing code.
-- Keep the probe default-off. Feature-off creates no recorder, callback, batch request, output directory, or output file.
+- Keep the probe default-off. Feature-off creates no probe recorder, callback,
+  batch request, output directory, or output file. Ordinary framework/React
+  object allocation is outside this diagnostic side-effect boundary.
 - Probe failure is diagnostic-only. It must not reject, retry, acknowledge, reroute, or change Speech, Agent, Tool, Task, media, presentation, history, cancellation, or next-turn operations.
 - Use `time.monotonic_ns() / 1_000_000` in Python and `performance.now()` in the Browser. Never subtract clocks from different `clock_domain_id` values.
 - Never record audio, text, prompt, response, Tool/Task content, credentials, URLs, filesystem paths, exception text, tracebacks, or arbitrary metadata.
@@ -41,7 +57,7 @@ Browser query:       lv_latency_run, lv_latency_profile, lv_latency_case
 Browser batch RPC:   live_voice.latency_probe.batch
 ```
 
-The Browser obtains `run_id`, `profile_id`, and `input_case_id` from the three query parameters only when the frontend flag is true. It allocates `round_index` in `sessionStorage`, keyed by those three values. A page/session restart starts a new run rather than guessing the prior index. Gateway and Agent Server validate the resulting context against the immutable `run.json`.
+The Browser obtains `run_id`, `profile_id`, and `input_case_id` from the three query parameters only when the frontend flag is true. It reads the next provisional `round_index` from `sessionStorage`, keyed by those three values, and advances it only when exact speech-start/EOT/stop-and-recognize admits a real attempt. An unused successor is abandoned without a batch or index advance. Same-tab reload retains the committed counter; closing the tab or losing that storage requires a new run. Gateway and Agent Server validate the resulting context against the immutable `run.json`.
 
 The first implementation creates these modules:
 
@@ -105,7 +121,7 @@ Use frozen, slotted dataclasses and explicit exact-key validators. Keep the five
 
 - [ ] **Step 4: Add failing recorder/writer/factory tests**
 
-Cover monotonic mark indices, duplicate point rejection, capacity behavior, finish-once behavior, canonical batch bytes, identical batch retry, conflicting `batch_id`, one-line JSONL append, injected write failure, and feature-off zero allocation/files. Patch all three environment variables in the tests; never use the developer's real environment.
+Cover monotonic mark indices, duplicate point rejection, capacity behavior, finish-once behavior, canonical batch bytes, identical batch retry, conflicting `batch_id`, one-line JSONL append, injected write failure, and feature-off zero probe-runtime/files. Patch all three environment variables in the tests; never use the developer's real environment.
 
 ```python
 recorder = LatencyProbeRecorder(
@@ -123,7 +139,16 @@ assert [mark.mark_index for mark in batch.marks] == [0]
 
 - [ ] **Step 5: Implement recorder, batch writer, and environment factory**
 
-The runtime loads and validates `run.json` before creating writers. The writer uses a process-local lock and appends one canonical UTF-8 JSON object plus `\n` per completed batch. It retains `batch_id -> sha256(canonical_bytes)` only up to a bounded limit, treats an identical retry as idempotent, and returns a closed diagnostic result instead of raising into product code. No directory is created on the feature-off path.
+The runtime loads and validates `run.json` before creating writers. The writer
+uses a process-local lock and appends one canonical UTF-8 JSON object plus `\n`
+per completed batch. It retains bounded in-memory receipts plus durable-file
+receipt reconstruction, treats an identical retry as idempotent, and returns a
+closed diagnostic result instead of raising into product code. Gateway STT/TTS
+and Agent foreground finish through one bounded producer-local export queue so
+serialization and file I/O cannot delay product terminals; Gateway Browser-RPC
+writes run off the shared event loop while preserving the exact receipt. Both
+backend lifecycle owners perform a bounded drain on normal shutdown. No
+directory, queue, or worker is created on the feature-off path.
 
 - [ ] **Step 6: Run focused tests and commit**
 
@@ -323,7 +348,7 @@ git commit -m "feat(live-voice): add browser latency recorder"
 
 - [ ] **Step 1: Write failing round-lifecycle tests**
 
-Test a deterministic no-Tool round from initial capture through B0–B10. A capture owns round N. When EOT is accepted, round N becomes the response round. Concurrent capture preparation allocates round N+1 for the next input while recording `successor_capture_requested/ready` on N. The TTS request retains N; the successor media activation retains N+1.
+Test a deterministic no-Tool round from initial capture through B0–B10. A capture provisionally owns round N and admits it only at speech-start/EOT/explicit recognition. When EOT is accepted, round N becomes the response round. Concurrent capture preparation carries provisional context N+1 for the next input while recording `successor_capture_requested/ready` on N; it advances the durable counter only if that successor receives real speech/EOT. The TTS request retains N; the successor media activation retains provisional N+1. Reload/close before successor speech abandons N+1 without a batch, so a five-profile same-tab cycle still yields exactly 30 contiguous admitted indices per profile.
 
 Define B10 precisely as the first Browser instant when both conditions are true: the current response's B9 ACK has returned and its prepared successor capture is ready. This preserves the current capture/playout overlap while making `round_total` a terminal lifecycle duration. Export round N once at B10; export a failed/cancelled round at its stable terminal.
 
@@ -492,7 +517,8 @@ Expected: mark/context assertions fail.
 
 Add keyword-only optional sink parameters; do not put probe fields into `TurnCommit`, `PresentationUnit`, Task records, journal fingerprints, history, or retained business results. Mark:
 
-- commit accepted immediately after durable unified journal admission;
+- commit accepted immediately after the closed `TurnCommit` is accepted for
+  authoritative processing and before semantic resolution or Task lookup;
 - route resolved after restoring the admitted semantic binding;
 - Agent start at committed dispatch;
 - first delta/final and first tool call/result in `_consume_agent_event`;
@@ -541,7 +567,10 @@ Expected: all commands PASS. Record exact counts and any pre-existing unrelated 
 
 - [ ] **Step 2: Perform Tier-3 independent review**
 
-Review spec coverage, type consistency between Python/TypeScript, feature-off zero allocation, negative matrices, fault injection, private sentinel surfaces, replay/idempotency, and zero forbidden effects. Fix findings and rerun affected suites before measurement.
+Review spec coverage, type consistency between Python/TypeScript, feature-off
+zero diagnostic side effects, negative matrices, fault injection, private
+sentinel surfaces, replay/idempotency, and zero forbidden effects. Fix findings
+and rerun affected suites before measurement.
 
 - [ ] **Step 3: Document the private run setup**
 
@@ -553,7 +582,7 @@ Create one warm and one cold `run.json` outside the repository. Bind each to `gi
 
 - [ ] **Step 5: Execute the real current-source baseline**
 
-Run five attempted warm rounds per profile as a smoke iteration. Resolve probe defects only; if fixed segment definitions or instrumentation change, discard those results and start a new run. Then collect at least 20 successful warm rounds and at least 20 successful cold rounds per profile, retaining every failed/fallback/cancelled/underrun/rebuffer attempt in the denominator.
+Run five attempted warm rounds per profile as a smoke iteration. Resolve probe defects only; if fixed segment definitions or instrumentation change, discard those results and start a new run. Then execute exactly the declared 30 warm and 30 cold attempts per profile, require at least 20 successes in each population, and retain every failed/fallback/cancelled/underrun/rebuffer/missing attempt in the denominator.
 
 - [ ] **Step 6: Generate and inspect reports**
 

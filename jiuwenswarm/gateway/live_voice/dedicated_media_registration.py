@@ -1475,6 +1475,10 @@ class DedicatedMediaProductRegistry:
                     else RecognitionTurnDetection.manual()
                 ),
                 latency_probe_context=record.latency_probe_context,
+                latency_activation_id=record.product_activation_id,
+                latency_activation_generation=(
+                    record.product_activation_generation
+                ),
             )
         except asyncio.CancelledError:
             self._retain_streaming_outcome(

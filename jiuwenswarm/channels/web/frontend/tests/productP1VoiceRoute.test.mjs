@@ -3628,6 +3628,7 @@ function latencyProbeHarness({ rejectExport = false } = {}) {
       const roundIndex = rounds.length;
       const marks = [];
       let finished = false;
+      let committed = false;
       const round = {
         context: Object.freeze({
           schema_version: 'live-voice.latency-context.v0',
@@ -3638,6 +3639,16 @@ function latencyProbeHarness({ rejectExport = false } = {}) {
         }),
         identity: { ...identity },
         marks,
+        commit() {
+          if (finished) return false;
+          committed = true;
+          return true;
+        },
+        abandon() {
+          if (finished || committed) return false;
+          finished = true;
+          return true;
+        },
         mark(point, patch, observation) {
           if (finished || marks.some(mark => mark.point === point)) return false;
           this.identity = { ...this.identity, ...patch };
@@ -3645,7 +3656,7 @@ function latencyProbeHarness({ rejectExport = false } = {}) {
           return true;
         },
         finish(outcome) {
-          if (finished) return null;
+          if (finished || !committed) return null;
           finished = true;
           const batch = Object.freeze({ round_index: roundIndex, terminal_outcome: outcome, marks: [...marks] });
           round.batch = batch;
@@ -4744,6 +4755,54 @@ test('uplink last-frame mark retains the accepted-send monotonic timestamp acros
   await journey.owner.close();
 });
 
+test('initial diagnostic mark rejection abandons the provisional round without an attempted batch', async () => {
+  let begins = 0;
+  let abandons = 0;
+  let finishes = 0;
+  let exports = 0;
+  const probe = {
+    beginRound() {
+      const roundIndex = begins;
+      begins += 1;
+      return {
+        context: Object.freeze({
+          schema_version: 'live-voice.latency-context.v0',
+          run_id: 'run-mark-rejected',
+          profile_id: 'dialogue_no_tool',
+          input_case_id: 'case-mark-rejected',
+          round_index: roundIndex,
+        }),
+        commit: () => {
+          throw new Error('provisional round must not commit');
+        },
+        abandon() {
+          abandons += 1;
+          return true;
+        },
+        mark: () => false,
+        finish() {
+          finishes += 1;
+          return Object.freeze({ terminal_outcome: 'unknown' });
+        },
+      };
+    },
+    async exportBatch() {
+      exports += 1;
+    },
+  };
+  const journey = await runConcurrentCaptureJourney({
+    latencyProbe: probe,
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.ok(begins >= 1);
+  assert.equal(abandons, begins);
+  assert.equal(finishes, 0);
+  assert.equal(exports, 0);
+  await journey.owner.close();
+});
+
 test('invalid accepted-send diagnostic clock terminalizes the round without changing product behavior', async () => {
   const latency = latencyProbeHarness();
   const journey = await runConcurrentCaptureJourney({
@@ -4810,8 +4869,8 @@ test('latency probe owns exact N/N+1 rounds, joins B9 with successor readiness, 
   assert.equal(journey.owner.status().status, 'capturing');
   await journey.owner.close();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(latency.exports.length, 2);
-  assert.equal(latency.exports[1].batch.terminal_outcome, 'cancelled');
+  assert.equal(latency.exports.length, 1);
+  assert.equal(latency.rounds[1].batch, undefined);
 });
 
 test('real latency recorder retains response N capture identity through overlapping N+1 B5-B10', async () => {
@@ -5001,8 +5060,9 @@ test('capture/playout failure terminalizes each active diagnostic round without 
   assert.notEqual(journey.playError, null);
   assert.equal(journey.owner.status().status, 'failed');
   assert.equal(journey.owner.status().reason, 'AUDIO_INPUT_GAP_EXCEEDED');
-  assert.equal(latency.exports.length, 2);
-  assert.deepEqual(latency.exports.map(entry => entry.batch.terminal_outcome), ['failed', 'failed']);
+  assert.equal(latency.exports.length, 1);
+  assert.deepEqual(latency.exports.map(entry => entry.batch.terminal_outcome), ['failed']);
+  assert.equal(latency.rounds[1].batch, undefined);
   await journey.owner.close().catch(() => undefined);
 });
 

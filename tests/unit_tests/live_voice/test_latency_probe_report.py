@@ -28,7 +28,12 @@ from jiuwenswarm.server.live_voice.latency_probe_report import (
 )
 
 
-def run_payload(*, cold_or_warm: str = "warm", source_state: str = "clean") -> dict[str, object]:
+def run_payload(
+    *,
+    cold_or_warm: str = "warm",
+    source_state: str = "clean",
+    intended_attempts: int = 1,
+) -> dict[str, object]:
     return {
         "schema_version": "live-voice.latency-run.v0",
         "run_id": "run-20260819-a",
@@ -46,11 +51,17 @@ def run_payload(*, cold_or_warm: str = "warm", source_state: str = "clean") -> d
         "playout_configuration": "webaudio-default",
         "allowlisted_feature_flags": {"formal_route": True},
         "cold_or_warm": cold_or_warm,
-        "input_case_ids": ["short-greeting-v1", "tool-weather-v1"],
+        "input_case_ids": [
+            "short-greeting-v1",
+            "tool-weather-v1",
+            "task-create-v1",
+            "task-status-v1",
+            "task-cancel-v1",
+        ],
         "profile_ids": [
             "dialogue_no_tool", "dialogue_with_tool", "task_create", "task_status", "task_cancel",
         ],
-        "intended_attempts": 5,
+        "intended_attempts": intended_attempts,
         "required_successes": 1,
         "experiment": None,
     }
@@ -72,13 +83,21 @@ def batch_for(
         else "task_create" if definition.segment_id in {"task_command", "task_command_to_presentation"}
         else "dialogue_no_tool"
     )
+    input_case_id = {
+        "dialogue_no_tool": "short-greeting-v1",
+        "dialogue_with_tool": "tool-weather-v1",
+        "task_create": "task-create-v1",
+        "task_status": "task-status-v1",
+        "task_cancel": "task-cancel-v1",
+    }[profile_id]
     common = dict(
         schema_version=MARK_SCHEMA_VERSION, run_id=run.run_id, profile_id=profile_id,
-        input_case_id="short-greeting-v1", round_index=round_index, source_instance_id="source-1",
+        input_case_id=input_case_id, round_index=round_index, source_instance_id="source-1",
         component=definition.component, clock_domain_id=clock, uncertainty_ms=None,
         outcome="observed", reason_code=None, correlation_id=identity, interaction_id="interaction-1",
         activation_id="activation-1", activation_generation=1, turn_id="turn-1",
-        response_id="response-1", response_generation=1, task_id=None,
+        response_id="response-1", response_generation=1,
+        task_id="task-1" if profile_id.startswith("task_") else None,
     )
     marks = tuple(
         LatencyMark(mark_index=index, point=point, monotonic_ms=timestamp, **common)
@@ -90,7 +109,7 @@ def batch_for(
     }[definition.component]
     return LatencyBatch(
         schema_version=BATCH_SCHEMA_VERSION, batch_id=batch_id or f"batch-{definition.segment_id}",
-        run_id=run.run_id, profile_id=profile_id, input_case_id="short-greeting-v1",
+        run_id=run.run_id, profile_id=profile_id, input_case_id=input_case_id,
         round_index=round_index, source_instance_id="source-1", component=definition.component,
         phase=phase, terminal_outcome=terminal_outcome, marks=marks,
     )
@@ -109,20 +128,17 @@ def test_reducer_calculates_every_fixed_same_clock_segment(run_config, definitio
     assert summary.unknown == 0
 
 
-@pytest.mark.parametrize("mutation", ["missing", "duplicate", "identity", "cross_clock"])
+@pytest.mark.parametrize("mutation", ["missing", "identity", "cross_clock"])
 def test_reducer_keeps_ambiguous_pairs_unknown_never_zero(run_config, mutation) -> None:
     definition = next(item for item in FIXED_SEGMENTS if item.segment_id == "response_total")
     batch = batch_for(run_config, definition)
     if mutation == "missing":
         batch = replace(batch, marks=batch.marks[:1])
-    elif mutation == "duplicate":
-        batches = [batch, _one_mark_batch(batch, batch.marks[1], batch_id="duplicate-end", source="source-1")]
     elif mutation == "identity":
         batch = replace(batch, marks=(batch.marks[0], replace(batch.marks[1], correlation_id="corr-2")))
     else:
         batch = replace(batch, marks=(batch.marks[0], replace(batch.marks[1], clock_domain_id="clock-2")))
-    if mutation != "duplicate":
-        batches = [batch]
+    batches = [batch]
 
     summary = reduce_latency_run(run_config, batches).profile("dialogue_no_tool").segment("response_total")
     assert summary.successful_samples == 0
@@ -141,7 +157,149 @@ def test_reducer_deduplicates_identical_batch_receipts(run_config) -> None:
     assert summary.unknown == 0
 
 
+def test_reader_and_reducer_scope_opaque_batch_ids_by_component(
+    run_config, tmp_path
+) -> None:
+    browser_definition = next(
+        item for item in FIXED_SEGMENTS if item.segment_id == "response_total"
+    )
+    gateway_definition = next(
+        item for item in FIXED_SEGMENTS if item.segment_id == "stt_transport_open"
+    )
+    browser = batch_for(
+        run_config,
+        browser_definition,
+        batch_id="shared-cross-component-id",
+    )
+    gateway = batch_for(
+        run_config,
+        gateway_definition,
+        batch_id="shared-cross-component-id",
+    )
+    run_dir = tmp_path / run_config.run_id
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps(run_config.to_dict()), encoding="utf-8"
+    )
+    (run_dir / "browser.jsonl").write_bytes(browser.canonical_bytes() + b"\n")
+    (run_dir / "gateway.jsonl").write_bytes(gateway.canonical_bytes() + b"\n")
+
+    report = reduce_latency_run(run_config, read_latency_batches(run_dir))
+
+    profile = report.profile("dialogue_no_tool")
+    assert profile.segment("response_total").successful_samples == 1
+    assert profile.segment("stt_transport_open").successful_samples == 1
+
+
+def test_reader_and_reducer_reject_distinct_batches_for_one_semantic_slot(
+    run_config, tmp_path
+) -> None:
+    definition = next(
+        item for item in FIXED_SEGMENTS if item.segment_id == "response_total"
+    )
+    complete = batch_for(run_config, definition)
+    first = replace(complete, batch_id="slot-start", marks=complete.marks[:1])
+    second_mark = replace(complete.marks[1], mark_index=0)
+    second = replace(complete, batch_id="slot-end", marks=(second_mark,))
+    run_dir = tmp_path / run_config.run_id
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps(run_config.to_dict()), encoding="utf-8"
+    )
+    (run_dir / "browser.jsonl").write_bytes(
+        first.canonical_bytes() + b"\n" + second.canonical_bytes() + b"\n"
+    )
+
+    with pytest.raises(LatencyProbeViolation):
+        reduce_latency_run(run_config, read_latency_batches(run_dir))
+
+
+def test_reducer_rejects_mid_round_component_restart(run_config) -> None:
+    stt = next(item for item in FIXED_SEGMENTS if item.segment_id == "stt_transport_open")
+    tts = next(item for item in FIXED_SEGMENTS if item.segment_id == "tts_transport_open")
+    first = batch_for(run_config, stt)
+    second = batch_for(run_config, tts, batch_id="gateway-tts")
+    second = replace(
+        second,
+        source_instance_id="restarted-gateway-source",
+        marks=tuple(
+            replace(mark, source_instance_id="restarted-gateway-source")
+            for mark in second.marks
+        ),
+    )
+
+    report = reduce_latency_run(run_config, [first, second])
+    profile = report.profile("dialogue_no_tool")
+    assert profile.segment("stt_transport_open").unknown == 1
+    assert profile.segment("tts_transport_open").unknown == 1
+
+
+@pytest.mark.parametrize(
+    ("segment_id", "missing_fields"),
+    [
+        ("response_total", ("response_id", "response_generation")),
+        ("presentation_dispatch", ("response_id", "response_generation")),
+        ("task_command", ("task_id",)),
+    ],
+)
+def test_reducer_requires_applicable_response_and_task_identity(
+    run_config, segment_id, missing_fields
+) -> None:
+    definition = next(item for item in FIXED_SEGMENTS if item.segment_id == segment_id)
+    batch = batch_for(run_config, definition)
+    batch = replace(
+        batch,
+        marks=tuple(
+            replace(mark, **{field: None for field in missing_fields})
+            for mark in batch.marks
+        ),
+    )
+
+    summary = reduce_latency_run(run_config, [batch]).profile(batch.profile_id).segment(
+        segment_id
+    )
+    assert summary.successful_samples == 0
+    assert summary.unknown == 1
+
+
+def test_reducer_requires_task_identity_on_post_response_browser_drilldown(
+    run_config,
+) -> None:
+    definition = next(
+        item
+        for item in FIXED_SEGMENTS
+        if item.segment_id == "successor_capture_readiness"
+    )
+    batch = batch_for(run_config, definition)
+    batch = replace(
+        batch,
+        profile_id="task_create",
+        input_case_id="task-create-v1",
+        marks=tuple(
+            replace(
+                mark,
+                profile_id="task_create",
+                input_case_id="task-create-v1",
+                task_id=None,
+            )
+            for mark in batch.marks
+        ),
+    )
+
+    summary = reduce_latency_run(run_config, [batch]).profile("task_create").segment(
+        definition.segment_id
+    )
+    assert summary.successful_samples == 0
+    assert summary.unknown == 1
+
+
 def test_reducer_uses_nearest_rank_and_never_pools_cold_warm(run_config, tmp_path) -> None:
+    warm_path = tmp_path / "warm-five.json"
+    warm_path.write_text(
+        json.dumps(run_payload(intended_attempts=5)),
+        encoding="utf-8",
+    )
+    run_config = load_latency_run_config(warm_path)
     definition = next(item for item in FIXED_SEGMENTS if item.segment_id == "response_total")
     batches = []
     for index, end in enumerate((110.0, 120.0, 130.0, 140.0, 150.0)):
@@ -152,7 +310,10 @@ def test_reducer_uses_nearest_rank_and_never_pools_cold_warm(run_config, tmp_pat
     assert (summary.minimum_ms, summary.p50_ms, summary.p95_ms, summary.maximum_ms) == (10.0, 30.0, 50.0, 50.0)
 
     cold_path = tmp_path / "cold.json"
-    cold_path.write_text(json.dumps(run_payload(cold_or_warm="cold")), encoding="utf-8")
+    cold_path.write_text(
+        json.dumps(run_payload(cold_or_warm="cold", intended_attempts=5)),
+        encoding="utf-8",
+    )
     cold = reduce_latency_run(load_latency_run_config(cold_path), batches)
     assert warm.cold_or_warm == "warm"
     assert cold.cold_or_warm == "cold"
@@ -336,10 +497,62 @@ def test_pairing_allows_optional_identity_enrichment_but_rejects_cross_source_or
 
     source_one = _one_mark_batch(batch, batch.marks[0], batch_id="source-one", source="source-1")
     source_two = _one_mark_batch(batch, batch.marks[1], batch_id="source-two", source="source-2")
-    assert reduce_latency_run(run_config, [source_one, source_two]).profile("dialogue_no_tool").segment("response_total").unknown == 1
+    with pytest.raises(LatencyProbeViolation, match="BATCH_CONFLICT"):
+        reduce_latency_run(run_config, [source_one, source_two])
 
     conflict = replace(batch, marks=(batch.marks[0], replace(batch.marks[1], response_id="response-2")))
     assert reduce_latency_run(run_config, [conflict]).profile("dialogue_no_tool").segment("response_total").unknown == 1
+
+    identity_loss = replace(
+        batch,
+        marks=(batch.marks[0], replace(batch.marks[1], activation_id=None)),
+    )
+    assert (
+        reduce_latency_run(run_config, [identity_loss])
+        .profile("dialogue_no_tool")
+        .segment("response_total")
+        .unknown
+        == 1
+    )
+
+
+def test_reducer_retains_missing_attempts_and_rejects_cross_producer_identity(
+    tmp_path,
+) -> None:
+    path = tmp_path / "three-attempts.json"
+    path.write_text(
+        json.dumps(run_payload(intended_attempts=3)),
+        encoding="utf-8",
+    )
+    run = load_latency_run_config(path)
+    response = next(
+        item for item in FIXED_SEGMENTS if item.segment_id == "response_total"
+    )
+    stt = next(
+        item for item in FIXED_SEGMENTS if item.segment_id == "stt_transport_open"
+    )
+    round_zero = batch_for(run, response, round_index=0, batch_id="browser-zero")
+    round_two = batch_for(run, response, round_index=2, batch_id="browser-two")
+
+    summary = (
+        reduce_latency_run(run, [round_zero, round_two])
+        .profile("dialogue_no_tool")
+        .segment("response_total")
+    )
+    assert (summary.attempts, summary.successful_samples, summary.unknown) == (3, 2, 1)
+
+    foreign_gateway = batch_for(
+        run,
+        stt,
+        identity="foreign-correlation",
+        batch_id="gateway-foreign",
+    )
+    rejected_binding = (
+        reduce_latency_run(run, [round_zero, foreign_gateway])
+        .profile("dialogue_no_tool")
+        .segment("response_total")
+    )
+    assert (rejected_binding.successful_samples, rejected_binding.unknown) == (0, 3)
 
 
 @pytest.mark.parametrize("terminal_outcome, mark_outcome", [("unknown", "observed"), ("completed", "unknown")])
@@ -387,6 +600,29 @@ def test_load_report_rejects_adversarial_schema_metadata_and_numbers_without_wri
     path = tmp_path / "adversarial-report.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setattr(Path, "write_text", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read only")))
+
+    with pytest.raises(LatencyProbeViolation):
+        latency_probe_report._load_report(path)
+
+
+@pytest.mark.parametrize(
+    ("attempts", "unknown"),
+    [(20, 20), (30, 20)],
+)
+def test_load_report_rejects_dropped_attempt_denominators(
+    tmp_path, attempts, unknown
+) -> None:
+    config_path = tmp_path / "thirty-attempt-run.json"
+    config_path.write_text(
+        json.dumps(run_payload(intended_attempts=30)), encoding="utf-8"
+    )
+    run = load_latency_run_config(config_path)
+    raw = reduce_latency_run(run, []).to_dict()
+    summary = raw["profiles"][0]["segments"][0]
+    summary["attempts"] = attempts
+    summary["unknown"] = unknown
+    path = tmp_path / f"dropped-{attempts}-{unknown}.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(LatencyProbeViolation):
         latency_probe_report._load_report(path)
@@ -474,20 +710,25 @@ def test_report_artifacts_and_cli_output_are_exact_and_complete(run_config, tmp_
         latency_probe_report.REPORT_SCHEMA_VERSION, run_config,
         (latency_probe_report.ProfileLatencyReport("dialogue_no_tool", (summary,)),),
     )
+    assert summary.segment.measurement_kind == "estimate"
+    assert next(
+        item for item in latency_probe_report.FIXED_SEGMENTS
+        if item.segment_id == "round_total"
+    ).measurement_kind == "exact"
     write_latency_report(tiny_report, output)
     assert (output / "report.json").read_bytes() == (
         json.dumps(tiny_report.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     )
     assert (output / "report.csv").read_bytes() == (
-        b"profile_id,segment_id,start_point,end_point,component,phase_tags,primary_capability,applicable_profiles,attempts,successful_samples,unknown,failed,cancelled,fallback,underrun,rebuffer,minimum_ms,p50_ms,p95_ms,maximum_ms\n"
-        b"dialogue_no_tool,response_total,browser.eot_received,browser.playout_first_frame_started_estimate,browser,P1;P2;P3,integrated_web,dialogue_no_tool;dialogue_with_tool;task_create;task_status;task_cancel,1,1,0,0,0,0,0,0,850.0,850.0,850.0,850.0\n"
+        b"profile_id,segment_id,start_point,end_point,component,measurement_kind,phase_tags,primary_capability,applicable_profiles,attempts,successful_samples,unknown,failed,cancelled,fallback,underrun,rebuffer,minimum_ms,p50_ms,p95_ms,maximum_ms\n"
+        b"dialogue_no_tool,response_total,browser.eot_received,browser.playout_first_frame_started_estimate,browser,estimate,P1;P2;P3,integrated_web,dialogue_no_tool;dialogue_with_tool;task_create;task_status;task_cancel,1,1,0,0,0,0,0,0,850.0,850.0,850.0,850.0\n"
     )
     assert (output / "report.md").read_bytes() == (
         b"# Live Voice latency report\n\n## dialogue_no_tool\n\n"
-        b"| Segment | Samples | p50 ms | p95 ms | Unknown |\n"
-        b"|---|---:|---:|---:|---:|\n"
-        b"| response_total | 1 | 850.0 | 850.0 | 0 |\n\n"
-        b"### Waterfall\n\nresponse_total: 850.000 ms\n"
+        b"| Segment | Measurement | Samples | p50 ms | p95 ms | Unknown |\n"
+        b"|---|---|---:|---:|---:|---:|\n"
+        b"| response_total | estimate | 1 | 850.0 | 850.0 | 0 |\n\n"
+        b"### Waterfall\n\nresponse_total [estimate]: 850.000 ms\n"
     )
 
     write_latency_report(report, output)

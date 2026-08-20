@@ -190,6 +190,8 @@ export interface LatencyBatch {
 
 export interface BrowserLatencyRound {
   readonly context: LatencyProbeContext;
+  commit(): boolean;
+  abandon(): boolean;
   mark(point: BrowserLatencyPoint, identity: LatencyIdentityPatch, observation?: LatencyObservation): boolean;
   finish(outcome: LatencyTerminalOutcome): Readonly<LatencyBatch> | null;
 }
@@ -336,9 +338,10 @@ function storageKey(selection: Selection): string {
   return `${STORAGE_PREFIX}:${encodeURIComponent(selection.run_id)}:${encodeURIComponent(selection.profile_id)}:${encodeURIComponent(selection.input_case_id)}`;
 }
 
-type RoundAllocation = Readonly<{ status: 'allocated'; roundIndex: number }> | Readonly<{ status: 'safe_failure' }> | Readonly<{ status: 'unknown_write' }>;
+type RoundIndexRead = Readonly<{ status: 'available'; roundIndex: number }> | Readonly<{ status: 'safe_failure' }>;
+type RoundCommit = 'committed' | 'safe_failure' | 'unknown_write';
 
-function allocateRoundIndex(storage: LatencyProbeStorage, key: string): RoundAllocation {
+function readRoundIndex(storage: LatencyProbeStorage, key: string): RoundIndexRead {
   let raw: string | null;
   try {
     raw = storage.getItem(key);
@@ -353,30 +356,24 @@ function allocateRoundIndex(storage: LatencyProbeStorage, key: string): RoundAll
     current = Number(raw);
     if (!nonnegativeSafeInteger(current) || current >= MAX_ROUNDS) return Object.freeze({ status: 'safe_failure' });
   }
-  const next = String(current + 1);
+  return Object.freeze({ status: 'available', roundIndex: current });
+}
+
+function commitRoundIndex(storage: LatencyProbeStorage, key: string, roundIndex: number): RoundCommit {
+  const current = readRoundIndex(storage, key);
+  if (current.status !== 'available' || current.roundIndex !== roundIndex) return 'safe_failure';
+  const next = String(roundIndex + 1);
   try {
     storage.setItem(key, next);
   } catch {
-    return Object.freeze({ status: 'unknown_write' });
+    return 'unknown_write';
   }
   try {
-    if (storage.getItem(key) !== next) return Object.freeze({ status: 'unknown_write' });
+    if (storage.getItem(key) !== next) return 'unknown_write';
   } catch {
-    return Object.freeze({ status: 'unknown_write' });
+    return 'unknown_write';
   }
-  return Object.freeze({ status: 'allocated', roundIndex: current });
-}
-
-function rollbackRoundIndex(storage: LatencyProbeStorage, key: string, roundIndex: number): boolean {
-  try {
-    const allocatedNext = String(roundIndex + 1);
-    if (storage.getItem(key) !== allocatedNext) return false;
-    const restoredNext = String(roundIndex);
-    storage.setItem(key, restoredNext);
-    return storage.getItem(key) === restoredNext;
-  } catch {
-    return false;
-  }
+  return 'committed';
 }
 
 function parseIdentity(value: unknown, current: Identity | null): Identity | null {
@@ -453,6 +450,8 @@ function freezeContext(selection: Selection, roundIndex: number): LatencyProbeCo
 function inertRound(selection: Selection): BrowserLatencyRound {
   return Object.freeze({
     context: freezeContext(selection, 0),
+    commit: () => false,
+    abandon: () => false,
     mark: () => false,
     finish: () => null,
   });
@@ -567,11 +566,15 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
   readonly #batchId: string;
   readonly #monotonicMs: () => number;
   readonly #points: ReadonlySet<string>;
+  readonly #onCommit: () => boolean;
+  readonly #onProvisionalSettled: () => void;
   readonly #onFinish: (batch: Readonly<LatencyBatch>, context: LatencyProbeContext) => void;
   readonly #marks: LatencyMark[] = [];
   readonly #seen = new Set<string>();
   #identity: Identity;
   #finished = false;
+  #committed = false;
+  #provisionalSettled = false;
   #capacityRecorded = false;
   #busy = false;
 
@@ -583,6 +586,8 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
     batchId: string;
     monotonicMs: () => number;
     points: ReadonlySet<string>;
+    onCommit: () => boolean;
+    onProvisionalSettled: () => void;
     onFinish: (batch: Readonly<LatencyBatch>, context: LatencyProbeContext) => void;
   }) {
     this.#context = input.context;
@@ -592,12 +597,59 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
     this.#batchId = input.batchId;
     this.#monotonicMs = input.monotonicMs;
     this.#points = input.points;
+    this.#onCommit = input.onCommit;
+    this.#onProvisionalSettled = input.onProvisionalSettled;
     this.#onFinish = input.onFinish;
     Object.preventExtensions(this);
   }
 
   get context(): LatencyProbeContext {
     return this.#context;
+  }
+
+  commit(): boolean {
+    if (this.#busy || this.#finished) return false;
+    if (this.#committed) return true;
+    this.#busy = true;
+    try {
+      if (!this.#onCommit()) {
+        this.#finished = true;
+        this.#marks.length = 0;
+        return false;
+      }
+      this.#committed = true;
+      return true;
+    } catch {
+      this.#finished = true;
+      this.#marks.length = 0;
+      return false;
+    } finally {
+      this.#settleProvisional();
+      this.#busy = false;
+    }
+  }
+
+  abandon(): boolean {
+    if (this.#busy || this.#finished || this.#committed) return false;
+    this.#busy = true;
+    try {
+      this.#finished = true;
+      this.#marks.length = 0;
+      return true;
+    } finally {
+      this.#settleProvisional();
+      this.#busy = false;
+    }
+  }
+
+  #settleProvisional(): void {
+    if (this.#provisionalSettled) return;
+    this.#provisionalSettled = true;
+    try {
+      this.#onProvisionalSettled();
+    } catch {
+      // Provisional ownership is diagnostic-only and never escapes.
+    }
   }
 
   mark(point: BrowserLatencyPoint, identity: LatencyIdentityPatch, observation?: LatencyObservation): boolean {
@@ -683,6 +735,16 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
     if (this.#busy || this.#finished || !TERMINAL_OUTCOMES.has(outcome)) return null;
     this.#busy = true;
     try {
+      if (!this.#committed) {
+        if (!this.#onCommit()) {
+          this.#finished = true;
+          this.#marks.length = 0;
+          this.#settleProvisional();
+          return null;
+        }
+        this.#committed = true;
+        this.#settleProvisional();
+      }
       this.#finished = true;
       const batch = deepFreezeBatch({
         schema_version: LATENCY_BATCH_SCHEMA_VERSION,
@@ -700,6 +762,11 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
       this.#onFinish(batch, this.#context);
       return batch;
     } catch {
+      this.#finished = true;
+      if (!this.#committed) {
+        this.#marks.length = 0;
+        this.#settleProvisional();
+      }
       return null;
     } finally {
       this.#busy = false;
@@ -721,6 +788,7 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
   readonly #batchContexts = new WeakMap<object, LatencyProbeContext>();
   readonly #settledExports = new WeakSet<object>();
   #allocatorUncertain = false;
+  #provisionalActive = false;
 
   constructor(input: {
     selection: Selection;
@@ -744,40 +812,48 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
   }
 
   beginRound(identity: LatencyIdentityPatch): BrowserLatencyRound {
-    if (this.#allocatorUncertain) return inertRound(this.#selection);
+    if (this.#allocatorUncertain || this.#provisionalActive) return inertRound(this.#selection);
     const parsedIdentity = parseIdentity(identity, null);
     if (parsedIdentity === null) return inertRound(this.#selection);
-    const allocation = allocateRoundIndex(this.#storage, this.#storageKey);
-    if (allocation.status === 'unknown_write') {
-      this.#allocatorUncertain = true;
-      return inertRound(this.#selection);
-    }
+    const allocation = readRoundIndex(this.#storage, this.#storageKey);
     if (allocation.status === 'safe_failure') return inertRound(this.#selection);
     const roundIndex = allocation.roundIndex;
     let batchId: string;
     try {
       batchId = this.#randomId();
     } catch {
-      if (!rollbackRoundIndex(this.#storage, this.#storageKey, roundIndex)) this.#allocatorUncertain = true;
       return inertRound(this.#selection);
     }
     if (!boundedToken(batchId)) {
-      if (!rollbackRoundIndex(this.#storage, this.#storageKey, roundIndex)) this.#allocatorUncertain = true;
       return inertRound(this.#selection);
     }
-    return new ActiveBrowserLatencyRound({
-      context: freezeContext(this.#selection, roundIndex),
-      identity: parsedIdentity,
-      sourceInstanceId: this.#sourceInstanceId,
-      clockDomainId: this.#clockDomainId,
-      batchId,
-      monotonicMs: this.#monotonicMs,
-      points: this.#points,
-      onFinish: (batch, context) => {
-        this.#ownedBatches.add(batch);
-        this.#batchContexts.set(batch, context);
-      },
-    });
+    this.#provisionalActive = true;
+    try {
+      return new ActiveBrowserLatencyRound({
+        context: freezeContext(this.#selection, roundIndex),
+        identity: parsedIdentity,
+        sourceInstanceId: this.#sourceInstanceId,
+        clockDomainId: this.#clockDomainId,
+        batchId,
+        monotonicMs: this.#monotonicMs,
+        points: this.#points,
+        onCommit: () => {
+          const committed = commitRoundIndex(this.#storage, this.#storageKey, roundIndex);
+          if (committed === 'unknown_write') this.#allocatorUncertain = true;
+          return committed === 'committed';
+        },
+        onProvisionalSettled: () => {
+          this.#provisionalActive = false;
+        },
+        onFinish: (batch, context) => {
+          this.#ownedBatches.add(batch);
+          this.#batchContexts.set(batch, context);
+        },
+      });
+    } catch {
+      this.#provisionalActive = false;
+      return inertRound(this.#selection);
+    }
   }
 
   async exportBatch(sessionId: string, batch: Readonly<LatencyBatch>): Promise<void> {

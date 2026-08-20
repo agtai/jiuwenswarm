@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import threading
+import time
 
 import pytest
 
@@ -39,7 +41,13 @@ def valid_run_json() -> dict[str, object]:
         "playout_configuration": "webaudio-default",
         "allowlisted_feature_flags": {"formal_route": True},
         "cold_or_warm": "warm",
-        "input_case_ids": ["short-greeting-v1", "tool-weather-v1"],
+        "input_case_ids": [
+            "short-greeting-v1",
+            "tool-weather-v1",
+            "task-create-v1",
+            "task-status-v1",
+            "task-cancel-v1",
+        ],
         "profile_ids": [
             "dialogue_no_tool",
             "dialogue_with_tool",
@@ -100,7 +108,13 @@ def test_load_run_config_accepts_the_five_fixed_profiles_and_declared_points(run
         "task_status",
         "task_cancel",
     )
-    assert run_config.input_case_ids == ("short-greeting-v1", "tool-weather-v1")
+    assert run_config.input_case_ids == (
+        "short-greeting-v1",
+        "tool-weather-v1",
+        "task-create-v1",
+        "task-status-v1",
+        "task-cancel-v1",
+    )
     assert run_config.allows_point("browser.eot_received", "browser") is True
     assert run_config.allows_point("gateway.stt_request_started", "gateway") is True
     assert (
@@ -125,6 +139,16 @@ def test_load_run_config_rejects_closed_invalid_inputs(tmp_path, mutate, reason)
     path.write_text(json.dumps(value), encoding="utf-8")
 
     with pytest.raises(ValueError):
+        load_latency_run_config(path)
+
+
+def test_run_config_requires_one_ordered_input_case_per_fixed_profile(tmp_path) -> None:
+    value = valid_run_json()
+    value["input_case_ids"] = ["short-greeting-v1", "tool-weather-v1"]
+    path = tmp_path / "mismatched-profile-cases.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(LatencyProbeViolation):
         load_latency_run_config(path)
 
 
@@ -169,7 +193,33 @@ def test_context_is_closed_and_bound_to_run(run_config) -> None:
     assert try_parse_latency_probe_context(
         {**context.to_dict(), "input_case_id": "undeclared-case"}, run_config
     ) is None
+    assert try_parse_latency_probe_context(
+        {**context.to_dict(), "input_case_id": "tool-weather-v1"}, run_config
+    ) is None
+    assert try_parse_latency_probe_context(
+        {**context.to_dict(), "round_index": run_config.intended_attempts},
+        run_config,
+    ) is None
+    assert try_parse_latency_probe_context(
+        {**context.to_dict(), "round_index": 2**53},
+        run_config,
+    ) is None
     assert try_parse_latency_probe_context(context.to_dict(), object()) is None
+
+
+def test_batch_rejects_out_of_policy_rounds_and_non_json_safe_generations(
+    run_config,
+) -> None:
+    batch = browser_batch_for(run_config).to_dict()
+    batch["round_index"] = run_config.intended_attempts
+    batch["marks"][0]["round_index"] = run_config.intended_attempts
+    with pytest.raises(LatencyProbeViolation):
+        LatencyBatch.from_dict(batch, run_config)
+
+    unsafe_generation = browser_batch_for(run_config).to_dict()
+    unsafe_generation["marks"][0]["activation_generation"] = 2**53
+    with pytest.raises(LatencyProbeViolation):
+        LatencyBatch.from_dict(unsafe_generation, run_config)
 
 
 def context_for(run_config):
@@ -261,8 +311,9 @@ def test_writer_appends_one_canonical_line_and_handles_retries(tmp_path, run_con
     output = tmp_path / run_config.run_id / "gateway.jsonl"
     assert first.status == "written"
     assert retry.status == "idempotent"
-    assert conflict.status == "written"
-    assert output.read_bytes().count(b"\n") == 2
+    assert conflict.status == "rejected"
+    assert conflict.reason_code == "BATCH_CONFLICT"
+    assert output.read_bytes().count(b"\n") == 1
     assert output.read_bytes().splitlines()[0] == batch.canonical_bytes()
 
 
@@ -278,6 +329,66 @@ def test_writer_rejects_conflicting_bytes_for_one_batch_id(tmp_path, run_config)
 
     assert writer.write(first).status == "written"
     assert writer.write(second.with_batch_id(first.batch_id)).reason_code == "BATCH_CONFLICT"
+
+
+def test_writer_reconstructs_idempotency_and_conflict_receipts_after_restart(
+    tmp_path, run_config
+) -> None:
+    first = recorder_for(run_config).finish("completed")
+    second_recorder = recorder_for(run_config)
+    assert second_recorder.mark(
+        "gateway.stt_request_started", correlation_id="corr", interaction_id="ix"
+    ) is True
+    conflict = second_recorder.finish("completed")
+    assert first is not None and conflict is not None
+    assert LatencyProbeBatchWriter(tmp_path, run_config, "gateway").write(first).status == "written"
+
+    restarted_writer = LatencyProbeBatchWriter(tmp_path, run_config, "gateway")
+    assert restarted_writer.write(first).status == "idempotent"
+    conflict_result = restarted_writer.write(conflict.with_batch_id(first.batch_id))
+    assert conflict_result.status == "rejected"
+    assert conflict_result.reason_code == "BATCH_CONFLICT"
+
+    output = tmp_path / run_config.run_id / "gateway.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_writer_rejects_a_second_batch_for_a_durable_semantic_slot(
+    tmp_path, run_config
+) -> None:
+    first = recorder_for(run_config).finish("completed")
+    assert first is not None
+    conflicting = first.with_batch_id("different-batch-for-same-slot")
+
+    assert (
+        LatencyProbeBatchWriter(tmp_path, run_config, "gateway").write(first).status
+        == "written"
+    )
+    restarted = LatencyProbeBatchWriter(tmp_path, run_config, "gateway")
+    result = restarted.write(conflicting)
+
+    assert result.status == "rejected"
+    assert result.reason_code == "BATCH_CONFLICT"
+    output = tmp_path / run_config.run_id / "gateway.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_writer_finds_evicted_receipts_on_disk(tmp_path, run_config, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.latency_probe.MAX_WRITER_RECEIPTS",
+        1,
+    )
+    writer = LatencyProbeBatchWriter(tmp_path, run_config, "gateway")
+    first = recorder_for(run_config).finish("completed")
+    assert first is not None
+    second = replace(first, batch_id="gateway-batch-2", round_index=1)
+
+    assert writer.write(first).status == "written"
+    assert writer.write(second).status == "written"
+    assert writer.write(first).status == "idempotent"
+
+    output = tmp_path / run_config.run_id / "gateway.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 2
 
 
 def test_writer_maps_agent_server_batches_to_the_closed_agent_filename(tmp_path, run_config) -> None:
@@ -418,6 +529,7 @@ def test_closed_config_parses_every_field_and_nested_experiment_contract(run_con
             "gateway.stt_request_started", "gateway.stt_provider_transport_open",
             "gateway.stt_session_ready", "gateway.vad_speech_stopped",
             "gateway.eot_control_sent", "gateway.stt_final_available",
+            "gateway.stt_fallback_selected",
             "gateway.tts_request_received", "gateway.tts_provider_transport_open",
             "gateway.tts_provider_first_audio", "gateway.downlink_ticket_ready",
             "gateway.downlink_first_frame_sent",
@@ -564,14 +676,6 @@ def test_runtime_and_writer_contain_invalid_context_and_callback_failures(
         clock_domain_id="gateway-process-1",
         monotonic_ms=lambda: 10.0,
     ) is None
-    assert runtime.create_recorder(
-        context=context_for(run_config),
-        phase="gateway_stt",
-        clock_domain_id="gateway-process-1",
-        monotonic_ms=lambda: 10.0,
-        source_instance_id_factory=lambda: (_ for _ in ()).throw(RuntimeError("PRIVATE")),
-    ) is None
-
     recorder = recorder_for(run_config, clock=lambda: 10**100000)
     assert recorder.mark(
         "gateway.stt_request_started", correlation_id="corr", interaction_id="ix"
@@ -586,6 +690,82 @@ def test_runtime_and_writer_contain_invalid_context_and_callback_failures(
     monkeypatch.setattr("pathlib.Path.exists", lambda self: (_ for _ in ()).throw(OSError("PRIVATE")))
     assert writer.write(batch).reason_code == "EXPORT_FAILED"
 
+
+def test_runtime_reuses_one_process_source_identity_for_every_recorder(
+    tmp_path, run_config
+) -> None:
+    runtime = LatencyProbeRuntime(
+        run_config,
+        "gateway",
+        LatencyProbeBatchWriter(tmp_path, run_config, "gateway"),
+        source_instance_id="gateway-process-source",
+    )
+    first = runtime.create_recorder(
+        context=context_for(run_config),
+        phase="gateway_stt",
+        clock_domain_id="gateway-process-1",
+        monotonic_ms=lambda: 10.0,
+    )
+    second = runtime.create_recorder(
+        context=context_for(run_config),
+        phase="gateway_tts",
+        clock_domain_id="gateway-process-1",
+        monotonic_ms=lambda: 20.0,
+    )
+    assert first is not None and second is not None
+
+    assert first.finish("completed").source_instance_id == "gateway-process-source"
+    assert second.finish("completed").source_instance_id == "gateway-process-source"
+
+
+def test_runtime_exports_finished_batches_off_path_and_supports_bounded_drain(
+    run_config,
+) -> None:
+    class BlockingWriter:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.batches: list[LatencyBatch] = []
+
+        def write(self, batch: LatencyBatch) -> object:
+            self.entered.set()
+            assert self.release.wait(2.0)
+            self.batches.append(batch)
+            return object()
+
+    writer = BlockingWriter()
+    runtime = LatencyProbeRuntime(run_config, "gateway", writer)  # type: ignore[arg-type]
+    batch = recorder_for(run_config).finish("completed")
+    assert batch is not None
+
+    started = time.monotonic()
+    assert runtime.submit(batch) is True
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert writer.entered.wait(1.0)
+    assert runtime.drain(0.01) is False
+    writer.release.set()
+    assert runtime.drain(1.0) is True
+    assert writer.batches == [batch]
+    assert runtime.close(1.0) is True
+
+
+def test_runtime_rolls_back_submission_when_export_thread_cannot_start(
+    run_config, monkeypatch
+) -> None:
+    writer = type("Writer", (), {"write": lambda _self, _batch: object()})()
+    runtime = LatencyProbeRuntime(run_config, "gateway", writer)  # type: ignore[arg-type]
+    batch = recorder_for(run_config).finish("completed")
+    assert batch is not None
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.latency_probe.Thread.start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("THREAD_START_FAILED")),
+    )
+
+    assert runtime.submit(batch) is False
+    assert runtime.drain(0.01) is True
+    assert runtime.close(0.01) is True
 
 def test_full_batch_requires_the_reserved_capacity_mark_in_slot_63(tmp_path, run_config) -> None:
     recorder = recorder_for(run_config)
@@ -676,7 +856,7 @@ def test_gateway_writer_can_persist_only_its_allowed_browser_and_gateway_produce
         mode="gateway_with_browser",
     )
     runtime = LatencyProbeRuntime(run_config, "gateway", writer)
-    browser = browser_batch_for(run_config)
+    browser = browser_batch_for(run_config).with_batch_id("shared-cross-component-id")
     gateway = recorder_for(run_config).finish("completed")
     agent = LatencyProbeRecorder(
         context=context_for(run_config),
@@ -688,6 +868,7 @@ def test_gateway_writer_can_persist_only_its_allowed_browser_and_gateway_produce
         monotonic_ms=lambda: 10.0,
     ).finish("completed")
     assert gateway is not None and agent is not None
+    gateway = gateway.with_batch_id("shared-cross-component-id")
 
     assert runtime.writer.write(browser).status == "written"
     assert runtime.writer.write(gateway).status == "written"

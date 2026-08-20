@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -55,7 +57,13 @@ def _run_payload() -> dict[str, object]:
         "playout_configuration": "webaudio-default",
         "allowlisted_feature_flags": {"formal_route": True},
         "cold_or_warm": "warm",
-        "input_case_ids": ["short-greeting-v1", "tool-weather-v1"],
+        "input_case_ids": [
+            "short-greeting-v1",
+            "tool-weather-v1",
+            "task-create-v1",
+            "task-status-v1",
+            "task-cancel-v1",
+        ],
         "profile_ids": [
             "dialogue_no_tool",
             "dialogue_with_tool",
@@ -304,7 +312,7 @@ async def test_bootstrap_publishes_one_reusable_gateway_runtime_and_real_browser
 
 
 @pytest.mark.asyncio
-async def test_handler_persists_once_retries_idempotently_and_fences_round_order(
+async def test_handler_persists_once_retries_and_accepts_declared_round_gaps(
     tmp_path: Path,
     run_config: Any,
 ) -> None:
@@ -352,13 +360,43 @@ async def test_handler_persists_once_retries_idempotently_and_fences_round_order
         "written",
         "idempotent",
         "rejected",
-        "rejected",
+        "written",
         "written",
     ]
     assert _payload(channel.responses[2])["reason_code"] == "BATCH_CONFLICT"
-    assert _payload(channel.responses[3])["reason_code"] == "SEQUENCE_GAP"
     output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
-    assert len(output.read_text(encoding="utf-8").splitlines()) == 2
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 3
+
+
+@pytest.mark.asyncio
+async def test_browser_batch_durable_write_never_blocks_the_gateway_event_loop(
+    run_config: Any,
+) -> None:
+    channel = _FakeChannel()
+    writer = _BlockingWriter()
+    runtime = LatencyProbeRuntime(
+        run_config,
+        "gateway",
+        writer,  # type: ignore[arg-type]
+    )
+    register_latency_probe_rpc_handler(channel, runtime)
+    started = time.monotonic()
+    handling = asyncio.create_task(
+        channel.handlers[LATENCY_PROBE_BATCH_METHOD](
+            "ws",
+            "blocking-write",
+            {"session_id": "session-1", "batch": _batch_dict()},
+            "session-1",
+        )
+    )
+
+    assert await asyncio.to_thread(writer.entered.wait, 1.0)
+    await asyncio.sleep(0)
+    assert time.monotonic() - started < 0.2
+
+    writer.release.set()
+    await handling
+    assert _payload(channel.responses[-1])["status"] == "written"
 
 
 @pytest.mark.asyncio
@@ -409,7 +447,7 @@ async def test_handler_rejects_closed_identity_bounds_and_private_inputs_without
 
 
 @pytest.mark.asyncio
-async def test_session_identity_is_isolated_and_first_round_must_be_zero(
+async def test_same_session_accepts_independent_profile_rounds_and_restart_continuation(
     tmp_path: Path,
     run_config: Any,
 ) -> None:
@@ -419,66 +457,63 @@ async def test_session_identity_is_isolated_and_first_round_must_be_zero(
 
     await handler(
         "ws",
-        "session-a-zero",
+        "dialogue-zero",
         {"session_id": "session-a", "batch": _batch_dict(batch_id="a-0")},
         "session-a",
     )
     await handler(
         "ws",
-        "session-b-gap",
-        {
-            "session_id": "session-b",
-            "batch": _batch_dict(batch_id="b-1", round_index=1),
-        },
-        "session-b",
-    )
-    await handler(
-        "ws",
-        "session-b-zero",
-        {
-            "session_id": "session-b",
-            "batch": _batch_dict(
-                batch_id="b-0",
-                profile_id="task_status",
-                input_case_id="tool-weather-v1",
-            ),
-        },
-        "session-b",
-    )
-    await handler(
-        "ws",
-        "session-a-wrong-profile",
+        "task-zero",
         {
             "session_id": "session-a",
             "batch": _batch_dict(
-                batch_id="a-1",
+                batch_id="task-0",
                 profile_id="task_status",
-                round_index=1,
+                input_case_id="task-status-v1",
             ),
         },
         "session-a",
     )
     await handler(
         "ws",
-        "session-a-wrong-input-case",
+        "dialogue-one",
         {
             "session_id": "session-a",
             "batch": _batch_dict(
-                batch_id="a-1-other-case",
-                input_case_id="tool-weather-v1",
+                batch_id="a-1",
                 round_index=1,
             ),
         },
         "session-a",
     )
 
-    assert [_payload(item)["reason_code"] for item in channel.responses] == [
-        None,
-        "SEQUENCE_GAP",
-        None,
-        "IDENTITY_MISMATCH",
-        "IDENTITY_MISMATCH",
+    restarted_channel = _FakeChannel()
+    register_latency_probe_rpc_handler(
+        restarted_channel,
+        _runtime(tmp_path, run_config),
+    )
+    restarted_handler = restarted_channel.handlers[LATENCY_PROBE_BATCH_METHOD]
+    await restarted_handler(
+        "ws",
+        "dialogue-two-after-restart",
+        {
+            "session_id": "session-a",
+            "batch": _batch_dict(
+                batch_id="a-2",
+                round_index=2,
+            ),
+        },
+        "session-a",
+    )
+
+    assert [_payload(item)["status"] for item in channel.responses] == [
+        "written",
+        "written",
+        "written",
     ]
+    assert _payload(restarted_channel.responses[-1])["status"] == "written"
+    output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 4
 
 
 @pytest.mark.asyncio
@@ -544,8 +579,8 @@ async def test_all_declared_round_digests_remain_idempotent_and_range_is_closed(
     }
     assert _payload(channel.responses[-1]) == {
         "status": "rejected",
-        "batch_id": "batch-256",
-        "reason_code": "SEQUENCE_GAP",
+        "batch_id": "",
+        "reason_code": "INCOMPATIBLE_RUN",
     }
     output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
     assert len(output.read_text(encoding="utf-8").splitlines()) == 256
@@ -581,6 +616,17 @@ class _RaiseWriter:
 
     def write(self, _batch: LatencyBatch) -> LatencyProbeWriteResult:
         raise self.failure
+
+
+class _BlockingWriter:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, batch: LatencyBatch) -> LatencyProbeWriteResult:
+        self.entered.set()
+        self.release.wait(1.0)
+        return LatencyProbeWriteResult("written", batch.batch_id, None)
 
 
 class _ResponseFailureChannel(_FakeChannel):
@@ -744,7 +790,7 @@ async def test_handler_contains_ordinary_writer_fault_but_not_process_control(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_send_failure_is_contained_without_confirming_round_state(
+async def test_ordinary_send_failure_is_contained_with_durable_independent_rounds(
     tmp_path: Path,
     run_config: Any,
 ) -> None:
@@ -776,9 +822,9 @@ async def test_ordinary_send_failure_is_contained_without_confirming_round_state
 
     assert [_payload(response) for response in channel.responses] == [
         {
-            "status": "rejected",
+            "status": "written",
             "batch_id": "round-1",
-            "reason_code": "SEQUENCE_GAP",
+            "reason_code": None,
         },
         {
             "status": "idempotent",
@@ -787,12 +833,12 @@ async def test_ordinary_send_failure_is_contained_without_confirming_round_state
         },
     ]
     output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
-    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 2
     assert "PRIVATE_SEND_FAILURE" not in repr(channel.responses)
 
 
 @pytest.mark.asyncio
-async def test_false_enqueue_receipt_does_not_confirm_round_state(
+async def test_false_enqueue_receipt_does_not_break_durable_independent_rounds(
     tmp_path: Path,
     run_config: Any,
 ) -> None:
@@ -829,9 +875,9 @@ async def test_false_enqueue_receipt_does_not_confirm_round_state(
             "reason_code": None,
         },
         {
-            "status": "rejected",
+            "status": "written",
             "batch_id": "round-1",
-            "reason_code": "SEQUENCE_GAP",
+            "reason_code": None,
         },
         {
             "status": "idempotent",
@@ -840,12 +886,12 @@ async def test_false_enqueue_receipt_does_not_confirm_round_state(
         },
     ]
     output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
-    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 2
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(19)])
 @pytest.mark.asyncio
-async def test_send_process_control_escapes_without_confirming_round_state(
+async def test_send_process_control_escapes_without_breaking_durable_rounds(
     tmp_path: Path,
     run_config: Any,
     failure: BaseException,
@@ -872,9 +918,9 @@ async def test_send_process_control_escapes_without_confirming_round_state(
     )
 
     assert _payload(channel.responses[-1]) == {
-        "status": "rejected",
+        "status": "written",
         "batch_id": "round-1",
-        "reason_code": "SEQUENCE_GAP",
+        "reason_code": None,
     }
 
 
@@ -1082,13 +1128,6 @@ async def test_every_local_dispatch_outcome_has_zero_real_gateway_effects(
                 },
             ),
             (
-                "gap",
-                {
-                    "session_id": "registered-session",
-                    "batch": _batch_dict(batch_id="gap-2", round_index=2),
-                },
-            ),
-            (
                 "round-conflict",
                 {
                     "session_id": "registered-session",
@@ -1110,6 +1149,25 @@ async def test_every_local_dispatch_outcome_has_zero_real_gateway_effects(
                 enabled_file_processing,
                 enabled_routing,
             )
+
+        await dispatch(
+            enabled,
+            enabled_ws,
+            "declared-gap",
+            {
+                "session_id": "registered-session",
+                "batch": _batch_dict(batch_id="gap-2", round_index=2),
+            },
+        )
+        assert _payload(enabled_responses[-1])["status"] == "written"
+        assert_zero_effects(
+            enabled,
+            enabled_owners,
+            enabled_media,
+            enabled_registry,
+            enabled_file_processing,
+            enabled_routing,
+        )
 
         (
             disabled,

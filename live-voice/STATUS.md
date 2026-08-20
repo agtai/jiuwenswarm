@@ -77,7 +77,7 @@ only one coherent packet at a time.
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** One-click hands-free shell, formal route, progress, TTS and current Task presentation exist | Formal route becomes the only supported default; truthful queued/running/terminal UX; device/privacy/recovery UX; legacy hook/flags removed | All P1/P2/P3 owners plus complete human journey |
-| Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md): fresh physical baseline; stable EOT/Agent/TTS/first-audible diagnostics; low-risk pipeline waits; authoritative ACK; formal sentence-level Agent→TTS overlap; fixed-corpus p50/p95 and no-regression proof | Instrumentation before optimization; fixed corpus/environment; Conversation Runtime and P1 media owners |
+| Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist. The default-off minimal latency probe records the Browser timeline plus Gateway/Agent same-clock drill-downs and passed its final independent Tier-3 code review; real warm/cold runs have not yet granted baseline credit | Execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md): accepted fresh physical baseline; low-risk pipeline waits; authoritative ACK; formal sentence-level Agent→TTS overlap; fixed-corpus p50/p95 and no-regression proof | Fixed clean-source corpus/environment measurement, then Conversation Runtime and P1 media owners |
 | Automated verification and product acceptance | **PARTIAL.** Broad exact-source backend/frontend/build/review credit exists | Affected defect reruns, capability-owned test migration, cumulative feature-complete matrix, clean real Journey, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete | Explicit Demo profile; remove `.env.production` default-on dependency; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
@@ -211,10 +211,12 @@ not invalidate the historical exact-source Alpha result.
   organization batch; authority handlers remain explicit unless semantics match.
 - **Latency:** the code-fact diagnosis and implementation approach are now
   defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
-  Establish its current physical baseline first, then execute low-risk pipeline
-  work, truthful acknowledgement and formal sentence-level Agent→TTS overlap.
-  This remains queued P1/P2 quality work, not completion credit or part of the
-  current product-truth repair packet.
+  The default-off minimal probe candidate is implemented and its final
+  independent Tier-3 code review is closed with no open finding. Establish the
+  clean-source physical baseline before low-risk pipeline work, truthful acknowledgement and formal
+  sentence-level Agent→TTS overlap. This remains P1/P2 quality work, not
+  baseline or completion credit and not part of the current product-truth
+  repair packet.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.

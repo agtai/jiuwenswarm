@@ -107,6 +107,7 @@ interface OwnedLatencyRound {
   successorRequested: boolean;
   successorRound: OwnedLatencyRound | null;
   readonly completionJoin: ProductLatencyCompletionJoin;
+  admitted: boolean;
   finished: boolean;
 }
 
@@ -817,6 +818,7 @@ export class ProductP1VoiceRouteOwner {
     const route = this.#route;
     const speech = this.#speech;
     const latencyRound = this.#captureLatencyRound;
+    this.#admitLatencyRound(latencyRound);
     this.#setStatus('recognizing', null);
     try {
       this.#markLatency(latencyRound, 'browser.capture_stop_requested');
@@ -2264,6 +2266,7 @@ export class ProductP1VoiceRouteOwner {
     ) {
       throw new Error('speech-start control escaped its media authority');
     }
+    this.#admitLatencyRound(this.#captureLatencyRound);
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
   }
@@ -2307,6 +2310,7 @@ export class ProductP1VoiceRouteOwner {
     ) {
       throw new Error('end-of-turn control escaped its media authority');
     }
+    this.#admitLatencyRound(this.#captureLatencyRound);
     if (this.#responseLatencyRound === null) {
       const latencyRound = this.#captureLatencyRound;
       if (latencyRound !== null && this.#markLatency(latencyRound, 'browser.eot_received')) {
@@ -2375,7 +2379,7 @@ export class ProductP1VoiceRouteOwner {
       const round = this.#latencyProbe.beginRound(identity);
       const context = round.context;
       if (!round.mark('browser.capture_start_requested', identity)) {
-        round.finish('unknown');
+        round.abandon();
         return null;
       }
       const owned: OwnedLatencyRound = {
@@ -2389,6 +2393,7 @@ export class ProductP1VoiceRouteOwner {
         successorRequested: false,
         successorRound: null,
         completionJoin: new ProductLatencyCompletionJoin(),
+        admitted: false,
         finished: false,
       };
       this.#captureLatencyRound = owned;
@@ -2424,6 +2429,26 @@ export class ProductP1VoiceRouteOwner {
     try {
       return owned.round.mark(point, identity, observation);
     } catch {
+      return false;
+    }
+  }
+
+  #admitLatencyRound(owned: OwnedLatencyRound | null): boolean {
+    if (owned === null || owned.finished) return false;
+    if (owned.admitted) return true;
+    try {
+      if (!owned.round.commit()) {
+        owned.finished = true;
+        if (this.#captureLatencyRound === owned) this.#captureLatencyRound = null;
+        if (this.#responseLatencyRound === owned) this.#responseLatencyRound = null;
+        return false;
+      }
+      owned.admitted = true;
+      return true;
+    } catch {
+      owned.finished = true;
+      if (this.#captureLatencyRound === owned) this.#captureLatencyRound = null;
+      if (this.#responseLatencyRound === owned) this.#responseLatencyRound = null;
       return false;
     }
   }
@@ -2479,6 +2504,14 @@ export class ProductP1VoiceRouteOwner {
     owned.finished = true;
     if (this.#captureLatencyRound === owned) this.#captureLatencyRound = null;
     if (this.#responseLatencyRound === owned) this.#responseLatencyRound = null;
+    if (!owned.admitted) {
+      try {
+        owned.round.abandon();
+      } catch {
+        // Diagnostic abandonment never changes product cleanup.
+      }
+      return;
+    }
     let batch: ReturnType<BrowserLatencyRound['finish']> = null;
     try {
       batch = owned.round.finish(outcome);

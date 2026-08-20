@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import OrderedDict
-from dataclasses import dataclass, field
 from typing import Any, Final
 
 from jiuwenswarm.server.live_voice.latency_probe import (
@@ -19,16 +18,7 @@ from jiuwenswarm.server.live_voice.latency_probe import (
 
 
 LATENCY_PROBE_BATCH_METHOD: Final = "live_voice.latency_probe.batch"
-_MAX_SESSION_STATES: Final = 256
-
-
-@dataclass(slots=True)
-class _AcceptedSession:
-    run_id: str
-    profile_id: str
-    input_case_id: str
-    next_round: int = 0
-    accepted_rounds: OrderedDict[int, str] = field(default_factory=OrderedDict)
+_MAX_ACCEPTED_ROUNDS: Final = 256
 
 
 def _closed_result(
@@ -66,7 +56,9 @@ def register_latency_probe_rpc_handler(
     ):
         return
 
-    sessions: OrderedDict[str, _AcceptedSession] = OrderedDict()
+    accepted_rounds: OrderedDict[tuple[str, str, str, str, int], str] = (
+        OrderedDict()
+    )
     dispatch_lock = asyncio.Lock()
 
     async def _handle_batch(
@@ -78,7 +70,7 @@ def register_latency_probe_rpc_handler(
         async with dispatch_lock:
             result = _closed_result("rejected", reason_code="INVALID_STRUCTURE")
             batch: LatencyBatch | None = None
-            pending_acceptance: tuple[LatencyBatch, str] | None = None
+            pending_acceptance: tuple[tuple[str, str, str, str, int], str] | None = None
             authorized_session_id = ""
             try:
                 if not isinstance(params, dict) or set(params) != {"session_id", "batch"}:
@@ -107,32 +99,25 @@ def register_latency_probe_rpc_handler(
                     raise LatencyProbeViolation("SEQUENCE_GAP")
 
                 digest = hashlib.sha256(batch.canonical_bytes()).hexdigest()
-                session = sessions.get(authorized_session_id)
-                identical_retry = False
-                if session is None:
-                    if batch.round_index != 0:
-                        raise LatencyProbeViolation("SEQUENCE_GAP")
-                else:
-                    if (
-                        batch.run_id != session.run_id
-                        or batch.profile_id != session.profile_id
-                        or batch.input_case_id != session.input_case_id
-                    ):
-                        raise LatencyProbeViolation("IDENTITY_MISMATCH")
-                    prior_digest = session.accepted_rounds.get(batch.round_index)
-                    if prior_digest is not None:
-                        if prior_digest != digest:
-                            raise LatencyProbeViolation("BATCH_CONFLICT")
-                        identical_retry = True
-                    elif batch.round_index < session.next_round:
-                        raise LatencyProbeViolation("BATCH_CONFLICT")
-                    elif batch.round_index > session.next_round:
-                        raise LatencyProbeViolation("SEQUENCE_GAP")
+                round_key = (
+                    authorized_session_id,
+                    batch.run_id,
+                    batch.profile_id,
+                    batch.input_case_id,
+                    batch.round_index,
+                )
+                prior_digest = accepted_rounds.get(round_key)
+                identical_retry = prior_digest == digest
+                if prior_digest is not None and not identical_retry:
+                    raise LatencyProbeViolation("BATCH_CONFLICT")
 
                 if identical_retry:
                     result = _closed_result("idempotent", batch.batch_id)
                 else:
-                    write_result = runtime.writer.write(batch)
+                    write_result = await asyncio.to_thread(
+                        runtime.writer.write,
+                        batch,
+                    )
                     if not isinstance(write_result, LatencyProbeWriteResult):
                         result = _closed_result("failed", batch.batch_id, "EXPORT_FAILED")
                     else:
@@ -142,7 +127,7 @@ def register_latency_probe_rpc_handler(
                             write_result.reason_code,
                         )
                         if write_result.status in {"written", "idempotent"}:
-                            pending_acceptance = (batch, digest)
+                            pending_acceptance = (round_key, digest)
             except LatencyProbeViolation as exc:
                 result = _closed_result(
                     "rejected",
@@ -169,21 +154,10 @@ def register_latency_probe_rpc_handler(
                 return
 
             if pending_acceptance is not None:
-                accepted_batch, accepted_digest = pending_acceptance
-                session = sessions.get(authorized_session_id)
-                if session is None:
-                    session = _AcceptedSession(
-                        accepted_batch.run_id,
-                        accepted_batch.profile_id,
-                        accepted_batch.input_case_id,
-                    )
-                    sessions[authorized_session_id] = session
-                    while len(sessions) > _MAX_SESSION_STATES:
-                        sessions.popitem(last=False)
-                else:
-                    sessions.move_to_end(authorized_session_id)
-                if accepted_batch.round_index == session.next_round:
-                    session.accepted_rounds[accepted_batch.round_index] = accepted_digest
-                    session.next_round += 1
+                accepted_key, accepted_digest = pending_acceptance
+                accepted_rounds[accepted_key] = accepted_digest
+                accepted_rounds.move_to_end(accepted_key)
+                while len(accepted_rounds) > _MAX_ACCEPTED_ROUNDS:
+                    accepted_rounds.popitem(last=False)
 
     channel.register_method(LATENCY_PROBE_BATCH_METHOD, _handle_batch)

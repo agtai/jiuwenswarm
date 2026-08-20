@@ -29,16 +29,20 @@ class _Writer:
         self.fail = fail
         self.batches: list[object] = []
 
-    def write(self, batch: object) -> bool:
+    def submit(self, batch: object) -> bool:
         if self.fail:
             raise OSError("PRIVATE OUTPUT PATH")
         self.batches.append(batch)
         return True
 
+    def write(self, _batch: object) -> bool:
+        raise AssertionError("product path must not call the durable writer")
+
 
 def _runtime(recorder: _Recorder, writer: _Writer) -> object:
     return SimpleNamespace(
         writer=writer,
+        submit=writer.submit,
         create_recorder=lambda **_kwargs: recorder,
     )
 
@@ -51,6 +55,8 @@ def test_agent_probe_binds_response_and_task_identity_then_writes_once() -> None
         object(),
         correlation_id="correlation-1",
         interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=2,
         turn_id="turn-1",
     )
     assert probe is not None
@@ -68,6 +74,8 @@ def test_agent_probe_binds_response_and_task_identity_then_writes_once() -> None
     assert recorder.marks[-1][1] == {
         "correlation_id": "correlation-1",
         "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 2,
         "turn_id": "turn-1",
         "response_id": "response-1",
         "response_generation": 3,
@@ -82,6 +90,8 @@ def test_agent_probe_rejects_foreign_response_and_contains_writer_failure() -> N
         object(),
         correlation_id="correlation-1",
         interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=2,
         turn_id="turn-1",
     )
     assert probe is not None
@@ -102,6 +112,8 @@ def test_agent_probe_abandon_suppresses_replay_shard() -> None:
         object(),
         correlation_id="correlation-1",
         interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=2,
         turn_id="turn-1",
     )
     assert probe is not None

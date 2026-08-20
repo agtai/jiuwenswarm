@@ -162,6 +162,7 @@ class StreamingRecognitionHandle:
     latency_probe: GatewayLatencyProbeOperation | None = field(
         default=None, repr=False
     )
+    latency_attempt_admitted: bool = field(default=False, repr=False)
 
 
 StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
@@ -227,6 +228,8 @@ class StreamingRecognitionRouteOwner:
         *,
         turn_detection: RecognitionTurnDetection | None = None,
         latency_probe_context: object | None = None,
+        latency_activation_id: str | None = None,
+        latency_activation_generation: int | None = None,
     ) -> tuple[StreamingRecognitionHandle | None, StreamingRecognitionOutcome | None]:
         probe = None
         if self._latency_probe_runtime is not None and latency_probe_context is not None:
@@ -237,6 +240,8 @@ class StreamingRecognitionRouteOwner:
                     phase="gateway_stt",
                     correlation_id=binding.correlation_id,
                     interaction_id=binding.interaction_id,
+                    activation_id=latency_activation_id,
+                    activation_generation=latency_activation_generation,
                 )
             except Exception:
                 probe = None
@@ -250,14 +255,19 @@ class StreamingRecognitionRouteOwner:
             )
         except asyncio.CancelledError:
             if probe is not None:
-                probe.finish("cancelled")
+                probe.abandon()
             raise
         except BaseException:
             if probe is not None:
-                probe.finish("failed")
+                probe.abandon()
             raise
         if handle is None and probe is not None:
-            probe.finish("failed")
+            probe.mark(
+                "gateway.stt_fallback_selected",
+                outcome="fallback",
+                reason_code="FALLBACK",
+            )
+            probe.abandon()
         return handle, outcome
 
     async def _begin(
@@ -520,13 +530,18 @@ class StreamingRecognitionRouteOwner:
             handle.latency_probe.mark("gateway.eot_control_sent")
 
     async def finish(
-        self, handle: StreamingRecognitionHandle
+        self,
+        handle: StreamingRecognitionHandle,
+        *,
+        _admit_latency_attempt: bool = True,
     ) -> StreamingRecognitionOutcome:
         if handle.closed:
             return self._fallback(
                 StreamingRecognitionFallbackReason.ROUTE_ABORTED,
                 SpeechRouteTier.TEXT,
             )
+        if _admit_latency_attempt:
+            handle.latency_attempt_admitted = True
         handle.closed = True
         current_task = asyncio.current_task()
         if current_task is not None:
@@ -633,7 +648,13 @@ class StreamingRecognitionRouteOwner:
                 or StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE,
                 SpeechRouteTier.TEXT,
             )
-            self._finish_latency_probe(handle, "failed")
+            if handle.latency_probe is not None:
+                handle.latency_probe.mark(
+                    "gateway.stt_fallback_selected",
+                    outcome="fallback",
+                    reason_code="FALLBACK",
+                )
+            self._finish_latency_probe(handle, "unknown")
             return outcome
         except asyncio.CancelledError:
             # Cancellation of the caller that owns finish() is also a product
@@ -691,7 +712,7 @@ class StreamingRecognitionRouteOwner:
             return
         handle.failure = StreamingRecognitionFallbackReason.ROUTE_ABORTED
         if not handle.closed:
-            await self.finish(handle)
+            await self.finish(handle, _admit_latency_attempt=False)
             return
         # A product revoke may race a finish already waiting on commit/final.
         # Cancel the exact Provider stream and its local waiters instead of
@@ -1114,6 +1135,7 @@ class StreamingRecognitionRouteOwner:
             if handle.speech_start_ms is not None or event.provider_start_ms is None:
                 raise RuntimeError("speech start boundary was duplicated")
             handle.speech_start_ms = event.provider_start_ms
+            handle.latency_attempt_admitted = True
             future = handle.speech_start
             if future is None or future.done():
                 raise RuntimeError("speech-start boundary was not uniquely negotiated")
@@ -1490,7 +1512,10 @@ class StreamingRecognitionRouteOwner:
     ) -> None:
         probe = handle.latency_probe
         if probe is not None:
-            probe.finish(terminal_outcome)
+            if handle.latency_attempt_admitted:
+                probe.finish(terminal_outcome)
+            else:
+                probe.abandon()
 
 
 def _settle_eot_from_collector(

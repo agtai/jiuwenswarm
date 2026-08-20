@@ -220,6 +220,7 @@ class _LatencyRecorderSpy:
     def __init__(self) -> None:
         self.marks: list[tuple[str, dict[str, object]]] = []
         self.terminal: str | None = None
+        self.abandoned = False
 
     def mark(self, point: str, **identity: object) -> bool:
         self.marks.append((point, identity))
@@ -228,6 +229,9 @@ class _LatencyRecorderSpy:
     def finish(self, terminal: str):
         self.terminal = terminal
         return self
+
+    def abandon(self) -> None:
+        self.abandoned = True
 
 
 class _LatencyRuntimeSpy:
@@ -244,11 +248,14 @@ class _LatencyRuntimeSpy:
         self.recorders.append(recorder)
         return recorder
 
-    def write(self, batch: _LatencyRecorderSpy) -> object:
+    def submit(self, batch: _LatencyRecorderSpy) -> object:
         if self.fail_write:
             raise OSError("PRIVATE-LATENCY-WRITER")
         self.writes.append(batch)
         return object()
+
+    def write(self, _batch: _LatencyRecorderSpy) -> object:
+        raise AssertionError("product path must not call the durable writer")
 
 
 def _latency_context() -> LatencyProbeContext:
@@ -381,7 +388,10 @@ async def test_streaming_owner_emits_one_content_free_stt_probe_batch() -> None:
     )
 
     handle, fallback = await owner.begin(
-        _binding(), latency_probe_context=_latency_context()
+        _binding(),
+        latency_probe_context=_latency_context(),
+        latency_activation_id="activation-1",
+        latency_activation_generation=2,
     )
     assert handle is not None and fallback is None
     owner.offer(handle, _frame(0))
@@ -396,12 +406,37 @@ async def test_streaming_owner_emits_one_content_free_stt_probe_batch() -> None:
     ]
     assert runtime.recorders[0].terminal == "completed"
     assert runtime.writes == [runtime.recorders[0]]
+    assert runtime.recorders[0].marks[0][1]["activation_id"] == "activation-1"
+    assert runtime.recorders[0].marks[0][1]["activation_generation"] == 2
     assert "hello" not in repr(runtime.recorders[0].marks)
     await owner.close()
 
 
 @pytest.mark.asyncio
-async def test_stt_probe_fallback_and_writer_failure_never_change_product() -> None:
+async def test_streaming_owner_close_abandons_pre_speech_probe_without_batch() -> None:
+    provider = _Provider()
+    runtime = _LatencyRuntimeSpy()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        ),
+        latency_probe_runtime=runtime,
+    )
+
+    handle, fallback = await owner.begin(
+        _binding(), latency_probe_context=_latency_context()
+    )
+    assert handle is not None and fallback is None
+    await owner.close()
+
+    assert runtime.recorders[0].abandoned is True
+    assert runtime.recorders[0].terminal is None
+    assert runtime.writes == []
+
+
+@pytest.mark.asyncio
+async def test_pre_speech_stt_fallback_abandons_probe_and_never_changes_product() -> None:
     runtime = _LatencyRuntimeSpy()
     runtime.fail_write = True
     owner = StreamingRecognitionRouteOwner(
@@ -418,10 +453,88 @@ async def test_stt_probe_fallback_and_writer_failure_never_change_product() -> N
 
     assert handle is None
     assert fallback is not None and fallback.completed is False
-    assert runtime.recorders[0].terminal == "failed"
+    assert runtime.recorders[0].marks[-1] == (
+        "gateway.stt_fallback_selected",
+        {
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": None,
+            "activation_generation": None,
+            "response_id": None,
+            "response_generation": None,
+            "outcome": "fallback",
+            "reason_code": "FALLBACK",
+        },
+    )
+    assert runtime.recorders[0].terminal is None
+    assert runtime.recorders[0].abandoned is True
     assert runtime.writes == []
     assert "PRIVATE-LATENCY-WRITER" not in repr(runtime.recorders[0].marks)
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_pre_speech_fallback_leaves_same_round_slot_for_later_real_attempt() -> None:
+    runtime = _LatencyRuntimeSpy()
+    fallback_owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None),
+        ),
+        latency_probe_runtime=runtime,
+    )
+    handle, fallback = await fallback_owner.begin(
+        _binding(), latency_probe_context=_latency_context()
+    )
+    assert handle is None and fallback is not None
+    await fallback_owner.close()
+
+    provider = _Provider()
+    actual_owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        ),
+        latency_probe_runtime=runtime,
+    )
+    actual, actual_fallback = await actual_owner.begin(
+        _binding(), latency_probe_context=_latency_context()
+    )
+    assert actual is not None and actual_fallback is None
+    actual_owner.offer(actual, _frame(0))
+    outcome = await actual_owner.finish(actual)
+
+    assert outcome.completed is True
+    assert runtime.recorders[0].abandoned is True
+    assert runtime.recorders[0].terminal is None
+    assert runtime.recorders[1].terminal == "completed"
+    assert runtime.writes == [runtime.recorders[1]]
+    await actual_owner.close()
+
+
+@pytest.mark.asyncio
+async def test_pre_speech_begin_exception_abandons_probe_without_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LatencyRuntimeSpy()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, _Provider(), None),
+        ),
+        latency_probe_runtime=runtime,
+    )
+
+    async def explode(*_args: object, **_kwargs: object):
+        raise RuntimeError("PRIVATE begin failure")
+
+    monkeypatch.setattr(owner, "_begin", explode)
+    with pytest.raises(RuntimeError, match="PRIVATE begin failure"):
+        await owner.begin(_binding(), latency_probe_context=_latency_context())
+
+    assert runtime.recorders[0].abandoned is True
+    assert runtime.recorders[0].terminal is None
+    assert runtime.writes == []
 
 
 @pytest.mark.asyncio
@@ -807,13 +920,17 @@ async def test_streaming_owner_queue_exhaustion_falls_back_without_dropping_capt
     None
 ):
     provider = _Provider(block_send=True)
+    runtime = _LatencyRuntimeSpy()
     owner = StreamingRecognitionRouteOwner(
         lambda: asyncio.sleep(
             0,
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
-        )
+        ),
+        latency_probe_runtime=runtime,
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await owner.begin(
+        _binding(), latency_probe_context=_latency_context()
+    )
     assert handle is not None
 
     overflow_frame_count = streaming_speech_route._MAX_PENDING_PROVIDER_FRAMES + 2
@@ -828,6 +945,9 @@ async def test_streaming_owner_queue_exhaustion_falls_back_without_dropping_capt
     # batch replay after sealing the canonical media digest.
     assert outcome.fallback_tier is SpeechRouteTier.TEXT
     assert outcome.reason is StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
+    assert runtime.recorders[0].marks[-1][0] == "gateway.stt_fallback_selected"
+    assert runtime.recorders[0].marks[-1][1]["outcome"] == "fallback"
+    assert runtime.recorders[0].terminal == "unknown"
     assert provider.cancel_count == 1
 
 

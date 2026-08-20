@@ -794,6 +794,24 @@ class WebChannel(BaseWsChannel):
                 retain_failure(error, "WebChannel server wait-closed failed")
             if server_close_complete:
                 self._server = None
+        latency_runtime = getattr(self, "live_voice_latency_probe_runtime", None)
+        if latency_runtime is not None:
+            try:
+                latency_cleanup_complete = await asyncio.to_thread(
+                    latency_runtime.close,
+                    5.0,
+                )
+                if latency_cleanup_complete is not True:
+                    logger.warning(
+                        "WebChannel live voice latency export drain incomplete"
+                    )
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice latency export cleanup failed",
+                )
+            finally:
+                self.live_voice_latency_probe_runtime = None
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
         try:
             await self._shutdown_all_writers()

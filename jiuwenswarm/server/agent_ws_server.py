@@ -1472,6 +1472,20 @@ class AgentWebSocketServer:
         registry = self._live_voice_product_composition
         if registry is None:
             self._live_voice_product_observability = None
+            latency_runtime = getattr(
+                self, "_live_voice_latency_probe_runtime", None
+            )
+            if latency_runtime is not None:
+                try:
+                    closed = await asyncio.to_thread(latency_runtime.close, 5.0)
+                    if closed is not True:
+                        logger.warning(
+                            "[LiveVoiceLatency] Agent export drain incomplete"
+                        )
+                except Exception:  # noqa: BLE001 -- diagnostic only
+                    logger.warning(
+                        "[LiveVoiceLatency] Agent export cleanup failed"
+                    )
             self._live_voice_latency_probe_runtime = None
             return True
         try:
@@ -1482,6 +1496,20 @@ class AgentWebSocketServer:
         if self._live_voice_product_composition is registry:
             self._live_voice_product_composition = None
             self._live_voice_product_observability = None
+            latency_runtime = getattr(
+                self, "_live_voice_latency_probe_runtime", None
+            )
+            if latency_runtime is not None:
+                try:
+                    closed = await asyncio.to_thread(latency_runtime.close, 5.0)
+                    if closed is not True:
+                        logger.warning(
+                            "[LiveVoiceLatency] Agent export drain incomplete"
+                        )
+                except Exception:  # noqa: BLE001 -- diagnostic only
+                    logger.warning(
+                        "[LiveVoiceLatency] Agent export cleanup failed"
+                    )
             self._live_voice_latency_probe_runtime = None
         return True
 
@@ -9154,11 +9182,16 @@ class AgentWebSocketServer:
                     )
                     correlation_id = params.get("correlation_id")
                     interaction_id = params.get("interaction_id")
+                    activation_id = params.get("activation_id")
+                    activation_generation = params.get("activation_generation")
                     turn_id = params.get("turn_id")
                     if (
                         parsed_latency_context is not None
                         and type(correlation_id) is str
                         and type(interaction_id) is str
+                        and type(activation_id) is str
+                        and type(activation_generation) is int
+                        and activation_generation >= 0
                         and type(turn_id) is str
                     ):
                         latency_probe = AgentForegroundLatencyProbeOperation.create(
@@ -9166,6 +9199,8 @@ class AgentWebSocketServer:
                             parsed_latency_context,
                             correlation_id=correlation_id,
                             interaction_id=interaction_id,
+                            activation_id=activation_id,
+                            activation_generation=activation_generation,
                             turn_id=turn_id,
                         )
                         if latency_probe is not None:

@@ -20,9 +20,11 @@ class GatewayLatencyProbeOperation:
     """Own one Gateway-local recorder without gaining product authority."""
 
     _recorder: Any
-    _writer: Any
+    _submit: Any
     _correlation_id: str
     _interaction_id: str
+    _activation_id: str | None = None
+    _activation_generation: int | None = None
     _response_id: str | None = None
     _response_generation: int | None = None
     _finished: bool = False
@@ -36,6 +38,8 @@ class GatewayLatencyProbeOperation:
         phase: str,
         correlation_id: str,
         interaction_id: str,
+        activation_id: str | None = None,
+        activation_generation: int | None = None,
         response_id: str | None = None,
         response_generation: int | None = None,
     ) -> GatewayLatencyProbeOperation | None:
@@ -48,21 +52,29 @@ class GatewayLatencyProbeOperation:
                 clock_domain_id="gateway-process-monotonic",
                 monotonic_ms=lambda: time.monotonic() * 1000.0,
             )
-            writer = runtime.writer
+            submit = runtime.submit
         except Exception:
             return None
-        if recorder is None or not callable(getattr(writer, "write", None)):
+        if recorder is None or not callable(submit):
             return None
         return cls(
             recorder,
-            writer,
+            submit,
             correlation_id,
             interaction_id,
+            activation_id,
+            activation_generation,
             response_id,
             response_generation,
         )
 
-    def mark(self, point: str) -> bool:
+    def mark(
+        self,
+        point: str,
+        *,
+        outcome: str = "observed",
+        reason_code: str | None = None,
+    ) -> bool:
         if self._finished:
             return False
         try:
@@ -70,8 +82,12 @@ class GatewayLatencyProbeOperation:
                 point,
                 correlation_id=self._correlation_id,
                 interaction_id=self._interaction_id,
+                activation_id=self._activation_id,
+                activation_generation=self._activation_generation,
                 response_id=self._response_id,
                 response_generation=self._response_generation,
+                outcome=outcome,
+                reason_code=reason_code,
             ) is True
         except Exception:
             return False
@@ -83,7 +99,20 @@ class GatewayLatencyProbeOperation:
         try:
             batch = self._recorder.finish(terminal_outcome)
             if batch is not None:
-                self._writer.write(batch)
+                self._submit(batch)
+        except Exception:
+            return
+
+    def abandon(self) -> None:
+        """Retire a provisional operation without producing a durable shard."""
+
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            abandon = getattr(self._recorder, "abandon", None)
+            if callable(abandon):
+                abandon()
         except Exception:
             return
 

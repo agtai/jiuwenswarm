@@ -475,7 +475,8 @@ commit，因此旧 config 和旧 smoke 必须丢弃并重新绑定。
 
 在仓库外创建 `<output-root>/<run-id>/run.json`。下面是 baseline 模板；`git_commit`
 必须替换为刚才输出的完整 40 位 commit，warm/cold 分别替换 `run_id` 和
-`cold_or_warm`。正式 20-success 运行使用最多 30 个 attempt；五轮 smoke 使用一个
+`cold_or_warm`。正式运行对每个 profile 必须执行声明的全部 30 个 attempt，并要求
+至少 20 个 success；不能达到的 round 仍由 reducer 记为 missing/unknown。五轮 smoke 使用一个
 独立 warm run，把 `intended_attempts` 和 `required_successes` 都改为 `5`。
 
 ```json
@@ -589,6 +590,12 @@ capture ready 都完成，或进入稳定 failed/cancelled terminal 后才导出
 “probe complete”产品状态；用私有输出文件新增的合法 JSONL batch 和最终 report
 核对，而不是在 console 打印内容。
 
+successor capture 在真实 `speech_started`、服务端 EOT 或显式 stop-and-recognize 前只是
+provisional context。profile 切换/reload 会放弃这个尚未说话的 successor，不导出
+cancelled batch，也不推进该 profile 的 `round_index`。因此每个 profile 的 30 个
+attempt 必须对应 30 次真实输入且索引恰为 `0..29`；若出现由空 successor 造成的跳号、
+额外 cancelled batch 或 phantom denominator，立即判定 probe/run 无效，不得继续采集。
+
 #### 7.6.4 Warm、cold、报告和接受边界
 
 先运行独立 warm smoke：每个 profile 恰好五个 attempted round。只修 probe 缺陷；
@@ -605,10 +612,14 @@ profile：
   `run_id`、目录或 report。
 
 每轮前确认麦克风/耳机、Chrome permission、Provider/model、项目注册和网络仍可用。
-这些都是机器私有 runtime state，Git 不会恢复。若某一 profile 在 30 个 attempt 内
-没有 20 个成功 sample，该 run 不取得 baseline credit。
+这些都是机器私有 runtime state，Git 不会恢复。每个 profile 必须执行全部 30 个
+attempt；若其中没有 20 个成功 sample，该 run 不取得 baseline credit。提前达到 20
+个 success 不能停止该 profile，因为剩余 attempt 属于固定 denominator。
 
-停止服务后在私有目录生成报告：
+通过正常 shutdown 停止 AgentServer、Gateway 和 WebChannel，让两个 Python producer
+执行最长 5 秒的 bounded export drain。只有 shutdown 完成且日志中没有
+`latency export drain incomplete`/`latency export cleanup failed` 后，才在私有目录生成报告；
+直接 kill 进程可能丢失最后一个 queued shard，使对应 attempt 保持 `unknown`：
 
 ```bash
 uv run python -m jiuwenswarm.server.live_voice.latency_probe_report \

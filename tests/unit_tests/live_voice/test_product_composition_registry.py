@@ -286,10 +286,11 @@ class _AgentManager:
 
 
 class _ForegroundLatencyProbeSpy:
-    def __init__(self) -> None:
+    def __init__(self, owner_events: list[str] | None = None) -> None:
         self.marks: list[tuple[str, object | None, str | None]] = []
         self.terminals: list[str] = []
         self.abandoned = False
+        self.owner_events = owner_events
 
     def mark(
         self,
@@ -299,6 +300,8 @@ class _ForegroundLatencyProbeSpy:
         task_id: str | None = None,
     ) -> bool:
         self.marks.append((point, response_ref, task_id))
+        if self.owner_events is not None:
+            self.owner_events.append(point)
         return True
 
     def finish(self, terminal_outcome: str) -> None:
@@ -1479,6 +1482,7 @@ async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_ident
 @pytest.mark.asyncio
 async def test_unified_latency_probe_tracks_new_execution_and_abandons_replay(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     assert (
@@ -1490,7 +1494,24 @@ async def test_unified_latency_probe_tracks_new_execution_and_abandons_replay(
         )
     ).ok
     params = _unified_final_params(stem="latency-dialogue", text="PRIVATE INPUT")
-    first_probe = _ForegroundLatencyProbeSpy()
+    owner_events: list[str] = []
+    bridge = registry._task_intent_bridge
+    journal = registry._unified_journal
+    assert bridge is not None and journal is not None
+    real_resolve = bridge.resolve_unified
+    real_admit = journal.admit
+
+    def traced_resolve(*args, **kwargs):
+        owner_events.append("owner.semantic_resolver")
+        return real_resolve(*args, **kwargs)
+
+    def traced_admit(*args, **kwargs):
+        owner_events.append("owner.journal_admit")
+        return real_admit(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, "resolve_unified", traced_resolve)
+    monkeypatch.setattr(journal, "admit", traced_admit)
+    first_probe = _ForegroundLatencyProbeSpy(owner_events)
     first_probe.mark("agent.commit_submit_received")
 
     first = await registry.handle_unified_submit(
@@ -1518,6 +1539,12 @@ async def test_unified_latency_probe_tracks_new_execution_and_abandons_replay(
     ]
     assert first_probe.terminals == ["completed"]
     assert "PRIVATE INPUT" not in repr(first_probe.marks)
+    assert owner_events.index("agent.commit_accepted") < owner_events.index(
+        "owner.semantic_resolver"
+    )
+    assert owner_events.index("owner.journal_admit") < owner_events.index(
+        "agent.route_resolved"
+    )
 
     replay_probe = _ForegroundLatencyProbeSpy()
     replay_probe.mark("agent.commit_submit_received")

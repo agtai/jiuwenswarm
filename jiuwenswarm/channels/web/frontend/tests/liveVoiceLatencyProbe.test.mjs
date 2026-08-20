@@ -161,17 +161,55 @@ test('query selector rejects missing, duplicate, empty, sensitive, overlong, mal
   }
 });
 
-test('round allocator assigns contiguous 0 and 1 to probes sharing one sessionStorage namespace', () => {
+test('round admission assigns contiguous 0 and 1 only after the prior provisional round commits', () => {
   const storage = memoryStorage();
   const firstHarness = harness({ storage, ids: ['source-a', 'clock-a', 'batch-a'] });
   const secondHarness = harness({ storage, ids: ['source-b', 'clock-b', 'batch-b'] });
   const first = createBrowserLatencyProbe(firstHarness.dependencies);
   const second = createBrowserLatencyProbe(secondHarness.dependencies);
 
-  assert.equal(first.beginRound(initialIdentity).context.round_index, 0);
+  const firstRound = first.beginRound(initialIdentity);
+  assert.equal(firstRound.context.round_index, 0);
+  assert.equal(storage.values.size, 0);
+  assert.equal(firstRound.commit(), true);
   assert.equal(second.beginRound(initialIdentity).context.round_index, 1);
   assert.equal(storage.values.size, 1);
-  assert.equal([...storage.values.values()][0], '2');
+  assert.equal([...storage.values.values()][0], '1');
+});
+
+test('five-profile reload cycles retain thirty contiguous real attempts while every unused successor is abandoned', () => {
+  const storage = memoryStorage();
+  const admitted = new Map(profiles.map(profile => [profile, []]));
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    for (const profile of profiles) {
+      const currentHarness = harness({
+        storage,
+        search: `?lv_latency_run=run-cycle&lv_latency_profile=${profile}&lv_latency_case=case-${profile}`,
+        ids: [`source-${profile}-${attempt}`, `clock-${profile}-${attempt}`, `batch-${profile}-${attempt}`, `unused-${profile}-${attempt}`],
+      });
+      const currentProbe = createBrowserLatencyProbe(currentHarness.dependencies);
+      const current = currentProbe.beginRound(initialIdentity);
+      assert.equal(current.context.round_index, attempt);
+      assert.equal(current.commit(), true);
+      assert.equal(current.mark('browser.eot_received', initialIdentity), true);
+      admitted.get(profile).push(current.finish('completed').round_index);
+
+      const unusedSuccessor = currentProbe.beginRound(initialIdentity);
+      assert.equal(unusedSuccessor.context.round_index, attempt + 1);
+      assert.equal(unusedSuccessor.mark('browser.capture_start_requested', initialIdentity), true);
+      assert.equal(unusedSuccessor.abandon(), true);
+      assert.equal(unusedSuccessor.finish('cancelled'), null);
+    }
+  }
+
+  for (const profile of profiles) {
+    assert.deepEqual(
+      admitted.get(profile),
+      Array.from({ length: 30 }, (_value, index) => index),
+    );
+  }
+  assert.deepEqual([...storage.values.values()], ['30', '30', '30', '30', '30']);
 });
 
 test('round allocator accepts 255 then fails inert at 256 without randomness, clocks, or transport', () => {
@@ -186,10 +224,12 @@ test('round allocator accepts 255 then fails inert at 256 without randomness, cl
   // Obtain the opaque tuple key through one ordinary allocation, then set its next value.
   const allocated = firstProbe.beginRound(initialIdentity);
   assert.equal(allocated.context.round_index, 0);
-  const tupleKey = storage.calls.find(call => call[0] === 'setItem')[1];
+  const tupleKey = storage.calls.find(call => call[0] === 'getItem')[1];
+  assert.equal(allocated.abandon(), true);
   storage.values.set(tupleKey, '255');
   const atLimit = firstProbe.beginRound(initialIdentity);
   assert.equal(atLimit.context.round_index, 255);
+  assert.equal(atLimit.commit(), true);
   assert.equal(storage.values.get(tupleKey), '256');
 
   const before = first.counts();
@@ -243,7 +283,7 @@ test('corrupt, unsafe, throwing, and conflicting storage returns an inert round 
   }
 });
 
-test('failed batch randomness rolls back its allocation so the next active round remains contiguous', () => {
+test('failed batch randomness consumes no provisional index so the next active round remains contiguous', () => {
   const h = harness({
     ids: ['source-instance-1', 'browser-clock-1', new Error('PRIVATE random failure'), 'batch-after-recovery'],
   });
@@ -551,20 +591,6 @@ test('unknown storage write outcomes permanently latch one probe allocator inert
   const adapters = [
     (() => {
       let value = null;
-      let reads = 0;
-      return {
-        getItem() {
-          reads += 1;
-          if (reads === 2) throw new Error('PRIVATE verification failure');
-          return value;
-        },
-        setItem(_key, next) {
-          value = next;
-        },
-      };
-    })(),
-    (() => {
-      let value = null;
       return {
         getItem() {
           return value;
@@ -581,35 +607,18 @@ test('unknown storage write outcomes permanently latch one probe allocator inert
       return {
         getItem() {
           reads += 1;
-          if (reads === 2) return 'conflicting-next-index';
+          if (reads === 3) return 'conflicting-next-index';
           return value;
         },
         setItem(_key, next) {
           value = next;
-        },
-      };
-    })(),
-    (() => {
-      let value = null;
-      let writes = 0;
-      return {
-        getItem() {
-          return value;
-        },
-        setItem(_key, next) {
-          writes += 1;
-          value = next;
-          if (writes === 2) throw new Error('PRIVATE rollback unknown');
         },
       };
     })(),
   ];
 
-  adapters.forEach((storage, index) => {
-    const h = harness({
-      storage,
-      ids: index === 3 ? ['source-instance-1', 'browser-clock-1', new Error('PRIVATE batch random'), 'forbidden-batch'] : undefined,
-    });
+  adapters.forEach(storage => {
+    const h = harness({ storage });
     const probe = createBrowserLatencyProbe(h.dependencies);
     const failed = probe.beginRound(initialIdentity);
     assert.equal(failed.finish('failed'), null);
@@ -621,6 +630,26 @@ test('unknown storage write outcomes permanently latch one probe allocator inert
     assert.deepEqual(h.counts(), afterFailure);
     assert.equal(h.requestCalls.length, 0);
   });
+});
+
+test('safe pre-write admission failure releases the provisional slot for a later round', () => {
+  const storage = memoryStorage();
+  const ordinaryGet = storage.getItem.bind(storage);
+  let reads = 0;
+  storage.getItem = key => {
+    reads += 1;
+    if (reads === 2) throw new Error('PRIVATE pre-write read failure');
+    return ordinaryGet(key);
+  };
+  const h = harness({ storage });
+  const probe = createBrowserLatencyProbe(h.dependencies);
+
+  assert.equal(probe.beginRound(initialIdentity).finish('failed'), null);
+  storage.getItem = ordinaryGet;
+  const recovered = probe.beginRound(initialIdentity);
+  assert.equal(recovered.context.round_index, 0);
+  assert.equal(recovered.commit(), true);
+  assert.notEqual(recovered.finish('completed'), null);
 });
 
 test('monotonic clock reentrancy cannot insert a conflicting mark or finish an in-flight mark', () => {

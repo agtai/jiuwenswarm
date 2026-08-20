@@ -335,9 +335,12 @@ class _LatencyRuntimeSpy:
         self.recorders.append(recorder)
         return recorder
 
-    def write(self, batch: _LatencyRecorderSpy) -> object:
+    def submit(self, batch: _LatencyRecorderSpy) -> object:
         self.writes.append(batch)
         return object()
+
+    def write(self, _batch: _LatencyRecorderSpy) -> object:
+        raise AssertionError("product path must not call the durable writer")
 
 
 def _latency_context() -> LatencyProbeContext:

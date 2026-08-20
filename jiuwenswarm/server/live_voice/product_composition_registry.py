@@ -4468,6 +4468,7 @@ class AgentServerProductCompositionRegistry:
                     "committed_at": committed_at,
                 }
             )
+            _mark_foreground_latency(latency_probe, "agent.commit_accepted")
             preliminary = bridge.resolve_unified(commit, commit.scope, None)
             current: PersistentTaskRecord | None = None
             background_authority_unavailable = False
@@ -4572,7 +4573,6 @@ class AgentServerProductCompositionRegistry:
                     commit_id=commit.commit_id,
                 )
                 return P3RouteResult(bool(payload.get("ok")), payload)
-            _mark_foreground_latency(latency_probe, "agent.commit_accepted")
             _mark_foreground_latency(latency_probe, "agent.route_resolved")
             admitted_execution = True
             may_seal_failure = True

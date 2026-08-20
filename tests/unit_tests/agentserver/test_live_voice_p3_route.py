@@ -16,6 +16,7 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _FORWARD_NO_LOCAL_HANDLER_METHODS,
     _FORWARD_REQ_METHODS,
 )
+from jiuwenswarm.server import agent_ws_server as agent_ws_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice import p3_authenticated_composition as p3_module
 from jiuwenswarm.server.live_voice import product_composition_registry as product_module
@@ -611,6 +612,52 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
 
 
 @pytest.mark.asyncio
+async def test_agentserver_product_stop_drains_latency_export_runtime() -> None:
+    class Runtime:
+        def __init__(self) -> None:
+            self.close_calls: list[float] = []
+
+        def close(self, timeout: float) -> bool:
+            self.close_calls.append(timeout)
+            return True
+
+    runtime = Runtime()
+    server = _server(object())
+    server._live_voice_product_composition = None
+    server._live_voice_latency_probe_runtime = runtime
+
+    assert await server._stop_live_voice_product_composition() is True
+
+    assert runtime.close_calls == [5.0]
+    assert server._live_voice_latency_probe_runtime is None
+
+
+@pytest.mark.asyncio
+async def test_agentserver_latency_cleanup_redacts_private_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        def close(self, _timeout: float) -> bool:
+            raise OSError("PRIVATE-LATENCY-OUTPUT-PATH")
+
+    server = _server(object())
+    server._live_voice_product_composition = None
+    server._live_voice_latency_probe_runtime = Runtime()
+    warnings: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        agent_ws_module.logger,
+        "warning",
+        lambda *args: warnings.append(args),
+    )
+
+    assert await server._stop_live_voice_product_composition() is True
+
+    assert "Agent export cleanup failed" in repr(warnings)
+    assert "PRIVATE-LATENCY-OUTPUT-PATH" not in repr(warnings)
+    assert server._live_voice_latency_probe_runtime is None
+
+
+@pytest.mark.asyncio
 async def test_agentserver_retains_failed_product_cleanup_owner_for_retry() -> None:
     registry = _ProductRegistry(stop_failures=1)
     server = _server(object())
@@ -795,6 +842,8 @@ async def test_unified_probe_context_is_stripped_before_business_dispatch(
             "session_id": "session-1",
             "correlation_id": "correlation-1",
             "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 3,
             "turn_id": "turn-1",
             "latency_probe_context": {"PRIVATE": "must not reach business"},
         },
@@ -810,6 +859,8 @@ async def test_unified_probe_context_is_stripped_before_business_dispatch(
                     "session_id": "session-1",
                     "correlation_id": "correlation-1",
                     "interaction_id": "interaction-1",
+                    "activation_id": "activation-1",
+                    "activation_generation": 3,
                     "turn_id": "turn-1",
                 },
                 "request_id": "request-unified-probe",

@@ -21,9 +21,11 @@ class AgentForegroundLatencyProbeOperation:
     """Own one Agent-local recorder without becoming product authority."""
 
     _recorder: Any
-    _writer: Any
+    _submit: Any
     _correlation_id: str
     _interaction_id: str
+    _activation_id: str
+    _activation_generation: int
     _turn_id: str
     _response_id: str | None = None
     _response_generation: int | None = None
@@ -38,6 +40,8 @@ class AgentForegroundLatencyProbeOperation:
         *,
         correlation_id: str,
         interaction_id: str,
+        activation_id: str,
+        activation_generation: int,
         turn_id: str,
     ) -> AgentForegroundLatencyProbeOperation | None:
         if runtime is None or context is None:
@@ -49,16 +53,18 @@ class AgentForegroundLatencyProbeOperation:
                 clock_domain_id="agent-server-process-monotonic",
                 monotonic_ms=lambda: time.monotonic() * 1000.0,
             )
-            writer = runtime.writer
+            submit = runtime.submit
         except Exception:
             return None
-        if recorder is None or not callable(getattr(writer, "write", None)):
+        if recorder is None or not callable(submit):
             return None
         return cls(
             recorder,
-            writer,
+            submit,
             correlation_id,
             interaction_id,
+            activation_id,
+            activation_generation,
             turn_id,
         )
 
@@ -84,6 +90,8 @@ class AgentForegroundLatencyProbeOperation:
                     point,
                     correlation_id=self._correlation_id,
                     interaction_id=self._interaction_id,
+                    activation_id=self._activation_id,
+                    activation_generation=self._activation_generation,
                     turn_id=self._turn_id,
                     response_id=self._response_id,
                     response_generation=self._response_generation,
@@ -101,7 +109,7 @@ class AgentForegroundLatencyProbeOperation:
         try:
             batch = self._recorder.finish(terminal_outcome)
             if batch is not None:
-                self._writer.write(batch)
+                self._submit(batch)
         except Exception:
             return
 
