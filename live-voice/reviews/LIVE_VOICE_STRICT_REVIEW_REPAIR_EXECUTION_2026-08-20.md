@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 8/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 9/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -403,6 +403,7 @@ and risk checkpoint before implementation.
 | SRR-07 / A3 | 6/88 | `ec43b0423`; Provider-boundary canonical transcript is shared exactly by result, event, receipt, hash and claim; ASCII/Unicode boundaries, rejection zero effects, concurrent/later replay and real Gateway/product consumers verified; 58 module + 18 consumer tests; independently signed |
 | SRR-12 / A18 | 7/88 | `3f746fd48`; cold create/run await the existing Agent singleflight before target pin or mutation, while exception/None fail closed and retry succeeds without stale effects; 28 handler/DeepAdapter + 212 affected tests; independently signed |
 | SRR-11 / A4 | 8/88 | `c255ddcae`; bounded batch audio resampling runs off the event-loop thread without changing DSP bytes or typed failures; deterministic heartbeat/cancel barriers, late worker completion/error containment, 61 module + 14 consumer tests and repeated scheduling probes independently signed |
+| SRR-14 / A12 | 9/88 | `bafab7c91`; a durable cross-adapter user cancel observed after normal Agent return now settles exactly as `CANCELLED`, while shutdown/heartbeat/lost-owner interruption remains `INTERRUPTED`; isolated patch zero effects, exact replay, reopen, 100 module tests and independent Tier-3 review passed |
 
 ## 8. Global exclusions
 
