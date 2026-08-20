@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 7/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 8/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -328,6 +328,7 @@ and risk checkpoint before implementation.
 | SRR-09 / B7 | 5/88 | `4f62a0d82` + `31dec8c7c`; exact-ID release preserves successor clarification/authorization across both orderings and a deterministic RLock race while old authority has zero effects; 60 module tests; independently signed |
 | SRR-07 / A3 | 6/88 | `ec43b0423`; Provider-boundary canonical transcript is shared exactly by result, event, receipt, hash and claim; ASCII/Unicode boundaries, rejection zero effects, concurrent/later replay and real Gateway/product consumers verified; 58 module + 18 consumer tests; independently signed |
 | SRR-12 / A18 | 7/88 | `3f746fd48`; cold create/run await the existing Agent singleflight before target pin or mutation, while exception/None fail closed and retry succeeds without stale effects; 28 handler/DeepAdapter + 212 affected tests; independently signed |
+| SRR-11 / A4 | 8/88 | `c255ddcae`; bounded batch audio resampling runs off the event-loop thread without changing DSP bytes or typed failures; deterministic heartbeat/cancel barriers, late worker completion/error containment, 61 module + 14 consumer tests and repeated scheduling probes independently signed |
 
 ## 8. Global exclusions
 
