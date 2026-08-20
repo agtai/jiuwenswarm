@@ -523,11 +523,18 @@ def test_bridge_recomputes_the_complete_resolution_identity() -> None:
     assert raised.value.reason == "TASK_INTENT_RESOLUTION_ID_MISMATCH"
 
 
-def test_bridge_rejects_confirmation_token_mixed_with_other_authority_fields() -> None:
+@pytest.mark.parametrize(
+    "conflicting_field",
+    ("operation", "task_id", "name", "instruction", "target_span"),
+)
+def test_bridge_rejects_each_confirmation_token_authority_conflict(
+    conflicting_field: str,
+) -> None:
     token = "a" * 32
-    text = f"inspect task-abc {token}"
+    text = f"inspect label task-abc {token}"
     commit = committed(text, commit_id="commit-mixed-confirmation")
-    source_span = TaskIntentSourceSpan(0, len("inspect"))
+    token_start = text.index(token)
+    source_span = TaskIntentSourceSpan(token_start, token_start + len(token))
     target_start = text.index("task-abc")
     target_span = TaskIntentSourceSpan(target_start, target_start + len("task-abc"))
     commit_sha256 = hashlib.sha256(commit.canonical_bytes()).hexdigest()
@@ -536,15 +543,25 @@ def test_bridge_rejects_confirmation_token_mixed_with_other_authority_fields() -
         "implementation_class": "mixed_authority_fields",
         "commit_sha256": commit_sha256,
         "operation": None,
-        "task_id": "task-abc",
+        "task_id": None,
         "name": None,
-        "instruction": "inspect",
+        "instruction": None,
         "source_span": source_span,
-        "target_span": target_span,
+        "target_span": None,
         "requires_confirmation": False,
         "confirmation_token": token,
         "reason": "TASK_CONFIRMATION_RESOLVED",
     }
+    conflicts = {
+        "operation": "task.create",
+        "task_id": "task-abc",
+        "name": "label",
+        "instruction": "inspect",
+        "target_span": target_span,
+    }
+    values[conflicting_field] = conflicts[conflicting_field]
+    if conflicting_field == "instruction":
+        values["source_span"] = TaskIntentSourceSpan(0, len("inspect"))
     resolution_id = hashlib.sha256(
         canonical_json_bytes(_resolution_identity(**values))
     ).hexdigest()
@@ -562,5 +579,60 @@ def test_bridge_rejects_confirmation_token_mixed_with_other_authority_fields() -
         bridge.resolve(commit, SCOPE)
 
     assert raised.value.reason == "INVALID_TASK_CONFIRMATION_DECISION"
-    assert not hasattr(bridge, "task_store")
-    assert not hasattr(bridge, "tool")
+
+
+@pytest.mark.parametrize(
+    "authority_field",
+    ("confirmation_token", "instruction", "task_id"),
+)
+def test_bridge_validates_each_populated_authority_field_against_its_exact_span(
+    authority_field: str,
+) -> None:
+    token = "a" * 32
+    text = f"inspect label task-abc {token}"
+    commit = committed(text, commit_id=f"commit-wrong-span-{authority_field}")
+    label_start = text.index("label")
+    task_start = text.index("task-abc")
+    values = {
+        "provider": "malicious.test",
+        "implementation_class": "wrong_authority_span",
+        "commit_sha256": hashlib.sha256(commit.canonical_bytes()).hexdigest(),
+        "operation": None,
+        "task_id": None,
+        "name": None,
+        "instruction": None,
+        "source_span": TaskIntentSourceSpan(label_start, label_start + len("label")),
+        "target_span": None,
+        "requires_confirmation": False,
+        "confirmation_token": None,
+        "reason": "TASK_INTENT_RESOLVED",
+    }
+    if authority_field == "confirmation_token":
+        values["confirmation_token"] = token
+        values["reason"] = "TASK_CONFIRMATION_RESOLVED"
+    elif authority_field == "instruction":
+        values["operation"] = "task.create"
+        values["instruction"] = "inspect"
+        values["requires_confirmation"] = True
+    else:
+        values["operation"] = "task.status"
+        values["task_id"] = "task-abc"
+        values["target_span"] = TaskIntentSourceSpan(
+            task_start, task_start + len("task-abc")
+        )
+    resolution_id = hashlib.sha256(
+        canonical_json_bytes(_resolution_identity(**values))
+    ).hexdigest()
+
+    class WrongSpanResolver:
+        def resolve(self, _commit: TurnCommit) -> ResolvedTaskIntent:
+            return ResolvedTaskIntent(
+                disposition=TaskIntentDisposition.DISPATCHED,
+                resolution_id=resolution_id,
+                **values,
+            )
+
+    with pytest.raises(VoiceTaskBridgeViolation) as raised:
+        VoiceTaskBridge(WrongSpanResolver()).resolve(commit, SCOPE)
+
+    assert raised.value.reason == "TASK_INTENT_SOURCE_SPAN_MISMATCH"

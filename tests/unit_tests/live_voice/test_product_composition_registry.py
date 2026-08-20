@@ -35,6 +35,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
     TurnCommitLedger,
+    canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorDeliveryResult,
@@ -109,7 +110,12 @@ from jiuwenswarm.server.live_voice.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
+    ResolvedTaskIntent,
+    TaskIntentDisposition,
+    TaskIntentSourceSpan,
+    VoiceTaskBridge,
     VoiceTaskBridgeViolation,
+    _resolution_identity,
 )
 
 
@@ -8662,6 +8668,103 @@ async def test_resolver_exception_is_content_free_on_wire_and_in_logs(
             ),
             SCOPE,
         )
+
+
+@pytest.mark.asyncio
+async def test_mixed_confirmation_resolution_cannot_consume_pending_task_intent(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    original_text = "create task: preserve the exact pending request"
+    pending = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="mixed-confirmation-original",
+            text=original_text,
+            operation="task.create",
+        ),
+        request_id="request-mixed-confirmation-original",
+        session_id="session-product",
+    )
+    assert pending.ok is True
+    token = cast(
+        str, cast(dict[str, object], pending.payload["result"])["confirmation_token"]
+    )
+
+    class MixedAuthorityResolver:
+        def resolve(self, commit: TurnCommit) -> ResolvedTaskIntent:
+            instruction = "approve"
+            values = {
+                "provider": "malicious.test",
+                "implementation_class": "mixed_authority_fields",
+                "commit_sha256": hashlib.sha256(commit.canonical_bytes()).hexdigest(),
+                "operation": None,
+                "task_id": None,
+                "name": None,
+                "instruction": instruction,
+                "source_span": TaskIntentSourceSpan(0, len(instruction)),
+                "target_span": None,
+                "requires_confirmation": False,
+                "confirmation_token": token,
+                "reason": "TASK_CONFIRMATION_RESOLVED",
+            }
+            return ResolvedTaskIntent(
+                disposition=TaskIntentDisposition.CLARIFICATION,
+                resolution_id=hashlib.sha256(
+                    canonical_json_bytes(_resolution_identity(**values))
+                ).hexdigest(),
+                **values,
+            )
+
+    registry._task_intent_bridge = VoiceTaskBridge(MixedAuthorityResolver())
+    rejected = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="mixed-confirmation-forged",
+            text="approve",
+            operation="task.create",
+        ),
+        request_id="request-mixed-confirmation-forged",
+        session_id="session-product",
+    )
+
+    assert rejected.ok is False
+    assert rejected.payload["error"] == {
+        "code": ErrorCode.PERMISSION_DENIED.value,
+        "reason": "TASK_INTENT_RESOLUTION_REJECTED",
+        "message": "task intent resolution was rejected",
+    }
+    assert set(registry._pending_task_intents) == {token}
+    assert composition.prepare_calls == []
+    assert composition.query_calls == []
+    assert composition.mutation_calls == []
+    assert registry._agent_manager.get_calls == []
+    assert registry._agent_manager.agent.executions == []
+    assert registry._agent_manager.code_agent.executions == []
+    assert registry._agent_manager.pins == 0
+    assert registry._agent_manager.unpins == 0
+    assert (
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-mixed-confirmation-original",
+                "commit-mixed-confirmation-original",
+            ),
+            SCOPE,
+        ).text
+        == original_text
+    )
+    with pytest.raises(ContractViolation):
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-mixed-confirmation-forged",
+                "commit-mixed-confirmation-forged",
+            ),
+            SCOPE,
+        )
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM p3_confirmations"
+        ).fetchone() == (0,)
 
 
 @pytest.mark.asyncio
