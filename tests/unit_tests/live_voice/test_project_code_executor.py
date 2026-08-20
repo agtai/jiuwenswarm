@@ -1249,6 +1249,42 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
         await second.close()
 
 
+@pytest.mark.asyncio
+async def test_direct_d2_is_an_explicit_store_backed_candidate_only(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "candidate-project"
+    _git_project(project)
+    database = tmp_path / "candidate.sqlite3"
+    resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
+    legacy = DirectProjectCodeExecutorAdapter(resolver, database)
+    store = SqliteTaskStore(database)
+    durable = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+        durability_store=store,
+    )
+
+    try:
+        assert legacy.capability_profiles() == (legacy.capability_profile(),)
+        candidates = durable.capability_profiles()
+        assert candidates[0] is durable.capability_profile()
+        assert tuple(profile.durability_level for profile in candidates) == (
+            "D0",
+            "D2",
+        )
+        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v1"
+        with pytest.raises(ValueError, match="same canonical"):
+            DirectProjectCodeExecutorAdapter(
+                resolver,
+                database,
+                durability_store=SqliteTaskStore(tmp_path / "foreign.sqlite3"),
+            )
+    finally:
+        await legacy.close()
+        await durable.close()
+
+
 def test_direct_stream_observer_defaults_off_and_never_changes_profile(
     tmp_path: Path,
 ) -> None:
@@ -1359,9 +1395,7 @@ async def test_direct_stream_observer_is_content_free_immutable_and_pairs_each_s
             "d0-project:attempt-1:adjust:adjust-1",
             "d0-project:attempt-1:adjust:adjust-1",
         ]
-        assert {item.observed_at for item in observations} == {
-            "2026-08-05T12:00:00Z"
-        }
+        assert {item.observed_at for item in observations} == {"2026-08-05T12:00:00Z"}
         assert observer_health_reads == [0, 0, 0, 0]
         assert all(item.tool_name_digest.startswith("sha256:") for item in observations)
         assert all(item.call_id_digest.startswith("sha256:") for item in observations)
@@ -1453,9 +1487,9 @@ async def test_direct_stream_observer_maps_unknown_tool_and_error_without_raw_fi
 def test_direct_stream_observer_marks_every_invalid_call_identity_closed(
     invalid: object,
 ) -> None:
-    expected = "sha256:" + hashlib.sha256(
-        b"live-voice.invalid-tool-call-id"
-    ).hexdigest()
+    expected = (
+        "sha256:" + hashlib.sha256(b"live-voice.invalid-tool-call-id").hexdigest()
+    )
 
     observation = project_code_executor._closed_direct_stream_observation(
         {
@@ -1479,9 +1513,7 @@ def test_direct_stream_observer_marks_every_invalid_call_identity_closed(
 def test_direct_stream_observer_marks_every_invalid_tool_identity_unknown(
     invalid: object,
 ) -> None:
-    expected = "sha256:" + hashlib.sha256(
-        b"live-voice.invalid-tool-name"
-    ).hexdigest()
+    expected = "sha256:" + hashlib.sha256(b"live-voice.invalid-tool-name").hexdigest()
 
     observation = project_code_executor._closed_direct_stream_observation(
         {
@@ -1653,10 +1685,7 @@ async def test_selected_direct_status_reports_profile_drift_under_old_binding(
         assert observed.resolution is ExecutorResolution.UNAVAILABLE
         assert observed.error == "EXECUTOR_SELECTION_PROFILE_DRIFT"
         assert observed.adapter_id == selection.adapter_id
-        assert (
-            observed.capability_profile_digest
-            == selection.capability_profile_digest
-        )
+        assert observed.capability_profile_digest == selection.capability_profile_digest
         assert adapter._journal.get(item.attempt_id) is not None
         assert _git(project, "status", "--short") == before_status
     finally:
@@ -3119,21 +3148,16 @@ async def test_direct_executor_runs_two_distinct_projects_concurrently(
     assert len(first_executor.requests) == 1
     assert len(second_executor.requests) == 1
     assert {
-        (item.task_ref, item.attempt_ref, item.run_ref)
-        for item in observations
+        (item.task_ref, item.attempt_ref, item.run_ref) for item in observations
     } == {
         ("task-1", "attempt-1", "d0-project:attempt-1"),
         ("task-2", "attempt-2", "d0-project:attempt-2"),
     }
     assert [
-        item.sequence
-        for item in observations
-        if item.attempt_ref == "attempt-1"
+        item.sequence for item in observations if item.attempt_ref == "attempt-1"
     ] == [1, 2]
     assert [
-        item.sequence
-        for item in observations
-        if item.attempt_ref == "attempt-2"
+        item.sequence for item in observations if item.attempt_ref == "attempt-2"
     ] == [1, 2]
     assert "PRIVATE_PATH_SENTINEL" not in repr(observations)
     assert "PRIVATE_RESULT_SENTINEL" not in repr(observations)

@@ -72,6 +72,10 @@ from .formal_task_models import (
     utc_now,
 )
 from .durability_checkpoint import D1Checkpoint
+from .durability_authority import (
+    DurabilityMutationAuthorization,
+    _durability_authorization_payload_digest,
+)
 from .durability_effects import (
     EffectContinuationAuthorization,
     EffectFact,
@@ -1189,11 +1193,26 @@ class SqliteTaskStore:
             executor_id=attempt_row["executor_id"],
             selection=_selection_from_attempt_row(attempt_row),
         )
+        logical_origin_attempt_id = origin_attempt_id
+        visited: set[str] = set()
+        while True:
+            if logical_origin_attempt_id in visited:
+                raise cls._corrupt("durability recovery lineage contains a cycle")
+            visited.add(logical_origin_attempt_id)
+            recovery_row = connection.execute(
+                """SELECT producer_attempt_id FROM durability_recoveries
+                   WHERE task_id=? AND recovery_attempt_id=?""",
+                (task_id, logical_origin_attempt_id),
+            ).fetchone()
+            if recovery_row is None:
+                break
+            logical_origin_attempt_id = recovery_row["producer_attempt_id"]
         return DurabilityReadBinding(
             scope=scope,
             task_id=task_row["task_id"],
             origin_attempt_id=origin_attempt_id,
             profile=profile,
+            logical_origin_attempt_id=logical_origin_attempt_id,
         )
 
     @staticmethod
@@ -1278,11 +1297,78 @@ class SqliteTaskStore:
             expected_prefix_digest=expected_prefix_digest,
         )
 
+    def _consume_durability_authorization(
+        self,
+        connection: sqlite3.Connection,
+        authorization: DurabilityMutationAuthorization | None,
+        *,
+        operation: str,
+        binding: DurabilityReadBinding,
+        candidate_attempt_id: str | None,
+        payload_digest: str,
+        observed_at: str,
+    ) -> tuple[VerifiedCheckpointPrefix, VerifiedEffectPrefix]:
+        if type(authorization) is not DurabilityMutationAuthorization:
+            raise FormalTaskViolation(
+                "DURABILITY_MUTATION_AUTHORIZATION_REQUIRED",
+                "durability mutation requires one opaque Direct authorization",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        checkpoints = self._verified_checkpoint_prefix(connection, binding)
+        effects = self._verified_effect_prefix(connection, binding)
+        lease = connection.execute(
+            "SELECT * FROM durability_mutator_leases WHERE task_id=?",
+            (binding.task_id,),
+        ).fetchone()
+        if (
+            not authorization.is_for_store(self)
+            or authorization.operation != operation
+            or authorization.scope != binding.scope
+            or authorization.task_id != binding.task_id
+            or authorization.producer_attempt_id != binding.origin_attempt_id
+            or authorization.candidate_attempt_id != candidate_attempt_id
+            or authorization.profile != binding.profile
+            or authorization.checkpoint_head != checkpoints.head
+            or authorization.checkpoint_prefix_digest != checkpoints.prefix_digest
+            or authorization.effect_head != effects.head
+            or authorization.effect_prefix_digest != effects.prefix_digest
+            or authorization.payload_digest != payload_digest
+            or lease is None
+            or lease["owner_id"] != authorization.claim_owner_id
+            or lease["claim_token"] != authorization.claim_token
+            or lease["claim_generation"] != authorization.claim_generation
+            or _utc_datetime(lease["expires_at"]) <= _utc_datetime(observed_at)
+        ):
+            raise FormalTaskViolation(
+                "DURABILITY_MUTATION_AUTHORIZATION_STALE",
+                "durability authorization does not bind current Store truth",
+                ErrorCode.STALE,
+            )
+        consumed = connection.execute(
+            """DELETE FROM durability_mutator_leases
+               WHERE task_id=? AND owner_id=? AND claim_token=?
+                 AND claim_generation=?""",
+            (
+                binding.task_id,
+                authorization.claim_owner_id,
+                authorization.claim_token,
+                authorization.claim_generation,
+            ),
+        ).rowcount
+        if consumed != 1:
+            raise FormalTaskViolation(
+                "DURABILITY_MUTATION_AUTHORIZATION_STALE",
+                "durability authorization was already consumed",
+                ErrorCode.STALE,
+            )
+        return checkpoints, effects
+
     def append_durability_checkpoint(
         self,
         checkpoint: D1Checkpoint,
         *,
         observed_at: str,
+        authorization: DurabilityMutationAuthorization | None = None,
     ) -> VerifiedCheckpointPrefix:
         """Atomically append one canonical immutable checkpoint fact."""
 
@@ -1315,6 +1401,15 @@ class SqliteTaskStore:
                     "persisted checkpoint sequence must start at one",
                     ErrorCode.CONFLICT,
                 )
+            self._consume_durability_authorization(
+                connection,
+                authorization,
+                operation="checkpoint.append",
+                binding=binding,
+                candidate_attempt_id=None,
+                payload_digest=digest,
+                observed_at=observed_at,
+            )
             existing = next(
                 (row for row in rows if row.row_sequence == row_sequence), None
             )
@@ -1411,7 +1506,7 @@ class SqliteTaskStore:
         current_effect_digest: str,
     ) -> None:
         actor_attempt_id, generation = cls._effect_actor(fact)
-        if actor_attempt_id == binding.origin_attempt_id:
+        if actor_attempt_id == binding.logical_origin_attempt_id:
             if generation != 0:
                 raise FormalTaskViolation(
                     "DURABILITY_BINDING_MISMATCH",
@@ -1421,11 +1516,10 @@ class SqliteTaskStore:
             return
         row = connection.execute(
             """SELECT * FROM durability_recoveries
-               WHERE task_id=? AND producer_attempt_id=?
-                 AND recovery_attempt_id=? AND recovery_generation=?""",
+               WHERE task_id=? AND recovery_attempt_id=?
+                 AND recovery_generation=?""",
             (
                 binding.task_id,
-                binding.origin_attempt_id,
                 actor_attempt_id,
                 generation,
             ),
@@ -1454,31 +1548,47 @@ class SqliteTaskStore:
         *,
         row_sequence: int,
         observed_at: str,
+        authorization: DurabilityMutationAuthorization | None = None,
     ) -> VerifiedEffectPrefix:
         """Commit intent/facts before any caller-owned external dispatch."""
 
         canonical = effect_fact_bytes(fact)
         digest = hashlib.sha256(canonical).hexdigest()
-        binding = DurabilityReadBinding(
-            scope=fact.binding.scope,
-            task_id=fact.binding.task_id,
-            origin_attempt_id=fact.binding.origin_attempt_id,
-            profile=fact.binding.profile,
+        lineage_attempt_id = (
+            authorization.producer_attempt_id
+            if type(authorization) is DurabilityMutationAuthorization
+            else fact.binding.origin_attempt_id
         )
         with self._transaction() as connection:
             stored = self._durability_binding_from_connection(
                 connection,
-                scope=binding.scope,
-                task_id=binding.task_id,
-                origin_attempt_id=binding.origin_attempt_id,
+                scope=fact.binding.scope,
+                task_id=fact.binding.task_id,
+                origin_attempt_id=lineage_attempt_id,
             )
-            if stored != binding or binding.profile.durability_level != "D2":
+            binding = stored
+            if (
+                fact.binding.scope != binding.scope
+                or fact.binding.task_id != binding.task_id
+                or fact.binding.origin_attempt_id != binding.logical_origin_attempt_id
+                or fact.binding.profile != binding.profile
+                or binding.profile.durability_level != "D2"
+            ):
                 raise FormalTaskViolation(
                     "DURABILITY_BINDING_MISMATCH",
                     "effect fact does not match one persisted D2 selection",
                     ErrorCode.CONFLICT,
                 )
             rows = self._effect_rows(connection, binding)
+            self._consume_durability_authorization(
+                connection,
+                authorization,
+                operation="effect.append",
+                binding=binding,
+                candidate_attempt_id=None,
+                payload_digest=digest,
+                observed_at=observed_at,
+            )
             existing = next(
                 (row for row in rows if row.row_sequence == row_sequence), None
             )
@@ -5451,6 +5561,25 @@ class SqliteTaskStore:
             ).fetchone()
             if row is None:
                 return None
+            binding = self._durability_binding_from_connection(
+                connection,
+                scope=scope,
+                task_id=task_id,
+                origin_attempt_id=row["producer_attempt_id"],
+            )
+            checkpoints = self._verified_checkpoint_prefix(connection, binding)
+            effects = self._verified_effect_prefix(connection, binding)
+            if (
+                checkpoints.head != row["checkpoint_head"]
+                or checkpoints.prefix_digest != row["checkpoint_prefix_digest"]
+                or effects.head != row["effect_head"]
+                or effects.prefix_digest != row["effect_prefix_digest"]
+            ):
+                raise FormalTaskViolation(
+                    "TASK_RECOVERY_PREFIX_STALE",
+                    "linked recovery no longer binds current Store tips",
+                    ErrorCode.STALE,
+                )
             return (
                 row["producer_attempt_id"],
                 row["recovery_generation"],
@@ -5458,6 +5587,143 @@ class SqliteTaskStore:
                 row["checkpoint_prefix_digest"],
                 row["effect_head"],
                 row["effect_prefix_digest"],
+            )
+
+    def fork_durability_lineage(
+        self,
+        source_binding: DurabilityReadBinding,
+        *,
+        candidate_attempt_id: str,
+        recovery_generation: int,
+        observed_at: str,
+        authorization: DurabilityMutationAuthorization | None = None,
+    ) -> tuple[VerifiedCheckpointPrefix, VerifiedEffectPrefix]:
+        """Atomically copy immutable producer facts into one linked lineage."""
+
+        payload_digest = _durability_authorization_payload_digest(
+            {
+                "candidate_attempt_id": candidate_attempt_id,
+                "recovery_generation": recovery_generation,
+            }
+        )
+        with self._transaction() as connection:
+            stored_source = self._durability_binding_from_connection(
+                connection,
+                scope=source_binding.scope,
+                task_id=source_binding.task_id,
+                origin_attempt_id=source_binding.origin_attempt_id,
+            )
+            if stored_source != source_binding:
+                raise FormalTaskViolation(
+                    "DURABILITY_BINDING_MISMATCH",
+                    "lineage source does not match persisted selection",
+                    ErrorCode.CONFLICT,
+                )
+            source_checkpoints, source_effects = self._consume_durability_authorization(
+                connection,
+                authorization,
+                operation="lineage.fork",
+                binding=source_binding,
+                candidate_attempt_id=candidate_attempt_id,
+                payload_digest=payload_digest,
+                observed_at=observed_at,
+            )
+            recovery_row = connection.execute(
+                """SELECT * FROM durability_recoveries
+                   WHERE task_id=? AND producer_attempt_id=?
+                     AND recovery_attempt_id=? AND recovery_generation=?""",
+                (
+                    source_binding.task_id,
+                    source_binding.origin_attempt_id,
+                    candidate_attempt_id,
+                    recovery_generation,
+                ),
+            ).fetchone()
+            candidate_binding = self._durability_binding_from_connection(
+                connection,
+                scope=source_binding.scope,
+                task_id=source_binding.task_id,
+                origin_attempt_id=candidate_attempt_id,
+            )
+            if (
+                recovery_row is None
+                or not source_checkpoints.records
+                or candidate_binding.profile != source_binding.profile
+                or candidate_binding.logical_origin_attempt_id
+                != source_binding.logical_origin_attempt_id
+            ):
+                raise FormalTaskViolation(
+                    "DURABILITY_LINEAGE_FORK_STALE",
+                    "linked lineage no longer matches its authorized producer",
+                    ErrorCode.STALE,
+                )
+            existing_checkpoints = self._checkpoint_rows(connection, candidate_binding)
+            existing_effects = self._effect_rows(connection, candidate_binding)
+            if not existing_effects:
+                for row in self._effect_rows(connection, source_binding):
+                    connection.execute(
+                        """INSERT INTO durability_effect_facts(
+                               task_id, origin_attempt_id, row_sequence, canonical,
+                               payload_digest, created_at)
+                           VALUES(?, ?, ?, ?, ?, ?)""",
+                        (
+                            candidate_binding.task_id,
+                            candidate_attempt_id,
+                            row.row_sequence,
+                            row.canonical_bytes,
+                            row.payload_digest,
+                            observed_at,
+                        ),
+                    )
+            target_effects = self._verified_effect_prefix(connection, candidate_binding)
+            prior = source_checkpoints.records[-1]
+            checkpoint = D1Checkpoint.create(
+                checkpoint_id=f"checkpoint-{candidate_attempt_id}-1",
+                scope=prior.scope,
+                task_id=prior.task_id,
+                producer_attempt_id=candidate_attempt_id,
+                checkpoint_sequence=1,
+                recovery_generation=recovery_generation,
+                profile=prior.profile,
+                complete=True,
+                task_spec_digest=prior.task_spec_digest,
+                context_version=prior.context_version,
+                context_digest=prior.context_digest,
+                input_digest=prior.input_digest,
+                state_schema_id=prior.state_schema_id,
+                state_schema_version=prior.state_schema_version,
+                state_bytes=prior.state_bytes,
+                effect_head=target_effects.head,
+                effect_prefix_digest=target_effects.prefix_digest,
+            )
+            canonical = checkpoint.canonical_bytes()
+            digest = hashlib.sha256(canonical).hexdigest()
+            if not existing_checkpoints:
+                connection.execute(
+                    """INSERT INTO durability_checkpoints(
+                           task_id, producer_attempt_id, row_sequence, canonical,
+                           payload_digest, created_at)
+                       VALUES(?, ?, 1, ?, ?, ?)""",
+                    (
+                        candidate_binding.task_id,
+                        candidate_attempt_id,
+                        canonical,
+                        digest,
+                        observed_at,
+                    ),
+                )
+            elif (
+                len(existing_checkpoints) != 1
+                or existing_checkpoints[0].canonical_bytes != canonical
+            ):
+                raise FormalTaskViolation(
+                    "DURABILITY_LINEAGE_FORK_CONFLICT",
+                    "linked lineage already contains different immutable facts",
+                    ErrorCode.CONFLICT,
+                )
+            return (
+                self._verified_checkpoint_prefix(connection, candidate_binding),
+                target_effects,
             )
 
     def recover_durable_attempt(
@@ -5470,10 +5736,8 @@ class SqliteTaskStore:
         checkpoint_prefix_digest: str,
         effect_head: int,
         effect_prefix_digest: str,
-        claim_owner_id: str,
-        claim_token: str,
-        claim_generation: int,
         observed_at: str,
+        authorization: DurabilityMutationAuthorization | None = None,
         admission_policy: AdmissionPolicy | None = None,
     ) -> PersistentAttemptRecord:
         """Operator/Core-only linked recovery; no transport command is registered."""
@@ -5490,21 +5754,66 @@ class SqliteTaskStore:
                 (recovery_id,),
             ).fetchone()
             if replay is not None:
+                replay_binding = self._durability_binding_from_connection(
+                    connection,
+                    scope=authority.task.scope,
+                    task_id=replay["task_id"],
+                    origin_attempt_id=replay["producer_attempt_id"],
+                )
+                replay_checkpoints = self._verified_checkpoint_prefix(
+                    connection, replay_binding
+                )
+                replay_effects = self._verified_effect_prefix(
+                    connection, replay_binding
+                )
                 if (
-                    replay["recovery_attempt_id"]
+                    replay["task_id"] != authority.task.task_id
+                    or replay["producer_attempt_id"]
+                    != authority.producer_attempt.attempt_id
+                    or replay["recovery_attempt_id"]
                     != recovery_facts.candidate_recovery_attempt_id
+                    or replay["recovery_generation"]
+                    != recovery_facts.recovery_generation
+                    or replay["profile_json"]
+                    != _json_dump(replay_binding.profile.to_dict())
+                    or recovery_facts.scope != authority.task.scope
+                    or recovery_facts.task_id != replay["task_id"]
+                    or recovery_facts.producer_attempt_id
+                    != replay["producer_attempt_id"]
+                    or recovery_facts.profile != replay_binding.profile
                     or bytes(replay["recovery_facts"])
                     != recovery_facts.canonical_bytes()
                     or replay["checkpoint_head"] != checkpoint_head
                     or replay["checkpoint_prefix_digest"] != checkpoint_prefix_digest
                     or replay["effect_head"] != effect_head
                     or replay["effect_prefix_digest"] != effect_prefix_digest
+                    or replay_checkpoints.head != checkpoint_head
+                    or replay_checkpoints.prefix_digest != checkpoint_prefix_digest
+                    or replay_effects.head != effect_head
+                    or replay_effects.prefix_digest != effect_prefix_digest
                 ):
                     raise FormalTaskViolation(
                         "IDEMPOTENCY_CONFLICT",
                         "recovery id is already bound to different durability facts",
                         ErrorCode.CONFLICT,
                     )
+                disposition = self._require_recovery_effect_safety(replay_effects)
+                self._consume_durability_authorization(
+                    connection,
+                    authorization,
+                    operation=f"recovery.admit.{disposition}",
+                    binding=replay_binding,
+                    candidate_attempt_id=recovery_facts.candidate_recovery_attempt_id,
+                    payload_digest=_durability_authorization_payload_digest(
+                        {
+                            "recovery_id": recovery_id,
+                            "recovery_facts_sha256": hashlib.sha256(
+                                recovery_facts.canonical_bytes()
+                            ).hexdigest(),
+                        }
+                    ),
+                    observed_at=observed_at,
+                )
                 attempt_row = connection.execute(
                     "SELECT * FROM attempts WHERE attempt_id=?",
                     (replay["recovery_attempt_id"],),
@@ -5538,9 +5847,8 @@ class SqliteTaskStore:
                 checkpoint_prefix_digest=checkpoint_prefix_digest,
                 effect_head=effect_head,
                 effect_prefix_digest=effect_prefix_digest,
-                claim_owner_id=claim_owner_id,
-                claim_token=claim_token,
-                claim_generation=claim_generation,
+                authorization=authorization,
+                recovery_id=recovery_id,
                 observed_at=observed_at,
             )
             attempt_id = recovery_facts.candidate_recovery_attempt_id
@@ -5641,18 +5949,6 @@ class SqliteTaskStore:
                 raise FormalTaskViolation(
                     "TASK_RECOVERY_PRECONDITION_STALE",
                     "durable recovery lost its Task CAS",
-                    ErrorCode.STALE,
-                )
-            released = connection.execute(
-                """DELETE FROM durability_mutator_leases
-                   WHERE task_id=? AND owner_id=? AND claim_token=?
-                     AND claim_generation=?""",
-                (task.task_id, claim_owner_id, claim_token, claim_generation),
-            ).rowcount
-            if released != 1:
-                raise FormalTaskViolation(
-                    "TASK_RECOVERY_PRECONDITION_STALE",
-                    "durable recovery lost its Store claim",
                     ErrorCode.STALE,
                 )
             row = connection.execute(
@@ -6045,6 +6341,12 @@ class SqliteTaskStore:
                 "cancelled or fenced Task cannot admit recovery",
                 ErrorCode.CONFLICT,
             )
+        if task.reconciliation_state not in {None, ReconciliationState.RESOLVED}:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_RECONCILIATION_PENDING",
+                "producer reconciliation ownership is not closed",
+                ErrorCode.UNAVAILABLE,
+            )
         unsettled = connection.execute(
             """SELECT 1 FROM outbox
                WHERE task_id=? AND attempt_id=? AND state IN (?, ?)
@@ -6070,46 +6372,58 @@ class SqliteTaskStore:
         )
 
     @staticmethod
-    def _require_recovery_effect_safety(prefix: VerifiedEffectPrefix) -> None:
-        dispatches: dict[str, ExternalEffectDispatch] = {}
-        observations: dict[str, ExternalEffectObservation] = {}
-        settlements: dict[str, ExternalEffectSettlement] = {}
-        for fact in prefix.records:
-            effect_id = fact.binding.effect_id
-            if type(fact) is ExternalEffectDispatch:
-                dispatches[effect_id] = fact
-            elif type(fact) is ExternalEffectObservation:
-                observations[effect_id] = fact
-            elif type(fact) is ExternalEffectSettlement:
-                settlements[effect_id] = fact
-        for effect_id, dispatch in dispatches.items():
-            observation = observations.get(effect_id)
-            settlement = settlements.get(effect_id)
-            if (
-                observation is None
-                or observation.dispatch_ordinal != dispatch.dispatch_ordinal
-                or observation.kind.value == "unknown"
-                or (
-                    observation.kind.value == "applied"
-                    and (
-                        settlement is None
-                        or settlement.kind.value not in {"resolved", "compensated"}
-                    )
-                )
-                or (
-                    settlement is not None
-                    and settlement.kind.value == "manual_required"
-                )
-            ):
-                raise FormalTaskViolation(
-                    "TASK_RECOVERY_EFFECT_UNKNOWN",
-                    "external effect truth is not safe for automatic recovery",
-                    ErrorCode.RESULT_UNKNOWN,
-                )
+    def _require_recovery_effect_safety(prefix: VerifiedEffectPrefix) -> str:
+        dispatch = next(
+            (
+                fact
+                for fact in reversed(prefix.records)
+                if type(fact) is ExternalEffectDispatch
+            ),
+            None,
+        )
+        observation = next(
+            (
+                fact
+                for fact in reversed(prefix.records)
+                if type(fact) is ExternalEffectObservation
+                and dispatch is not None
+                and fact.binding.effect_id == dispatch.binding.effect_id
+                and fact.dispatch_ordinal == dispatch.dispatch_ordinal
+            ),
+            None,
+        )
+        if dispatch is None or observation is None:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_EFFECT_UNKNOWN",
+                "external effect truth is not closed for automatic recovery",
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        if observation.kind.value == "no_effect":
+            return "continue"
+        settlement = next(
+            (
+                fact
+                for fact in reversed(prefix.records)
+                if type(fact) is ExternalEffectSettlement
+                and fact.binding.effect_id == dispatch.binding.effect_id
+                and fact.recovery_generation == dispatch.recovery_generation
+            ),
+            None,
+        )
+        if (
+            observation.kind.value == "applied"
+            and settlement is not None
+            and settlement.kind.value == "resolved"
+        ):
+            return "applied"
+        raise FormalTaskViolation(
+            "TASK_RECOVERY_EFFECT_UNKNOWN",
+            "external effect truth is not safe for automatic recovery",
+            ErrorCode.RESULT_UNKNOWN,
+        )
 
-    @classmethod
     def _validate_durable_recovery(
-        cls,
+        self,
         connection: sqlite3.Connection,
         *,
         authority: DurableRecoveryAuthoritySnapshot,
@@ -6119,14 +6433,13 @@ class SqliteTaskStore:
         checkpoint_prefix_digest: str | None,
         effect_head: int | None,
         effect_prefix_digest: str | None,
-        claim_owner_id: str | None,
-        claim_token: str | None,
-        claim_generation: int | None,
+        authorization: DurabilityMutationAuthorization | None,
+        recovery_id: str,
         observed_at: str,
     ) -> None:
         producer = authority.producer_attempt
         task = authority.task
-        binding = cls._durability_binding_from_connection(
+        binding = self._durability_binding_from_connection(
             connection,
             scope=task.scope,
             task_id=task.task_id,
@@ -6136,10 +6449,6 @@ class SqliteTaskStore:
             """SELECT COALESCE(MAX(recovery_generation), 0) AS generation
                FROM durability_recoveries
                WHERE task_id=?""",
-            (task.task_id,),
-        ).fetchone()
-        lease = connection.execute(
-            "SELECT * FROM durability_mutator_leases WHERE task_id=?",
             (task.task_id,),
         ).fetchone()
         cancel_fence = connection.execute(
@@ -6158,11 +6467,6 @@ class SqliteTaskStore:
             or recovery_facts.recovery_generation != authority.recovery_generation
             or recovery_facts.is_expired(at=observed_at)
             or cancel_fence is not None
-            or lease is None
-            or lease["owner_id"] != claim_owner_id
-            or lease["claim_token"] != claim_token
-            or lease["claim_generation"] != claim_generation
-            or _utc_datetime(lease["expires_at"]) <= _utc_datetime(observed_at)
         ):
             raise FormalTaskViolation(
                 "TASK_RECOVERY_FACTS_STALE",
@@ -6181,18 +6485,19 @@ class SqliteTaskStore:
                 "durable recovery requires complete checkpoint and effect prefixes",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
-        checkpoints = cls._verified_checkpoint_prefix(
-            connection,
-            binding,
-            expected_head=checkpoint_head,
-            expected_prefix_digest=checkpoint_prefix_digest,
-        )
-        effects = cls._verified_effect_prefix(
-            connection,
-            binding,
-            expected_head=effect_head,
-            expected_prefix_digest=effect_prefix_digest,
-        )
+        checkpoints = self._verified_checkpoint_prefix(connection, binding)
+        effects = self._verified_effect_prefix(connection, binding)
+        if (
+            checkpoints.head != checkpoint_head
+            or checkpoints.prefix_digest != checkpoint_prefix_digest
+            or effects.head != effect_head
+            or effects.prefix_digest != effect_prefix_digest
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_PREFIX_STALE",
+                "recovery evidence does not bind the current full Store tips",
+                ErrorCode.STALE,
+            )
         if not checkpoints.records:
             raise FormalTaskViolation(
                 "TASK_RECOVERY_CHECKPOINT_REQUIRED",
@@ -6218,7 +6523,24 @@ class SqliteTaskStore:
                 "checkpoint does not match exact Task/context/effect truth",
                 ErrorCode.STALE,
             )
-        cls._require_recovery_effect_safety(effects)
+        disposition = self._require_recovery_effect_safety(effects)
+        payload_digest = _durability_authorization_payload_digest(
+            {
+                "recovery_id": recovery_id,
+                "recovery_facts_sha256": hashlib.sha256(
+                    recovery_facts.canonical_bytes()
+                ).hexdigest(),
+            }
+        )
+        self._consume_durability_authorization(
+            connection,
+            authorization,
+            operation=f"recovery.admit.{disposition}",
+            binding=binding,
+            candidate_attempt_id=recovery_facts.candidate_recovery_attempt_id,
+            payload_digest=payload_digest,
+            observed_at=observed_at,
+        )
 
     @staticmethod
     def _corrupt(message: str) -> FormalTaskViolation:

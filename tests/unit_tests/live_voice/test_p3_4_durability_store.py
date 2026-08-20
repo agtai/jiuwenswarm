@@ -17,6 +17,18 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.durability_checkpoint import D1Checkpoint
+from jiuwenswarm.server.live_voice.durability_authority import (
+    _durability_authorization_payload_digest,
+    _mint_durability_mutation_authorization,
+)
+from jiuwenswarm.server.live_voice.durability_effects import (
+    EffectObservationKind,
+    ExternalEffectBinding,
+    ExternalEffectDispatch,
+    ExternalEffectIntent,
+    ExternalEffectObservation,
+    effect_fact_bytes,
+)
 from jiuwenswarm.server.live_voice.durability_identity import (
     DurabilityProfileBinding,
 )
@@ -48,6 +60,7 @@ from tests.unit_tests.live_voice.test_persistent_task_core import (
     _downgrade_fixture_to_v4,
     _observations,
     _scope,
+    _wave2_command,
 )
 
 LATER = "2026-08-05T12:05:00Z"
@@ -153,6 +166,157 @@ def _checkpoint(store: SqliteTaskStore, task, binding) -> D1Checkpoint:
     )
 
 
+def _mutation_authorization(
+    store: SqliteTaskStore,
+    binding: DurabilityReadBinding,
+    *,
+    operation: str,
+    payload_digest: str,
+    candidate_attempt_id: str | None = None,
+    owner_generation: int = 0,
+    owner_id: str = "direct-runtime-unit",
+):
+    claim = store.claim_durability_mutator(
+        scope=binding.scope,
+        task_id=binding.task_id,
+        owner_id=owner_id,
+        observed_at=NOW,
+        expires_at=EXPIRY,
+    )
+    assert claim is not None
+    checkpoints = store.read_durability_checkpoints(binding)
+    effects = store.read_durability_effects(binding)
+    return _mint_durability_mutation_authorization(
+        store=store,
+        operation=operation,
+        scope=binding.scope,
+        task_id=binding.task_id,
+        producer_attempt_id=binding.origin_attempt_id,
+        candidate_attempt_id=candidate_attempt_id,
+        profile=binding.profile,
+        executor_owner_id="direct-runtime-unit",
+        executor_owner_generation=owner_generation,
+        checkpoint_head=checkpoints.head,
+        checkpoint_prefix_digest=checkpoints.prefix_digest,
+        effect_head=effects.head,
+        effect_prefix_digest=effects.prefix_digest,
+        payload_digest=payload_digest,
+        claim_owner_id=owner_id,
+        claim_token=claim[0],
+        claim_generation=claim[1],
+    )
+
+
+def _append_checkpoint(
+    store: SqliteTaskStore,
+    binding: DurabilityReadBinding,
+    checkpoint: D1Checkpoint,
+):
+    authorization = _mutation_authorization(
+        store,
+        binding,
+        operation="checkpoint.append",
+        payload_digest=hashlib.sha256(checkpoint.canonical_bytes()).hexdigest(),
+        owner_generation=checkpoint.recovery_generation,
+    )
+    return store.append_durability_checkpoint(
+        checkpoint,
+        observed_at=NOW,
+        authorization=authorization,
+    )
+
+
+def _recovery_effect_facts(task, binding):
+    effect_binding = ExternalEffectBinding(
+        scope=task.scope,
+        task_id=task.task_id,
+        origin_attempt_id=task.attempt_id,
+        profile=binding.profile,
+        effect_id="effect-recovery-unit",
+        operation_kind="project.apply",
+        operation_ordinal=1,
+        target_digest="2" * 64,
+        intended_effect_digest="3" * 64,
+    )
+    return (
+        ExternalEffectIntent(binding=effect_binding, replay_safe=True),
+        ExternalEffectDispatch(
+            binding=effect_binding,
+            actor_attempt_id=task.attempt_id,
+            dispatch_ordinal=1,
+            recovery_generation=0,
+            provider_operation_key="stable-operation-key",
+        ),
+        ExternalEffectObservation(
+            binding=effect_binding,
+            actor_attempt_id=task.attempt_id,
+            observation_ordinal=1,
+            dispatch_ordinal=1,
+            recovery_generation=0,
+            kind=EffectObservationKind.NO_EFFECT,
+            evidence_digest="4" * 64,
+        ),
+    )
+
+
+def _safe_recovery_prefix(store: SqliteTaskStore, task, binding):
+    facts = _recovery_effect_facts(task, binding)
+    for row_sequence, fact in enumerate(facts, start=1):
+        authorization = _mutation_authorization(
+            store,
+            binding,
+            operation="effect.append",
+            payload_digest=hashlib.sha256(effect_fact_bytes(fact)).hexdigest(),
+        )
+        store.append_durability_effect_fact(
+            fact,
+            row_sequence=row_sequence,
+            observed_at=NOW,
+            authorization=authorization,
+        )
+    checkpoint = _checkpoint(store, task, binding)
+    return _append_checkpoint(store, binding, checkpoint)
+
+
+def _recovery_authorization(
+    store: SqliteTaskStore,
+    binding: DurabilityReadBinding,
+    facts: ExecutorRecoveryFacts,
+    *,
+    recovery_id: str,
+    owner_id: str,
+    claim: tuple[str, int],
+):
+    checkpoints = store.read_durability_checkpoints(binding)
+    effects = store.read_durability_effects(binding)
+    return _mint_durability_mutation_authorization(
+        store=store,
+        operation="recovery.admit.continue",
+        scope=binding.scope,
+        task_id=binding.task_id,
+        producer_attempt_id=binding.origin_attempt_id,
+        candidate_attempt_id=facts.candidate_recovery_attempt_id,
+        profile=binding.profile,
+        executor_owner_id=facts.executor_epoch_id,
+        executor_owner_generation=facts.executor_owner_generation,
+        checkpoint_head=checkpoints.head,
+        checkpoint_prefix_digest=checkpoints.prefix_digest,
+        effect_head=effects.head,
+        effect_prefix_digest=effects.prefix_digest,
+        payload_digest=_durability_authorization_payload_digest(
+            {
+                "recovery_id": recovery_id,
+                "recovery_facts_sha256": hashlib.sha256(
+                    facts.canonical_bytes()
+                ).hexdigest(),
+            }
+        ),
+        claim_owner_id=owner_id,
+        claim_token=claim[0],
+        claim_generation=claim[1],
+    )
+
+
 def test_v6_bootstrap_and_v5_migration_rollback_then_reopen(tmp_path: Path) -> None:
     database = tmp_path / "migration.sqlite"
     SqliteTaskStore(database)
@@ -183,6 +347,87 @@ def test_v6_bootstrap_and_v5_migration_rollback_then_reopen(tmp_path: Path) -> N
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
         ).fetchone() == ("6",)
+
+
+def test_populated_v5_migration_preserves_admission_consumer_and_restart_truth(
+    tmp_path: Path,
+) -> None:
+    store, selection, task, _binding_value = _selected_task(tmp_path)
+    database = Path(store.database_path)
+    claimed = store.claim_outbox("v5-restart-worker", observed_at=NOW)
+    assert claimed is not None
+    accepted = store.events(task.task_id, task.scope)[0]
+    acknowledged = store.ack_events(
+        _wave2_command(
+            task.task_id,
+            "task.ack_events",
+            {
+                "presentation_class": "text",
+                "acked_through_seq": accepted.seq,
+                "acked_event_id": accepted.event_id,
+                "expected_event_head": accepted.seq,
+            },
+            command_id="command-v5-consumer",
+        )[0],
+        observed_at=LATER,
+    )
+    assert acknowledged.ok
+    preserved_tables = (
+        "tasks",
+        "attempts",
+        "task_events",
+        "commands",
+        "outbox",
+        "task_event_consumption",
+    )
+
+    def snapshot() -> dict[str, list[tuple[object, ...]]]:
+        with sqlite3.connect(database) as connection:
+            return {
+                table: connection.execute(
+                    f"SELECT * FROM {table} ORDER BY rowid"
+                ).fetchall()
+                for table in preserved_tables
+            }
+
+    before = snapshot()
+    assert before["task_event_consumption"]
+    assert before["outbox"][0]
+    with sqlite3.connect(database) as connection:
+        for table in _V6_TABLES:
+            connection.execute(f"DROP TABLE {table}")
+        connection.execute("UPDATE metadata SET value='5' WHERE key='schema_version'")
+
+    def fail(name: str) -> None:
+        if name == "migration.v5_to_v6.before_metadata":
+            raise RuntimeError("expected populated-v5 failpoint")
+
+    with pytest.raises(RuntimeError, match="expected populated-v5 failpoint"):
+        SqliteTaskStore(database, failpoint=fail)
+    assert snapshot() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("5",)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reopened = tuple(pool.map(lambda _index: SqliteTaskStore(database), range(2)))
+
+    assert snapshot() == before
+    assert all(
+        candidate.get_task(task.task_id, task.scope).attempt_id == task.attempt_id
+        for candidate in reopened
+    )
+    assert all(
+        candidate.get_attempt(task.attempt_id).selection == selection
+        for candidate in reopened
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 @pytest.mark.parametrize(
@@ -243,8 +488,8 @@ def test_checkpoint_is_immutable_and_corruption_fails_reopen(tmp_path: Path) -> 
     store, _selection_value, task, binding = _selected_task(tmp_path)
     checkpoint = _checkpoint(store, task, binding)
 
-    first = store.append_durability_checkpoint(checkpoint, observed_at=NOW)
-    replay = store.append_durability_checkpoint(checkpoint, observed_at=NOW)
+    first = _append_checkpoint(store, binding, checkpoint)
+    replay = _append_checkpoint(store, binding, checkpoint)
     assert replay == first
     assert first.records == (checkpoint,)
 
@@ -268,7 +513,7 @@ def test_checkpoint_is_immutable_and_corruption_fails_reopen(tmp_path: Path) -> 
         effect_prefix_digest=checkpoint.effect_prefix_digest,
     )
     with pytest.raises(FormalTaskViolation) as conflict:
-        store.append_durability_checkpoint(changed, observed_at=NOW)
+        _append_checkpoint(store, binding, changed)
     assert conflict.value.reason == "DURABILITY_PREFIX_CONFLICT"
 
     with sqlite3.connect(store.database_path) as connection:
@@ -279,6 +524,34 @@ def test_checkpoint_is_immutable_and_corruption_fails_reopen(tmp_path: Path) -> 
     with pytest.raises(FormalTaskViolation) as rejected:
         SqliteTaskStore(store.database_path)
     assert rejected.value.reason == "TASK_STORE_CORRUPT"
+
+
+def test_raw_authority_free_checkpoint_cannot_mutate_store(tmp_path: Path) -> None:
+    store, _selection_value, task, binding = _selected_task(tmp_path)
+    checkpoint = _checkpoint(store, task, binding)
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        store.append_durability_checkpoint(checkpoint, observed_at=NOW)
+
+    assert rejected.value.reason == "DURABILITY_MUTATION_AUTHORIZATION_REQUIRED"
+    assert store.counts() == before
+    assert store.read_durability_checkpoints(binding).records == ()
+    assert store.read_durability_effects(binding).records == ()
+
+    with pytest.raises(FormalTaskViolation) as effect_rejected:
+        store.append_durability_effect_fact(
+            _recovery_effect_facts(task, binding)[0],
+            row_sequence=1,
+            observed_at=NOW,
+        )
+
+    assert effect_rejected.value.reason == (
+        "DURABILITY_MUTATION_AUTHORIZATION_REQUIRED"
+    )
+    assert store.counts() == before
+    assert store.read_durability_checkpoints(binding).records == ()
+    assert store.read_durability_effects(binding).records == ()
 
 
 def test_two_store_instances_share_one_mutator_claim(tmp_path: Path) -> None:
@@ -316,8 +589,7 @@ def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
     tmp_path: Path,
 ) -> None:
     store, selection, task, binding = _selected_task(tmp_path)
-    checkpoint = _checkpoint(store, task, binding)
-    checkpoint_prefix = store.append_durability_checkpoint(checkpoint, observed_at=NOW)
+    checkpoint_prefix = _safe_recovery_prefix(store, task, binding)
     item = store.claim_outbox("producer", observed_at=NOW)
     assert item is not None
     observations = tuple(
@@ -363,6 +635,25 @@ def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
         evidence_digest="1" * 64,
     )
 
+    before_unauthorized = store.counts()
+    before_unauthorized_events = store.events(task.task_id, task.scope)
+    with pytest.raises(FormalTaskViolation) as unauthorized:
+        store.recover_durable_attempt(
+            authority,
+            recovery_id="recovery-1",
+            recovery_facts=facts,
+            checkpoint_head=checkpoint_prefix.head,
+            checkpoint_prefix_digest=checkpoint_prefix.prefix_digest,
+            effect_head=effects.head,
+            effect_prefix_digest=effects.prefix_digest,
+            observed_at=NOW,
+        )
+    assert unauthorized.value.reason == ("DURABILITY_MUTATION_AUTHORIZATION_REQUIRED")
+    assert store.counts() == before_unauthorized
+    assert store.events(task.task_id, task.scope) == before_unauthorized_events
+    assert store.read_durability_checkpoints(binding) == checkpoint_prefix
+    assert store.read_durability_effects(binding) == effects
+
     recovered_attempt = store.recover_durable_attempt(
         authority,
         recovery_id="recovery-1",
@@ -371,9 +662,14 @@ def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
         checkpoint_prefix_digest=checkpoint_prefix.prefix_digest,
         effect_head=effects.head,
         effect_prefix_digest=effects.prefix_digest,
-        claim_owner_id="recovery-worker",
-        claim_token=claim[0],
-        claim_generation=claim[1],
+        authorization=_recovery_authorization(
+            store,
+            binding,
+            facts,
+            recovery_id="recovery-1",
+            owner_id="recovery-worker",
+            claim=claim,
+        ),
         observed_at=NOW,
     )
     assert recovered_attempt.attempt_id == "attempt-linked-recovery"
@@ -390,6 +686,38 @@ def test_linked_recovery_requires_exact_facts_and_wins_cancel_race_once(
         .attempt_id
         == "attempt-linked-recovery"
     )
+    prior = checkpoint_prefix.records[-1]
+    later_checkpoint = D1Checkpoint.create(
+        checkpoint_id="checkpoint-later-tip",
+        scope=prior.scope,
+        task_id=prior.task_id,
+        producer_attempt_id=prior.producer_attempt_id,
+        checkpoint_sequence=prior.checkpoint_sequence + 1,
+        recovery_generation=prior.recovery_generation,
+        profile=prior.profile,
+        complete=True,
+        task_spec_digest=prior.task_spec_digest,
+        context_version=prior.context_version,
+        context_digest=prior.context_digest,
+        input_digest=prior.input_digest,
+        state_schema_id=prior.state_schema_id,
+        state_schema_version=prior.state_schema_version,
+        state_bytes=prior.state_bytes,
+        effect_head=prior.effect_head,
+        effect_prefix_digest=prior.effect_prefix_digest,
+    )
+    _append_checkpoint(store, binding, later_checkpoint)
+    before_stale_dispatch = store.counts()
+    before_stale_events = store.events(task.task_id, task.scope)
+    with pytest.raises(FormalTaskViolation) as stale_dispatch:
+        store.read_durable_recovery_dispatch(
+            scope=task.scope,
+            task_id=task.task_id,
+            recovery_attempt_id="attempt-linked-recovery",
+        )
+    assert stale_dispatch.value.reason == "TASK_RECOVERY_PREFIX_STALE"
+    assert store.counts() == before_stale_dispatch
+    assert store.events(task.task_id, task.scope) == before_stale_events
 
 
 def test_recovery_missing_checkpoint_fails_closed_without_task_or_external_effects(
@@ -404,13 +732,50 @@ def test_recovery_missing_checkpoint_fails_closed_without_task_or_external_effec
     assert store.read_durability_effects(binding).records == ()
 
 
+@pytest.mark.asyncio
+async def test_generic_executor_cannot_mint_recovery_or_mutate_any_authority(
+    tmp_path: Path,
+) -> None:
+    store, selection, task, binding = _selected_task(tmp_path)
+    checkpoints = _safe_recovery_prefix(store, task, binding)
+    effects = store.read_durability_effects(binding)
+    item = store.claim_outbox("generic-producer", observed_at=NOW)
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=tuple(
+            replace(
+                observation,
+                adapter_id=selection.adapter_id,
+                capability_profile_digest=selection.capability_profile_digest,
+            )
+            for observation in _observations(item, outcome=TerminalOutcome.INTERRUPTED)
+        ),
+    )
+    before_counts = store.counts()
+    before_events = store.events(task.task_id, task.scope)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        await PersistentTaskCore(store, _Executor()).recover_durable_attempt(
+            scope=task.scope,
+            task_id=task.task_id,
+            operator_id="operator-generic",
+            observed_at=NOW,
+        )
+
+    assert rejected.value.reason == "EXECUTOR_DURABILITY_UNAVAILABLE"
+    assert store.counts() == before_counts
+    assert store.events(task.task_id, task.scope) == before_events
+    assert store.read_durability_checkpoints(binding) == checkpoints
+    assert store.read_durability_effects(binding) == effects
+
+
 def test_real_cancel_fence_wins_concurrent_recovery_with_zero_recovery_effects(
     tmp_path: Path,
 ) -> None:
     store, selection, task, binding = _selected_task(tmp_path)
-    checkpoint_prefix = store.append_durability_checkpoint(
-        _checkpoint(store, task, binding), observed_at=NOW
-    )
+    checkpoint_prefix = _safe_recovery_prefix(store, task, binding)
     item = store.claim_outbox("producer", observed_at=NOW)
     assert item is not None
     store.complete_outbox(
@@ -463,6 +828,18 @@ def test_real_cancel_fence_wins_concurrent_recovery_with_zero_recovery_effects(
         store.database_path, failpoint=hold_cancel_transaction
     )
     recovery_store = SqliteTaskStore(store.database_path)
+    recovery_authorization = _recovery_authorization(
+        recovery_store,
+        recovery_store.read_durability_binding(
+            scope=task.scope,
+            task_id=task.task_id,
+            origin_attempt_id=task.attempt_id,
+        ),
+        facts,
+        recovery_id="recovery-loses-to-cancel",
+        owner_id="recovery-worker",
+        claim=claim,
+    )
     before = store.counts()
     before_events = store.events(task.task_id, task.scope)
 
@@ -478,9 +855,7 @@ def test_real_cancel_fence_wins_concurrent_recovery_with_zero_recovery_effects(
             checkpoint_prefix_digest=checkpoint_prefix.prefix_digest,
             effect_head=effects.head,
             effect_prefix_digest=effects.prefix_digest,
-            claim_owner_id="recovery-worker",
-            claim_token=claim[0],
-            claim_generation=claim[1],
+            authorization=recovery_authorization,
             observed_at=LATER,
         )
         release_fence.set()

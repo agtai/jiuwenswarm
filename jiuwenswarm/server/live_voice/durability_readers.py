@@ -132,18 +132,25 @@ class DurabilityReadBinding:
     task_id: str
     origin_attempt_id: str
     profile: DurabilityProfileBinding
+    logical_origin_attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         _scope(self.scope)
         _text(self.task_id, "read_binding.task_id")
         _text(self.origin_attempt_id, "read_binding.origin_attempt_id")
         _profile(self.profile)
+        logical_origin = self.logical_origin_attempt_id
+        if logical_origin is None:
+            logical_origin = self.origin_attempt_id
+            object.__setattr__(self, "logical_origin_attempt_id", logical_origin)
+        _text(logical_origin, "read_binding.logical_origin_attempt_id")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "scope": self.scope.to_dict(),
             "task_id": self.task_id,
             "origin_attempt_id": self.origin_attempt_id,
+            "logical_origin_attempt_id": self.logical_origin_attempt_id,
             "profile": self.profile.to_dict(),
         }
 
@@ -216,6 +223,10 @@ def _normalize_binding(value: object) -> DurabilityReadBinding:
             value.origin_attempt_id, "read_binding.origin_attempt_id"
         ),
         profile=_profile(value.profile),
+        logical_origin_attempt_id=_text(
+            value.logical_origin_attempt_id,
+            "read_binding.logical_origin_attempt_id",
+        ),
     )
 
 
@@ -456,7 +467,7 @@ def verify_effect_prefix(
             if type(fact_binding) is not ExternalEffectBinding or (
                 fact_binding.scope != binding.scope
                 or fact_binding.task_id != binding.task_id
-                or fact_binding.origin_attempt_id != binding.origin_attempt_id
+                or fact_binding.origin_attempt_id != binding.logical_origin_attempt_id
                 or fact_binding.profile != binding.profile
             ):
                 raise DurabilityPrefixViolation(

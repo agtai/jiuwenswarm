@@ -53,6 +53,7 @@ from .formal_task_models import (
     utc_now,
 )
 from .durability_identity import DurabilityProfileBinding
+from .durability_authority import DurabilityMutationAuthorization
 from .durability_recovery_facts import ExecutorRecoveryFacts
 from .task_store import SqliteTaskStore
 
@@ -110,6 +111,27 @@ class FormalExecutor(Protocol):
         expires_at: str,
     ) -> ExecutorRecoveryFacts:
         """Prove exact Executor/runtime/OS quiescence for linked recovery."""
+
+    def authorize_durable_recovery(
+        self,
+        task: PersistentTaskRecord,
+        producer_attempt: PersistentAttemptRecord,
+        *,
+        recovery_id: str,
+        candidate_recovery_attempt_id: str,
+        profile: DurabilityProfileBinding,
+        recovery_generation: int,
+        checkpoint_head: int,
+        checkpoint_prefix_digest: str,
+        effect_head: int,
+        effect_prefix_digest: str,
+        claim_owner_id: str,
+        claim_token: str,
+        claim_generation: int,
+        observed_at: str,
+        expires_at: str,
+    ) -> tuple[ExecutorRecoveryFacts, DurabilityMutationAuthorization]:
+        """Mint one Store-bound recovery receipt after Direct preflight."""
 
 
 def _contract_error(error: FormalTaskViolation) -> ContractViolation:
@@ -339,23 +361,34 @@ class PersistentTaskCore:
         try:
             checkpoints = self.store.read_durability_checkpoints(binding)
             effects = self.store.read_durability_effects(binding)
-            facts_method = getattr(self.executor, "recovery_facts", None)
-            if not callable(facts_method):
+            authorize = getattr(self.executor, "authorize_durable_recovery", None)
+            if not callable(authorize):
                 raise FormalTaskViolation(
                     "EXECUTOR_DURABILITY_UNAVAILABLE",
                     "Executor recovery facts are unavailable",
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
-            facts = facts_method(
+            facts, authorization = authorize(
                 authority.task,
                 authority.producer_attempt,
+                recovery_id=recovery_id,
                 candidate_recovery_attempt_id=candidate_attempt_id,
                 profile=binding.profile,
                 recovery_generation=authority.recovery_generation,
+                checkpoint_head=checkpoints.head,
+                checkpoint_prefix_digest=checkpoints.prefix_digest,
+                effect_head=effects.head,
+                effect_prefix_digest=effects.prefix_digest,
+                claim_owner_id=owner_id,
+                claim_token=claim[0],
+                claim_generation=claim[1],
                 observed_at=now,
                 expires_at=expires_at,
             )
-            if type(facts) is not ExecutorRecoveryFacts:
+            if (
+                type(facts) is not ExecutorRecoveryFacts
+                or type(authorization) is not DurabilityMutationAuthorization
+            ):
                 raise FormalTaskViolation(
                     "EXECUTOR_RECOVERY_FACTS_INVALID",
                     "Executor recovery facts are not exact",
@@ -369,9 +402,7 @@ class PersistentTaskCore:
                 checkpoint_prefix_digest=checkpoints.prefix_digest,
                 effect_head=effects.head,
                 effect_prefix_digest=effects.prefix_digest,
-                claim_owner_id=owner_id,
-                claim_token=claim[0],
-                claim_generation=claim[1],
+                authorization=authorization,
                 observed_at=now,
                 admission_policy=self._admission_policy,
             )
