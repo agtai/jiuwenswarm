@@ -550,6 +550,24 @@ class _GatewayShutdownError(RuntimeError):
     """Content-free public failure for unsupported shutdown exceptions."""
 
 
+def _gateway_shutdown_exception_matches(
+    exc: BaseException,
+    *expected_types: type[BaseException],
+) -> bool:
+    """Classify an exception without invoking instance/metaclass hooks."""
+
+    exception_type = type(exc)
+    try:
+        mro = type.__getattribute__(exception_type, "__mro__")
+    except BaseException:
+        mro = (exception_type,)
+    return any(
+        candidate is expected
+        for candidate in mro
+        for expected in expected_types
+    )
+
+
 @dataclass
 class _GatewayShutdownFailures:
     entries: list[tuple[str, BaseException]] = field(default_factory=list)
@@ -559,7 +577,7 @@ class _GatewayShutdownFailures:
         phase_category = _gateway_shutdown_phase_category(phase)
         current = asyncio.current_task()
         if (
-            isinstance(exc, asyncio.CancelledError)
+            _gateway_shutdown_exception_matches(exc, asyncio.CancelledError)
             and current is not None
             and current.cancelling()
             and self.caller_cancellation is None
@@ -620,17 +638,22 @@ def _gateway_shutdown_phase_category(phase: str) -> str:
 
 
 def _gateway_shutdown_failure_category(exc: BaseException) -> str:
-    if isinstance(exc, asyncio.CancelledError):
+    if _gateway_shutdown_exception_matches(exc, asyncio.CancelledError):
         return "cancelled"
-    if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+    if _gateway_shutdown_exception_matches(
+        exc,
+        KeyboardInterrupt,
+        SystemExit,
+        GeneratorExit,
+    ):
         return "interrupt"
-    if isinstance(exc, TimeoutError):
+    if _gateway_shutdown_exception_matches(exc, TimeoutError):
         return "timeout"
-    if isinstance(exc, OSError):
+    if _gateway_shutdown_exception_matches(exc, OSError):
         return "io_error"
-    if isinstance(exc, RuntimeError):
+    if _gateway_shutdown_exception_matches(exc, RuntimeError):
         return "runtime_error"
-    if isinstance(exc, Exception):
+    if _gateway_shutdown_exception_matches(exc, Exception):
         return "exception"
     return "base_exception"
 
@@ -645,27 +668,27 @@ def _gateway_public_shutdown_failure(
         "Gateway shutdown failed "
         f"(phase={phase_category}, failure={failure_category})"
     )
-    if isinstance(exc, TimeoutError):
+    if _gateway_shutdown_exception_matches(exc, TimeoutError):
         public_failure: BaseException = TimeoutError(message)
-    elif isinstance(exc, OSError):
+    elif _gateway_shutdown_exception_matches(exc, OSError):
         public_failure = OSError(message)
-    elif isinstance(exc, RuntimeError):
+    elif _gateway_shutdown_exception_matches(exc, RuntimeError):
         public_failure = RuntimeError(message)
-    elif isinstance(exc, TypeError):
+    elif _gateway_shutdown_exception_matches(exc, TypeError):
         public_failure = TypeError(message)
-    elif isinstance(exc, ValueError):
+    elif _gateway_shutdown_exception_matches(exc, ValueError):
         public_failure = ValueError(message)
-    elif isinstance(exc, LookupError):
+    elif _gateway_shutdown_exception_matches(exc, LookupError):
         public_failure = LookupError(message)
-    elif isinstance(exc, ArithmeticError):
+    elif _gateway_shutdown_exception_matches(exc, ArithmeticError):
         public_failure = ArithmeticError(message)
-    elif isinstance(exc, AssertionError):
+    elif _gateway_shutdown_exception_matches(exc, AssertionError):
         public_failure = AssertionError(message)
-    elif isinstance(exc, KeyboardInterrupt):
+    elif _gateway_shutdown_exception_matches(exc, KeyboardInterrupt):
         public_failure = KeyboardInterrupt(message)
-    elif isinstance(exc, SystemExit):
+    elif _gateway_shutdown_exception_matches(exc, SystemExit):
         public_failure = SystemExit(message)
-    elif isinstance(exc, GeneratorExit):
+    elif _gateway_shutdown_exception_matches(exc, GeneratorExit):
         public_failure = GeneratorExit(message)
     elif type(exc) is Exception:
         public_failure = Exception(message)
@@ -729,7 +752,11 @@ async def _cancel_gateway_owned_task(
             break
     if caller_cancellation is not None:
         raise caller_cancellation
-    if isinstance(owned_failure, TypeError) and suppress_type_error:
+    if (
+        owned_failure is not None
+        and _gateway_shutdown_exception_matches(owned_failure, TypeError)
+        and suppress_type_error
+    ):
         return
     if owned_failure is not None:
         raise owned_failure

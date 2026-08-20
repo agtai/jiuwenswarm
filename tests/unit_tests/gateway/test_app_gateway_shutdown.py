@@ -1599,6 +1599,123 @@ async def test_unknown_hostile_shutdown_exception_uses_safe_wrapper(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_site", "phase", "hook_failure_type"),
+    (
+        ("action", "web.stop", AssertionError),
+        ("registry", "channels.pop.feishu", GeneratorExit),
+        ("descriptor", "channels.feishu.task", AssertionError),
+    ),
+)
+async def test_hostile_exception_class_hook_cannot_escape_shutdown_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_site: str,
+    phase: str,
+    hook_failure_type: type[BaseException],
+) -> None:
+    raw_marker = f"private-hostile-class-owner-{failure_site}"
+    hook_marker = f"SENTINEL-HOSTILE-CLASS-{failure_site}"
+
+    class _HostileClassFailure(BaseException):
+        def __getattribute__(self, name: str) -> object:
+            if name == "__class__":
+                raise hook_failure_type(hook_marker)
+            return super().__getattribute__(name)
+
+        def __str__(self) -> str:
+            return raw_marker
+
+        def __repr__(self) -> str:
+            return f"HostileClassFailure({raw_marker})"
+
+    raw_failure = _HostileClassFailure()
+    harness = _ShutdownHarness(
+        failures={phase: raw_failure} if failure_site == "action" else None,
+        enable_all_owners=True,
+        descriptor_failures=(
+            {phase: raw_failure} if failure_site == "descriptor" else None
+        ),
+        registry_only_channel_id=(
+            "feishu" if failure_site in {"registry", "descriptor"} else None
+        ),
+        registry_snapshot_failures=(
+            {"feishu": raw_failure} if failure_site == "registry" else None
+        ),
+    )
+    public_failure: BaseException | None = None
+    formatted_failure = ""
+    calls_before_cleanup: list[str] = []
+    tasks_done_before_cleanup = False
+    caller_logger = logging.getLogger("test.gateway.shutdown.hostile-class-caller")
+
+    _install_gateway_fakes(monkeypatch, harness)
+    gateway_module.logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO):
+            try:
+                await gateway_module._run(
+                    harness.agent_server_url,
+                    "127.0.0.1",
+                    19000,
+                    "/ws",
+                )
+            except BaseException as exc:
+                public_failure = exc
+                # The RED baseline leaks the hostile object itself. Avoid
+                # asking pytest/traceback to inspect that object; the GREEN
+                # path must instead expose a safe public exception that can be
+                # formatted and logged by an ordinary caller.
+                leaked_hostile_context = exc is raw_failure or (
+                    type(exc) is not _HostileClassFailure
+                    and exc.__context__ is raw_failure
+                )
+                if leaked_hostile_context:
+                    exc.__traceback__ = None
+                    exc.__cause__ = None
+                    exc.__context__ = None
+                    exc.__suppress_context__ = True
+                else:
+                    formatted_failure = "".join(
+                        traceback.format_exception(type(exc), exc, exc.__traceback__)
+                    )
+                    caller_logger.exception("caller observed Gateway shutdown failure")
+    finally:
+        calls_before_cleanup = list(harness.calls)
+        tasks_done_before_cleanup = all(task.done() for task in harness.owned_tasks)
+        await harness.cancel_leftover_cleanup()
+        gateway_module.logger.removeHandler(caplog.handler)
+
+    assert public_failure is not None
+    assert public_failure is not raw_failure
+    assert type(public_failure) is gateway_module._GatewayShutdownError
+    _assert_safe_public_failure(
+        public_failure,
+        expected_type=gateway_module._GatewayShutdownError,
+        phase=phase,
+        category="base_exception",
+    )
+    expected = list(_ALL_OWNER_EXPECTED_CALLS)
+    if failure_site in {"registry", "descriptor"}:
+        insert_at = expected.index("channels.pop.xiaoyi")
+        expected[insert_at:insert_at] = [
+            "channels.feishu.task",
+            "channels.feishu.stop",
+        ]
+    assert calls_before_cleanup == expected
+    assert Counter(calls_before_cleanup) == Counter(expected)
+    assert calls_before_cleanup.count(phase) == (
+        3 if failure_site == "descriptor" else 1
+    )
+    assert tasks_done_before_cleanup
+    assert "restart.exec" not in calls_before_cleanup
+    for marker in (raw_marker, hook_marker):
+        assert marker not in formatted_failure
+        assert marker not in caplog.text
+        assert all(marker not in repr(record.args) for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_real_run_public_failure_and_all_logs_are_content_free(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
