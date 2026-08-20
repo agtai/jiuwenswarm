@@ -885,6 +885,11 @@ test('Web response error extraction preserves nested product reason', () => {
     'TASK_CONTEXT_PERMISSION_MISSING',
   );
   assert.equal(extractWebErrorReason({ reason: ' TOP_LEVEL_REASON ' }), 'TOP_LEVEL_REASON');
+  assert.equal(extractWebErrorReason({}, ' MEDIA_PLAYOUT_RECEIPT_UNTRUSTED '), 'MEDIA_PLAYOUT_RECEIPT_UNTRUSTED');
+  assert.equal(
+    extractWebErrorReason({ error: { reason: 'EXACT_MEDIA_REASON' } }, 'MEDIA_PLAYOUT_RECEIPT_UNTRUSTED'),
+    'EXACT_MEDIA_REASON',
+  );
   assert.equal(extractWebErrorReason({ error: 'legacy error' }), undefined);
 });
 

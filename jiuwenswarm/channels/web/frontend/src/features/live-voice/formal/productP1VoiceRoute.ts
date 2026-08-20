@@ -1708,7 +1708,7 @@ export class ProductP1VoiceRouteOwner {
       receipt.playout_peak_depth !== pending.peakDepth ||
       receipt.capture_control_ack !== 'capture_flush_acked' ||
       receipt.playout_state !== 'render_completed' ||
-      receipt.duplex_media_observed !== (pending.downlinkRoute !== null)
+      typeof receipt.duplex_media_observed !== 'boolean'
     )
       throw new Error('media playout receipt binding mismatch');
   }

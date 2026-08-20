@@ -289,6 +289,37 @@ exact-source Alpha result.
   acceptance remain open; no physical PASS or product-readiness credit is
   claimed.
 
+#### T2-L2B — completed playout receipt must not require early duplex media (SOURCE/AUTOMATED REPAIRED; PHYSICAL OPEN, 2026-08-20)
+
+- **Observed failure:** exact source `874cf327c` spoke the complete short TTS
+  answer, then reported `PRODUCT_TTS_PLAYBACK_FAILED` and closed the successor
+  listening route. Gateway cleanup emitted
+  `STREAMING_SPEECH_CANCEL_UNACKNOWLEDGED`; the current Web projection discarded
+  the more specific RPC code.
+- **Intended behaviour:** the exact authorized downlink and browser-render
+  receipt settle playout independently. The existing
+  `duplex_media_observed` field reports true/false without turning missing or
+  late successor media into a retroactive TTS failure. Initial user capture
+  remains ACK-gated and fail-closed.
+- **Owner/risk/exclusions:** Gateway media registration, formal P1 receipt
+  validation, minimal Web reason projection and their tests; Tier 3 under root
+  `TESTING.md`. Agent/Tool/Task/history, P2/P3 schemas, Provider configuration,
+  capture-duration policy, private telemetry, physical PASS and remote refs are
+  excluded.
+- **Acceptance:** old-source failing minimal no-duplex receipt regression;
+  repaired false/true duplex receipts; unchanged invalid/stale/binding
+  rejection; completed TTS without duplicate business effects; affected
+  backend/frontend suites, scoped review and a freshly prepared runtime. Human
+  audibility and automatic post-playout listening remain physical acceptance.
+- **Evidence:** [P1_T2_POST_PLAYOUT_RECEIPT_DECOUPLING_2026-08-20.md](evidence/P1_T2_POST_PLAYOUT_RECEIPT_DECOUPLING_2026-08-20.md).
+- **Current result:** the old-source Python and browser-route minimal repros
+  failed at the exact no-early-duplex boundary and pass after the repair.
+  Gateway registration/synthesis/RPC/streaming suites, browser audio I/O,
+  TypeScript and the affected Integrated Web suite pass except for the same
+  pre-existing Exit/immediate-re-enable case (414/415). A fresh real Chrome
+  audible turn and automatic successor listening remain user validation; no
+  physical PASS is claimed.
+
 ## Dependency route to feature complete
 
 1. ~~Audit all 15 capability/module rows against current source/tests~~ **DONE —

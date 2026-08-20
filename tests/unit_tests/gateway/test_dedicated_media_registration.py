@@ -1409,11 +1409,11 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
 
 
 @pytest.mark.parametrize(
-    ("accept_real_frame", "expected_duplex"),
-    ((False, False), (True, True)),
+    ("successor_frame_timing", "expected_duplex"),
+    (("none", False), ("before_downlink_complete", True), ("after_downlink_complete", False)),
 )
-def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_receipt(
-    accept_real_frame: bool, expected_duplex: bool
+def test_synthesis_downlink_receipt_reports_early_duplex_without_rejecting_playout(
+    successor_frame_timing: str, expected_duplex: bool
 ) -> None:
     registry = _active_registry()
     activation = _activate(
@@ -1537,31 +1537,33 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
     registry.mark_downlink_started(downlink)
     assert downlink.downlink_overlap_record_id == next_uplink.record_id
     assert downlink.downlink_overlap_observed is False
-    if accept_real_frame:
+    if successor_frame_timing == "before_downlink_complete":
         registry.accept_frame(
             next_uplink,
             MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
         )
-    assert (
-        registry.complete_downlink(
-            downlink,
-            DedicatedMediaSocketLeafResult(
-                activated=True,
-                socket_touched=True,
-                attach_sent=True,
-                accepted_frames=0,
-                close_result=None,
-                reason_id=MediaDetachReason.LOCAL_CLOSE,
-                sent_frames=1,
-                acknowledged_through_seq=0,
-                configured_max_pending_frames=8,
-                configured_max_pending_bytes=131_072,
-                peak_pending_frames=1,
-                peak_pending_bytes=1_320,
-            ),
-        )
-        is expected_duplex
+    assert registry.complete_downlink(
+        downlink,
+        DedicatedMediaSocketLeafResult(
+            activated=True,
+            socket_touched=True,
+            attach_sent=True,
+            accepted_frames=0,
+            close_result=None,
+            reason_id=MediaDetachReason.LOCAL_CLOSE,
+            sent_frames=1,
+            acknowledged_through_seq=0,
+            configured_max_pending_frames=8,
+            configured_max_pending_bytes=131_072,
+            peak_pending_frames=1,
+            peak_pending_bytes=1_320,
+        ),
     )
+    if successor_frame_timing == "after_downlink_complete":
+        registry.accept_frame(
+            next_uplink,
+            MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+        )
     assert downlink.downlink_overlap_observed is expected_duplex
     receipt_params = {
         "session_id": "session-1",
@@ -1579,26 +1581,15 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
         "capture_control_ack": "capture_flush_acked",
         "playout_state": "render_completed",
     }
-    if expected_duplex:
-        receipt = registry.acknowledge_playout(
-            params=receipt_params,
-            routed_session_id="session-1",
-            connection_id="connection-1",
-            user_id="user-1",
-            request_origin=ORIGIN,
-        )
-        assert receipt["duplex_media_observed"] is True
-    else:
-        with pytest.raises(MediaTransportViolation) as caught:
-            registry.acknowledge_playout(
-                params=receipt_params,
-                routed_session_id="session-1",
-                connection_id="connection-1",
-                user_id="user-1",
-                request_origin=ORIGIN,
-            )
-        assert caught.value.reason_id == "MEDIA_PLAYOUT_RECEIPT_UNTRUSTED"
-        assert parent.playout_receipts == {}
+    receipt = registry.acknowledge_playout(
+        params=receipt_params,
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+        request_origin=ORIGIN,
+    )
+    assert receipt["duplex_media_observed"] is expected_duplex
+    assert tuple(parent.playout_receipts) == ((ref, "unit-1"),)
     assert next_uplink.route_completed is False
 
 
