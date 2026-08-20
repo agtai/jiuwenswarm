@@ -32,6 +32,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorResolution,
     ExecutorRetryReadiness,
     FormalAttemptState,
+    FormalTaskState,
     FormalTaskViolation,
     OutboxState,
     PersistentAttemptRecord,
@@ -59,6 +60,7 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     ResolvedAuthority,
     ServerSessionProjectAuthorityResolver,
     StaticBearerAuthenticator,
+    _DirectP3RuntimeOwner,
     _resolve_database_path,
     create_p3_composition_from_environment,
 )
@@ -76,6 +78,7 @@ from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCor
 from jiuwenswarm.server.live_voice.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
+    ProjectExecutionBinding,
 )
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 from jiuwenswarm.server.live_voice.voice_task_policy import FormalTaskPolicyAdapter
@@ -2899,6 +2902,360 @@ async def test_factory_direct_executor_lifecycle_releases_agent_bindings(
 
     assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
     assert manager.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_phases_direct_status_settlement_before_binding_release() -> None:
+    events: list[str] = []
+
+    class Direct:
+        has_live_workers = False
+
+        async def prepare_startup(self) -> int:
+            events.append("executor.prepare")
+            return 0
+
+        async def close(self, *, interrupt_running: bool) -> None:
+            assert interrupt_running is True
+            events.append("executor.close")
+
+    class Binding:
+        async def close(self) -> None:
+            events.append("binding.close")
+
+    class Core:
+        async def reconcile(self):
+            events.append("core.reconcile")
+            return {}
+
+        async def reconcile_status(self):
+            events.append("core.reconcile_status")
+            return {
+                "known": 1,
+                "unavailable": 0,
+                "lost": 0,
+                "superseded": 0,
+            }
+
+    runtime_owner = _DirectP3RuntimeOwner(
+        executor=Direct(),  # type: ignore[arg-type]
+        binding_resolver=Binding(),  # type: ignore[arg-type]
+    )
+    composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
+        authority_resolver=_AuthorityResolver({}),
+        core=Core(),  # type: ignore[arg-type]
+        binding_resolver=runtime_owner,
+        reconcile_interval=3600,
+        clock=lambda: NOW,
+    )
+
+    await composition.start()
+    await composition.stop()
+    await composition.stop()
+
+    assert events == [
+        "executor.prepare",
+        "core.reconcile",
+        "core.reconcile",  # final generic outbox drain while carrier is open
+        "executor.close",
+        "core.reconcile_status",
+        "binding.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stop_retains_direct_owner_until_status_settlement_retries() -> None:
+    status_summaries = [
+        {
+            "known": 0,
+            "unavailable": 1,
+            "lost": 0,
+            "superseded": 0,
+        },
+        {
+            "known": 1,
+            "unavailable": 0,
+            "lost": 0,
+            "superseded": 0,
+        },
+    ]
+    direct_close_calls = binding_close_calls = status_calls = 0
+
+    class Direct:
+        has_live_workers = False
+
+        async def prepare_startup(self) -> int:
+            return 0
+
+        async def close(self, *, interrupt_running: bool) -> None:
+            nonlocal direct_close_calls
+            assert interrupt_running is True
+            direct_close_calls += 1
+
+    class Binding:
+        async def close(self) -> None:
+            nonlocal binding_close_calls
+            binding_close_calls += 1
+
+    class Core:
+        async def reconcile(self):
+            return {}
+
+        async def reconcile_status(self):
+            nonlocal status_calls
+            status_calls += 1
+            return status_summaries.pop(0)
+
+    runtime_owner = _DirectP3RuntimeOwner(
+        executor=Direct(),  # type: ignore[arg-type]
+        binding_resolver=Binding(),  # type: ignore[arg-type]
+    )
+    composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
+        authority_resolver=_AuthorityResolver({}),
+        core=Core(),  # type: ignore[arg-type]
+        binding_resolver=runtime_owner,
+        reconcile_interval=3600,
+        clock=lambda: NOW,
+    )
+    await composition.start()
+
+    with pytest.raises(FormalTaskViolation) as pending:
+        await composition.stop()
+
+    assert pending.value.reason == "EXECUTOR_CLOSE_CLEANUP_PENDING"
+    assert direct_close_calls == 1
+    assert status_calls == 1
+    assert binding_close_calls == 0
+
+    await composition.stop()
+    await composition.stop()
+
+    assert direct_close_calls == 2
+    assert status_calls == 2
+    assert binding_close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_retains_direct_owner_when_executor_cleanup_is_pending() -> None:
+    cleanup_pending = True
+    direct_close_calls = binding_close_calls = status_calls = 0
+
+    class Direct:
+        @property
+        def has_live_workers(self) -> bool:
+            return cleanup_pending
+
+        async def prepare_startup(self) -> int:
+            return 0
+
+        async def close(self, *, interrupt_running: bool) -> None:
+            nonlocal direct_close_calls
+            assert interrupt_running is True
+            direct_close_calls += 1
+
+    class Binding:
+        async def close(self) -> None:
+            nonlocal binding_close_calls
+            binding_close_calls += 1
+
+    class Core:
+        async def reconcile(self):
+            return {}
+
+        async def reconcile_status(self):
+            nonlocal status_calls
+            status_calls += 1
+            return {
+                "known": 1,
+                "unavailable": 0,
+                "lost": 0,
+                "superseded": 0,
+            }
+
+    runtime_owner = _DirectP3RuntimeOwner(
+        executor=Direct(),  # type: ignore[arg-type]
+        binding_resolver=Binding(),  # type: ignore[arg-type]
+    )
+    composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
+        authority_resolver=_AuthorityResolver({}),
+        core=Core(),  # type: ignore[arg-type]
+        binding_resolver=runtime_owner,
+        reconcile_interval=3600,
+        clock=lambda: NOW,
+    )
+    await composition.start()
+
+    with pytest.raises(FormalTaskViolation) as pending:
+        await composition.stop()
+
+    assert pending.value.reason == "EXECUTOR_CLOSE_CLEANUP_PENDING"
+    assert direct_close_calls == 1
+    assert status_calls == 0
+    assert binding_close_calls == 0
+
+    cleanup_pending = False
+    await composition.stop()
+
+    assert direct_close_calls == 2
+    assert status_calls == 1
+    assert binding_close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_settles_direct_interruption_into_canonical_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        lambda: NOW,
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    (project / "tracked.txt").write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=project, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=P3 Test",
+            "-c",
+            "user.email=p3@example.invalid",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+        cwd=project,
+        check=True,
+    )
+
+    class BlockingProjectExecutor:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def process_background_code_task_stream(self, _request):
+            self.started.set()
+            await asyncio.Event().wait()
+            if False:
+                yield None
+
+    class Resolver:
+        def __init__(self, binding: ProjectExecutionBinding) -> None:
+            self.binding = binding
+            self.close_calls = 0
+
+        async def resolve(self, _spec, *, for_dispatch: bool):
+            assert for_dispatch is True
+            return self.binding
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    async def dispatch_fence() -> None:
+        return None
+
+    releases: list[str] = []
+    blocking_agent = BlockingProjectExecutor()
+    binding = ProjectExecutionBinding(
+        service=None,
+        execution_agent=object(),
+        project_executor=blocking_agent,
+        effective_execution_root=str(project.resolve()),
+        execution_target={
+            "project_dir": str(project.resolve()),
+            "project_id": "project-1",
+            "origin_session_id": "session-1",
+            "origin_channel_id": "web",
+        },
+        owner_scope={
+            "channel_id": "formal-task-core",
+            "session_id": "session-1",
+            "app_id": "live-voice",
+        },
+        resolved_revision_kind="version",
+        resolved_revision_value="a77516a0",
+        model_identity="default#0",
+        model_config_version="catalog-v1",
+        context_release=lambda: releases.append("released"),
+        dispatch_fence=dispatch_fence,
+    )
+    resolver = Resolver(binding)
+    database = tmp_path / "shutdown-settlement.sqlite3"
+    direct = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+        clock=lambda: NOW,
+        heartbeat_interval=60,
+        attempt_timeout=300,
+    )
+    runtime_owner = _DirectP3RuntimeOwner(
+        executor=direct,
+        binding_resolver=resolver,  # type: ignore[arg-type]
+    )
+    authority = _AuthorityResolver({"session-1": _context(project)})
+    confirmations = SqliteP3ConfirmationLedger(database)
+    models = _ModelResolver()
+    store = SqliteTaskStore(database)
+    composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(
+            token=TOKEN, principal=_principal()
+        ),
+        authority_resolver=authority,
+        core=PersistentTaskCore(store, direct),
+        confirmation_verifier=confirmations,
+        model_resolver=models,
+        binding_resolver=runtime_owner,
+        telemetry=_Telemetry(),
+        policy=FormalTaskPolicyAdapter(),
+        reconcile_interval=3600,
+        clock=lambda: NOW,
+        executor_profiles=(direct.capability_profile(),),
+    )
+    harness = _Harness(
+        composition,
+        database,
+        direct,  # type: ignore[arg-type]
+        authority,
+        runtime_owner,  # type: ignore[arg-type]
+        _Telemetry(),
+        confirmations,
+        models,
+    )
+
+    await composition.start()
+    created = await composition.handle(
+        operation="task.create",
+        params=_issued_create_params(harness, "command-shutdown-interruption"),
+        request_id="request-shutdown-interruption",
+        session_id="session-1",
+    )
+    assert created.ok is True
+    task_id = str(created.payload["result"]["task_id"])
+    attempt_id = str(created.payload["result"]["attempt_id"])
+    await composition.reconcile_once()
+    await asyncio.wait_for(blocking_agent.started.wait(), timeout=2)
+
+    await composition.stop()
+
+    direct_record = direct._journal.get(attempt_id)
+    assert direct_record is not None
+    assert direct_record.state is FormalAttemptState.TERMINAL
+    assert direct_record.outcome is TerminalOutcome.INTERRUPTED
+    task = store.get_task(task_id, _scope())
+    attempt = store.get_attempt(attempt_id)
+    assert task.state is FormalTaskState.TERMINAL
+    assert task.outcome is TerminalOutcome.INTERRUPTED
+    assert task.reconciliation_state is None
+    assert task.reconciliation_reason is None
+    assert attempt.state is FormalAttemptState.TERMINAL
+    assert attempt.outcome is TerminalOutcome.INTERRUPTED
+    assert direct.has_live_workers is False
+    assert releases == ["released"]
+    assert resolver.close_calls == 1
 
 
 @pytest.mark.parametrize(

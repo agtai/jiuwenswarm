@@ -1018,6 +1018,17 @@ class PersistentTaskCore:
             if not changed:
                 break
             delivered += 1
+        status_summary = await self.reconcile_status()
+        return {
+            "reset_claims": reset_claims,
+            "delivered": delivered,
+            "delivery_unavailable": delivery_unavailable,
+            **status_summary,
+        }
+
+    async def reconcile_status(self) -> dict[str, int]:
+        """Consume only Executor status evidence for canonical nonterminal attempts."""
+
         known = unavailable = lost = superseded = 0
         for task, attempt in self.store.nonterminal_attempts():
             if attempt.executor_ref is None:
@@ -1188,9 +1199,6 @@ class PersistentTaskCore:
                     continue
                 unavailable += 1
         return {
-            "reset_claims": reset_claims,
-            "delivered": delivered,
-            "delivery_unavailable": delivery_unavailable,
             "known": known,
             "unavailable": unavailable,
             "lost": lost,

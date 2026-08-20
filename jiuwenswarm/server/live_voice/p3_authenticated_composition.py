@@ -984,7 +984,7 @@ class _DirectP3RuntimeOwner:
     async def prepare_startup(self) -> int:
         return await self._executor.prepare_startup()
 
-    async def close(self) -> None:
+    async def close_executor(self) -> None:
         await self._executor.close(interrupt_running=True)
         if self._executor.has_live_workers:
             raise FormalTaskViolation(
@@ -992,7 +992,13 @@ class _DirectP3RuntimeOwner:
                 "formal attempt workers remain active after bounded shutdown",
                 ErrorCode.UNAVAILABLE,
             )
+
+    async def close_bindings(self) -> None:
         await self._binding_resolver.close()
+
+    async def close(self) -> None:
+        await self.close_executor()
+        await self.close_bindings()
 
 
 class P3AuthenticatedComposition:
@@ -1062,6 +1068,7 @@ class P3AuthenticatedComposition:
         self._accepting = False
         self._closed = False
         self._cleanup_complete = False
+        self._direct_runtime_prepared = False
 
     @property
     def accepting(self) -> bool:
@@ -1388,6 +1395,8 @@ class P3AuthenticatedComposition:
                 )
                 if callable(prepare_startup):
                     await prepare_startup()
+                    if isinstance(self._binding_resolver, _DirectP3RuntimeOwner):
+                        self._direct_runtime_prepared = True
             summary = await self.reconcile_once()
             worker = asyncio.create_task(
                 self._reconcile_loop(), name="live-voice-p3-reconciliation"
@@ -1431,8 +1440,21 @@ class P3AuthenticatedComposition:
             # Drain an externally requested reconcile_once before carrier close.
             async with self._reconcile_lock:
                 pass
-            if self._binding_resolver is not None:
-                await self._binding_resolver.close()
+            binding_resolver = self._binding_resolver
+            if isinstance(binding_resolver, _DirectP3RuntimeOwner):
+                await binding_resolver.close_executor()
+                if self._direct_runtime_prepared:
+                    status_summary = await self._core.reconcile_status()
+                    if status_summary["unavailable"] or status_summary["superseded"]:
+                        raise FormalTaskViolation(
+                            "EXECUTOR_CLOSE_CLEANUP_PENDING",
+                            "formal attempt status remains unsettled after shutdown",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                await binding_resolver.close_bindings()
+                self._direct_runtime_prepared = False
+            elif binding_resolver is not None:
+                await binding_resolver.close()
             self._cleanup_complete = True
 
     async def _enter_operation(self) -> None:

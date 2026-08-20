@@ -42,6 +42,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     OutboxKind,
     OutboxState,
     PersistentAttemptRecord,
+    PersistedExecutorSelection,
     PersistentOutboxItem,
     PersistentTaskEvent,
     PersistentTaskRecord,
@@ -7918,6 +7919,136 @@ class _Executor:
             raw_status=None,
             error=f"STATUS_{self.status_resolution.value.upper()}",
         )
+
+
+@pytest.mark.asyncio
+async def test_status_only_reconciliation_never_touches_outbox_delivery(
+    tmp_path: Path,
+) -> None:
+    class NoOutboxReconciliationStore(SqliteTaskStore):
+        def reset_expired_outbox_claims(self, *, claimed_before: str) -> int:
+            del claimed_before
+            raise AssertionError("status-only reconciliation must not reset outbox")
+
+        def claim_outbox(self, worker_id: str, *, observed_at: str | None = None):
+            del worker_id, observed_at
+            raise AssertionError("status-only reconciliation must not claim outbox")
+
+    database = tmp_path / "status-only-no-outbox.sqlite"
+    store = NoOutboxReconciliationStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    before = store.counts()
+
+    summary = await core.reconcile_status()
+
+    assert summary == {
+        "known": 0,
+        "unavailable": 1,
+        "lost": 0,
+        "superseded": 0,
+    }
+    assert store.counts() == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, delivery_count, claimed_by, claim_token FROM outbox"
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None)
+    task = store.get_task(str(created.result["task_id"]), _scope())
+    assert task.reconciliation_state is ReconciliationState.PENDING
+    assert task.reconciliation_reason == "ATTEMPT_NOT_YET_BOUND"
+
+
+@pytest.mark.asyncio
+async def test_status_only_selection_mismatch_is_pending_without_new_delivery(
+    tmp_path: Path,
+) -> None:
+    selection = PersistedExecutorSelection.from_values(
+        adapter_id="expected-adapter",
+        capability_profile={"profile": "expected"},
+        execution_requirements={"requirements": "expected"},
+    )
+
+    class SelectionMismatchExecutor(_Executor):
+        async def dispatch(
+            self, item: PersistentOutboxItem
+        ) -> ExecutorDeliveryResult:
+            self.dispatches.append(item.attempt_id)
+            observations = tuple(
+                replace(
+                    observation,
+                    adapter_id=selection.adapter_id,
+                    capability_profile_digest=selection.capability_profile_digest,
+                )
+                for observation in _observations(item)
+            )
+            return ExecutorDeliveryResult(
+                f"legacy:{item.attempt_id}", observations
+            )
+
+        async def status(
+            self,
+            task: PersistentTaskRecord,
+            attempt: PersistentAttemptRecord,
+        ) -> ExecutorObservation:
+            return ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=self.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task.task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=f"mismatch:{attempt.attempt_id}",
+                source_seq=attempt.source_seq + 1,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.INTERRUPTED,
+                occurred_at=utc_now(),
+                raw_status="interrupted",
+                adapter_id="foreign-adapter",
+                capability_profile_digest=selection.capability_profile_digest,
+            )
+
+    store = SqliteTaskStore(tmp_path / "status-only-selection-mismatch.sqlite")
+    executor = SelectionMismatchExecutor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        selection=selection,
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(observed_at=NOW) is True
+    before_counts = store.counts()
+
+    summary = await core.reconcile_status()
+
+    assert summary == {
+        "known": 0,
+        "unavailable": 1,
+        "lost": 0,
+        "superseded": 0,
+    }
+    assert executor.dispatches == [created.result["attempt_id"]]
+    assert executor.cancels == []
+    assert store.counts() == before_counts
+    task = store.get_task(str(created.result["task_id"]), _scope())
+    attempt = store.get_attempt(str(created.result["attempt_id"]))
+    assert task.state is FormalTaskState.RUNNING
+    assert attempt.state is FormalAttemptState.RUNNING
+    assert task.reconciliation_state is ReconciliationState.PENDING
+    assert task.reconciliation_reason == "EXECUTOR_STATUS_SELECTION_MISMATCH"
 
 
 @pytest.mark.parametrize(
