@@ -581,6 +581,227 @@ async def test_agent_client_connect_preserves_cancelled_error(monkeypatch):
     assert raised.value is cancellation
 
 
+class _TransportFailureCleanupHarness(AgentClientHarness):
+    def __init__(
+        self,
+        *,
+        private_uri: str,
+        private_message: str,
+        private_cause: str,
+    ) -> None:
+        super().__init__()
+        self.private_uri = private_uri
+        self.private_message = private_message
+        self.private_cause = private_cause
+        self.failed_ws = BlockingCloseWebSocket()
+        self.transport_failed = asyncio.Event()
+        self.cleanup_cancellation: asyncio.CancelledError | None = None
+
+    async def _connect_transport(self, uri: str) -> None:
+        assert uri == self.private_uri
+        self._uri = uri
+        self._ws = self.failed_ws
+        self._running = True
+        self._server_ready = True
+        self.transport_failed.set()
+        try:
+            raise RuntimeError(self.private_cause)
+        except RuntimeError as cause:
+            raise OSError(f"{self.private_message} uri={uri}") from cause
+
+    async def _run_disconnect_cleanup(self) -> None:
+        try:
+            await super()._run_disconnect_cleanup()
+        except asyncio.CancelledError as exc:
+            self.cleanup_cancellation = exc
+            raise
+
+
+class _CleanupProcessControlFailure(BaseException):
+    pass
+
+
+class _TransportAndCleanupFailureHarness(_TransportFailureCleanupHarness):
+    def __init__(self, *, cleanup_failure: BaseException, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cleanup_failure = cleanup_failure
+        self.cleanup_started = asyncio.Event()
+        self.release_cleanup = asyncio.Event()
+
+    async def _disconnect_impl(self) -> None:
+        self._disconnecting = True
+        try:
+            self._running = False
+            self._ws = None
+            self._uri = None
+            self._server_ready = False
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            raise self.cleanup_failure
+        finally:
+            self._disconnecting = False
+
+
+def _start_transport_failure_operation(
+    client: AgentClientHarness,
+    *,
+    path: str,
+    uri: str,
+) -> asyncio.Task:
+    if path == "connect":
+        return asyncio.create_task(client.connect(uri))
+
+    client.set_uri_for_test(uri)
+    client.set_ws_for_test(None)
+    envelope = e2a_from_agent_fields(
+        request_id=f"transport-cleanup-{path}",
+        channel_id="web",
+        session_id=f"transport-cleanup-session-{path}",
+        req_method="chat.send",
+        params={"content": "transport-cleanup-private-content"},
+        is_stream=False,
+    )
+    return asyncio.create_task(client.send_request(envelope))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("connect", "automatic_reconnect"))
+async def test_transport_failure_caller_cancel_waits_for_content_free_cleanup(
+    path, caplog
+):
+    private_uri = (
+        "wss://cleanup-user:cleanup-password@cleanup-host/cleanup-private-path"
+    )
+    private_message = "cleanup-private-transport-message"
+    private_cause = "cleanup-private-transport-cause"
+    client = _TransportFailureCleanupHarness(
+        private_uri=private_uri,
+        private_message=private_message,
+        private_cause=private_cause,
+    )
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.gateway.routing.agent_client.cancellation_consumer"
+    )
+    consumer_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.ERROR, logger=consumer_logger.name)
+
+    operation = _start_transport_failure_operation(
+        client,
+        path=path,
+        uri=private_uri,
+    )
+    try:
+        await asyncio.wait_for(client.transport_failed.wait(), timeout=0.1)
+        await asyncio.wait_for(client.failed_ws.close_started.wait(), timeout=0.1)
+        operation.cancel("caller-cancel-after-transport-failure")
+        await asyncio.sleep(0)
+
+        assert operation.done() is False
+        assert client.is_disconnecting_for_test() is True
+
+        client.failed_ws.release_close.set()
+        raised_error: asyncio.CancelledError | None = None
+        formatted = ""
+        try:
+            await asyncio.wait_for(operation, timeout=0.1)
+        except asyncio.CancelledError as exc:
+            raised_error = exc
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("Agent client transport cleanup cancelled")
+        else:
+            raise AssertionError("expected caller cancellation")
+    finally:
+        consumer_logger.removeHandler(caplog.handler)
+
+    assert raised_error is client.cleanup_cancellation
+    assert raised_error.args == ("caller-cancel-after-transport-failure",)
+    assert raised_error.__cause__ is None
+    assert raised_error.__context__ is None
+    assert client.failed_ws.closed is True
+    assert client.get_ws_for_test() is None
+    assert client.get_uri_for_test() is None
+    assert client.is_running_for_test() is False
+    assert client.is_disconnecting_for_test() is False
+    diagnostic_material = f"{formatted}\n{caplog.text}"
+    forbidden = (
+        private_uri,
+        "cleanup-user",
+        "cleanup-password",
+        "cleanup-host",
+        "cleanup-private-path",
+        private_message,
+        private_cause,
+    )
+    assert not [marker for marker in forbidden if marker in diagnostic_material]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("connect", "automatic_reconnect"))
+@pytest.mark.parametrize(
+    "cleanup_failure_kind",
+    ("ordinary", "process_control"),
+)
+async def test_cleanup_failure_wins_without_raw_transport_context(
+    path, cleanup_failure_kind, caplog
+):
+    private_uri = "wss://failure-user:failure-password@failure-host/failure-path"
+    private_message = "failure-private-transport-message"
+    private_cause = "failure-private-transport-cause"
+    cleanup_failure = (
+        RuntimeError("safe ordinary cleanup failure")
+        if cleanup_failure_kind == "ordinary"
+        else _CleanupProcessControlFailure("safe process-control cleanup failure")
+    )
+    client = _TransportAndCleanupFailureHarness(
+        cleanup_failure=cleanup_failure,
+        private_uri=private_uri,
+        private_message=private_message,
+        private_cause=private_cause,
+    )
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.gateway.routing.agent_client.cleanup_failure_consumer"
+    )
+    consumer_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.ERROR, logger=consumer_logger.name)
+
+    operation = _start_transport_failure_operation(
+        client,
+        path=path,
+        uri=private_uri,
+    )
+    try:
+        await asyncio.wait_for(client.transport_failed.wait(), timeout=0.1)
+        await asyncio.wait_for(client.cleanup_started.wait(), timeout=0.1)
+        client.release_cleanup.set()
+        raised_error: BaseException | None = None
+        formatted = ""
+        try:
+            await operation
+        except BaseException as exc:
+            raised_error = exc
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("Agent client cleanup failed")
+        else:
+            raise AssertionError("expected cleanup failure")
+    finally:
+        consumer_logger.removeHandler(caplog.handler)
+
+    assert raised_error is cleanup_failure
+    assert raised_error.__cause__ is None
+    assert raised_error.__context__ is None
+    diagnostic_material = f"{formatted}\n{caplog.text}"
+    forbidden = (
+        private_uri,
+        "failure-user",
+        "failure-password",
+        "failure-host",
+        "failure-path",
+        private_message,
+        private_cause,
+    )
+    assert not [marker for marker in forbidden if marker in diagnostic_material]
+
+
 def _private_consumer_decode_wire(form: str, stage: str, request_id: str) -> dict:
     if stage == "unrecognized":
         return {

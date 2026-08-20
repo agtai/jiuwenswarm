@@ -417,18 +417,19 @@ class WebSocketAgentServerClient(AgentServerClient):
         async with self._lifecycle_lock:
             if self._ws is not None:
                 await self._run_disconnect_cleanup()
-            safe_failure: Exception | None = None
+            connect_failure: BaseException | None = None
             try:
                 await self._connect_transport(uri)
             except BaseException as exc:
-                await self._run_disconnect_cleanup()
                 if isinstance(exc, asyncio.CancelledError) or not isinstance(
                     exc, Exception
                 ):
-                    raise
-                safe_failure = _content_free_connect_exception(exc)
-            if safe_failure is not None:
-                raise safe_failure from None
+                    connect_failure = exc
+                else:
+                    connect_failure = _content_free_connect_exception(exc)
+            if connect_failure is not None:
+                await self._run_disconnect_cleanup()
+                raise connect_failure from None
 
     async def _connect_transport(self, uri: str) -> None:
         logger.info("[WebSocketAgentServerClient] 正在连接 AgentServer transport")
@@ -679,18 +680,19 @@ class WebSocketAgentServerClient(AgentServerClient):
                     "[WebSocketAgentServerClient] WebSocket 已断开，准备按需重连: %s",
                     _format_transport_log_summary(self._diagnostic_state()),
                 )
-                safe_failure: Exception | None = None
+                connect_failure: BaseException | None = None
                 try:
                     await self._connect_transport(uri)
                 except BaseException as exc:
-                    await self._run_disconnect_cleanup()
                     if isinstance(exc, asyncio.CancelledError) or not isinstance(
                         exc, Exception
                     ):
-                        raise
-                    safe_failure = _content_free_connect_exception(exc)
-                if safe_failure is not None:
-                    raise safe_failure from None
+                        connect_failure = exc
+                    else:
+                        connect_failure = _content_free_connect_exception(exc)
+                if connect_failure is not None:
+                    await self._run_disconnect_cleanup()
+                    raise connect_failure from None
                 if self._ws is None:
                     raise RuntimeError("AgentServer WebSocket connection closed")
                 return self._ws, self._connection_generation
