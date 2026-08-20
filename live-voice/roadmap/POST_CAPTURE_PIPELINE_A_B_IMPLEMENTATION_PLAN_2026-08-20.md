@@ -585,6 +585,17 @@ git commit -m "feat(live-voice): automate fixed audio product rounds"
 
 ### Task 5: Create the loopback attempt runner and fixture server
 
+> **Progress — 2026-08-20:** the supervised runner was implemented in
+> `b8d3ebc4c`. It validates bounded PCM16 mono fixtures and hashes, rechecks the
+> hash at serving time, binds only loopback HTTP/CORS, accepts one exact
+> content-free result, launches an optional Browser argv with `shell=False`,
+> owns bounded cleanup, requires exact Browser/STT/TTS/Agent shards, supports
+> repeated rounds without confusing aggregate report counts, and writes the v1
+> report. The source-fact correction also makes the reducer accept both v0 and
+> v1 manifests. Focused runner/probe/report automation passed 161 tests plus
+> Ruff, `py_compile`, and diff checks. Complete Tier-2 matrix review and a real
+> automated Browser smoke remain open; no baseline credit is granted yet.
+
 **Risk:** Tier 2 — process lifecycle, private paths and diagnostic result integrity; it invokes the Tier-3 product route but owns no product authority.
 
 **Files:**
@@ -608,6 +619,7 @@ python scripts/live_voice/post_capture_latency_runner.py prepare-run
   --input-case-id dialogue-paris-en-v1
   --environment-profile windows-chrome-wsl2
   --browser-profile chrome-150-windows
+  --browser-os-class windows-11
   --gateway-profile wsl2-python-3.11
   --agent-profile wsl2-python-3.11
   --stt-profile openai-gpt-4o-mini-transcribe
@@ -623,6 +635,7 @@ python scripts/live_voice/post_capture_latency_runner.py run
   --run-json ABSOLUTE_RUN_JSON
   --fixture-manifest ABSOLUTE_FIXTURE_JSON
   --profile-id dialogue_no_tool|dialogue_with_tool
+  --round-index 0
   --session-id web_...
   --web-origin http://localhost:5173
   --browser-command-json '["/path/to/chrome","--user-data-dir=/abs/profile","{url}"]'
@@ -690,7 +703,7 @@ The runner must require, for the exact round:
 
 It must not infer success from the HTTP result alone.
 
-- [ ] **Step 4: Implement the strict runner**
+- [x] **Step 4: Implement the strict runner**
 
 Use `ThreadingHTTPServer`, immutable dataclasses and `subprocess.Popen(argv,
 shell=False)`. Validate the run with:
@@ -704,7 +717,7 @@ On terminal result, wait for shard settlement, invoke `report --run-dir`, load
 the report through the existing parser and check exact attempt outcome. Always
 shutdown HTTP and owned Browser process in `finally`.
 
-- [ ] **Step 5: Run focused GREEN/static checks**
+- [x] **Step 5: Run focused GREEN/static checks**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_post_capture_latency_runner.py -q
