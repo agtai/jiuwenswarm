@@ -491,6 +491,16 @@ def _store_counts(database: Path) -> tuple[int, ...]:
         )
 
 
+def _outbox_is_idle(database: Path) -> bool:
+    with sqlite3.connect(database) as connection:
+        return (
+            connection.execute(
+                "SELECT COUNT(*) FROM outbox WHERE state IN ('pending', 'claimed')"
+            ).fetchone()[0]
+            == 0
+        )
+
+
 def test_p2_response_generation_owner_is_lazy_and_bound_to_the_task_store(
     tmp_path: Path,
 ) -> None:
@@ -551,6 +561,7 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
             "model_config_version": "catalog-v1",
         }
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
 
         get_result = await harness.composition.handle(
             operation="task.get",
@@ -775,6 +786,7 @@ async def test_voice_task_create_requires_exact_accepted_commit_and_text(
         )
         assert accepted.ok is True
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
     finally:
         await harness.composition.stop()
 
@@ -947,6 +959,7 @@ async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
             assert created.ok is True
             task_ids.append(str(created.payload["result"]["task_id"]))
         await _wait_until(lambda: len(harness.executor.dispatches) == 2)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
 
         store = harness.composition._core.store
         noncurrent_task_id, current_task_id = task_ids
@@ -971,6 +984,12 @@ async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
         assert adjusted.payload["result"]["task_id"] == noncurrent_task_id
         await _wait_until(
             lambda: harness.executor.adjustments == ["command-adjust-addressed"]
+        )
+        await _wait_until(
+            lambda: (
+                harness.executor.adjustment_settlements
+                == [("command-adjust-addressed", TaskAdjustmentState.APPLIED)]
+            )
         )
         noncurrent_events = store.events(noncurrent_task_id, _scope(), after_seq=-1)
         assert [
@@ -1009,6 +1028,7 @@ async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
         assert created.ok is True
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         before_rejection = _store_counts(harness.database)
 
         oversized = _adjust_params(task_id, "command-adjust-oversized")
@@ -1389,6 +1409,7 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         harness.authority.dirty = True
 
         operations = {
@@ -1460,6 +1481,7 @@ async def test_read_queries_survive_clean_checkpoint_revision_but_cancel_fails_c
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         harness.authority.contexts["session-1"] = replace(
             harness.authority.contexts["session-1"],
             revision_value="clean-checkpoint-revision",
@@ -1512,6 +1534,7 @@ async def test_read_and_cancel_still_fail_closed_on_redacted_context(
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         harness.authority.contexts["session-1"] = replace(
             harness.authority.contexts["session-1"],
             redacted=True,
@@ -1590,6 +1613,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
         )
         task_id = created.payload["result"]["task_id"]
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
 
         cancel_params = _issued_cancel_params(harness, task_id)
         first, replay = await asyncio.gather(
@@ -1926,6 +1950,7 @@ async def test_confirmation_is_single_use_with_exact_idempotent_replay_only(
             session_id="session-1",
         )
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         before_conflict = _store_counts(harness.database)
         conflict = await harness.composition.handle(
             operation="task.create",
@@ -1992,6 +2017,7 @@ async def test_cross_task_confirmation_rejected_without_cancel_effect(
             )
             created.append(str(result.payload["result"]["task_id"]))
         await _wait_until(lambda: len(harness.executor.dispatches) == 2)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         cancel_one = _issued_cancel_params(harness, created[0])
         before = _store_counts(harness.database)
 
@@ -3736,6 +3762,7 @@ async def test_retry_rejects_nonterminal_predecessor_with_zero_effect(
         assert created.ok is True
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         before = await _effects(harness)
         confirmations_before = _confirmation_count(harness.database)
 

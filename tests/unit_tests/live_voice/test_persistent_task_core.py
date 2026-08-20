@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -6346,3 +6348,244 @@ async def test_reconciliation_sink_failure_cannot_change_durable_task_truth(
     assert summary["lost"] == 1
     assert task.state is FormalTaskState.TERMINAL
     assert task.outcome is TerminalOutcome.INTERRUPTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["claim_outbox", "reset_expired_outbox_claims"])
+async def test_blocking_store_stall_never_delays_event_loop_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store = SqliteTaskStore(tmp_path / f"blocking-{operation}.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    if operation == "claim_outbox":
+        invocation = _create(tmp_path)
+        created = core.execute(
+            invocation.envelope,
+            invocation.authorization,
+            context=invocation.context,
+            now=NOW,
+        )
+        assert created.ok
+
+    original = getattr(store, operation)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_store_call(*args, **kwargs):  # type: ignore[no-untyped-def]
+        entered.set()
+        assert release.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, operation, blocking_store_call)
+    fallback_released = threading.Event()
+
+    def release_fallback() -> None:
+        fallback_released.set()
+        release.set()
+
+    timer = threading.Timer(0.2, release_fallback)
+    timer.start()
+    control_ran_before_fallback: list[bool] = []
+
+    async def observe_control() -> None:
+        await asyncio.sleep(0)
+        control_ran_before_fallback.append(not fallback_released.is_set())
+        release.set()
+
+    control = asyncio.create_task(observe_control())
+    try:
+        if operation == "claim_outbox":
+            assert await core.drain_outbox_once(worker_id="blocking-worker") is True
+        else:
+            await core.reconcile()
+        await control
+    finally:
+        release.set()
+        timer.join(timeout=2)
+
+    assert entered.is_set()
+    assert control_ran_before_fallback == [True]
+
+
+@pytest.mark.asyncio
+async def test_async_store_orchestration_never_runs_sqlite_on_owner_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "store-thread-isolation.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    loop_thread = threading.get_ident()
+    calls: dict[str, list[int]] = {}
+    operations = (
+        "claim_outbox",
+        "complete_outbox",
+        "reset_expired_outbox_claims",
+        "nonterminal_attempts",
+        "mark_reconciliation_pending",
+        "resolve_lost_attempt",
+    )
+    for operation in operations:
+        original = getattr(store, operation)
+        calls[operation] = []
+
+        def record_thread(*args, _operation=operation, _original=original, **kwargs):  # type: ignore[no-untyped-def]
+            calls[_operation].append(threading.get_ident())
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, operation, record_thread)
+
+    await core.drain_outbox_once(worker_id="thread-isolation")
+    executor.status_resolution = ExecutorResolution.LOST
+    summary = await core.reconcile()
+
+    assert summary["lost"] == 1
+    assert all(calls[operation] for operation in operations)
+    assert all(
+        thread_id != loop_thread
+        for operation in operations
+        for thread_id in calls[operation]
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_blocking_claim_settles_and_releases_exact_outbox_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "cancelled-blocking-claim.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    original_claim = store.claim_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_claim(worker_id: str):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_claim(worker_id)
+
+    monkeypatch.setattr(store, "claim_outbox", blocked_claim)
+    timer = threading.Timer(0.2, release.set)
+    timer.start()
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="cancelled-owner"))
+    try:
+        await asyncio.sleep(0.03)
+        assert entered.is_set()
+        draining.cancel("caller stopped waiting")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        with pytest.raises(asyncio.CancelledError, match="caller stopped waiting"):
+            await draining
+    finally:
+        release.set()
+        timer.join(timeout=2)
+
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, claimed_by, claimed_at, claim_token FROM outbox"
+        ).fetchone()
+    assert outbox == ("pending", None, None, None)
+    assert executor.dispatches == []
+
+    monkeypatch.setattr(store, "claim_outbox", original_claim)
+    assert await core.drain_outbox_once(worker_id="successor-owner") is True
+    assert len(executor.dispatches) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_adjustment_store_wait_retains_exact_settlement_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "cancelled-adjustment-store.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(worker_id="dispatch-owner") is True
+    task_id = str(created.result["task_id"])
+    command, grant = _adjust(task_id, "Move the museum visit to 09:30.")
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok
+    original_complete = store.complete_adjustment_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_complete(*args, **kwargs):  # type: ignore[no-untyped-def]
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(store, "complete_adjustment_outbox", blocked_complete)
+    timer = threading.Timer(1, release.set)
+    timer.start()
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="adjustment-owner"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        draining.cancel("caller stopped adjustment wait")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        release.set()
+        with pytest.raises(
+            asyncio.CancelledError, match="caller stopped adjustment wait"
+        ):
+            await draining
+    finally:
+        release.set()
+        timer.join(timeout=2)
+
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, claimed_by, claimed_at, claim_token "
+            "FROM outbox WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+    assert outbox == ("delivered", None, None, None)
+    assert executor.adjustments == [command.command_id]
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False)
+    ]
+    replay = core.execute(
+        replace(command, request_id="request-adjust-after-cancelled-wait"),
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert replay.ok and replay.result is not None
+    assert replay.result["adjustment_state"] == "applied"
+    assert await core.drain_outbox_once(worker_id="later-owner") is False
+    assert executor.adjustments == [command.command_id]
