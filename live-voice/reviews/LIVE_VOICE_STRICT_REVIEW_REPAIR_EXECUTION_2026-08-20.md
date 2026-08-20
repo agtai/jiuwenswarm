@@ -68,15 +68,21 @@ close.
 - Capability/owner: Gateway Agent client/logging boundary.
 - Risk: Tier 3 privacy/security.
 - Worker-owned source/tests:
-  `jiuwenswarm/gateway/routing/agent_client.py` and its existing focused test
-  file only.
+  `jiuwenswarm/gateway/routing/agent_client.py`, the directly invoked
+  `jiuwenswarm/common/e2a/wire_codec.py`, and their existing focused tests.
 - Intended behavior: INFO/DEBUG logs expose only an allowlisted, content-free
   request/response summary; transcript/text/audio/credential/private markers
-  never appear at any nesting, casing or separator variant.
+  never appear at any nesting, casing or separator variant. URI, address,
+  object identity, exception/close reason and untrusted scalar values are also
+  content-hidden across the real unary/stream codec seam; any correlation ref
+  must use a process-temporary secret and never appear in task names as raw
+  content.
 - Acceptance: first demonstrate current transcript leakage with sentinel
   payloads; verify unary and streaming success/error logs, nested list/dict and
-  malformed/private values; prove the original payload is not mutated and
-  non-Live-Voice supported logging remains compatible.
+  malformed/private values; cover connect/send/receive/close diagnostics,
+  low-entropy ref enumeration, untrusted integers and common E2A success,
+  fallback and inverse-error logs; prove the original payload is not mutated
+  and non-Live-Voice supported logging remains compatible.
 - Exclusions: no global logging framework replacement, retention policy or
   transport payload change.
 
