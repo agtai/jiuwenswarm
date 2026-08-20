@@ -2656,13 +2656,23 @@ class DirectProjectCodeExecutorAdapter:
 
         return _DIRECT_D0_CAPABILITY_PROFILE
 
+    @classmethod
+    def construction_capability_profiles(
+        cls, *, store_backed: bool
+    ) -> tuple[ExecutorCapabilityProfile, ...]:
+        """Declare candidates before allocating a product Executor instance."""
+
+        if type(store_backed) is not bool:
+            raise TypeError("store_backed must be an exact bool")
+        legacy = cls.capability_profile()
+        return (legacy, _DIRECT_CAPABILITY_PROFILE) if store_backed else (legacy,)
+
     def capability_profiles(self) -> tuple[ExecutorCapabilityProfile, ...]:
         """Return only candidates whose construction dependencies are present."""
 
-        legacy = self.capability_profile()
-        if self._durability_store is None:
-            return (legacy,)
-        return (legacy, _DIRECT_CAPABILITY_PROFILE)
+        return self.construction_capability_profiles(
+            store_backed=self._durability_store is not None
+        )
 
     def __init__(
         self,

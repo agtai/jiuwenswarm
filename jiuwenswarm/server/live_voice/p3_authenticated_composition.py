@@ -137,6 +137,13 @@ _PRODUCT_DIRECT_OPERATION_VERSIONS = (
     ("adjust.demo-itinerary-checkpoint", "v1"),
     ("reconcile.d0", "v1"),
 )
+_PRODUCT_DIRECT_D2_OPERATION_VERSIONS = (
+    *_PRODUCT_DIRECT_OPERATION_VERSIONS,
+    ("checkpoint.d1", "v1"),
+    ("recover.d1", "v1"),
+    ("effect.d2", "v1"),
+    ("reconcile.d2", "v1"),
+)
 _PRODUCT_ADMISSION_POLICY = AdmissionPolicy(
     deadline_seconds=3_600,
     initial_backoff_seconds=1,
@@ -146,13 +153,21 @@ _PRODUCT_ADMISSION_POLICY = AdmissionPolicy(
 
 
 def _product_execution_requirements(
-    *, executor_id: str, side_effect_class: str
+    *,
+    executor_id: str,
+    side_effect_class: str,
+    durability_level: str = "D0",
 ) -> TaskExecutionRequirements:
+    operation_versions = (
+        _PRODUCT_DIRECT_D2_OPERATION_VERSIONS
+        if durability_level == "D2"
+        else _PRODUCT_DIRECT_OPERATION_VERSIONS
+    )
     return TaskExecutionRequirements(
         schema_version=TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
         executor_id=executor_id,
-        operation_versions=_PRODUCT_DIRECT_OPERATION_VERSIONS,
-        durability_level="D0",
+        operation_versions=operation_versions,
+        durability_level=durability_level,
         side_effect_class=side_effect_class,
         project_serialization="exclusive",
     )
@@ -1018,6 +1033,7 @@ class P3AuthenticatedComposition:
         reconcile_interval: float = 30.0,
         clock: Callable[[], str] = utc_now,
         executor_profiles: tuple[ExecutorCapabilityProfile, ...] | None = None,
+        execution_durability_level: str = "D0",
         admission_policy: AdmissionPolicy = _PRODUCT_ADMISSION_POLICY,
     ) -> None:
         _validate_reconcile_interval(reconcile_interval)
@@ -1034,6 +1050,8 @@ class P3AuthenticatedComposition:
             )
         if not isinstance(admission_policy, AdmissionPolicy):
             raise TypeError("admission_policy must be an AdmissionPolicy")
+        if execution_durability_level not in {"D0", "D1", "D2"}:
+            raise ValueError("execution_durability_level must be D0, D1, or D2")
         self._authenticator = authenticator
         self._authority_resolver = authority_resolver
         self._core = core
@@ -1058,6 +1076,7 @@ class P3AuthenticatedComposition:
         self._reconcile_interval = reconcile_interval
         self._clock = clock
         self._executor_profiles = executor_profiles
+        self._execution_durability_level = execution_durability_level
         self._admission_policy = admission_policy
         self._lifecycle_lock = asyncio.Lock()
         self._reconcile_lock = asyncio.Lock()
@@ -1785,6 +1804,7 @@ class P3AuthenticatedComposition:
         requirements = _product_execution_requirements(
             executor_id=spec.executor_id,
             side_effect_class=spec.side_effect_class,
+            durability_level=self._execution_durability_level,
         )
         return _persisted_executor_selection(
             select_executor(self._executor_profiles, requirements)
@@ -1823,7 +1843,10 @@ class P3AuthenticatedComposition:
             replayed_spec = replay.resulting_spec
             self._require_retry_executor(replayed_spec)
             replay_result = replay.original_result.result
-            if replay_result is None or type(replay_result.get("attempt_id")) is not str:
+            if (
+                replay_result is None
+                or type(replay_result.get("attempt_id")) is not str
+            ):
                 raise FormalTaskViolation(
                     "TASK_RETRY_REPLAY_BINDING_MISMATCH",
                     "applied retry replay does not identify its durable successor",
@@ -3119,10 +3142,13 @@ def create_p3_composition_from_environment(
     database = str(os.getenv(_DATABASE_ENV) or "").strip()
     database_path = _resolve_database_path(database)
     direct_selection = select_executor(
-        (DirectProjectCodeExecutorAdapter.capability_profile(),),
+        DirectProjectCodeExecutorAdapter.construction_capability_profiles(
+            store_backed=True
+        ),
         _product_execution_requirements(
             executor_id=FORMAL_PROJECT_EXECUTOR_ID,
             side_effect_class="project_mutation",
+            durability_level="D2",
         ),
     )
     principal = AuthenticatedPrincipal(
@@ -3149,6 +3175,7 @@ def create_p3_composition_from_environment(
             model_resolver=model_resolver,
             principal=principal,
         )
+        store = SqliteTaskStore(database_path)
         executor = DirectProjectCodeExecutorAdapter(
             binding_resolver,
             database_path,
@@ -3160,12 +3187,18 @@ def create_p3_composition_from_environment(
                 and _is_enabled(os.getenv(_DEMO_ADJUSTMENT_CHECKPOINT_ENV))
             ),
             stream_observer=stream_observer,
+            durability_store=store,
         )
+        if direct_selection.profile not in executor.capability_profiles():
+            raise FormalTaskViolation(
+                "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                "constructed Direct Executor does not expose its selected profile",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
         runtime_owner = _DirectP3RuntimeOwner(
             executor=executor,
             binding_resolver=binding_resolver,
         )
-        store = SqliteTaskStore(database_path)
         core = PersistentTaskCore(
             store,
             executor,
@@ -3183,6 +3216,7 @@ def create_p3_composition_from_environment(
             policy=FormalTaskPolicyAdapter(commit_ledger),
             reconcile_interval=interval,
             executor_profiles=(direct_selection.profile,),
+            execution_durability_level="D2",
             admission_policy=_PRODUCT_ADMISSION_POLICY,
         )
     except BaseException:  # noqa: BLE001 -- clean every owner, then re-raise exactly

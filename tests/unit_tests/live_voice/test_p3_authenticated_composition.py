@@ -167,9 +167,7 @@ def _observations(
             attempt_outcome=states[seq][1],
             occurred_at=utc_now(),
             raw_status=(outcome.value if outcome is not None else "running"),
-            adapter_id=(
-                None if item.selection is None else item.selection.adapter_id
-            ),
+            adapter_id=(None if item.selection is None else item.selection.adapter_id),
             capability_profile_digest=(
                 None
                 if item.selection is None
@@ -2374,6 +2372,35 @@ def test_factory_passes_only_the_explicit_direct_stream_observer(
     assert observed == []
 
 
+def test_product_factory_selects_exact_same_store_backed_d2_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches product composition advertising D2 without its Store authority."""
+
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / "factory-d2.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(), model_resolver=_ModelResolver()
+    )
+
+    assert composition is not None
+    store = composition._core.store
+    direct = composition._core.executor
+    assert type(store) is SqliteTaskStore
+    assert type(direct) is DirectProjectCodeExecutorAdapter
+    assert direct._durability_store is store
+    candidates = direct.capability_profiles()
+    assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
+    assert composition._executor_profiles == (candidates[-1],)
+    assert composition._execution_durability_level == "D2"
+
+
 def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2386,7 +2413,9 @@ def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
         "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
-    direct = DirectProjectCodeExecutorAdapter.capability_profile()
+    direct = DirectProjectCodeExecutorAdapter.construction_capability_profiles(
+        store_backed=True
+    )[-1]
     incompatible = replace(
         direct,
         operation_versions=tuple(
@@ -2396,8 +2425,8 @@ def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
     )
     monkeypatch.setattr(
         DirectProjectCodeExecutorAdapter,
-        "capability_profile",
-        classmethod(lambda cls: incompatible),
+        "construction_capability_profiles",
+        classmethod(lambda cls, *, store_backed: (incompatible,)),
     )
     adapter_calls: list[str] = []
     store_calls: list[str] = []
@@ -2504,21 +2533,29 @@ def test_factory_construction_failure_aborts_owners_in_reverse_order(
         )
 
     assert raised.value is original_failure
-    assert cleanup_order == ["executor", "resolver"]
-    assert len(adapters) == len(resolvers) == 1
-    assert adapters[0]._closed is True
-    assert adapters[0].has_live_workers is False
-    assert adapters[0]._running == {}
-    assert adapters[0]._retained_worktree_cleanups == {}
+    expected_cleanup = (
+        ["resolver"] if failure_stage == "store" else ["executor", "resolver"]
+    )
+    assert cleanup_order == expected_cleanup
+    assert len(resolvers) == 1
+    assert len(adapters) == (0 if failure_stage == "store" else 1)
+    if adapters:
+        assert adapters[0]._closed is True
+        assert adapters[0].has_live_workers is False
+        assert adapters[0]._running == {}
+        assert adapters[0]._retained_worktree_cleanups == {}
     assert resolvers[0]._close_requested is True
     assert resolvers[0]._closed is True
-    assert database.exists() is True
+    assert database.exists() is (failure_stage == "core")
     assert Path(f"{database}-wal").exists() is False
     assert Path(f"{database}-shm").exists() is False
-    unlocked_database = database.with_suffix(".unlocked")
-    database.replace(unlocked_database)
-    unlocked_database.replace(database)
-    assert tuple(tmp_path.iterdir()) == (database,)
+    if database.exists():
+        unlocked_database = database.with_suffix(".unlocked")
+        database.replace(unlocked_database)
+        unlocked_database.replace(database)
+        assert tuple(tmp_path.iterdir()) == (database,)
+    else:
+        assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_factory_adapter_initialization_failure_aborts_only_resolver(
@@ -2565,7 +2602,9 @@ def test_factory_adapter_initialization_failure_aborts_only_resolver(
 
     assert raised.value is original_failure
     assert cleanup_order == ["resolver"]
-    assert database.exists() is False
+    assert database.exists() is True
+    assert Path(f"{database}-wal").exists() is False
+    assert Path(f"{database}-shm").exists() is False
 
 
 def test_factory_cleanup_failure_preserves_primary_error_and_sanitizes_log(
@@ -2597,7 +2636,7 @@ def test_factory_cleanup_failure_preserves_primary_error_and_sanitizes_log(
             cleanup_order.append("executor")
             raise RuntimeError("PRIVATE_CLEANUP_SENTINEL")
 
-    class FailingStore:
+    class FailingCore:
         def __init__(self, *_args, **_kwargs) -> None:
             raise original_failure
 
@@ -2610,8 +2649,8 @@ def test_factory_cleanup_failure_preserves_primary_error_and_sanitizes_log(
         FailingCleanupAdapter,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.p3_authenticated_composition.SqliteTaskStore",
-        FailingStore,
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.PersistentTaskCore",
+        FailingCore,
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.live_voice.p3_authenticated_composition.logger.warning",
@@ -2787,10 +2826,7 @@ async def test_product_retry_reuses_persisted_selection_after_profile_drift(
             str(retried["attempt_id"])
         )
         assert successor.selection == frozen
-        assert (
-            successor.selection.capability_profile_digest
-            == profile.digest_sha256()
-        )
+        assert successor.selection.capability_profile_digest == profile.digest_sha256()
         assert successor.selection.capability_profile_digest != (
             changed_profile.digest_sha256()
         )
@@ -3201,9 +3237,7 @@ async def test_stop_settles_direct_interruption_into_canonical_store(
     models = _ModelResolver()
     store = SqliteTaskStore(database)
     composition = P3AuthenticatedComposition(
-        authenticator=StaticBearerAuthenticator(
-            token=TOKEN, principal=_principal()
-        ),
+        authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
         authority_resolver=authority,
         core=PersistentTaskCore(store, direct),
         confirmation_verifier=confirmations,
@@ -4616,9 +4650,10 @@ async def test_retry_fails_closed_while_executor_cleanup_is_pending(
             "TASK_RETRY_EXECUTOR_CLEANUP_PENDING"
         )
         assert rejected.payload["error"]["code"] == "RESULT_UNKNOWN"
-        assert rejected.payload["extensions"]["live_voice.command"][
-            "disposition"
-        ] == "unknown"
+        assert (
+            rejected.payload["extensions"]["live_voice.command"]["disposition"]
+            == "unknown"
+        )
         after = await _effects(harness)
         # Readiness itself was evaluated once and nothing else moved.
         assert after[:4] == before[:4]
