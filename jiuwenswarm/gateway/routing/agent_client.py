@@ -23,7 +23,12 @@ from websockets.exceptions import (
 )
 
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
-from jiuwenswarm.common.e2a.models import E2AEnvelope
+from jiuwenswarm.common.e2a.models import (
+    E2AAuth,
+    E2AEnvelope,
+    E2AProvenance,
+    IdentityOrigin,
+)
 from jiuwenswarm.common.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
@@ -82,6 +87,7 @@ _SAFE_EXCEPTION_CLASSES: tuple[tuple[type[BaseException], str], ...] = (
     (ValueError, "ValueError"),
 )
 _CONNECT_FAILURE_MESSAGE = "AgentServer WebSocket connection failed"
+_WIRE_REQUEST_ERROR_MESSAGE = "invalid AgentServer request payload"
 
 
 class _ReceiverFailure:
@@ -93,7 +99,102 @@ def _wire_request_id_key(request_id: Any) -> str:
     """与 AgentServer 回包 ``request_id`` 对齐：统一为 str，避免 JSON 数字/字符串导致队列键不一致。"""
     if request_id is None:
         return ""
-    return str(request_id)
+    if type(request_id) is str:
+        return request_id
+    if type(request_id) is bool:
+        return "True" if request_id else "False"
+    if type(request_id) not in (int, float):
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+
+    converted: str | None = None
+    try:
+        converted = str(request_id)
+    except Exception:
+        pass
+    if converted is None:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    return converted
+
+
+def _validate_exact_wire_json(value: Any) -> None:
+    """Accept only exact JSON scalar/container types without invoking hooks."""
+    pending: list[tuple[Any, bool]] = [(value, False)]
+    active_containers: set[int] = set()
+
+    while pending:
+        current, leaving = pending.pop()
+        current_id = id(current)
+        if leaving:
+            active_containers.discard(current_id)
+            continue
+
+        current_type = type(current)
+        if current is None or current_type in (str, int, float, bool):
+            continue
+        if current_type not in (dict, list, tuple):
+            raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+        if current_id in active_containers:
+            raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+
+        active_containers.add(current_id)
+        pending.append((current, True))
+        if current_type is dict:
+            for key, nested in current.items():
+                if type(key) is not str:
+                    raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+                pending.append((nested, False))
+        else:
+            for nested in current:
+                pending.append((nested, False))
+
+
+def _dump_exact_wire_json(
+    value: Any,
+    *,
+    sort_keys: bool = False,
+    separators: tuple[str, str] | None = None,
+) -> str:
+    """Serialize validated wire data or expose one static, context-free error."""
+    _validate_exact_wire_json(value)
+    failed = False
+    serialized = ""
+    try:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=sort_keys,
+            separators=separators,
+        )
+    except Exception:
+        failed = True
+    if failed:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    return serialized
+
+
+def _validate_exact_envelope_source(envelope: E2AEnvelope) -> None:
+    """Preflight trusted model fields before its serializer can inspect values."""
+    if type(envelope) is not E2AEnvelope:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    envelope_fields = object.__getattribute__(envelope, "__dict__")
+    if type(envelope_fields) is not dict:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+
+    for field_name, value in envelope_fields.items():
+        if field_name == "provenance":
+            if type(value) is not E2AProvenance:
+                raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+            provenance_fields = object.__getattribute__(value, "__dict__")
+            _validate_exact_wire_json(provenance_fields)
+        elif field_name == "auth" and value is not None:
+            if type(value) is not E2AAuth:
+                raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+            auth_fields = object.__getattribute__(value, "__dict__")
+            _validate_exact_wire_json(auth_fields)
+        elif field_name == "identity_origin" and type(value) is IdentityOrigin:
+            continue
+        else:
+            _validate_exact_wire_json(value)
 
 
 def _log_value_shape(value: Any) -> dict[str, Any]:
@@ -313,7 +414,17 @@ class AgentServerClient(ABC):
 
 def _e2a_to_wire(envelope: E2AEnvelope) -> dict[str, Any]:
     """E2AEnvelope → WebSocket JSON（与 AgentServer from_dict 对齐）。"""
-    return envelope.to_dict()
+    _validate_exact_envelope_source(envelope)
+    failed = False
+    payload: Any = None
+    try:
+        payload = envelope.to_dict()
+    except Exception:
+        failed = True
+    if failed or type(payload) is not dict:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    _validate_exact_wire_json(payload)
+    return payload
 
 
 def _unary_replay_fingerprint(payload: dict[str, Any]) -> str:
@@ -336,12 +447,11 @@ def _unary_replay_fingerprint(payload: dict[str, Any]) -> str:
             key: value for key, value in channel_context.items() if key != "ws_id"
         }
 
-    canonical_payload = json.dumps(
+    canonical_payload = _dump_exact_wire_json(
         stable_payload,
-        ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-    ).encode("utf-8")
+    ).encode("utf-8", errors="surrogatepass")
     return hashlib.sha256(canonical_payload).hexdigest()
 
 
@@ -712,9 +822,10 @@ class WebSocketAgentServerClient(AgentServerClient):
     ) -> None:
         if not self._connection_matches(expected_ws, expected_generation):
             raise RuntimeError("AgentServer WebSocket connection closed")
+        serialized = _dump_exact_wire_json(payload)
         send_failed = False
         try:
-            await expected_ws.send(json.dumps(payload, ensure_ascii=False))
+            await expected_ws.send(serialized)
         except (ConnectionClosed, OSError) as exc:
             logger.info(
                 "[WebSocketAgentServerClient] AgentServer WebSocket 发送失败，连接将重置: %s",
@@ -910,6 +1021,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         ) = await self._ensure_connected_for_request()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
+        payload = _e2a_to_wire(envelope)
         logger.info(
             "[E2A][out][stream] request_id_ref=%s channel_ref=%s method_ref=%s is_stream=%s",
             _content_hidden_log_ref("request_id", rid),
@@ -919,7 +1031,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         )
         logger.debug(
             "[WebSocketAgentServerClient] 发送请求(流式) E2A summary: %s",
-            _to_json(envelope.to_dict()),
+            _to_json(payload),
         )
 
         # 创建该请求的消息队列
@@ -941,7 +1053,6 @@ class WebSocketAgentServerClient(AgentServerClient):
         try:
             # 发送请求
             async with self._lock:
-                payload = _e2a_to_wire(envelope)
                 logger.info(
                     "[WebSocketAgentServerClient] 发送请求(流式) summary: %s",
                     _to_json(payload),

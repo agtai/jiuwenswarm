@@ -28,6 +28,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.e2a import wire_codec
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenswarm.server import ws_send
 
 
 def test_roundtrip_unary_ok() -> None:
@@ -305,7 +306,8 @@ def test_decode_failures_are_static_value_errors_without_private_cause(
     assert not [sentinel for sentinel in private_sentinels if sentinel in formatted]
 
 
-def test_wire_codec_logs_are_content_free_across_all_public_paths(
+@pytest.mark.asyncio
+async def test_wire_codec_logs_are_content_free_across_all_public_paths(
     caplog, monkeypatch
 ) -> None:
     target_logger = logging.getLogger("jiuwenswarm.common.e2a.wire_codec")
@@ -426,31 +428,81 @@ def test_wire_codec_logs_are_content_free_across_all_public_paths(
 
         private_failure = type("SentinelWireExceptionClass", (RuntimeError,), {})
 
-        def fail_unary_conversion(*args, **kwargs):
-            raise private_failure("sentinel-wire-unary-exception-message")
+        class SentinelHostileWireException(RuntimeError):
+            def __str__(self) -> str:
+                raise AssertionError("sentinel-wire-hostile-str-hook")
 
-        def fail_chunk_conversion(*args, **kwargs):
-            raise private_failure("sentinel-wire-chunk-exception-message")
+            def __repr__(self) -> str:
+                raise AssertionError("sentinel-wire-hostile-repr-hook")
 
-        monkeypatch.setattr(
-            wire_codec,
-            "e2a_response_from_agent_response",
-            fail_unary_conversion,
+        fallback_unary_source = AgentResponse(
+            request_id="fallback-safe-unary-request",
+            channel_id="web",
+            ok=True,
+            payload={"result": "safe"},
         )
-        encode_agent_response_for_wire(
-            normal_unary,
-            response_id="sentinel-wire-error-unary-response-id",
-            sequence=huge_sequence,
+        fallback_chunk_source = AgentResponseChunk(
+            request_id="fallback-safe-chunk-request",
+            channel_id="web",
+            payload={"result": "safe"},
+            is_complete=False,
         )
-        monkeypatch.setattr(
-            wire_codec,
-            "e2a_response_from_agent_chunk",
-            fail_chunk_conversion,
+        fallback_wires: list[dict] = []
+        fallback_sent_payloads: list[str] = []
+        escaped_failures: list[tuple[BaseException, str]] = []
+
+        class RecordingWebSocket:
+            async def send(self, payload: str) -> None:
+                fallback_sent_payloads.append(payload)
+
+        async def encode_and_send(form: str, failure: BaseException) -> None:
+            def fail_conversion(*_args, **_kwargs):
+                raise failure
+
+            try:
+                if form == "unary":
+                    monkeypatch.setattr(
+                        wire_codec,
+                        "e2a_response_from_agent_response",
+                        fail_conversion,
+                    )
+                    wire = encode_agent_response_for_wire(
+                        fallback_unary_source,
+                        response_id="fallback-safe-unary-response",
+                        sequence=3,
+                    )
+                else:
+                    monkeypatch.setattr(
+                        wire_codec,
+                        "e2a_response_from_agent_chunk",
+                        fail_conversion,
+                    )
+                    wire = encode_agent_chunk_for_wire(
+                        fallback_chunk_source,
+                        response_id="fallback-safe-chunk-response",
+                        sequence=4,
+                    )
+            except BaseException as exc:
+                escaped_failures.append((exc, "".join(traceback.format_exception(exc))))
+                return
+            fallback_wires.append(wire)
+            assert await ws_send.send_wire_payload(RecordingWebSocket(), wire) is True
+
+        await encode_and_send(
+            "unary",
+            private_failure("sentinel-wire-unary-exception-message"),
         )
-        encode_agent_chunk_for_wire(
-            normal_chunk,
-            response_id="sentinel-wire-error-chunk-response-id",
-            sequence=huge_sequence,
+        await encode_and_send(
+            "unary",
+            SentinelHostileWireException("sentinel-wire-hostile-unary-message"),
+        )
+        await encode_and_send(
+            "chunk",
+            private_failure("sentinel-wire-chunk-exception-message"),
+        )
+        await encode_and_send(
+            "chunk",
+            SentinelHostileWireException("sentinel-wire-hostile-chunk-message"),
         )
     finally:
         target_logger.removeHandler(caplog.handler)
@@ -459,6 +511,43 @@ def test_wire_codec_logs_are_content_free_across_all_public_paths(
     assert chunk_back.payload == normal_chunk.payload
     assert normal_unary.payload == {"Final-Text": "sentinel-wire-normal-unary-payload"}
     assert normal_chunk.payload == {"RAW AUDIO": "sentinel-wire-normal-chunk-payload"}
+    assert escaped_failures == []
+    assert len(fallback_wires) == 4
+    assert len(fallback_sent_payloads) == 4
+    expected_failure_details = {
+        "code": "E2A.WIRE_ENCODE_ERROR",
+        "category": "wire_encode",
+    }
+    for fallback_wire, sent_payload in zip(
+        fallback_wires,
+        fallback_sent_payloads,
+        strict=True,
+    ):
+        assert fallback_wire["provenance"]["details"] == expected_failure_details
+        assert fallback_wire["body"]["details"] == expected_failure_details
+        assert json.loads(sent_payload) == fallback_wire
+
+    fallback_diagnostics = "\n".join(
+        [
+            *fallback_sent_payloads,
+            *(formatted for _, formatted in escaped_failures),
+        ]
+    )
+    fallback_private_sentinels = (
+        "SentinelWireExceptionClass",
+        "SentinelHostileWireException",
+        "sentinel-wire-unary-exception-message",
+        "sentinel-wire-chunk-exception-message",
+        "sentinel-wire-hostile-unary-message",
+        "sentinel-wire-hostile-chunk-message",
+        "sentinel-wire-hostile-str-hook",
+        "sentinel-wire-hostile-repr-hook",
+    )
+    assert not [
+        sentinel
+        for sentinel in fallback_private_sentinels
+        if sentinel in fallback_diagnostics
+    ]
 
     records = [record for record in caplog.records if record.name == target_logger.name]
     log_material = "\n".join(

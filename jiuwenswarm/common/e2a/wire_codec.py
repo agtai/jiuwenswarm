@@ -44,6 +44,10 @@ _SAFE_EXCEPTION_CLASSES: tuple[tuple[type[BaseException], str], ...] = (
     (ValueError, "ValueError"),
 )
 _WIRE_DECODE_ERROR_MESSAGE = "invalid AgentServer wire response"
+_WIRE_ENCODE_FAILURE_DETAILS = {
+    "code": "E2A.WIRE_ENCODE_ERROR",
+    "category": "wire_encode",
+}
 
 
 def _safe_exception_class(exc: BaseException) -> str:
@@ -265,7 +269,6 @@ def encode_agent_response_for_wire(
                 _json_safe(asdict(resp)),
                 response_id=response_id,
                 sequence=sequence,
-                exc=te,
             )
         logger.info(
             "[E2A][wire][out] form=unary legacy_stashed=false",
@@ -280,7 +283,6 @@ def encode_agent_response_for_wire(
             _json_safe(asdict(resp)),
             response_id=response_id,
             sequence=sequence,
-            exc=e,
         )
 
 
@@ -310,7 +312,6 @@ def encode_agent_chunk_for_wire(
                 _json_safe(asdict(chunk)),
                 response_id=response_id,
                 sequence=sequence,
-                exc=te,
                 is_stream=is_stream,
             )
         logger.debug("[E2A][wire][out] form=chunk legacy_stashed=false")
@@ -324,7 +325,6 @@ def encode_agent_chunk_for_wire(
             _json_safe(asdict(chunk)),
             response_id=response_id,
             sequence=sequence,
-            exc=e,
             is_stream=is_stream,
         )
 
@@ -334,14 +334,13 @@ def _fallback_wire_unary_from_legacy(
     *,
     response_id: str,
     sequence: int,
-    exc: BaseException,
 ) -> dict[str, Any]:
     ts = utc_now_iso()
     prov = E2AProvenance(
         source_protocol=E2A_SOURCE_PROTOCOL_E2A,
         converter="jiuwenswarm.common.e2a.wire_codec:_fallback_wire_unary_from_legacy",
         converted_at=ts,
-        details={"error": str(exc), "kind": "wire_encode_fallback"},
+        details=dict(_WIRE_ENCODE_FAILURE_DETAILS),
     )
     e2a = E2AResponse(
         protocol_version=E2A_PROTOCOL_VERSION,
@@ -356,7 +355,7 @@ def _fallback_wire_unary_from_legacy(
         body={
             "code": "E2A.WIRE_ENCODE_ERROR",
             "message": "Failed to encode AgentResponse as E2A; see metadata legacy blob",
-            "details": {"error": str(exc)},
+            "details": dict(_WIRE_ENCODE_FAILURE_DETAILS),
         },
         channel=str(legacy.get("channel_id") or "") or None,
         metadata={E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY: legacy},
@@ -371,7 +370,6 @@ def _fallback_wire_chunk_from_legacy(
     *,
     response_id: str,
     sequence: int,
-    exc: BaseException,
     is_stream: bool,
 ) -> dict[str, Any]:
     ts = utc_now_iso()
@@ -379,7 +377,7 @@ def _fallback_wire_chunk_from_legacy(
         source_protocol=E2A_SOURCE_PROTOCOL_E2A,
         converter="jiuwenswarm.common.e2a.wire_codec:_fallback_wire_chunk_from_legacy",
         converted_at=ts,
-        details={"error": str(exc), "kind": "wire_encode_chunk_fallback"},
+        details=dict(_WIRE_ENCODE_FAILURE_DETAILS),
     )
     e2a = E2AResponse(
         protocol_version=E2A_PROTOCOL_VERSION,
@@ -394,7 +392,7 @@ def _fallback_wire_chunk_from_legacy(
         body={
             "code": "E2A.WIRE_ENCODE_ERROR",
             "message": "Failed to encode AgentResponseChunk as E2A; see metadata legacy blob",
-            "details": {"error": str(exc)},
+            "details": dict(_WIRE_ENCODE_FAILURE_DETAILS),
         },
         channel=str(legacy.get("channel_id") or "") or None,
         metadata={E2A_WIRE_LEGACY_AGENT_CHUNK_KEY: legacy},

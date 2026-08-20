@@ -290,7 +290,9 @@ def test_agent_client_log_refs_are_secret_keyed_and_sequence_is_shape_only():
 
 
 @pytest.mark.asyncio
-async def test_agent_client_log_projection_ignores_hostile_scalar_subclass_hooks():
+async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak(
+    caplog,
+):
     hooks: list[str] = []
 
     class HostileStr(str):
@@ -312,6 +314,18 @@ async def test_agent_client_log_projection_ignores_hostile_scalar_subclass_hooks
             hooks.append("float.hex")
             raise AssertionError("sentinel-hostile-float-hook")
 
+    class HostileLookupStr(str):
+        def __getattribute__(self, name: str):
+            if name == "__dataclass_fields__":
+                hooks.append("str.__getattribute__")
+                raise AssertionError("sentinel-hostile-lookup-hook")
+            return super().__getattribute__(name)
+
+    class HostileDict(dict):
+        def items(self):
+            hooks.append("dict.items")
+            raise AssertionError("sentinel-hostile-dict-hook")
+
     summary = json.loads(
         agent_client._to_json(
             {
@@ -332,41 +346,224 @@ async def test_agent_client_log_projection_ignores_hostile_scalar_subclass_hooks
     }
     assert hooks == []
 
-    client = AgentClientHarness()
-    ws = FakeWebSocket()
-    client.set_ws_for_test(ws)
-    envelope = e2a_from_agent_fields(
-        request_id="hostile-scalar-business-request",
-        channel_id="web",
-        session_id="hostile-scalar-business-session",
-        req_method="chat.send",
-        params={"content": "business-payload-must-still-send"},
-        is_stream=False,
-    )
-    envelope.channel = HostileStr("web")
-    envelope.method = HostileInt(42)
-    envelope.protocol_version = HostileFloat(4.25)
+    class SentinelPrivateNestedValue:
+        pass
 
-    request = asyncio.create_task(client.send_request(envelope))
-    for _ in range(100):
-        if ws.sent_payloads:
-            break
-        await asyncio.sleep(0.001)
-    assert ws.sent_payloads
-    await client.get_message_queue_for_test("hostile-scalar-business-request").put(
-        encode_agent_response_for_wire(
-            AgentResponse(
-                request_id="hostile-scalar-business-request",
-                channel_id="web",
-                ok=True,
-                payload={"status": "business-success"},
-            ),
-            response_id="hostile-scalar-business-request",
+    class SentinelHostileNestedValue:
+        def __str__(self) -> str:
+            hooks.append("nested.__str__")
+            raise AssertionError("sentinel-hostile-nested-str-hook")
+
+        def __repr__(self) -> str:
+            hooks.append("nested.__repr__")
+            raise AssertionError("sentinel-hostile-nested-repr-hook")
+
+    async def invoke_public_path(
+        client: AgentClientHarness,
+        envelope,
+        *,
+        is_stream: bool,
+    ) -> tuple[BaseException, str]:
+        try:
+            if is_stream:
+                await anext(client.send_request_stream(envelope))
+            else:
+                await client.send_request(envelope)
+        except BaseException as exc:
+            return exc, "".join(traceback.format_exception(exc))
+        raise AssertionError("expected invalid request payload rejection")
+
+    failures: list[tuple[BaseException, str]] = []
+    sent_payloads: list[str] = []
+
+    # request_id canonicalization must reject scalar subclasses without
+    # invoking __str__, encode or any other untrusted hook.
+    for is_stream in (False, True):
+        client = AgentClientHarness()
+        ws = FakeWebSocket()
+        client.set_ws_for_test(ws)
+        envelope = e2a_from_agent_fields(
+            request_id=f"hostile-request-id-{is_stream}",
+            channel_id="web",
+            session_id="hostile-request-id-session",
+            req_method="chat.send",
+            params={"content": "ordinary-content"},
+            is_stream=is_stream,
         )
-    )
+        envelope.request_id = HostileStr(f"sentinel-hostile-request-id-{is_stream}")
+        failures.append(await invoke_public_path(client, envelope, is_stream=is_stream))
+        sent_payloads.extend(ws.sent_payloads)
 
-    assert (await request).payload == {"status": "business-success"}
+    # Reject subclasses in any serialized field before E2AEnvelope.to_dict()
+    # can probe dataclass/container hooks.
+    hostile_fields = (
+        ("channel", HostileStr("sentinel-hostile-channel")),
+        ("method", HostileInt(42)),
+        ("protocol_version", HostileFloat(4.25)),
+        ("channel", HostileLookupStr("sentinel-hostile-lookup")),
+        ("params", HostileDict({"content": "sentinel-hostile-dict"})),
+    )
+    for field_name, value in hostile_fields:
+        for is_stream in (False, True):
+            client = AgentClientHarness()
+            ws = FakeWebSocket()
+            client.set_ws_for_test(ws)
+            envelope = e2a_from_agent_fields(
+                request_id=f"hostile-field-{field_name}-{is_stream}",
+                channel_id="web",
+                session_id="hostile-field-session",
+                req_method="chat.send",
+                params={"content": "ordinary-content"},
+                is_stream=is_stream,
+            )
+            setattr(envelope, field_name, value)
+            failures.append(
+                await invoke_public_path(client, envelope, is_stream=is_stream)
+            )
+            sent_payloads.extend(ws.sent_payloads)
+
+    # Both the unary replay fingerprint and stream send serialization must
+    # fail closed for unsupported nested values. A hostile object is never
+    # stringified or represented as part of that rejection.
+    for value in (SentinelPrivateNestedValue(), SentinelHostileNestedValue()):
+        for is_stream in (False, True):
+            client = AgentClientHarness()
+            ws = FakeWebSocket()
+            client.set_ws_for_test(ws)
+            envelope = e2a_from_agent_fields(
+                request_id=f"unsupported-nested-{type(value).__name__}-{is_stream}",
+                channel_id="web",
+                session_id="unsupported-nested-session",
+                req_method="chat.send",
+                params={"nested": [{"private": value}]},
+                is_stream=is_stream,
+            )
+            failures.append(
+                await invoke_public_path(client, envelope, is_stream=is_stream)
+            )
+            sent_payloads.extend(ws.sent_payloads)
+
+    # Exercise the actual MessageHandler exception consumers, not a synthetic
+    # logger: unary catches and publishes an error, while stream logs and
+    # re-raises the public AgentClient failure.
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+
+    handler_logger = logging.getLogger(
+        "jiuwenswarm.gateway.message_handler.message_handler"
+    )
+    handler_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger=handler_logger.name)
+    try:
+        unary_client = AgentClientHarness()
+        unary_ws = FakeWebSocket()
+        unary_client.set_ws_for_test(unary_ws)
+        unary_envelope = e2a_from_agent_fields(
+            request_id="message-handler-private-unary",
+            channel_id="web",
+            session_id="message-handler-private-session",
+            req_method="chat.send",
+            params={"nested": [{"private": SentinelPrivateNestedValue()}]},
+            is_stream=False,
+        )
+        unary_handler = object.__new__(MessageHandler)
+        unary_handler.agent_client = unary_client
+        published: list[object] = []
+
+        async def publish_error(message) -> None:
+            published.append(message)
+
+        unary_handler.publish_robot_messages = publish_error
+        unary_handler._build_error_out_message = lambda _msg, _exc: {"safe": True}
+        unary_message = Message(
+            id="message-handler-unary-message",
+            type="req",
+            channel_id="web",
+            session_id="message-handler-private-session",
+            params={},
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            is_stream=False,
+        )
+        assert (
+            await unary_handler._process_non_stream_request(
+                unary_message,
+                unary_envelope,
+            )
+            is None
+        )
+        assert published == [{"safe": True}]
+        sent_payloads.extend(unary_ws.sent_payloads)
+
+        stream_client = AgentClientHarness()
+        stream_ws = FakeWebSocket()
+        stream_client.set_ws_for_test(stream_ws)
+        stream_envelope = e2a_from_agent_fields(
+            request_id="message-handler-private-stream",
+            channel_id="web",
+            session_id="message-handler-private-session",
+            req_method="chat.send",
+            params={"nested": [{"private": SentinelHostileNestedValue()}]},
+            is_stream=True,
+        )
+        stream_handler = object.__new__(MessageHandler)
+        stream_handler.agent_client = stream_client
+        stream_handler._stream_app_ids = {}
+        stream_handler._stream_modes = {}
+        stream_handler._active_chat_tasks = {}
+        stream_handler._is_interrupt_evolution_approval_answer_payload = (
+            lambda _payload: False
+        )
+
+        async def no_op(*_args, **_kwargs) -> None:
+            return None
+
+        stream_handler._publish_stream_cancelled_final = no_op
+        stream_handler._pop_stream_tracking_and_broadcast = no_op
+        stream_handler._session_has_streams_blocking_processing_false = (
+            lambda _session_id: True
+        )
+        stream_failure: BaseException | None = None
+        stream_formatted = ""
+        try:
+            await stream_handler.process_stream(
+                stream_envelope,
+                None,
+                None,
+            )
+        except BaseException as exc:
+            stream_failure = exc
+            stream_formatted = "".join(traceback.format_exception(exc))
+        else:
+            raise AssertionError("expected MessageHandler stream failure")
+        failures.append((stream_failure, stream_formatted))
+        sent_payloads.extend(stream_ws.sent_payloads)
+    finally:
+        handler_logger.removeHandler(caplog.handler)
+
+    for failure, formatted in failures:
+        assert type(failure) is ValueError
+        assert failure.args == ("invalid AgentServer request payload",)
+        assert failure.__cause__ is None
+        assert failure.__context__ is None
+        assert "invalid AgentServer request payload" in formatted
+
+    diagnostic_material = "\n".join(
+        [*(formatted for _, formatted in failures), caplog.text]
+    )
+    forbidden = (
+        "sentinel-hostile-request-id",
+        "sentinel-hostile-str-hook",
+        "SentinelPrivateNestedValue",
+        "SentinelHostileNestedValue",
+        "sentinel-hostile-nested-str-hook",
+        "sentinel-hostile-nested-repr-hook",
+        "sentinel-hostile-lookup-hook",
+        "sentinel-hostile-dict-hook",
+    )
+    assert sent_payloads == []
     assert hooks == []
+    assert not [marker for marker in forbidden if marker in diagnostic_material]
 
 
 @pytest.mark.asyncio
