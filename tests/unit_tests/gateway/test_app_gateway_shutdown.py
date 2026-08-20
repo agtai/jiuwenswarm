@@ -119,6 +119,7 @@ class _ShutdownHarness:
         descriptor_failures: dict[str, BaseException] | None = None,
         registry_only_channel_id: str | None = None,
         registry_snapshot_failures: dict[str, BaseException] | None = None,
+        registry_unregister_failures: dict[str, BaseException] | None = None,
     ) -> None:
         self.failures = dict(failures or {})
         self.restart_requested = restart_requested
@@ -130,6 +131,7 @@ class _ShutdownHarness:
         self.descriptor_failures = dict(descriptor_failures or {})
         self.registry_only_channel_id = registry_only_channel_id
         self.registry_snapshot_failures = dict(registry_snapshot_failures or {})
+        self.registry_unregister_failures = dict(registry_unregister_failures or {})
         self.calls: list[str] = []
         self.issuer_values: list[object | None] = []
         self.shutdown_started = False
@@ -476,6 +478,9 @@ def _install_gateway_fakes(
                 return
             self._registered.pop(channel_id, None)
             harness.unregistered_channel_ids.append(channel_id)
+            failure = harness.registry_unregister_failures.get(channel_id)
+            if failure is not None:
+                raise failure
 
         def get_channels_by_id(self, channel_id: str) -> list[object]:
             if harness.shutdown_started:
@@ -1315,6 +1320,104 @@ async def test_dynamic_owner_registry_survives_pop_discovery_failure(
             public_failure.__traceback__,
         )
     )
+    assert "restart.exec" not in harness.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", ("feishu", "xiaoyi"))
+@pytest.mark.parametrize("unregister_fails", (False, True))
+async def test_registry_only_owner_survives_snapshot_and_pop_failure_together(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    channel_id: str,
+    unregister_fails: bool,
+) -> None:
+    phase = f"channels.pop.{channel_id}"
+    snapshot_marker = f"private-{channel_id}-snapshot-failure"
+    pop_marker = f"private-{channel_id}-pop-failure"
+    unregister_marker = f"private-{channel_id}-unregister-failure"
+    harness = _ShutdownHarness(
+        failures={phase: RuntimeError(pop_marker)},
+        enable_all_owners=True,
+        registry_only_channel_id=channel_id,
+        registry_snapshot_failures={
+            channel_id: RuntimeError(snapshot_marker),
+        },
+        registry_unregister_failures=(
+            {channel_id: RuntimeError(unregister_marker)} if unregister_fails else None
+        ),
+    )
+
+    _install_gateway_fakes(monkeypatch, harness)
+    gateway_module.logger.addHandler(caplog.handler)
+    public_failure: BaseException | None = None
+    all_registered_tasks_done = False
+    manager_registry_empty = False
+    try:
+        with caplog.at_level(logging.INFO):
+            await gateway_module._run(
+                harness.agent_server_url,
+                "127.0.0.1",
+                19000,
+                "/ws",
+            )
+    except BaseException as exc:
+        public_failure = exc
+    finally:
+        registered = harness.registered_channels[channel_id]
+        all_registered_tasks_done = all(
+            object.__getattribute__(channel, "start_task").done()
+            for channel in registered
+        )
+        manager = harness.channel_manager
+        assert manager is not None
+        manager_registry_empty = channel_id not in object.__getattribute__(
+            manager, "_registered"
+        )
+        await harness.cancel_leftover_cleanup()
+        gateway_module.logger.removeHandler(caplog.handler)
+
+    assert public_failure is not None
+    _assert_safe_public_failure(
+        public_failure,
+        expected_type=RuntimeError,
+        phase=phase,
+        category="runtime_error",
+    )
+    expected = list(_ALL_OWNER_EXPECTED_CALLS)
+    following_phase = (
+        "channels.pop.xiaoyi" if channel_id == "feishu" else "dingtalk.task"
+    )
+    insert_at = expected.index(following_phase)
+    expected[insert_at:insert_at] = [
+        f"channels.{channel_id}.task",
+        f"channels.{channel_id}.stop",
+    ]
+    assert harness.calls == expected
+    assert Counter(harness.calls) == Counter(expected)
+    registered = harness.registered_channels[channel_id]
+    assert len(registered) == 3
+    stopped = [
+        channel
+        for channel in harness.stopped_channels
+        if any(channel is registered_channel for registered_channel in registered)
+    ]
+    assert Counter(map(id, stopped)) == Counter(
+        {id(channel): 1 for channel in registered}
+    )
+    assert all_registered_tasks_done
+    assert manager_registry_empty
+    assert harness.unregistered_channel_ids.count(channel_id) == 1
+    rendered = "".join(
+        traceback.format_exception(
+            type(public_failure),
+            public_failure,
+            public_failure.__traceback__,
+        )
+    )
+    for marker in (snapshot_marker, pop_marker, unregister_marker):
+        assert marker not in caplog.text
+        assert marker not in rendered
     assert "restart.exec" not in harness.calls
 
 

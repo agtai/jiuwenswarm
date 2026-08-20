@@ -2442,7 +2442,7 @@ async def _run(
     xiaoyi_task = None
     dynamic_channel_owners: dict[
         str,
-        list[tuple[Any, asyncio.Task[Any]]],
+        list[tuple[Any, asyncio.Task[Any] | None]],
     ] = {"feishu": [], "xiaoyi": []}
     dingtalk_channel = None
     dingtalk_task = None
@@ -3177,6 +3177,12 @@ async def _run(
     service_failure: BaseException | None = None
     caller_cancellation: asyncio.CancelledError | None = None
     try:
+        for channel_id, retained_owners in dynamic_channel_owners.items():
+            retained_ids = {id(channel) for channel, _task in retained_owners}
+            for channel in channel_manager.get_channels_by_id(channel_id):
+                if id(channel) not in retained_ids:
+                    retained_owners.append((channel, None))
+                    retained_ids.add(id(channel))
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
         if tasks_to_wait:
             restart_requested = await _wait_for_gateway_tasks_or_restart(
