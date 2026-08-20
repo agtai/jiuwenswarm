@@ -5821,6 +5821,310 @@ def _terminal_task(
     return store, executor, core, item.task_id, item.attempt_id
 
 
+def _formal_cancel_then_retry(
+    tmp_path: Path,
+    *,
+    terminalize_retry: bool = False,
+) -> tuple[
+    Path,
+    SqliteTaskStore,
+    _Executor,
+    PersistentTaskCore,
+    CommandEnvelope,
+    TaskAuthorizationGrant,
+    ResultEnvelope,
+    str,
+    str,
+    PersistentTaskEvent,
+    PersistentTaskEvent | None,
+]:
+    """Build a formal cancel settlement followed by a live retry epoch."""
+
+    database = tmp_path / "historical-cancel-retry.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    dispatch_a = store.claim_outbox("historical-cancel-dispatch-a")
+    assert dispatch_a is not None
+    store.complete_outbox(
+        dispatch_a,
+        executor_ref=f"legacy:{dispatch_a.attempt_id}",
+        observations=_observations(dispatch_a),
+    )
+
+    cancellation = _cancel(dispatch_a.task_id)
+    accepted = core.execute(
+        cancellation.envelope,
+        cancellation.authorization,
+        now=NOW,
+    )
+    assert accepted.ok and accepted.result is not None
+    assert accepted.result["applied"] is False
+    cancel_a = store.claim_outbox("historical-cancel-delivery-a")
+    assert cancel_a is not None and cancel_a.kind is OutboxKind.ATTEMPT_CANCEL
+    store.complete_outbox(
+        cancel_a,
+        executor_ref=f"legacy:{dispatch_a.attempt_id}",
+        observations=_observations(cancel_a, outcome=TerminalOutcome.CANCELLED),
+    )
+    events_a = store.events(
+        dispatch_a.task_id,
+        _scope(),
+        attempt_id=dispatch_a.attempt_id,
+    )
+    settlement_a = events_a[-1]
+    assert settlement_a.event_type == "task.terminal"
+    assert settlement_a.outcome == TerminalOutcome.CANCELLED.value
+
+    retry, grant = _retry(
+        dispatch_a.task_id,
+        dispatch_a.attempt_id,
+        TerminalOutcome.CANCELLED,
+        2,
+    )
+    retried = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert retried.ok and retried.result is not None
+    attempt_b = str(retried.result["attempt_id"])
+    dispatch_b = store.claim_outbox("historical-cancel-dispatch-b")
+    assert dispatch_b is not None
+    assert dispatch_b.attempt_id == attempt_b
+    store.complete_outbox(
+        dispatch_b,
+        executor_ref=f"legacy:{attempt_b}",
+        observations=_observations(dispatch_b),
+    )
+    settlement_b: PersistentTaskEvent | None = None
+    if terminalize_retry:
+        cancel_b_command, cancel_b_grant = _wave2_command(
+            dispatch_a.task_id,
+            "task.cancel",
+            {},
+            command_id="command-cancel-b",
+        )
+        cancel_b_result = core.execute(cancel_b_command, cancel_b_grant, now=NOW)
+        assert cancel_b_result.ok and cancel_b_result.result is not None
+        cancel_b = store.claim_outbox("historical-cancel-delivery-b")
+        assert cancel_b is not None and cancel_b.kind is OutboxKind.ATTEMPT_CANCEL
+        assert cancel_b.attempt_id == attempt_b
+        store.complete_outbox(
+            cancel_b,
+            executor_ref=f"legacy:{attempt_b}",
+            observations=_observations(cancel_b, outcome=TerminalOutcome.CANCELLED),
+        )
+        settlement_b = store.events(
+            dispatch_a.task_id,
+            _scope(),
+            attempt_id=attempt_b,
+        )[-1]
+        assert settlement_b.event_type == "task.terminal"
+        assert settlement_b.outcome == TerminalOutcome.CANCELLED.value
+
+    return (
+        database,
+        store,
+        executor,
+        core,
+        retry,
+        grant,
+        retried,
+        dispatch_a.attempt_id,
+        attempt_b,
+        settlement_a,
+        settlement_b,
+    )
+
+
+def test_historical_cancel_settlement_reopens_and_replays_after_retry_running(
+    tmp_path: Path,
+) -> None:
+    (
+        database,
+        store,
+        executor,
+        _core,
+        retry,
+        grant,
+        retried,
+        attempt_a,
+        attempt_b,
+        settlement_a,
+        settlement_b,
+    ) = _formal_cancel_then_retry(tmp_path)
+    assert settlement_b is None
+    current = store.get_task(str(retried.result["task_id"]), _scope())
+    assert current.attempt_id == attempt_b
+    assert current.state is FormalTaskState.RUNNING
+    assert store.get_attempt(attempt_a).outcome is TerminalOutcome.CANCELLED
+    assert retried.extensions["live_voice.command"]["settlement_event_id"] != (
+        settlement_a.event_id
+    )
+    before = _database_dump(database)
+    executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    )
+
+    reopened = SqliteTaskStore(database)
+    replay = PersistentTaskCore(reopened, executor).execute(
+        replace(retry, request_id="request-retry-2-replay-after-running"),
+        grant,
+        context=_context(tmp_path),
+        now=NOW,
+    )
+
+    assert replay.ok and replay.result == retried.result
+    assert replay.command_id == retried.command_id
+    assert replay.observed_at == retried.observed_at
+    assert replay.extensions == retried.extensions
+    assert reopened.get_task(current.task_id, _scope()) == current
+    assert reopened.get_attempt(attempt_a).outcome is TerminalOutcome.CANCELLED
+    assert reopened.get_attempt(attempt_b).state is FormalAttemptState.RUNNING
+    assert _database_dump(database) == before
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    ) == executor_effects
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "cross_epoch_settlement",
+        "settlement_cause",
+        "settlement_order",
+        "settlement_attempt",
+        "missing_cancel_request",
+        "missing_attempt_source",
+        "missing_cancel_outbox",
+        "result_flags",
+    ],
+)
+def test_historical_cancel_settlement_rejects_cross_epoch_or_incomplete_authority(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    (
+        database,
+        _store,
+        executor,
+        _core,
+        _retry_command,
+        _retry_grant,
+        _retried,
+        attempt_a,
+        attempt_b,
+        settlement_a,
+        settlement_b,
+    ) = _formal_cancel_then_retry(tmp_path, terminalize_retry=True)
+    assert settlement_b is not None
+    with sqlite3.connect(database) as connection:
+        if corruption == "cross_epoch_settlement":
+            row = connection.execute(
+                "SELECT result_json FROM commands WHERE command_id='command-cancel'"
+            ).fetchone()
+            assert row is not None
+            payload = json.loads(row[0])
+            payload["observed_at"] = settlement_b.occurred_at
+            payload["extensions"]["live_voice.command"]["settlement_event_id"] = (
+                settlement_b.event_id
+            )
+            connection.execute(
+                "UPDATE commands SET result_json=? WHERE command_id='command-cancel'",
+                (json.dumps(payload, sort_keys=True),),
+            )
+        elif corruption == "settlement_cause":
+            connection.execute(
+                "UPDATE task_events SET causation_id='foreign-cause' WHERE event_id=?",
+                (settlement_a.event_id,),
+            )
+        elif corruption == "settlement_order":
+            attempt_terminal = connection.execute(
+                """SELECT event_id, seq FROM task_events
+                   WHERE attempt_id=? AND event_type='attempt.terminal'""",
+                (attempt_a,),
+            ).fetchone()
+            assert attempt_terminal is not None
+            connection.execute(
+                "UPDATE task_events SET seq=-1 WHERE event_id=?",
+                (attempt_terminal[0],),
+            )
+            connection.execute(
+                "UPDATE task_events SET seq=? WHERE event_id=?",
+                (attempt_terminal[1], settlement_a.event_id),
+            )
+            connection.execute(
+                "UPDATE task_events SET seq=? WHERE event_id=?",
+                (settlement_a.seq, attempt_terminal[0]),
+            )
+        elif corruption == "settlement_attempt":
+            connection.execute(
+                "UPDATE task_events SET attempt_id=? WHERE event_id=?",
+                (attempt_b, settlement_a.event_id),
+            )
+        elif corruption == "missing_cancel_request":
+            connection.execute(
+                """DELETE FROM task_events
+                   WHERE attempt_id=? AND event_type='task.cancel_requested'""",
+                (attempt_a,),
+            )
+        elif corruption == "missing_attempt_source":
+            terminal_source = connection.execute(
+                """SELECT source_event_id FROM task_events
+                   WHERE attempt_id=? AND event_type='attempt.terminal'""",
+                (attempt_a,),
+            ).fetchone()
+            assert terminal_source is not None
+            connection.execute(
+                "DELETE FROM executor_events WHERE source_event_id=?",
+                (terminal_source[0],),
+            )
+        elif corruption == "missing_cancel_outbox":
+            connection.execute(
+                """DELETE FROM outbox
+                   WHERE attempt_id=? AND kind=?""",
+                (attempt_a, OutboxKind.ATTEMPT_CANCEL.value),
+            )
+        else:
+            row = connection.execute(
+                "SELECT result_json FROM commands WHERE command_id='command-cancel'"
+            ).fetchone()
+            assert row is not None
+            payload = json.loads(row[0])
+            payload["result"]["applied"] = False
+            connection.execute(
+                "UPDATE commands SET result_json=? WHERE command_id='command-cancel'",
+                (json.dumps(payload, sort_keys=True),),
+            )
+        connection.commit()
+    before = _database_dump(database)
+    executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    )
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    ) == executor_effects
+
+
 @pytest.mark.parametrize(
     ("outcome", "reason"),
     (

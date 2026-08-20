@@ -6671,6 +6671,8 @@ class SqliteTaskStore:
         attempt: PersistentAttemptRecord,
         request: PersistentTaskEvent,
         disposition: PersistentTaskEvent | None = None,
+        attempt_terminal: PersistentTaskEvent | None = None,
+        task_terminal: PersistentTaskEvent | None = None,
     ) -> str | None:
         """Bind a control request, optional settlement, command and outbox."""
 
@@ -6717,16 +6719,56 @@ class SqliteTaskStore:
             ),
         ).fetchall()
         if expected_type == "task.cancel":
-            terminal_settlement = connection.execute(
-                """SELECT * FROM task_events
-                   WHERE task_id=? AND seq=? AND event_type='task.terminal'""",
-                (task.task_id, task.event_head),
-            ).fetchone()
-            settled = (
-                task.state is FormalTaskState.TERMINAL
-                and task.outcome is TerminalOutcome.CANCELLED
-                and terminal_settlement is not None
+            terminal_cancelled = (
+                task_terminal is not None
+                and task_terminal.outcome == TerminalOutcome.CANCELLED.value
             )
+            terminal_pair_invalid = (attempt_terminal is None) != (
+                task_terminal is None
+            )
+            if attempt_terminal is not None and task_terminal is not None:
+                terminal_pair_invalid = terminal_pair_invalid or (
+                    request.seq >= attempt_terminal.seq
+                    or attempt_terminal.seq >= task_terminal.seq
+                    or attempt_terminal.task_id != task.task_id
+                    or task_terminal.task_id != task.task_id
+                    or attempt_terminal.attempt_id != attempt.attempt_id
+                    or task_terminal.attempt_id != attempt.attempt_id
+                    or attempt_terminal.scope != task.scope
+                    or task_terminal.scope != task.scope
+                    or attempt_terminal.correlation_id != task.correlation_id
+                    or task_terminal.correlation_id != task.correlation_id
+                    or attempt_terminal.event_type != "attempt.terminal"
+                    or task_terminal.event_type != "task.terminal"
+                    or attempt_terminal.state != FormalAttemptState.TERMINAL.value
+                    or task_terminal.state != FormalTaskState.TERMINAL.value
+                    or attempt_terminal.outcome != task_terminal.outcome
+                    or (
+                        terminal_cancelled
+                        and attempt_terminal.source_event_id is None
+                        and (
+                            attempt_terminal.causation_id != command_id
+                            or task_terminal.causation_id != command_id
+                        )
+                    )
+                    or (
+                        terminal_cancelled
+                        and attempt_terminal.source_event_id is not None
+                        and (
+                            attempt_terminal.causation_id
+                            != attempt_terminal.source_event_id
+                            or task_terminal.source_event_id
+                            != attempt_terminal.source_event_id
+                            or task_terminal.causation_id
+                            != attempt_terminal.source_event_id
+                        )
+                    )
+                )
+            if terminal_pair_invalid:
+                raise cls._corrupt(
+                    "formal Task cancel settlement segment is not canonical"
+                )
+            settled = terminal_cancelled
             if (
                 disposition is not None
                 or command.payload
@@ -6765,7 +6807,7 @@ class SqliteTaskStore:
                 )
                 and result.observed_at
                 == (
-                    terminal_settlement["occurred_at"]
+                    task_terminal.occurred_at
                     if settled
                     else request.occurred_at
                 )
@@ -6778,7 +6820,7 @@ class SqliteTaskStore:
                     ),
                     admission_event_id=request.event_id,
                     settlement_event_id=(
-                        terminal_settlement["event_id"] if settled else None
+                        task_terminal.event_id if settled else None
                     ),
                 )
             )
@@ -7184,6 +7226,8 @@ class SqliteTaskStore:
                 executor_attempt_sources: set[str] = set()
                 executor_task_sources: set[str] = set()
                 store_owned_attempt_terminal: PersistentTaskEvent | None = None
+                attempt_terminal_event: PersistentTaskEvent | None = None
+                task_terminal_event: PersistentTaskEvent | None = None
                 for event in segment[1:]:
                     if task_segment_state == FormalTaskState.TERMINAL.value:
                         raise cls._corrupt(
@@ -7315,6 +7359,8 @@ class SqliteTaskStore:
                             )
                         task_segment_state = event.state
                         task_segment_outcome = event.outcome
+                        if event.event_type == "task.terminal":
+                            task_terminal_event = event
                     elif event.event_type in {
                         "task.cancel_requested",
                         "task.adjust_requested",
@@ -7643,6 +7689,8 @@ class SqliteTaskStore:
                                     "formal Task attempt has duplicate Store terminal truth"
                                 )
                             store_owned_attempt_terminal = event
+                        if event.state == FormalAttemptState.TERMINAL.value:
+                            attempt_terminal_event = event
                         attempt_segment_state = event.state
                         attempt_segment_outcome = event.outcome
                     else:
@@ -7657,6 +7705,8 @@ class SqliteTaskStore:
                         task=task,
                         attempt=attempt,
                         request=cancel_request,
+                        attempt_terminal=attempt_terminal_event,
+                        task_terminal=task_terminal_event,
                     )
                     if outbox_id is not None:
                         verified_control_outbox_ids.add(outbox_id)
