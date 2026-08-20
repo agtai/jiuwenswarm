@@ -2146,6 +2146,7 @@
       "editorLabel": "Recognized speech",
       "recoveryFailed": "Voice connection recovery failed",
       "recoveryFailedWithReason": "Voice recovery failed (phase: {{phase}}, reason: {{reason}})",
+      "interruptionDegraded": "Interruption is unavailable for this response; audio is preserved and listening will restart (reason: {{reason}})",
       "recoveryRetryingWithContext": "Recovering ({{seam}}; correlation: {{correlationId}}; generation: {{generation}}; reason: {{reason}})",
       "recoveryTerminalWithContext": "Recovery failed ({{seam}}; correlation: {{correlationId}}; generation: {{generation}}; reason: {{reason}})",
       "recoverySeam": {

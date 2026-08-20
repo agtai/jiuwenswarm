@@ -3588,7 +3588,9 @@ test('formal P1 fences successor capture while retained close is in flight', asy
 async function runConcurrentCaptureJourney(options = {}) {
   const calls = [];
   const statuses = [];
+  const statusSnapshots = [];
   const sockets = [];
+  const socketOpenTasks = [];
   let activationCount = 0;
   let concurrentFailureSnapshot = null;
   let concurrentAudioReleased = false;
@@ -3704,7 +3706,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
         if (options.ackSecondCapture !== false || this.serverBinding.generation.id !== 'capture-2') {
           const throughSeq = decodeAudioFrame(this.serverBinding, value).seq;
-          queueMicrotask(() =>
+          const acknowledge = () =>
             this.onmessage?.({
               data: serializeMediaControl({
                 type: 'media.ack',
@@ -3712,8 +3714,16 @@ async function runConcurrentCaptureJourney(options = {}) {
                 generation: this.serverBinding.generation.value,
                 through_seq: throughSeq,
               }),
-            })
-          );
+            });
+          if (
+            this.serverBinding.generation.id === 'capture-2'
+            && Number.isFinite(options.secondCaptureAckDelayMs)
+            && options.secondCaptureAckDelayMs > 0
+          ) {
+            setTimeout(acknowledge, options.secondCaptureAckDelayMs);
+          } else {
+            queueMicrotask(acknowledge);
+          }
         }
       } else if (this.serverBinding.direction === 'uplink' && typeof value === 'string') {
         const control = JSON.parse(value);
@@ -3763,7 +3773,13 @@ async function runConcurrentCaptureJourney(options = {}) {
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
-    on_status: status => statuses.push(status),
+    on_status: status => {
+      statuses.push(status);
+      statusSnapshots.push({
+        status,
+        source_start_count: environment.contexts[0]?.sourceStartCount ?? 0,
+      });
+    },
     on_concurrent_capture_started: () => {
       concurrentCaptureStartedCalls += 1;
     },
@@ -3787,7 +3803,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       assert.equal(new URL(url).pathname, '/ws/live-voice/media');
       const socket = new DuplexSocket();
       sockets.push(socket);
-      queueMicrotask(() => {
+      const openTask = Promise.resolve().then(async () => {
         socket.protocol = 'live-voice.media.v1';
         socket.readyState = 1;
         socket.onopen?.({});
@@ -3800,6 +3816,23 @@ async function runConcurrentCaptureJourney(options = {}) {
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
         if (binding.direction === 'downlink') {
+          if (options.useRealProcessorForSecondCapture === true) {
+            for (let turn = 0; turn < 500 && realProcessorHarness === null; turn += 1) {
+              await new Promise(resolve => setImmediate(resolve));
+            }
+            assert.notEqual(realProcessorHarness, null);
+            for (let turn = 0; turn < 500 && concurrentCaptureStartedCalls === 0; turn += 1) {
+              await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            assert.equal(concurrentCaptureStartedCalls, 1);
+          }
+          if (
+            options.exerciseRenderRegressionDuringDownlink === true
+            || options.exerciseRenderStallDuringDownlink === true
+          ) {
+            socket.pumpDownlink();
+            assert.equal(owner.status().status, 'playing');
+          }
           if (options.exerciseDuplicateRenderFrameAtFinalPlayout === true) {
             assert.notEqual(realProcessorHarness, null);
             environment.contexts[0].onSourceEnded = ({ sourceStartCount, sourceEndCount }) => {
@@ -3861,21 +3894,11 @@ async function runConcurrentCaptureJourney(options = {}) {
             assert.equal(processor.process(quantum()), false);
             concurrentFailureSnapshot = owner.status();
           }
-          const captureFailureReason =
-            typeof options.failSecondCaptureDuringDownlinkReason === 'string'
-              ? options.failSecondCaptureDuringDownlinkReason
-              : options.failSecondCaptureDuringDownlink === true
-                ? 'input_gap_exceeded'
-                : null;
-          if (captureFailureReason !== null && activationCount === 2) {
-            environment.worklet.port.onmessage?.({
-              data: { kind: 'error', reason: captureFailureReason },
-            });
-            concurrentFailureSnapshot = owner.status();
-          }
           socket.pumpDownlink();
         }
       });
+      void openTask.catch(() => undefined);
+      socketOpenTasks.push(openTask);
       return socket;
     }),
     request: (request = async (method, params) => {
@@ -4075,6 +4098,22 @@ async function runConcurrentCaptureJourney(options = {}) {
       );
     }
   }
+  const activeCaptureFailureReason =
+    typeof options.failSecondCaptureDuringDownlinkReason === 'string'
+      ? options.failSecondCaptureDuringDownlinkReason
+      : options.failSecondCaptureDuringDownlink === true
+        ? 'input_gap_exceeded'
+        : null;
+  if (activeCaptureFailureReason !== null) {
+    for (let turn = 0; turn < 500 && concurrentCaptureStartedCalls === 0; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(concurrentCaptureStartedCalls, 1);
+    environment.worklet.port.onmessage?.({
+      data: { kind: 'error', reason: activeCaptureFailureReason },
+    });
+    concurrentFailureSnapshot = owner.status();
+  }
   if (options.closeDuringActivePlayout === true) {
     for (let turn = 0; turn < 500; turn += 1) {
       const downlink = sockets.find(socket => socket.serverBinding?.direction === 'downlink');
@@ -4155,6 +4194,10 @@ async function runConcurrentCaptureJourney(options = {}) {
     await Promise.resolve();
   }
   if (options.exerciseSilentCaptureRotationDuringActivePlayout === true) {
+    for (let turn = 0; turn < 500 && concurrentCaptureStartedCalls === 0; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(concurrentCaptureStartedCalls, 1);
     const rotatingWorklet = environment.worklet;
     const retainedFrameHandler = rotatingWorklet.port.onmessage;
     assert.equal(typeof retainedFrameHandler, 'function');
@@ -4528,11 +4571,13 @@ async function runConcurrentCaptureJourney(options = {}) {
     }
   }
   if (concurrentClosePromise !== null) await concurrentClosePromise;
+  await Promise.all(socketOpenTasks);
 
   return {
     owner,
     calls,
     statuses,
+    statusSnapshots,
     sockets,
     activationCount,
     playError,
@@ -4606,7 +4651,7 @@ async function runFirstRecoveredRetry(journey, afterCaptureStarted = async () =>
 
 test('formal P1 dedicated downlink ACKs scheduled audio and receipts only rendered audio', async () => {
   const journey = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });
-  const { owner, calls, sockets, activationCount, playError, environment } = journey;
+  const { owner, calls, sockets, activationCount, playError, environment, statusSnapshots } = journey;
 
   assert.equal(playError, null);
   assert.equal(owner.status().status, 'capturing');
@@ -4614,6 +4659,7 @@ test('formal P1 dedicated downlink ACKs scheduled audio and receipts only render
   assert.equal(activationCount, 2);
   assert.equal(environment.contexts.length, 1);
   assert.equal(environment.contexts[0].state, 'running');
+  assert.ok(statusSnapshots.find(snapshot => snapshot.status === 'playing')?.source_start_count > 0);
   const downlinkSocket = sockets.find(socket => socket.serverBinding.direction === 'downlink');
   assert.ok(downlinkSocket);
   const downlinkControls = downlinkSocket.sent.filter(value => typeof value === 'string').map(JSON.parse);
@@ -4629,6 +4675,7 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     negotiatedEot: true,
     triggerBargeInEot: true,
     holdDownlinkDetachAfterFinalRender: true,
+    deferSourceEndsUntilTransportAck: true,
   });
   assert.equal(journey.bargeInSpeechStartCalls, 1);
   assert.equal(journey.bargeInEotCalls, 0);
@@ -4655,6 +4702,7 @@ test('server speech-start/EOT interrupts an answer estimated beyond twenty secon
     negotiatedEot: true,
     triggerBargeInEot: true,
     holdDownlinkDetachAfterFinalRender: true,
+    deferSourceEndsUntilTransportAck: true,
     agentText:
       '实时语音系统会依次完成录音采集、前端处理、语音识别、Agent 推理、语音合成和浏览器播放。'.repeat(8),
   });
@@ -4690,7 +4738,7 @@ test('formal P1 advances the eight-frame downlink window before browser render c
   await owner.close();
 });
 
-test('formal P1 opens one bounded successor capture before a long answer can be interrupted', async () => {
+test('formal P1 starts one bounded successor capture without gating a long-answer downlink', async () => {
   const journey = await runConcurrentCaptureJourney({
     agentText:
       '实时语音系统会依次完成录音采集、前端处理、语音识别、Agent 推理、语音合成和浏览器播放。'.repeat(8),
@@ -4699,7 +4747,7 @@ test('formal P1 opens one bounded successor capture before a long answer can be 
   const { owner, calls, activationCount, activationCountAtFinalDownlinkAck, playError, environment } = journey;
 
   assert.equal(playError, null);
-  assert.equal(activationCountAtFinalDownlinkAck, 2);
+  assert.equal(activationCountAtFinalDownlinkAck, 1);
   assert.equal(activationCount, 2);
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
@@ -5391,6 +5439,7 @@ test('formal P1 terminal announcement failure releases both leases and first ret
   const journey = await runConcurrentCaptureJourney({
     pauseForNotificationBeforePlayout: true,
     failSecondCaptureDuringDownlink: true,
+    deferSourceEndsUntilTransportAck: true,
   });
 
   assert.equal(journey.notificationPauseOutcome, 'paused');
@@ -5619,6 +5668,7 @@ test('formal P1 rejects a prefix-only downlink completion without receipt or bus
     downlinkFramesToSend: 1,
     earlyDownlinkDetachThroughSeq: 0,
     requireBoundedPlayoutSettlement: true,
+    sendSecondFrame: false,
   });
   const { owner, calls, sockets, playError, environment } = journey;
 
@@ -6019,7 +6069,7 @@ test('a real processor render-clock regression fails exact P1 playout with zero 
     environment.contexts.every(context => context.state === 'closed'),
     true
   );
-  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 0);
+  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 1);
   assert.equal(
     sockets.every(socket => socket.readyState === 3),
     true
@@ -6034,29 +6084,98 @@ test('a real processor render-clock regression fails exact P1 playout with zero 
 
 test('formal P1 concurrent capture cannot publish readiness without a real frame', async () => {
   const journey = await runConcurrentCaptureJourney({ sendSecondFrame: false });
-  const { owner, calls, statuses, playError, capturingBeforeConcurrent } = journey;
+  const { owner, calls, statuses, playError, capturingBeforeConcurrent, environment } = journey;
 
-  assert.equal(playError?.reason, 'AUDIO_CAPTURE_NO_FRAMES');
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_NO_FRAMES' });
+  assert.equal(playError, null);
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: 'AUDIO_CAPTURE_NO_FRAMES' });
+  assert.equal(environment.contexts[0].sourceStartCount, 1);
   assert.equal(statuses.filter(status => status === 'capturing').length, capturingBeforeConcurrent);
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
   await owner.close();
 });
 
-test('formal P1 concurrent capture cannot publish readiness without the Gateway ACK', async () => {
+test('formal P1 concurrent capture without a Gateway ACK degrades barge-in without discarding TTS', async () => {
   const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
-  const { owner, calls, statuses, playError, capturingBeforeConcurrent } = journey;
+  const { owner, calls, statuses, playError, capturingBeforeConcurrent, environment } = journey;
 
-  assert.equal(playError?.reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+  assert.equal(playError, null);
   assert.deepEqual(owner.status(), {
-    status: 'failed',
+    status: 'recognized',
     reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
   });
+  assert.equal(environment.contexts[0].sourceStartCount, 1);
   assert.equal(statuses.filter(status => status === 'capturing').length, capturingBeforeConcurrent);
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+  assert.equal(calls.some(([method]) => method.includes('task.') || method.includes('tool.')), false);
+  assert.equal(owner.captureDiagnostics().successor_readiness, 'degraded');
+  assert.equal(owner.captureDiagnostics().successor_readiness_reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+  assert.ok(owner.captureDiagnostics().successor_readiness_elapsed_ms >= 1_000);
   await owner.close();
+});
+
+test('formal P1 restarts listening after degraded successor capture without replaying the response', async () => {
+  const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
+  const priorWorklet = journey.environment.worklet;
+  const restarting = journey.owner.startCapture({
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-restart-after-degradation',
+    activation_generation: 8,
+    locale: 'zh-CN',
+  });
+  await sendFirstFrameToNextWorklet(journey.environment, priorWorklet);
+  await restarting;
+
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 3);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length, 1);
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(journey.calls.some(([method]) => method.includes('task.') || method.includes('tool.')), false);
+  await journey.owner.close();
+});
+
+test('formal P1 accepts a delayed successor ACK inside the readiness window', async () => {
+  const journey = await runConcurrentCaptureJourney({ secondCaptureAckDelayMs: 500 });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.concurrentCaptureStartedCalls, 1);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(journey.owner.captureDiagnostics().successor_readiness, 'ready');
+  assert.equal(journey.owner.captureDiagnostics().successor_readiness_reason, null);
+  assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms >= 450);
+  assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms < 1_000);
+  await journey.owner.close();
+});
+
+test('formal P1 late successor ACK after the readiness window cannot cancel scheduled TTS', async () => {
+  const journey = await runConcurrentCaptureJourney({ secondCaptureAckDelayMs: 1_100 });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), {
+    status: 'recognized',
+    reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+  });
+  assert.equal(journey.environment.contexts[0].sourceStartCount, 1);
+  assert.equal(journey.concurrentCaptureStartedCalls, 0);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.ok(journey.calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+  const callsBeforeLateAck = journey.calls.length;
+  const sourceStartsBeforeLateAck = journey.environment.contexts[0].sourceStartCount;
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.deepEqual(journey.owner.status(), {
+    status: 'recognized',
+    reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+  });
+  assert.equal(journey.calls.length, callsBeforeLateAck);
+  assert.equal(journey.environment.contexts[0].sourceStartCount, sourceStartsBeforeLateAck);
+  await journey.owner.close();
 });
 
 test('formal P1 concurrent playing-window mute releases audio and compensates exact authority', async () => {
@@ -6066,26 +6185,21 @@ test('formal P1 concurrent playing-window mute releases audio and compensates ex
   });
   const { owner, calls, sockets, statuses, playError, capturingBeforeConcurrent, concurrentFailureSnapshot, concurrentAudioReleased } = journey;
 
-  assert.deepEqual(concurrentFailureSnapshot, {
-    status: 'cleanup_pending',
-    reason: 'AUDIO_INPUT_MUTED',
-  });
-  assert.equal(concurrentAudioReleased, true);
-  assert.equal(playError?.reason, 'AUDIO_INPUT_MUTED');
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_MUTED' });
+  assert.deepEqual(concurrentFailureSnapshot, { status: 'playing', reason: 'AUDIO_INPUT_MUTED' });
+  assert.equal(concurrentAudioReleased, false);
+  assert.equal(playError, null);
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: 'AUDIO_INPUT_MUTED' });
   assert.equal(statuses.filter(status => status === 'capturing').length, capturingBeforeConcurrent);
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
-  assert.equal(
-    sockets.some(socket => socket.serverBinding?.generation.id === 'capture-2'),
-    false
-  );
+  assert.equal(sockets.some(socket => socket.serverBinding?.direction === 'downlink'), true);
   await owner.close();
 });
 
 test('formal P1 persistent concurrent input gap stops playout with the exact stable reason', async () => {
   const journey = await runConcurrentCaptureJourney({
     failSecondCaptureDuringDownlink: true,
+    deferSourceEndsUntilTransportAck: true,
   });
   const { owner, calls, sockets, statuses, playError, capturingBeforeConcurrent, concurrentFailureSnapshot, environment } = journey;
 
@@ -6139,10 +6253,10 @@ test('formal P1 non-advancing concurrent render clock stops playout with the exa
     environment.contexts.every(context => context.state === 'closed'),
     true
   );
-  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 0);
+  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 1);
   assert.equal(
     environment.contexts.reduce((count, context) => count + context.sourceStartCount, 0),
-    0
+    1
   );
   assert.equal(
     sockets.every(socket => socket.readyState === 3),

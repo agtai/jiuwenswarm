@@ -2144,6 +2144,7 @@
       "editorLabel": "语音识别文本",
       "recoveryFailed": "语音连接恢复失败",
       "recoveryFailedWithReason": "语音恢复失败（阶段：{{phase}}，原因：{{reason}}）",
+      "interruptionDegraded": "本轮暂不支持插话；语音回答会继续，播放后将恢复监听（原因：{{reason}}）",
       "recoveryRetryingWithContext": "正在恢复（{{seam}}；关联：{{correlationId}}；代：{{generation}}；原因：{{reason}}）",
       "recoveryTerminalWithContext": "恢复失败（{{seam}}；关联：{{correlationId}}；代：{{generation}}；原因：{{reason}}）",
       "recoverySeam": {
