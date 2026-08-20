@@ -372,6 +372,33 @@ Wave 4 applies all relevant D-032 P/N/B/S/T/C/R/F/I/K/X dimensions recorded in
 the acceptance above. Worker commits alone receive no credit; independent
 Tier-3 review and integration verification remain mandatory.
 
+## 5.5 Wave 5 activation — P3 observed-fact manifest integrity
+
+### SRR-16 — B16 P3 control manifest truth
+
+- Capability/owner: P3 confirmation/mutation routing and product-composition
+  evidence.
+- Risk: Tier 3 authority and diagnostic-truth boundary.
+- Main-owned source/tests:
+  `jiuwenswarm/server/live_voice/product_composition_registry.py` and
+  `tests/unit_tests/live_voice/test_product_composition_registry.py` only.
+- Intended behavior: a P3 result may report formal authority, an open
+  activation lease or an observed runtime only when that exact request has
+  actually crossed those boundaries. Pre-authentication, feature-off,
+  structural-validation and missing-record failures expose unavailable or
+  disabled facts; successful issue/mutation/query results retain their real
+  formal manifest.
+- Acceptance: first reproduce the fabricated formal manifest for missing or
+  invalid bearer, disabled P3, invalid input and absent confirmation/task
+  records. Assert unavailable/disabled reason and evidence IDs, zero
+  confirmation consumption, Store/Executor/Agent/Task/Tool mutation and no
+  activation lease. Preserve authenticated success, exact replay and
+  post-authority typed failure truth. Cover concurrent unrelated sessions and
+  registry stop without introducing a shared schema or classifier.
+- Exclusions: no product-composition contract/schema change, authentication or
+  confirmation policy, Task operation, generation/capacity cleanup, query-lock
+  redesign, frontend behavior or new evidence vocabulary.
+
 ## 6. Queued repair programs
 
 These groups route work after the currently active packets; they are not yet
