@@ -1597,6 +1597,99 @@ class PersistentTaskEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskUnreadPage:
+    """One prefix-bounded unread page against a frozen consumer snapshot."""
+
+    task_id: str
+    presentation_class: str
+    watermark: int
+    acked_event_id: str | None
+    head_seq: int
+    events: tuple[PersistentTaskEvent, ...]
+    next_after_seq: int | None
+    has_more: bool
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task_unread.task_id")
+        if (
+            type(self.presentation_class) is not str
+            or self.presentation_class not in {"text", "voice"}
+        ):
+            raise FormalTaskViolation(
+                "INVALID_PRESENTATION_CLASS",
+                "task unread presentation class must be text or voice",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            type(self.watermark) is not int
+            or self.watermark < -1
+            or type(self.head_seq) is not int
+            or self.head_seq < 0
+            or self.watermark > self.head_seq
+            or type(self.events) is not tuple
+            or len(self.events) > 500
+            or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
+            or type(self.has_more) is not bool
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_UNREAD_PAGE",
+                "task unread page bounds are not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.watermark == -1:
+            if self.acked_event_id is not None:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_UNREAD_PAGE",
+                    "logical initial watermark cannot bind an event",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            _require_text(self.acked_event_id, "task_unread.acked_event_id")
+        for expected_seq, event in enumerate(self.events, self.watermark + 1):
+            if event.task_id != self.task_id or event.seq != expected_seq:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_UNREAD_PAGE",
+                    "task unread page is not one contiguous Task prefix",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if self.has_more:
+            if (
+                not self.events
+                or self.next_after_seq != self.events[-1].seq
+                or self.events[-1].seq >= self.head_seq
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_UNREAD_PAGE",
+                    "truncated task unread page lacks its next prefix position",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif self.next_after_seq is not None or (
+            self.events and self.events[-1].seq != self.head_seq
+        ) or (not self.events and self.watermark != self.head_seq):
+            raise FormalTaskViolation(
+                "INVALID_TASK_UNREAD_PAGE",
+                "complete task unread page does not reach its frozen head",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    @property
+    def acked_through_seq(self) -> int:
+        return self.watermark
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "presentation_class": self.presentation_class,
+            "watermark": self.watermark,
+            "acked_event_id": self.acked_event_id,
+            "head_seq": self.head_seq,
+            "events": [event.to_dict() for event in self.events],
+            "next_after_seq": self.next_after_seq,
+            "has_more": self.has_more,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TaskMutationResult:
     """Atomic mutation receipt pinned to one durable attempt epoch."""
 
@@ -2155,6 +2248,7 @@ __all__ = [
     "TaskResultArtifact",
     "TaskResultAvailability",
     "TaskResultRecord",
+    "TaskUnreadPage",
     "TaskRetryAuthoritySnapshot",
     "TaskRetryPrecondition",
     "TaskRetryProductRequestFingerprint",

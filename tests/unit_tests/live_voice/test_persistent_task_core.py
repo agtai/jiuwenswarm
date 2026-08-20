@@ -5615,7 +5615,7 @@ async def test_two_store_connections_serialize_same_and_distinct_adjustments(
     assert executor.adjustments == authoritative_command_order
 
 
-def test_task_result_is_three_state_immutable_and_revalidates_artifact(
+def test_task_result_is_three_state_immutable_after_artifact_changes(
     tmp_path: Path,
 ) -> None:
     store = SqliteTaskStore(tmp_path / "result.sqlite")
@@ -5675,9 +5675,15 @@ def test_task_result_is_three_state_immutable_and_revalidates_artifact(
 
     artifact_path.write_text("tampered", encoding="utf-8")
     assert store.task_result(task_id, _scope()) == (
-        TaskResultAvailability.UNAVAILABLE,
-        None,
-        "TASK_RESULT_ARTIFACT_INVALID",
+        TaskResultAvailability.AVAILABLE,
+        record,
+        "TASK_RESULT_AVAILABLE",
+    )
+    artifact_path.unlink()
+    assert store.task_result(task_id, _scope()) == (
+        TaskResultAvailability.AVAILABLE,
+        record,
+        "TASK_RESULT_AVAILABLE",
     )
 
 

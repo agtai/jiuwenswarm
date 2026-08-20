@@ -363,6 +363,7 @@ class PersistentTaskCore:
                 "task.resume",
                 "task.reprioritize",
                 "task.create_successor",
+                "task.ack_events",
             }:
                 raise FormalTaskViolation(
                     "UNSUPPORTED_FORMAL_TASK_COMMAND",
@@ -405,6 +406,20 @@ class PersistentTaskCore:
                 destructive=True,
                 now=observed_at,
             )
+            if command.command_type == "task.ack_events":
+                require_exact_payload(
+                    command.payload,
+                    frozenset(
+                        {
+                            "presentation_class",
+                            "acked_through_seq",
+                            "acked_event_id",
+                            "expected_event_head",
+                        }
+                    ),
+                    field_name="task.ack_events payload",
+                )
+                return self.store.ack_events(command, observed_at=observed_at)
             if command.command_type == "task.cancel":
                 require_exact_payload(
                     command.payload, frozenset(), field_name="task.cancel payload"
@@ -825,6 +840,19 @@ class PersistentTaskCore:
                     "truncated": has_more,
                     "cursor_replay_supported": True,
                 }
+            elif query.query_type == "task.unread_events":
+                require_exact_payload(
+                    query.payload,
+                    frozenset({"presentation_class", "limit"}),
+                    field_name="task.unread_events payload",
+                )
+                page = self.store.unread_events_page(
+                    query.target_ref.id,
+                    query.scope,
+                    presentation_class=query.payload["presentation_class"],
+                    limit=query.payload["limit"],
+                )
+                result = page.to_dict()
             elif query.query_type == "task.result":
                 require_exact_payload(
                     query.payload,

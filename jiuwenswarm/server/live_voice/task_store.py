@@ -16,10 +16,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
     CommandEnvelope,
     ContractViolation,
     ErrorCode,
@@ -66,6 +65,7 @@ from .formal_task_models import (
     TaskRetryAuthoritySnapshot,
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
+    TaskUnreadPage,
     command_result_extensions,
     utc_now,
 )
@@ -138,6 +138,16 @@ _ADJUST_BUSINESS_DECISIONS = {
         TaskCommandDisposition.CONFLICT,
         frozenset({ErrorCode.CONFLICT}),
     )
+}
+_ACK_BUSINESS_DECISIONS = {
+    "TASK_ACK_PRECONDITION_STALE": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.STALE}),
+    ),
+    "TASK_ACK_EVENT_MISMATCH": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.CONFLICT}),
+    ),
 }
 _TASK_STORE_TABLES_V2 = frozenset(
     {
@@ -1956,6 +1966,10 @@ class SqliteTaskStore:
                         "formal Task unsupported-control decision is not canonical"
                     )
                 continue
+            if command_type == "task.ack_events":
+                # Consumption authority exists only in schema v5 and is rebuilt
+                # with its consumer rows by _verify_v5_semantics.
+                continue
             if command_type not in {"task.cancel", "task.adjust"}:
                 raise cls._corrupt(
                     "formal Task command ledger contains an unsupported operation"
@@ -2388,6 +2402,203 @@ class SqliteTaskStore:
                 raise cls._corrupt(
                     "formal Task consumer crosses its exact Task scope"
                 )
+        cls._verify_v5_ack_semantics(connection, consumer_rows)
+
+    @classmethod
+    def _verify_v5_ack_semantics(
+        cls,
+        connection: sqlite3.Connection,
+        consumer_rows: list[sqlite3.Row],
+    ) -> None:
+        """Rebuild every durable consumer row from successful ACK commands."""
+
+        durable = {
+            (
+                row["subject_id"],
+                row["project_id"],
+                row["task_id"],
+                row["presentation_class"],
+            ): (
+                int(row["acked_through_seq"]),
+                row["acked_event_id"],
+                row["updated_at"],
+            )
+            for row in consumer_rows
+        }
+        reconstructed: dict[
+            tuple[str, str, str, str], tuple[int, str, str]
+        ] = {}
+        command_rows = connection.execute(
+            """SELECT rowid AS command_rowid, * FROM commands
+               WHERE command_type='task.ack_events'
+               ORDER BY command_rowid"""
+        ).fetchall()
+        for row in command_rows:
+            try:
+                stored_result = ResultEnvelope.from_dict(
+                    _json_load(row["result_json"])
+                )
+            except (ContractViolation, FormalTaskViolation) as error:
+                raise cls._corrupt(
+                    "formal Task ACK command result is not canonical"
+                ) from error
+            if not stored_result.ok:
+                cls._verify_business_decision(
+                    connection,
+                    row,
+                    expected=_ACK_BUSINESS_DECISIONS,
+                )
+                continue
+            command, result = cls._control_command_from_row(row)
+            payload = command.payload
+            value = result.result
+            task_row = connection.execute(
+                "SELECT scope_json, event_head FROM tasks WHERE task_id=?",
+                (command.target_ref.id,),
+            ).fetchone()
+            if task_row is None:
+                raise cls._corrupt("formal Task ACK lost its target")
+            try:
+                task_scope = ScopeRef.from_dict(_json_load(task_row["scope_json"]))
+            except (ContractViolation, FormalTaskViolation) as error:
+                raise cls._corrupt(
+                    "formal Task ACK target scope is not canonical"
+                ) from error
+            presentation_class = payload.get("presentation_class")
+            acked_through_seq = payload.get("acked_through_seq")
+            acked_event_id = payload.get("acked_event_id")
+            expected_event_head = payload.get("expected_event_head")
+            event_row = (
+                None
+                if type(acked_through_seq) is not int
+                or type(acked_event_id) is not str
+                else connection.execute(
+                    """SELECT 1 FROM task_events
+                       WHERE task_id=? AND seq=? AND event_id=?""",
+                    (
+                        command.target_ref.id,
+                        acked_through_seq,
+                        acked_event_id,
+                    ),
+                ).fetchone()
+            )
+            if (
+                command.target_ref.kind.value != "task"
+                or command.required_capabilities != ("task.ack_events",)
+                or set(payload)
+                != {
+                    "presentation_class",
+                    "acked_through_seq",
+                    "acked_event_id",
+                    "expected_event_head",
+                }
+                or presentation_class not in {"text", "voice"}
+                or type(acked_through_seq) is not int
+                or type(expected_event_head) is not int
+                or not 0
+                <= acked_through_seq
+                <= expected_event_head
+                <= int(task_row["event_head"])
+                or event_row is None
+                or command.scope.assurance is not Assurance.AUTHENTICATED
+                or task_scope.assurance is not Assurance.AUTHENTICATED
+                or command.scope.subject_id != task_scope.subject_id
+                or command.scope.project_id != task_scope.project_id
+            ):
+                raise cls._corrupt(
+                    "formal Task ACK command lacks exact consumer authority"
+                )
+            key = (
+                command.scope.subject_id,
+                command.scope.project_id,
+                command.target_ref.id,
+                presentation_class,
+            )
+            previous = reconstructed.get(key)
+            if (
+                previous is None
+                and type(value) is dict
+                and value.get("advanced") is False
+            ):
+                # A schema-v5 consumer seed can predate the Task5 command
+                # ledger. Its first lower/equal ACK exposes the logical seed
+                # in the result without changing the seed timestamp.
+                baseline_seq = value.get("acked_through_seq")
+                baseline_event_id = value.get("acked_event_id")
+                durable_value = durable.get(key)
+                baseline_event = (
+                    None
+                    if type(baseline_seq) is not int
+                    or type(baseline_event_id) is not str
+                    else connection.execute(
+                        """SELECT 1 FROM task_events
+                           WHERE task_id=? AND seq=? AND event_id=?""",
+                        (
+                            command.target_ref.id,
+                            baseline_seq,
+                            baseline_event_id,
+                        ),
+                    ).fetchone()
+                )
+                if (
+                    durable_value is None
+                    or baseline_event is None
+                    or baseline_seq < 0
+                    or baseline_seq > durable_value[0]
+                    or (
+                        baseline_seq == durable_value[0]
+                        and baseline_event_id != durable_value[1]
+                    )
+                ):
+                    raise cls._corrupt(
+                        "formal Task ACK seed authority is not canonical"
+                    )
+                previous = (
+                    baseline_seq,
+                    baseline_event_id,
+                    durable_value[2],
+                )
+                reconstructed[key] = previous
+            advanced = previous is None or acked_through_seq > previous[0]
+            authoritative_seq = (
+                acked_through_seq if advanced else previous[0]
+            )
+            authoritative_event_id = (
+                acked_event_id if advanced else previous[1]
+            )
+            if (
+                not result.ok
+                or type(value) is not dict
+                or value
+                != {
+                    "task_id": command.target_ref.id,
+                    "presentation_class": presentation_class,
+                    "acked_through_seq": authoritative_seq,
+                    "acked_event_id": authoritative_event_id,
+                    "advanced": advanced,
+                }
+                or result.observed_at != row["created_at"]
+                or dict(result.extensions)
+                != command_result_extensions(TaskCommandDisposition.APPLIED)
+            ):
+                raise cls._corrupt(
+                    "formal Task ACK result is not canonical"
+                )
+            if advanced:
+                reconstructed[key] = (
+                    acked_through_seq,
+                    acked_event_id,
+                    row["created_at"],
+                )
+
+        # Schema-v5 shipped before the ACK runtime and permitted structurally
+        # valid consumer seeds with no command ledger owner. Preserve those
+        # reviewed Task4 rows, while requiring every runtime-owned consumer to
+        # match its complete ACK history exactly.
+        if any(durable.get(key) != value for key, value in reconstructed.items()):
+            raise cls._corrupt(
+                "formal Task consumer ledger disagrees with ACK command history"
+            )
 
     def _hit(self, name: str) -> None:
         if self._failpoint is not None:
@@ -4546,6 +4757,15 @@ class SqliteTaskStore:
                     "product_request_sha256": product_request.sha256,
                 }
             )
+        elif command.command_type == "task.ack_events":
+            authority.update(
+                {
+                    "presentation_class": payload.get("presentation_class"),
+                    "acked_through_seq": payload.get("acked_through_seq"),
+                    "acked_event_id": payload.get("acked_event_id"),
+                    "expected_event_head": payload.get("expected_event_head"),
+                }
+            )
         elif command.command_type == "task.create_successor":
             authority.update(
                 {
@@ -4594,6 +4814,55 @@ class SqliteTaskStore:
         reason: str,
     ) -> dict[str, object]:
         """Capture only immutable or monotonic facts used for the decision."""
+
+        if command.command_type == "task.ack_events":
+            task_row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?",
+                (command.target_ref.id,),
+            ).fetchone()
+            if task_row is None:
+                raise cls._corrupt("formal Task ACK decision lost its target")
+            task_scope = ScopeRef.from_dict(_json_load(task_row["scope_json"]))
+            if (
+                command.scope.subject_id != task_scope.subject_id
+                or command.scope.project_id != task_scope.project_id
+            ):
+                raise cls._corrupt(
+                    "formal Task ACK decision crosses consumer scope"
+                )
+            head_row = connection.execute(
+                "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                (task_row["task_id"], task_row["event_head"]),
+            ).fetchone()
+            acked_through_seq = command.payload.get("acked_through_seq")
+            acknowledged_row = (
+                None
+                if type(acked_through_seq) is not int
+                else connection.execute(
+                    "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                    (task_row["task_id"], acked_through_seq),
+                ).fetchone()
+            )
+            if head_row is None:
+                raise cls._corrupt(
+                    "formal Task ACK decision lost its event-head authority"
+                )
+            return {
+                "reason": reason,
+                "payload": cls._decision_payload_authority(command),
+                "task": {
+                    "task_id": task_row["task_id"],
+                    "subject_id": task_scope.subject_id,
+                    "project_id": task_scope.project_id,
+                    "event_head": task_row["event_head"],
+                    "head_event_id": head_row["event_id"],
+                },
+                "event_at_ack_seq_id": (
+                    None
+                    if acknowledged_row is None
+                    else acknowledged_row["event_id"]
+                ),
+            }
 
         task_row = connection.execute(
             "SELECT * FROM tasks WHERE task_id=? AND scope_key=?",
@@ -4840,11 +5109,29 @@ class SqliteTaskStore:
                 "successor_task_ids",
                 "result_sha256s",
             }
+            ack_authority_fields = {
+                "reason",
+                "payload",
+                "task",
+                "event_at_ack_seq_id",
+            }
             authority_fields = frozenset(authority)
             reprioritize_snapshot = authority.get("reprioritize")
             if (
                 authority_fields
-                not in {frozenset(base_authority_fields), frozenset(base_authority_fields | {"reprioritize"})}
+                not in {
+                    frozenset(base_authority_fields),
+                    frozenset(base_authority_fields | {"reprioritize"}),
+                    frozenset(ack_authority_fields),
+                }
+                or (
+                    authority_fields == frozenset(ack_authority_fields)
+                    and binding["command_type"] != "task.ack_events"
+                )
+                or (
+                    binding["command_type"] == "task.ack_events"
+                    and authority_fields != frozenset(ack_authority_fields)
+                )
                 or not isinstance(authority["payload"], dict)
                 or (
                     "reprioritize" in authority
@@ -4890,6 +5177,14 @@ class SqliteTaskStore:
         error = result.error
         if error is None or error.reason not in expected:
             raise cls._corrupt("formal Task business decision reason is not canonical")
+        if row["command_type"] == "task.ack_events":
+            return cls._verify_ack_business_decision(
+                connection,
+                row,
+                binding,
+                result,
+                expected=expected,
+            )
         disposition, codes = expected[error.reason]
         task_row = connection.execute(
             "SELECT * FROM tasks WHERE task_id=? AND scope_key=?",
@@ -4940,6 +5235,118 @@ class SqliteTaskStore:
             dispatch,
             successor_ids,
         )
+        return binding, result
+
+    @classmethod
+    def _verify_ack_business_decision(
+        cls,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        binding: dict[str, object],
+        result: ResultEnvelope,
+        *,
+        expected: Mapping[
+            str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]
+        ],
+    ) -> tuple[dict[str, object], ResultEnvelope]:
+        """Verify one sanitized ACK conflict against its frozen Task head."""
+
+        error = result.error
+        if error is None or error.reason not in expected:
+            raise cls._corrupt("formal Task ACK decision reason is not canonical")
+        disposition, codes = expected[error.reason]
+        try:
+            command_scope = ScopeRef.from_dict(_json_load(row["scope_key"]))
+        except (ContractViolation, FormalTaskViolation) as parse_error:
+            raise cls._corrupt(
+                "formal Task ACK decision scope is not canonical"
+            ) from parse_error
+        task_row = connection.execute(
+            "SELECT * FROM tasks WHERE task_id=?",
+            (binding["target_task_id"],),
+        ).fetchone()
+        if task_row is None:
+            raise cls._corrupt("formal Task ACK decision lost its target")
+        try:
+            task_scope = ScopeRef.from_dict(_json_load(task_row["scope_json"]))
+        except (ContractViolation, FormalTaskViolation) as parse_error:
+            raise cls._corrupt(
+                "formal Task ACK target scope is not canonical"
+            ) from parse_error
+        authority = binding["authority"]
+        payload = authority["payload"]
+        cls._verify_decision_payload_authority("task.ack_events", payload)
+        task = authority["task"]
+        task_fields = {
+            "task_id",
+            "subject_id",
+            "project_id",
+            "event_head",
+            "head_event_id",
+        }
+        bound_head = None if type(task) is not dict else task.get("event_head")
+        head_row = (
+            None
+            if type(bound_head) is not int
+            else connection.execute(
+                "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                (binding["target_task_id"], bound_head),
+            ).fetchone()
+        )
+        acked_through_seq = payload["acked_through_seq"]
+        actual_event = (
+            None
+            if type(bound_head) is not int or acked_through_seq > bound_head
+            else connection.execute(
+                "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                (binding["target_task_id"], acked_through_seq),
+            ).fetchone()
+        )
+        actual_event_id = (
+            None if actual_event is None else actual_event["event_id"]
+        )
+        if (
+            _scope_key(command_scope) != row["scope_key"]
+            or binding["scope_sha256"]
+            != cls._json_value_sha256(command_scope.to_dict())
+            or binding["command_type"] != "task.ack_events"
+            or type(task) is not dict
+            or set(task) != task_fields
+            or task["task_id"] != binding["target_task_id"]
+            or task["subject_id"] != task_scope.subject_id
+            or task["project_id"] != task_scope.project_id
+            or command_scope.assurance is not Assurance.AUTHENTICATED
+            or task_scope.assurance is not Assurance.AUTHENTICATED
+            or command_scope.subject_id != task_scope.subject_id
+            or command_scope.project_id != task_scope.project_id
+            or type(bound_head) is not int
+            or not 0 <= bound_head <= int(task_row["event_head"])
+            or head_row is None
+            or task["head_event_id"] != head_row["event_id"]
+            or authority["event_at_ack_seq_id"] != actual_event_id
+            or result.result is not None
+            or error.code not in codes
+            or authority["reason"] != error.reason
+            or dict(result.extensions) != command_result_extensions(disposition)
+            or result.observed_at != row["created_at"]
+        ):
+            raise cls._corrupt("formal Task ACK decision is not canonical")
+        expected_reason = (
+            "TASK_ACK_PRECONDITION_STALE"
+            if (
+                acked_through_seq > payload["expected_event_head"]
+                or payload["expected_event_head"] > bound_head
+            )
+            else (
+                "TASK_ACK_EVENT_MISMATCH"
+                if actual_event_id != payload["acked_event_id"]
+                else None
+            )
+        )
+        if error.reason != expected_reason:
+            raise cls._corrupt(
+                "formal Task ACK decision lacks closed historical evidence"
+            )
         return binding, result
 
     @staticmethod
@@ -5000,6 +5407,13 @@ class SqliteTaskStore:
                 "previous_outcome",
                 "attempt_number",
                 "product_request_sha256",
+            },
+            "task.ack_events": {
+                "payload_sha256",
+                "presentation_class",
+                "acked_through_seq",
+                "acked_event_id",
+                "expected_event_head",
             },
             "task.create_successor": {
                 "payload_sha256",
@@ -5085,6 +5499,13 @@ class SqliteTaskStore:
                 and type(payload["attempt_number"]) is int
                 and payload["attempt_number"] in {2, 3}
                 and digest("product_request_sha256")
+            )
+        elif command_type == "task.ack_events":
+            valid = (
+                payload["presentation_class"] in {"text", "voice"}
+                and uint("acked_through_seq")
+                and text("acked_event_id")
+                and uint("expected_event_head")
             )
         elif command_type == "task.create_successor":
             try:
@@ -7421,6 +7842,8 @@ class SqliteTaskStore:
             return _ADJUST_BUSINESS_DECISIONS
         if command_type == "task.cancel":
             return _CANCEL_BUSINESS_DECISIONS
+        if command_type == "task.ack_events":
+            return _ACK_BUSINESS_DECISIONS
         raise cls._corrupt("formal Task decision operation is unsupported")
 
     @classmethod
@@ -8485,6 +8908,11 @@ class SqliteTaskStore:
                 """,
                 (OutboxState.DELIVERED.value, now, item.outbox_id),
             )
+            if any(
+                observation.attempt_state is FormalAttemptState.TERMINAL
+                for observation in observations
+            ):
+                self._hit("executor_terminal.after_outbox_settlement")
 
     @classmethod
     def _write_adjustment_command_result(
@@ -9051,6 +9479,8 @@ class SqliteTaskStore:
                 canonical,
             ),
         )
+        if observation.attempt_state is FormalAttemptState.TERMINAL:
+            self._hit("executor_terminal.after_source_fact")
         current = FormalAttemptState(attempt["state"])
         target = observation.attempt_state
         if target is current:
@@ -9104,6 +9534,8 @@ class SqliteTaskStore:
                 observation.attempt_id,
             ),
         )
+        if target is FormalAttemptState.TERMINAL:
+            self._hit("executor_terminal.after_attempt")
         task = self._require_task_row_by_id(connection, observation.task_id)
         details = {
             "raw_status": observation.raw_status,
@@ -9128,6 +9560,8 @@ class SqliteTaskStore:
                 details=details,
             )
         ]
+        if target is FormalAttemptState.TERMINAL:
+            self._hit("executor_terminal.after_attempt_event")
         task = self._require_task_row_by_id(connection, observation.task_id)
         task_state = FormalTaskState(task["state"])
         if (
@@ -9176,6 +9610,7 @@ class SqliteTaskStore:
                     update_task=True,
             )
             appended.append(terminal_task_event)
+            self._hit("executor_terminal.after_task_terminal")
             if observation.attempt_outcome is TerminalOutcome.CANCELLED:
                 self._settle_cancel_command_results(
                     connection,
@@ -9231,6 +9666,7 @@ class SqliteTaskStore:
                         "completed task result identity was reused with different facts",
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
+                self._hit("executor_terminal.after_task_result")
             connection.execute(
                 """
                 UPDATE outbox SET state=?, last_error=?, updated_at=?
@@ -9283,44 +9719,7 @@ class SqliteTaskStore:
                     "TASK_RESULT_NOT_CAPTURED",
                 )
             result = self._task_result_from_row(rows[0])
-            if not self._result_artifacts_match(task, result.artifacts):
-                return (
-                    TaskResultAvailability.UNAVAILABLE,
-                    None,
-                    "TASK_RESULT_ARTIFACT_INVALID",
-                )
             return TaskResultAvailability.AVAILABLE, result, "TASK_RESULT_AVAILABLE"
-
-    @staticmethod
-    def _result_artifacts_match(
-        task: PersistentTaskRecord,
-        artifacts: tuple[TaskResultArtifact, ...],
-    ) -> bool:
-        """Re-prove applied artifact identity without disclosing its contents."""
-
-        if not artifacts:
-            return True
-        parsed = urlparse(task.spec.context.uri)
-        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
-            return False
-        try:
-            project_root = Path(url2pathname(parsed.path)).resolve(strict=True)
-            if not project_root.is_dir():
-                return False
-            for artifact in artifacts:
-                candidate = (project_root / artifact.relative_path).resolve(strict=True)
-                candidate.relative_to(project_root)
-                if not candidate.is_file():
-                    return False
-                digest = hashlib.sha256()
-                with candidate.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(64 * 1024), b""):
-                        digest.update(chunk)
-                if digest.hexdigest() != artifact.sha256:
-                    return False
-        except (OSError, RuntimeError, ValueError):
-            return False
-        return True
 
     @classmethod
     def _mutation_result(
@@ -9399,6 +9798,8 @@ class SqliteTaskStore:
             occurred_at=occurred_at,
             details=event_details,
         )
+        if update_task and event_type == "task.terminal":
+            self._hit("executor_terminal.after_task_event")
         if update_task:
             connection.execute(
                 """
@@ -10049,6 +10450,236 @@ class SqliteTaskStore:
             next_after_seq = events[-1].seq if has_more and events else None
             return events, head_seq, next_after_seq, has_more
 
+    def unread_events_page(
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        presentation_class: str,
+        limit: int,
+    ) -> TaskUnreadPage:
+        """Read one class watermark and retained event prefix without mutation."""
+
+        if (
+            type(presentation_class) is not str
+            or presentation_class not in {"text", "voice"}
+        ):
+            raise FormalTaskViolation(
+                "INVALID_PRESENTATION_CLASS",
+                "task unread presentation class must be text or voice",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(limit) is not int or not 1 <= limit <= _MAX_EVENT_PAGE_LIMIT:
+            raise FormalTaskViolation(
+                "INVALID_EVENT_PAGE_LIMIT",
+                f"task.unread_events limit must be between 1 and {_MAX_EVENT_PAGE_LIMIT}",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._snapshot_reader() as connection:
+            task = self._require_consumer_task_row(connection, task_id, scope)
+            consumer = connection.execute(
+                """SELECT acked_through_seq, acked_event_id
+                   FROM task_event_consumption
+                   WHERE subject_id=? AND project_id=? AND task_id=?
+                     AND presentation_class=?""",
+                (
+                    scope.subject_id,
+                    scope.project_id,
+                    task_id,
+                    presentation_class,
+                ),
+            ).fetchone()
+            self._hit("unread_events_page.after_consumer")
+            watermark = -1 if consumer is None else int(consumer["acked_through_seq"])
+            acked_event_id = None if consumer is None else consumer["acked_event_id"]
+            head_seq = int(task["event_head"])
+            rows = connection.execute(
+                """SELECT * FROM task_events
+                   WHERE task_id=? AND seq>? AND seq<=?
+                   ORDER BY seq
+                   LIMIT ?""",
+                (task_id, watermark, head_seq, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            events = tuple(self._event_from_row(row) for row in rows[:limit])
+            return TaskUnreadPage(
+                task_id=task_id,
+                presentation_class=presentation_class,
+                watermark=watermark,
+                acked_event_id=acked_event_id,
+                head_seq=head_seq,
+                events=events,
+                next_after_seq=events[-1].seq if has_more and events else None,
+                has_more=has_more,
+            )
+
+    def ack_events(
+        self,
+        command: CommandEnvelope,
+        *,
+        observed_at: str,
+    ) -> ResultEnvelope:
+        """Persist the first exact class ACK without changing canonical Task truth."""
+
+        fingerprint = command.fingerprint()
+        with self._transaction() as connection:
+            replay = self._command_replay(connection, command, fingerprint)
+            if replay is not None:
+                return replay
+            try:
+                reparsed = CommandEnvelope.from_dict(command.to_dict())
+            except ContractViolation as error:
+                raise FormalTaskViolation(
+                    "TASK_ACK_INVALID",
+                    "task.ack_events command is not canonical",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from error
+            payload = reparsed.payload
+            if (
+                reparsed.command_type != "task.ack_events"
+                or reparsed.required_capabilities != ("task.ack_events",)
+                or set(payload)
+                != {
+                    "presentation_class",
+                    "acked_through_seq",
+                    "acked_event_id",
+                    "expected_event_head",
+                }
+            ):
+                raise FormalTaskViolation(
+                    "TASK_ACK_INVALID",
+                    "task.ack_events requires one exact ACK authority payload",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            task_id = reparsed.target_ref.id
+            task = self._require_consumer_task_row(
+                connection, task_id, reparsed.scope
+            )
+            acked_through_seq = payload["acked_through_seq"]
+            expected_event_head = payload["expected_event_head"]
+            current_event_head = int(task["event_head"])
+            if not (
+                type(acked_through_seq) is int
+                and type(expected_event_head) is int
+                and 0 <= acked_through_seq
+                <= expected_event_head
+                <= current_event_head
+            ):
+                result = self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.STALE,
+                    reason="TASK_ACK_PRECONDITION_STALE",
+                    message=(
+                        "task ACK is beyond its observed or current event head"
+                    ),
+                    observed_at=observed_at,
+                )
+                self._hit("ack_events.before_commit")
+                return result
+            event = connection.execute(
+                """SELECT event_id FROM task_events
+                   WHERE task_id=? AND seq=? AND event_id=?""",
+                (
+                    task_id,
+                    acked_through_seq,
+                    payload["acked_event_id"],
+                ),
+            ).fetchone()
+            if event is None:
+                result = self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.CONFLICT,
+                    reason="TASK_ACK_EVENT_MISMATCH",
+                    message="task ACK does not bind the exact retained event",
+                    observed_at=observed_at,
+                )
+                self._hit("ack_events.before_commit")
+                return result
+            existing = connection.execute(
+                """SELECT * FROM task_event_consumption
+                   WHERE subject_id=? AND project_id=? AND task_id=?
+                     AND presentation_class=?""",
+                (
+                    reparsed.scope.subject_id,
+                    reparsed.scope.project_id,
+                    task_id,
+                    payload["presentation_class"],
+                ),
+            ).fetchone()
+            advanced = existing is None or acked_through_seq > int(
+                existing["acked_through_seq"]
+            )
+            if existing is None:
+                connection.execute(
+                    """INSERT INTO task_event_consumption(
+                           subject_id, project_id, task_id, presentation_class,
+                           acked_through_seq, acked_event_id, updated_at)
+                       VALUES(?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        reparsed.scope.subject_id,
+                        reparsed.scope.project_id,
+                        task_id,
+                        payload["presentation_class"],
+                        acked_through_seq,
+                        payload["acked_event_id"],
+                        observed_at,
+                    ),
+                )
+            elif advanced:
+                connection.execute(
+                    """UPDATE task_event_consumption
+                       SET acked_through_seq=?, acked_event_id=?, updated_at=?
+                       WHERE subject_id=? AND project_id=? AND task_id=?
+                         AND presentation_class=?""",
+                    (
+                        acked_through_seq,
+                        payload["acked_event_id"],
+                        observed_at,
+                        reparsed.scope.subject_id,
+                        reparsed.scope.project_id,
+                        task_id,
+                        payload["presentation_class"],
+                    ),
+                )
+            authoritative_seq = (
+                acked_through_seq
+                if advanced
+                else int(existing["acked_through_seq"])
+            )
+            authoritative_event_id = (
+                payload["acked_event_id"]
+                if advanced
+                else existing["acked_event_id"]
+            )
+            result = ResultEnvelope.success(
+                owner=command,
+                result={
+                    "task_id": task_id,
+                    "presentation_class": payload["presentation_class"],
+                    "acked_through_seq": authoritative_seq,
+                    "acked_event_id": authoritative_event_id,
+                    "advanced": advanced,
+                },
+                observed_at=observed_at,
+                extensions=command_result_extensions(TaskCommandDisposition.APPLIED),
+            )
+            self._insert_command(
+                connection,
+                command,
+                fingerprint,
+                _scope_key(command.scope),
+                result,
+                observed_at,
+            )
+            self._hit("ack_events.before_commit")
+            return result
+
     def event_authority_snapshot(
         self, task_id: str, scope: ScopeRef, *, max_events: int
     ) -> TaskEventAuthoritySnapshot:
@@ -10234,6 +10865,31 @@ class SqliteTaskStore:
                 "TASK_NOT_FOUND", "task is unavailable", ErrorCode.NOT_FOUND
             )
         _task_binding_from_row(row)
+        return row
+
+    @classmethod
+    def _require_consumer_task_row(
+        cls,
+        connection: sqlite3.Connection,
+        task_id: str,
+        scope: ScopeRef,
+    ) -> sqlite3.Row:
+        """Authorize one stable subject/project consumer independent of Session."""
+
+        row = cls._require_task_row_by_id(connection, task_id)
+        stored_scope, _spec = _task_binding_from_row(row)
+        if (
+            not isinstance(scope, ScopeRef)
+            or scope.assurance is not Assurance.AUTHENTICATED
+            or stored_scope.assurance is not Assurance.AUTHENTICATED
+            or (scope.subject_id, scope.project_id)
+            != (stored_scope.subject_id, stored_scope.project_id)
+        ):
+            raise FormalTaskViolation(
+                "TASK_NOT_FOUND",
+                "task is unavailable in the authorized consumer scope",
+                ErrorCode.NOT_FOUND,
+            )
         return row
 
     @staticmethod
