@@ -376,28 +376,28 @@ Tier-3 review and integration verification remain mandatory.
 
 ### SRR-16 — B16 P3 control manifest truth
 
-- Capability/owner: P3 confirmation/mutation routing and product-composition
-  evidence.
+- Capability/owner: natural-language P3 task-intent rejection and
+  product-composition evidence.
 - Risk: Tier 3 authority and diagnostic-truth boundary.
 - Main-owned source/tests:
   `jiuwenswarm/server/live_voice/product_composition_registry.py` and
   `tests/unit_tests/live_voice/test_product_composition_registry.py` only.
-- Intended behavior: a P3 result may report formal authority, an open
-  activation lease or an observed runtime only when that exact request has
-  actually crossed those boundaries. Pre-authentication, feature-off,
-  structural-validation and missing-record failures expose unavailable or
-  disabled facts; successful issue/mutation/query results retain their real
-  formal manifest.
+- Intended behavior: a rejected natural-language task intent never fabricates
+  formal authority, an open activation lease or an observed P3 runtime. Its
+  manifest contains only unavailable/disabled facts; successful intent and
+  confirmation paths retain their existing real formal manifest.
 - Acceptance: first reproduce the fabricated formal manifest for missing or
-  invalid bearer, disabled P3, invalid input and absent confirmation/task
-  records. Assert unavailable/disabled reason and evidence IDs, zero
-  confirmation consumption, Store/Executor/Agent/Task/Tool mutation and no
-  activation lease. Preserve authenticated success, exact replay and
-  post-authority typed failure truth. Cover concurrent unrelated sessions and
-  registry stop without introducing a shared schema or classifier.
-- Exclusions: no product-composition contract/schema change, authentication or
-  confirmation policy, Task operation, generation/capacity cleanup, query-lock
-  redesign, frontend behavior or new evidence vocabulary.
+  invalid bearer, structural-validation, resolver and absent pending-record
+  failures that return through `_intent_rejected_result`. Assert unavailable
+  reason/evidence IDs, zero confirmation consumption, Store/Executor/Agent/
+  Task/Tool mutation and no retained activation lease. Preserve authenticated
+  clarification/dispatched success, exact replay and content-free errors.
+  Cover another session and registry stop without introducing a shared schema
+  or classifier.
+- Exclusions: no confirmation/mutation/query result semantics,
+  product-composition contract/schema change, authentication or confirmation
+  policy, Task operation, generation/capacity cleanup, query-lock redesign,
+  frontend behavior or new evidence vocabulary.
 
 ## 6. Queued repair programs
 
