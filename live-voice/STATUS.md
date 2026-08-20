@@ -31,10 +31,12 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** close the D-088 Wave-2 physical evidence gap
-  without weakening its source authority: diagnose why the private production
-  run produced no successful file write/edit pair, A2 or clean Store settlement,
-  then make a new explicit execution decision before any further private run.
-  The accepted packet's single fresh-root retry has been consumed. The deferred
+  without weakening its source authority. Post-run source repairs now preserve
+  trusted Tool-callback success provenance, retain exact closed producer failure
+  reasons and settle Direct interruption into canonical Store truth during
+  shutdown. A newly authorized private run must still prove the successful
+  file-Tool/A2/control/cleanup journey; the accepted packet's single fresh-root
+  retry has been consumed. The deferred
   P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
   and must close before a later controlled-candidate or feature-complete claim.
@@ -89,11 +91,11 @@ risks, dependencies, acceptance and integration order.
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; P3-1, P3-2 and P3-5A source/automation/review PASS.** Schema v5 retains the P3-1 multi-Task authority, implements the closed P3-2 command/disposition/update/successor matrix and adds retained result/event plus pure unread and explicit class-isolated ACK. Durable negative decisions, failpoints, restart verification and two-Store races are closed; unsupported controls remain truthful rather than inventing Executor primitives | Close the batch's physical Direct/Tool/terminal evidence, then implement P3-5B presentation filtering/invocation, P3-6 product targeting and the later complete one-product-Task model | Executor capability/admission facts, Voice–Task Bridge and restart/concurrency matrix; exact Wave-2 facts in the [evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md) and [review](reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md) |
-| Executor & Durability | **PARTIAL overall; P3-3 source/automation/review PASS; physical Gate PARTIAL.** Immutable Direct capability/profile selection, priority/FIFO admission, project-busy/capacity deferral, absolute deadline, three-fence separation, queued reprioritization and bounded reconciliation are integrated. The private run proved overlapping A1/B1 Direct-running intervals on two distinct projects and persisted the selected Direct binding, but produced no validated file-Tool pair or A2/control/clean-settlement evidence | Diagnose the missing real Tool emission and unresolved `EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED` settlement before another bounded run; later add supported D1 checkpoint and D2 reconciliation semantics in P3-4 | Tier-3 Direct Adapter/Agent/Tool evidence plus Core/Store admission integration; D1/D2 remain explicitly excluded |
+| Executor & Durability | **PARTIAL overall; P3-3 source/automation/review PASS; physical Gate PARTIAL.** Immutable Direct capability/profile selection, priority/FIFO admission, project-busy/capacity deferral, absolute deadline, three-fence separation, queued reprioritization and bounded reconciliation are integrated. Post-run no-Provider seams close trusted callback success provenance and post-Direct-close canonical settlement. The private run proved overlapping A1/B1 Direct-running intervals on two distinct projects and persisted the selected Direct binding, but produced no validated file-Tool pair or A2/control/clean-settlement evidence | Obtain a new explicit execution decision and physically revalidate file-Tool pairing, A2 admission/control and clean settlement; later add supported D1 checkpoint and D2 reconciliation semantics in P3-4 | Tier-3 Direct Adapter/Agent/Tool evidence plus Core/Store admission integration; D1/D2 remain explicitly excluded |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses. A broader P3-1 diagnostic also reproduced the unchanged mounted Exit/immediate-re-enable presentation-ACK timing failure at 406/407; both remain outside the accepted Core/Store package | Complete P3 controls/projections while preserving profile semantics; later close capture/Exit recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus deferred P1/P2 completion |
 | Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations now include a bounded content-free SLI calculator, complete declaration-only telemetry privacy profile and source-bound canonical OTel backend codec that reuses the current observability owner's calendar and private-carrier validation. The codec is not product-composed and owns no exporter/backend lifecycle | Compose the codec behind the existing adapter/exporter in the later owning package; add validated backend configuration and exact Task/Attempt/Command/activation/generation/ACK/Executor diagnostics; then execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with a fresh physical baseline, stable EOT/Agent/TTS/first-audible facts, authoritative ACK, formal sentence-level Agent→TTS overlap and fixed-corpus p50/p95 proof | Exact scoped evidence in the [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md); P3-8B composition/retirement after P3-7; fixed corpus/environment and Conversation Runtime/P1 media owners |
-| Automated verification and product acceptance | **PARTIAL.** Exact-source G0 affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review retain their source-bound credit. P3-1 and Wave-2 source packages have affected automation/static/build and independent Tier-3 review credit; the Wave-2 physical run proves only selected two-project Direct concurrency. The controlled product candidate remains FAIL | Close the Wave-2 file-Tool/A2/control/cleanup evidence, then repair/rerun the P1/P2 seam and complete the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, the [Wave-2 evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md), current acceptance and exact clean source |
+| Automated verification and product acceptance | **PARTIAL.** Exact-source G0 affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review retain their source-bound credit. The current Wave-2 source package has a final integrated `1008 passed, 5 skipped` regression, shared Python `133/133`, TypeScript/JavaScript `40/40`, production build/static checks and independent Tier-3 review credit; its physical run proves only selected two-project Direct concurrency. The controlled product candidate remains FAIL | Close the Wave-2 file-Tool/A2/control/cleanup evidence, then repair/rerun the P1/P2 seam and complete the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, the [Wave-2 evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md), current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -152,8 +154,11 @@ exact-source Alpha result.
   seams and the default-off content-free evidence observer are locally
   implemented and integrated. Schema v5 contains only the frozen P3-3 Attempt
   facts and P3-5A consumer state beyond the prior schema; no P3-4 D1/D2 DDL was
-  introduced. Child and cumulative Tier-3 reviews report no remaining
-  Critical/Important/Minor finding.
+  introduced. Post-run repairs preserve closed producer stage diagnostics,
+  derive success only at the trusted Tool callback boundary with failure-first
+  validation, and perform status-only canonical settlement after Direct closes.
+  Child and cumulative Tier-3 reviews report no remaining Critical/Important/
+  Minor finding.
 - **Automated state:** combined command/admission/consumption/composition/
   observer automation, shared Python/JavaScript contract parity, static checks
   and the frontend production build pass on the integrated source. Exact
@@ -164,16 +169,16 @@ exact-source Alpha result.
   no clean terminal settlement. Canonical Tasks remain running while the Direct
   journals are interrupted and reconciliation is pending with
   `EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED`. The physical Gate is therefore
-  **PARTIAL**; no positive evidence JSON exists.
+  **PARTIAL**; the later source repairs have not been physically rerun and no
+  positive evidence JSON exists.
 - **Private cleanup:** both failed roots remain ACL-private and
   `CLEANUP_PENDING`; they are not reused or recursively deleted while complete
   Agent/worker/Store cleanup is unproved. Private configuration values and raw
   Agent/Tool content were not inspected.
-- **Next action:** finish the local documentation/final-regression Gate and form
-  the exact normal-push packet. A further private Provider run is not authorized
-  by this packet: first diagnose the file-Tool/selection-proof settlement gap,
-  then obtain a new explicit execution decision because the single fresh-root
-  retry has been consumed.
+- **Next action:** form the exact normal-push packet and wait for its separate
+  remote-ref approval. A further private Provider run is not authorized by this
+  packet; it needs a new explicit execution decision because the single
+  fresh-root retry has been consumed.
 - **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; positive
   provide-input/pause/resume or unsupported running controls without real
   primitives; P3-4 D1/D2; P3-5B Runtime/Web delivery; P3-6 targeting; P3-7 UI;
@@ -205,7 +210,8 @@ exact-source Alpha result.
    and P3-5A retained replay/unread ACK~~ **SOURCE/AUTOMATION/REVIEW DONE; PHYSICAL
    GATE PARTIAL.** The bounded run proved selected two-project Direct concurrency
    but not the required file-Tool pair, A2/control journey or clean settlement.
-   Diagnose that exact gap before a newly authorized run; then activate P3-4,
+   The no-Provider callback/shutdown/diagnostic seams are repaired; obtain a new
+   explicit decision before physically rerunning them, then activate P3-4,
    P3-5B and P3-6 in dependency order. Continue migrating each still-applicable
    historical oracle with its first owning package; perform code placement,
    duplicate consolidation and entrypoint/document retirement only after
@@ -294,7 +300,8 @@ exact-source Alpha result.
 
 - `P3-2/P3-3/P3-5A` Wave-2 source, schema, composition and default-off evidence
   observer have affected automation/static/build and independent Tier-3 review
-  credit recorded in the
+  credit, including the final `1008 passed, 5 skipped` combined regression,
+  recorded in the
   [implementation review](reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md).
   The associated [physical evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md)
   is intentionally PARTIAL: A1/B1 selected Direct overlap is proved, while

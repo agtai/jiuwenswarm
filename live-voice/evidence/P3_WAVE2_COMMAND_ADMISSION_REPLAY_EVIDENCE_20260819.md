@@ -12,6 +12,8 @@
 - Activation baseline: `b1a6290b6ccbe5948c5700a8c6e103798160d7f1` on
   `hx/0812_live_voice_w3`.
 - Exact second-run source: `fcf029625a589d4843a35d81ec69724d2ab453e1`.
+- Exact post-diagnostic source candidate:
+  `534a04fbac40be633d0f275357958992a25cfca1`.
 - The source worktree was clean before and after the bounded run. Both target
   repositories were source-external, ACL-private, no-remote Git repositories.
 - Existing `config.yaml` and `.env` were copied by basename only into each
@@ -33,12 +35,12 @@ filled with invented IDs, observations or booleans.
 
 | Boundary | Exact result |
 |---|---|
-| Integrated P3-2/P3-3/P3-5A/Task6/Task7 affected suite | **879 passed, 5 skipped, 0 failed** in 322.09 s; skips are platform-specific POSIX/configuration-symlink cases on Windows |
-| Shared Python contract and formal policy | **87 passed, 0 failed** |
+| Final integrated P3-2/P3-3/P3-5A/Task6/Task7/rail suite | **1008 passed, 5 skipped, 0 failed** in 235.33 s; skips are platform-specific symlink/process cases on Windows |
+| Shared Python contract and formal policy | **133 passed, 0 failed** |
 | Strict TypeScript/JavaScript contract | **40 passed, 0 failed** |
 | Task7 Store-root/junction final affected suite | **184 passed, 3 skipped, 0 failed**; final junction reviewer also ran 8 counterexamples |
-| Static/build | broad changed-surface Ruff, `compileall`, Git diff check and frontend production `npm run build` passed; Vite emitted only existing chunk/dynamic-import warnings |
-| Independent review | Tasks 1–6 cumulative review and final Task7 security review each reported **0 Critical / 0 Important / 0 Minor** after their recorded repair rounds |
+| Static/build | broad changed-surface Ruff, `py_compile`, Git diff check and frontend production `npm run build:live-voice` passed; Vite emitted only existing chunk/dynamic-import warnings |
+| Independent review | Tasks 1–7 cumulative reviews plus the post-run diagnostics, shutdown and callback repairs each reported **0 Critical / 0 Important / 0 Minor** after their recorded repair rounds |
 
 These results establish automated and source-review credit. They do not replace
 the missing physical file-Tool proof.
@@ -92,6 +94,29 @@ ordering, but it is not a persisted authorized field and is therefore an
 inference, not the reported run reason. The Provider, model, network, Agent
 initialization and Tool-emission root cause is explicitly unknown.
 
+### 3.3 Post-run source diagnosis and repair
+
+The second run's immutable facts are not upgraded, but three source gaps were
+closed without reading private configuration or running a Provider:
+
+- The producer now carries only an allowlisted closed stage reason across its
+  Windows worker boundary and maps predicate failures immediately instead of
+  consuming the remaining scenario budget under a generic failure.
+- The trusted Tool callback boundary now marks normal callback completion as
+  success without parsing private result text. Explicit, nested or malformed
+  structured failure remains failure-first and content-free. The complete rail
+  → adapter → Direct observer seam proves an ordinary file-Tool result can form
+  a successful paired observation without a Provider.
+- Composition shutdown now performs pre-close reconciliation, Direct
+  quiescence/terminalization, status-only canonical reconciliation and then
+  binding release. A real Direct adapter with temporary SQLite and a blocking
+  fake Agent reproduces the former Direct-interrupted/Store-running split and
+  proves terminal `interrupted` settlement with no new outbox delivery.
+
+These repairs are source and automation evidence only. They do not prove that
+the retained private environment will emit the required Tool pair, reach A2 or
+complete cleanup; that requires a newly authorized fresh private run.
+
 ## 4. Physical claim disposition
 
 | Required claim | Disposition |
@@ -99,11 +124,11 @@ initialization and Tool-emission root cause is explicitly unknown.
 | Production registration/factory and persisted Direct dispatch | **PROVED by durable closed facts**, but not packaged by the positive JSON validator |
 | Two different projects simultaneously Direct-running | **PROVED** by overlapping Direct journal intervals and distinct clean project roots |
 | Persisted selected Direct adapter/profile | **PROVED** for A1/B1 |
-| Paired real file write/edit Tool observations | **NOT PROVED**; no validated observer artifact or target effect |
+| Paired real file write/edit Tool observations | **NOT PROVED**; the no-Provider callback seam is repaired, but no validated private-run observer artifact or target effect exists |
 | A2 `EXECUTOR_PROJECT_BUSY`, zero pre-release effect and same-Attempt dequeue | **NOT REACHED** |
 | A2 checkpoint adjustment and completion | **NOT REACHED** |
 | Exact A1/B1 cancellation | **NOT REACHED** |
-| Store reopen/terminal/result match | **CONTRADICTED by unresolved running Core state after Direct interruption** |
+| Store reopen/terminal/result match | **CONTRADICTED in the retained run**; the shutdown ordering is repaired in a synthetic real-Direct seam but has not been physically rerun |
 | Complete Agent/worker cleanup | **NOT PROVED**; Direct owner/lease facts cleared and targets are clean, but Store reconciliation remains pending |
 
 The second root is retained under its private ACL as `CLEANUP_PENDING`; no
@@ -136,7 +161,9 @@ recursive deletion is attempted while full cleanup authority is unproved.
   ownership. Store claims, Direct lease and OS lock remain separate facts.
 - **R/I/F/K/X:** v5 reopen binds profile/requirements/digest and legacy all-null
   Attempts; selected observations preserve adapter/digest; unknown ownership
-  projects manual reconciliation without fallback. D1/D2 remain P3-4 scope.
+  projects manual reconciliation without fallback. Post-close status-only
+  reconciliation now settles exact Direct terminal truth without draining new
+  work. D1/D2 remain P3-4 scope.
 - **Physical limitation:** A1/B1 real Direct overlap is proved, but the required
   file-Tool pair and A2 busy/dequeue/control journey remain unproved.
 
@@ -159,7 +186,7 @@ The Wave-2 source package is reviewable and automated-green, while its required
 complete physical Direct/Agent/file-Tool proof remains **PARTIAL**. Overall P3,
 feature completeness, controlled product readiness and Production remain false.
 Another private Provider run is outside this packet's one-fresh-root retry
-limit and requires a new explicit execution decision after diagnosing the real
-file-Tool emission/cleanup environment. See the scoped
+limit and requires a new explicit execution decision to validate the repaired
+file-Tool and shutdown seams in the real environment. See the scoped
 [implementation review](../reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md)
 and current [STATUS](../STATUS.md).

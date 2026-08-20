@@ -12,6 +12,8 @@
 - Branch: `hx/0812_live_voice_w3`.
 - Activation baseline: `b1a6290b6ccbe5948c5700a8c6e103798160d7f1`.
 - Exact physical-attempt source: `fcf029625a589d4843a35d81ec69724d2ab453e1`.
+- Exact post-diagnostic source candidate:
+  `534a04fbac40be633d0f275357958992a25cfca1`.
 - Governing decisions: D-060/D-062 parallel ownership, D-084 completion
   boundaries, D-087 command/admission/replay contract and D-088 Wave-2 packet.
 - Preparation maps:
@@ -82,6 +84,10 @@ repair, complete P3, controlled-candidate, feature-complete, Production,
   reparse/junction protection. Non-Windows physical production fails closed
   before spawn because a portable whole-descendant ownership primitive is not
   implemented.
+- Post-run repairs preserve closed stage failures across the worker boundary,
+  mark success only at the trusted Tool callback completion boundary with
+  failure-first structured validation, and settle Direct terminal status into
+  canonical Store truth before releasing shutdown bindings.
 
 ## 3. Review and repair history
 
@@ -103,6 +109,11 @@ alone composed local history. Review repairs included:
   authority-surface proof, DACL/junction/FD/source protection, global deadline,
   stable Windows Job ownership, non-owned output retention, POSIX positive-claim
   retirement, product Store-root placement and two-level Store junction rejection.
+- Post-run diagnostics: exact stage-reason propagation, immediate predicate
+  failure, real rail→adapter→observer success provenance, nested failure-first
+  classification and status-only post-Direct-close settlement. A broad rerun
+  also exposed and closed nested business-status misclassification and a
+  load-sensitive physical-process test window without changing production timeouts.
 
 Final child and cumulative reviewers reported **0 Critical / 0 Important /
 0 Minor** after these fixes. The final Store-junction review independently
@@ -113,12 +124,12 @@ effect.
 
 | Boundary | Result |
 |---|---|
-| Integrated affected Python suite through Task7 tooling | **879 passed, 5 skipped, 0 failed** in 322.09 s |
+| Final integrated P3-2/P3-3/P3-5A/Task6/Task7/rail suite | **1008 passed, 5 skipped, 0 failed** in 235.33 s |
 | Final Store-root/junction affected suite | **184 passed, 3 skipped, 0 failed** |
-| Shared Python contract/policy | **87 passed** |
+| Shared Python contract/policy | **133 passed** |
 | Strict TypeScript/JavaScript contract | **40 passed** |
 | Frontend production build | **PASS**, 4,643 modules transformed; existing Vite warnings only |
-| Python static/compile and Git whitespace | **PASS** |
+| Python Ruff/`py_compile`, schema v5 and Git whitespace | **PASS** |
 | Tasks 1–6 cumulative independent review | **APPROVED, 0/0/0** with additional Core/Store/ACK/Direct/JS focused cases |
 | Task7 final security review | **APPROVED, 0/0/0** after all process/output/ACL/path repairs |
 
@@ -154,6 +165,12 @@ Job-owned interruption, canonical Tasks remain running while Direct journals
 are interrupted and Store reconciliation is pending with
 `EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED`.
 
+The later no-Provider seams now prove that normal trusted Tool callback
+completion can produce a content-free successful pair and that Direct shutdown
+can settle `interrupted` into canonical Store truth without dispatching new
+work. They repair source behavior but do not alter or supersede the retained
+private-run facts.
+
 The precise Provider/model/network/Agent/Tool cause is not established because
 private content was deliberately not inspected. Full Agent/OS-worker cleanup
 is also not proved, so the private root remains `CLEANUP_PENDING`. These facts
@@ -162,10 +179,10 @@ forbid a complete physical or P3-3 acceptance claim.
 ## 7. Final judgement and non-claims
 
 The source implementation is accepted as a clean local Wave-2 package candidate
-subject to the final post-document regression. The physical evidence Gate is
-**PARTIAL**, not PASS. A further real run is outside the accepted one-fresh-root
-retry bound and requires a new explicit execution decision after diagnosing the
-file-Tool/cleanup environment.
+on the exact source recorded above. The physical evidence Gate is **PARTIAL**,
+not PASS. A further real run is outside the accepted one-fresh-root retry bound
+and requires a new explicit execution decision to validate the repaired
+file-Tool and shutdown seams in the private environment.
 
 No complete P3, feature-complete, controlled product-readiness, Production,
 P3-4/P3-5B/P3-6/P3-7/P3-8B, deferred P1/P2, `develop`, remote-ref or push credit
