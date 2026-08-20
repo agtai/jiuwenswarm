@@ -32,3 +32,6 @@ export const FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = import.meta.env.VITE_FEATU
 
 /** Development-only latency measurement; disabled unless the build opts in. */
 export const FEATURE_LIVE_VOICE_LATENCY_PROBE = import.meta.env.VITE_FEATURE_LIVE_VOICE_LATENCY_PROBE === 'true';
+
+/** Development-only controlled WAV benchmark. It must never enable a product path by default. */
+export const FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK = import.meta.env.VITE_FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK === 'true';

@@ -14,6 +14,7 @@ import {
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
   createProductLatencyProbe,
+  selectProductPostCaptureBenchmark,
   extractWebErrorReason,
   formalTaskIntentResultSummary,
   inspectProductP3RetryCandidate,
@@ -60,6 +61,50 @@ test('panel latency factory is side-effect free off and invalid query never reac
   };
   assert.equal(createProductLatencyProbe({ enabled: true, browser: invalidBrowser, request() {} }), null);
   assert.equal(storageReads, 0);
+});
+
+test('post-capture benchmark selection requires opt-in, exact Session, and a visible page', () => {
+  const location = {
+    search: '?live_voice_post_capture_benchmark=1&run_id=run-20260820-a&profile_id=dialogue_no_tool&input_case_id=dialogue-paris-en-v1&round_index=0&session_id=web_benchmark_session&fixture_url=http%3A%2F%2F127.0.0.1%3A41731%2Ffixture%2Fdialogue-paris-en-v1.wav&result_url=http%3A%2F%2F127.0.0.1%3A41731%2Fresult&start_delay_ms=1000',
+    origin: 'http://localhost:5173',
+    pathname: '/project/web_benchmark_session',
+  };
+  assert.equal(selectProductPostCaptureBenchmark(false, location, 'web_benchmark_session', 'visible'), null);
+  assert.equal(selectProductPostCaptureBenchmark(true, location, 'web_foreign', 'visible'), null);
+  assert.equal(selectProductPostCaptureBenchmark(true, location, 'web_benchmark_session', 'hidden'), null);
+  assert.deepEqual(selectProductPostCaptureBenchmark(true, location, 'web_benchmark_session', 'visible'), {
+    run_id: 'run-20260820-a',
+    profile_id: 'dialogue_no_tool',
+    input_case_id: 'dialogue-paris-en-v1',
+    round_index: 0,
+    session_id: 'web_benchmark_session',
+    fixture_url: 'http://127.0.0.1:41731/fixture/dialogue-paris-en-v1.wav',
+    result_url: 'http://127.0.0.1:41731/result',
+    start_delay_ms: 1000,
+  });
+});
+
+test('panel latency factory forwards only a settled Browser batch to its diagnostic observer', async () => {
+  const storage = new Map();
+  const settled = [];
+  let identifier = 0;
+  const probe = createProductLatencyProbe({
+    enabled: true,
+    browser: {
+      location: { search: '?lv_latency_run=run-panel&lv_latency_profile=dialogue_no_tool&lv_latency_case=fixture' },
+      sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
+      performance: { now: () => 1 },
+      crypto: { randomUUID: () => `panel-${++identifier}` },
+    },
+    request: async () => ({ status: 'written' }),
+    onBatchSettled(batch, receipt) { settled.push([batch, receipt]); },
+  });
+  const identity = { correlation_id: 'correlation-1', interaction_id: 'interaction-1' };
+  const round = probe.beginRound(identity);
+  assert.equal(round.mark('browser.eot_received', identity), true);
+  const batch = round.finish('completed');
+  await probe.exportBatch('web-panel-session', batch);
+  assert.deepEqual(settled.map(([, receipt]) => receipt), [{ disposition: 'written' }]);
 });
 
 test('only a fresh foreground PresentationUnit can donate B3 response identity', () => {

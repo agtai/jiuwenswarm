@@ -5,6 +5,7 @@ import {
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
   FEATURE_LIVE_VOICE_LATENCY_PROBE,
+  FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
 } from '../../featureFlags';
@@ -84,9 +85,13 @@ import {
 } from '../../features/live-voice/formal/unifiedCommittedInputOwner';
 import {
   createBrowserLatencyProbe,
+  type BrowserLatencyBatchSettlement,
   type BrowserLatencyProbe,
+  type LatencyBatch,
   type LatencyProbeContext,
 } from '../../features/live-voice/formal/latencyProbe';
+import { createFixedAudioCaptureOwner, type FixedAudioCaptureOwner } from '../../features/live-voice/benchmark/fixedAudioCaptureEnvironment';
+import { createPostCapturePipelineBenchmark, parsePostCaptureBenchmarkConfig } from '../../features/live-voice/benchmark/postCapturePipelineBenchmark';
 import { extractWebErrorReason, webClient, webReconnectDelayMs } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
 import './LiveVoiceIntegratedRoutePanel.css';
@@ -614,17 +619,30 @@ type ProductLatencyBrowser = Readonly<{
   crypto: Pick<Crypto, 'randomUUID'>;
 }>;
 
+export function selectProductPostCaptureBenchmark(
+  enabled: boolean,
+  location: Pick<Location, 'search' | 'origin' | 'pathname'>,
+  activeSessionId: string | null,
+  visibilityState: string,
+): ReturnType<typeof parsePostCaptureBenchmarkConfig> {
+  if (enabled !== true || visibilityState !== 'visible') return null;
+  const config = parsePostCaptureBenchmarkConfig(true, location);
+  return config !== null && config.session_id === activeSessionId ? config : null;
+}
+
 export function createProductLatencyProbe(input: Readonly<{
   enabled: boolean;
   browser: ProductLatencyBrowser;
   request: (method: string, params: Record<string, unknown>) => unknown;
+  onBatchSettled?: (batch: Readonly<LatencyBatch>, receipt: BrowserLatencyBatchSettlement) => void;
+  selection_search?: string;
 }>): BrowserLatencyProbe | null {
   try {
     if (input.enabled !== true) return null;
     return createBrowserLatencyProbe({
       enabled: true,
       get location() {
-        return input.browser.location;
+        return input.selection_search === undefined ? input.browser.location : { search: input.selection_search };
       },
       get storage() {
         return input.browser.sessionStorage;
@@ -634,6 +652,7 @@ export function createProductLatencyProbe(input: Readonly<{
       get request() {
         return input.request;
       },
+      onBatchSettled: input.onBatchSettled,
     });
   } catch {
     return null;
@@ -1189,9 +1208,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const reactId = useId();
   const fallbackCorrelationId = useMemo(() => `integrated-web-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}`, [reactId]);
   const pageInstanceIdRef = useRef<string | null>(null);
+  const postCaptureConfigRef = useRef<ReturnType<typeof parsePostCaptureBenchmarkConfig> | undefined>(undefined);
+  const postCaptureControllerRef = useRef<ReturnType<typeof createPostCapturePipelineBenchmark>>(null);
+  const postCaptureAudioOwnerRef = useRef<FixedAudioCaptureOwner | null>(null);
+  if (postCaptureConfigRef.current === undefined) {
+    postCaptureConfigRef.current = typeof window === 'undefined' || typeof document === 'undefined'
+      ? null
+      : selectProductPostCaptureBenchmark(
+          FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK,
+          window.location,
+          props.activeSessionId,
+          document.visibilityState,
+        );
+  }
   const latencyProbeRef = useRef<BrowserLatencyProbe | null | undefined>(undefined);
   if (latencyProbeRef.current === undefined) {
-    latencyProbeRef.current = FEATURE_LIVE_VOICE_LATENCY_PROBE && typeof window !== 'undefined'
+    const benchmarkConfig = postCaptureConfigRef.current ?? null;
+    latencyProbeRef.current = (FEATURE_LIVE_VOICE_LATENCY_PROBE || benchmarkConfig !== null) && typeof window !== 'undefined'
       ? createProductLatencyProbe({
           enabled: true,
           browser: {
@@ -1201,6 +1234,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             get crypto() { return window.crypto; },
           },
           request: (method, params) => productRequest(method, params),
+          onBatchSettled: (batch, receipt) => {
+            void postCaptureControllerRef.current?.observeBatch(batch, receipt);
+          },
+          ...(benchmarkConfig === null
+            ? {}
+            : {
+                selection_search: new URLSearchParams({
+                  lv_latency_run: benchmarkConfig.run_id,
+                  lv_latency_profile: benchmarkConfig.profile_id,
+                  lv_latency_case: benchmarkConfig.input_case_id,
+                }).toString(),
+              }),
         })
       : null;
   }
@@ -3385,6 +3430,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         ...(latencyProbeRef.current === null
           ? {}
           : { latency_monotonic_ms: () => window.performance.now() }),
+        ...(postCaptureAudioOwnerRef.current === null
+          ? {}
+          : { audio_environment: postCaptureAudioOwnerRef.current.environment }),
         on_status: (status, reason) => {
           if (p1VoiceOwnerRef.current === owner) {
             if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === owner) {
@@ -4772,6 +4820,84 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     await startProductVoiceCapture();
   };
+
+  useEffect(() => {
+    const config = postCaptureConfigRef.current ?? null;
+    if (
+      config === null ||
+      postCaptureControllerRef.current !== null ||
+      latencyProbeRef.current === null ||
+      props.activeSessionId !== config.session_id ||
+      !props.isConnected ||
+      !props.agentRouteAvailable ||
+      p2Activation.status !== 'active' ||
+      voiceLoopEnabledRef.current ||
+      pendingProductTurnRef.current !== null ||
+      pendingUnifiedFinalRef.current !== null ||
+      pendingPresentationAttemptRef.current !== null ||
+      pendingBargeInRef.current !== null ||
+      activationOwnerRef.current?.hasPendingSubmission() ||
+      activationOwnerRef.current?.hasPendingNotification() ||
+      activationOwnerRef.current?.hasPendingPresentationAck() ||
+      activationOwnerRef.current?.hasPendingBargeIn() ||
+      typeof document === 'undefined' ||
+      document.visibilityState !== 'visible' ||
+      typeof fetch !== 'function'
+    ) return;
+    const controller = createPostCapturePipelineBenchmark(config, {
+      async fetchFixture(url, signal) {
+        const response = await fetch(url, {
+          method: 'GET',
+          signal,
+          cache: 'no-store',
+          credentials: 'omit',
+        });
+        if (!response.ok) throw new Error('FIXED_AUDIO_FETCH_FAILED');
+        return response.arrayBuffer();
+      },
+      async postResult(result) {
+        const response = await fetch(config.result_url, {
+          method: 'POST',
+          cache: 'no-store',
+          credentials: 'omit',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(result),
+        });
+        if (!response.ok) throw new Error('POST_CAPTURE_RESULT_FAILED');
+      },
+    });
+    if (controller === null) return;
+    postCaptureControllerRef.current = controller;
+    void controller.start({
+      async startFixture(wavBytes) {
+        const audioOwner = createFixedAudioCaptureOwner({
+          input_case_id: config.input_case_id,
+          wav_bytes: wavBytes,
+          expected_sample_rate_hz: 48_000,
+          start_delay_ms: config.start_delay_ms,
+        });
+        postCaptureAudioOwnerRef.current = audioOwner;
+        await startProductVoiceLoop();
+        if (p1VoiceOwnerRef.current?.status().status !== 'capturing') {
+          throw new Error('POST_CAPTURE_PRODUCT_START_FAILED');
+        }
+      },
+      async close() {
+        const voiceOwner = p1VoiceOwnerRef.current;
+        if (voiceOwner !== null) {
+          await voiceOwner.close().catch(() => undefined);
+          if (p1VoiceOwnerRef.current === voiceOwner) p1VoiceOwnerRef.current = null;
+        }
+        const audioOwner = postCaptureAudioOwnerRef.current;
+        postCaptureAudioOwnerRef.current = null;
+        await audioOwner?.close();
+      },
+    });
+    return () => {
+      if (postCaptureControllerRef.current === controller) postCaptureControllerRef.current = null;
+      void controller.close();
+    };
+  }, [p2Activation.status, props.activeSessionId, props.agentRouteAvailable, props.isConnected]);
 
   useEffect(() => {
     const taskControlsLocked =
