@@ -168,10 +168,10 @@ The latency program now has two deliberately different lanes. They must not be
 pooled or described with the same acceptance label.
 
 The **P2 causal lane** requires no Browser, microphone, Speech Provider, TTS or
-physical playout. A deterministic Agent fixture publishes 10, 50 and 100
-ordered reasoning/delta notifications followed by one `chat.final`. The real
-P2 owner/protocol consumes that backlog under a controlled per-RPC delay and
-records, with a monotonic clock:
+physical playout. A deterministic Agent fixture publishes a total of 10, 50 or
+100 ordered notifications; the final element carries `chat.final` and every
+earlier element is reasoning/delta. The real P2 owner/protocol consumes that
+backlog under a controlled per-RPC delay and records, with a monotonic clock:
 
 - model-complete to final-consumed latency;
 - notification count, RPC count, batch size and remaining queue depth;
