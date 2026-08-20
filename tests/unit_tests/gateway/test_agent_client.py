@@ -710,6 +710,123 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ("channel", "method"))
+@pytest.mark.parametrize("is_stream", (False, True))
+async def test_agent_client_rejects_huge_exact_log_identifiers_with_static_error(
+    field_name,
+    is_stream,
+):
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    envelope = e2a_from_agent_fields(
+        request_id=f"huge-log-id-{field_name}-{is_stream}",
+        channel_id="web",
+        session_id="huge-log-id-session",
+        req_method="chat.send",
+        params={"content": "ordinary"},
+        is_stream=is_stream,
+    )
+    setattr(envelope, field_name, 10**5000)
+
+    with pytest.raises(ValueError) as raised:
+        if is_stream:
+            await anext(client.send_request_stream(envelope))
+        else:
+            await client.send_request(envelope)
+
+    assert raised.value.args == ("invalid AgentServer request payload",)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert "Exceeds the limit" not in rendered
+    assert "4300 digits" not in rendered
+    assert ws.sent_payloads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("connect", "automatic_reconnect"))
+async def test_agent_client_classifies_hostile_exception_without_class_hooks(
+    path,
+    caplog,
+):
+    hooks: list[str] = []
+
+    class HostileExceptionMeta(type):
+        def __eq__(cls, other):
+            hooks.append("meta.__eq__")
+            raise AssertionError("sentinel-hostile-exception-meta-eq")
+
+        def __getattribute__(cls, name):
+            if name in {"__mro__", "__name__"}:
+                hooks.append(f"meta.{name}")
+                raise AssertionError(f"sentinel-hostile-exception-meta-{name}")
+            return type.__getattribute__(cls, name)
+
+    class HostileOSError(OSError, metaclass=HostileExceptionMeta):
+        def __getattribute__(self, name):
+            if name == "__class__":
+                hooks.append("instance.__class__")
+                raise AssertionError("sentinel-hostile-exception-class")
+            return OSError.__getattribute__(self, name)
+
+    private_failure = HostileOSError("sentinel-hostile-exception-message")
+
+    class FailingClient(AgentClientHarness):
+        async def _connect_transport(self, _uri: str) -> None:
+            raise private_failure
+
+    agent_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.gateway.routing.agent_client.production_consumer"
+    )
+    for target_logger in (agent_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+
+    escaped: BaseException | None = None
+    escaped_context: BaseException | None = None
+    escaped_cause: BaseException | None = None
+    formatted = ""
+    client = FailingClient()
+    try:
+        try:
+            if path == "connect":
+                await client.connect("wss://ordinary.invalid")
+            else:
+                client.set_uri_for_test("wss://ordinary.invalid")
+                await client.send_request(
+                    e2a_from_agent_fields(
+                        request_id="hostile-exception-reconnect",
+                        channel_id="web",
+                        session_id="hostile-exception-session",
+                        req_method="chat.send",
+                        params={"content": "ordinary"},
+                        is_stream=False,
+                    )
+                )
+        except BaseException as exc:
+            escaped = exc
+            escaped_context = object.__getattribute__(exc, "__context__")
+            escaped_cause = object.__getattribute__(exc, "__cause__")
+            object.__setattr__(exc, "__context__", None)
+            object.__setattr__(exc, "__cause__", None)
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("agent client operation failed")
+    finally:
+        for target_logger in (agent_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert type(escaped) is OSError
+    assert escaped.args == ("AgentServer WebSocket connection failed",)
+    assert escaped_cause is None
+    assert escaped_context is None
+    assert hooks == []
+    diagnostics = f"{formatted}\n{caplog.text}"
+    assert "sentinel-hostile-exception" not in diagnostics
+
+
+@pytest.mark.asyncio
 async def test_agent_client_public_transport_failures_are_content_free_for_consumers(
     caplog, monkeypatch
 ):

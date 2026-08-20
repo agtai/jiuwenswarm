@@ -33,6 +33,7 @@ from jiuwenswarm.common.e2a.models import (
     utc_now_iso,
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.ws_limits import AGENT_WS_SEND_BUDGET_BYTES
 
 logger = logging.getLogger(__name__)
 _SAFE_EXCEPTION_CLASSES: tuple[tuple[type[BaseException], str], ...] = (
@@ -51,13 +52,55 @@ _WIRE_ENCODE_FAILURE_DETAILS = {
 }
 _MAX_LEGACY_JSON_DEPTH = 16
 _MAX_LEGACY_JSON_ITEMS = 1_024
+_MAX_LEGACY_JSON_TOTAL_NODES = 16_384
+_MAX_LEGACY_JSON_BYTES = 2 * AGENT_WS_SEND_BUDGET_BYTES
 _MAX_LEGACY_INTEGER_BITS = 4_096
+_PROJECTION_EXHAUSTED = object()
+
+
+class _LegacyProjectionBudget:
+    """One conservative node/JSON-byte budget shared by the full projection."""
+
+    __slots__ = ("bytes_left", "exhausted", "nodes_left")
+
+    def __init__(self) -> None:
+        self.nodes_left = _MAX_LEGACY_JSON_TOTAL_NODES
+        self.bytes_left = _MAX_LEGACY_JSON_BYTES
+        self.exhausted = False
+
+    def take_node(self) -> bool:
+        if self.nodes_left <= 0:
+            self.exhausted = True
+            return False
+        self.nodes_left -= 1
+        return True
+
+    def take_bytes(self, count: int) -> bool:
+        if count < 0 or count > self.bytes_left:
+            self.exhausted = True
+            return False
+        self.bytes_left -= count
+        return True
+
+
+def _physical_type_mro(value: Any) -> tuple[type, ...]:
+    """Read a physical type hierarchy without instance or metaclass hooks."""
+    value_type = type(value)
+    try:
+        mro = type.__getattribute__(value_type, "__mro__")
+    except BaseException:
+        return ()
+    return mro if type(mro) is tuple else ()
+
+
+def _physical_type_is(value: Any, expected: type) -> bool:
+    return any(candidate is expected for candidate in _physical_type_mro(value))
 
 
 def _safe_exception_class(exc: BaseException) -> str:
     """Classify an error without logging its dynamic name, message or traceback."""
     for cls, category in _SAFE_EXCEPTION_CLASSES:
-        if isinstance(exc, cls):
+        if _physical_type_is(exc, cls):
             return category
     return "Exception"
 
@@ -68,66 +111,124 @@ def _bounded_exact_integer(value: Any) -> int | None:
     return value
 
 
-def _legacy_json_project(
+def _projected_scalar(
     value: Any,
     *,
-    depth: int = 0,
-    active_containers: set[int] | None = None,
+    budget: _LegacyProjectionBudget,
 ) -> Any:
-    """Project legacy wire data without invoking untrusted object hooks."""
+    try:
+        encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        encoded = b"null"
+        value = None
+    if budget.take_bytes(len(encoded)):
+        return value
+    return _PROJECTION_EXHAUSTED
+
+
+def _projected_null(budget: _LegacyProjectionBudget) -> Any:
+    return None if budget.take_bytes(4) else _PROJECTION_EXHAUSTED
+
+
+def _json_object_key_size(value: Any) -> int:
+    value_type = type(value)
+    if value_type is str:
+        key_text = value
+    elif value is None:
+        key_text = "null"
+    elif value_type is bool:
+        key_text = "true" if value else "false"
+    else:
+        key_text = json.dumps(value, ensure_ascii=False)
+    return len(json.dumps(key_text, ensure_ascii=False).encode("utf-8"))
+
+
+def _legacy_json_project_inner(
+    value: Any,
+    *,
+    depth: int,
+    active_nodes: set[int],
+    budget: _LegacyProjectionBudget,
+) -> Any:
+    if not budget.take_node():
+        return _PROJECTION_EXHAUSTED
 
     value_type = type(value)
-    if value is None or value_type in (str, bool, float):
-        return value
+    if value is None or value_type is str or value_type is bool or value_type is float:
+        return _projected_scalar(value, budget=budget)
     if value_type is int:
-        return _bounded_exact_integer(value)
+        bounded = _bounded_exact_integer(value)
+        return (
+            _projected_null(budget)
+            if bounded is None
+            else _projected_scalar(bounded, budget=budget)
+        )
     if value_type is datetime:
         tzinfo = value.tzinfo
         if tzinfo is not None and type(tzinfo) is not timezone:
-            return None
-        return datetime.isoformat(value)
+            return _projected_null(budget)
+        return _projected_scalar(datetime.isoformat(value), budget=budget)
     if value_type is date:
-        return date.isoformat(value)
-    if value_type is OutputSchema:
-        fields = object.__getattribute__(value, "__dict__")
-        if type(fields) is not dict:
-            return None
-        return _legacy_json_project(
-            fields,
-            depth=depth + 1,
-            active_containers=active_containers,
+        return _projected_scalar(date.isoformat(value), budget=budget)
+
+    is_output_schema = value_type is OutputSchema
+    is_enum = _physical_type_is(value, Enum)
+    is_container = any(
+        value_type is candidate
+        for candidate in (
+            dict,
+            list,
+            tuple,
+            set,
         )
-    if isinstance(value, Enum):
-        try:
-            enum_value = object.__getattribute__(value, "_value_")
-        except Exception:
-            return None
-        return _legacy_json_project(
-            enum_value,
-            depth=depth + 1,
-            active_containers=active_containers,
-        )
-    if depth >= _MAX_LEGACY_JSON_DEPTH or value_type not in (
-        dict,
-        list,
-        tuple,
-        set,
-    ):
-        return None
-    if active_containers is None:
-        active_containers = set()
+    )
+    if not (is_output_schema or is_enum or is_container):
+        return _projected_null(budget)
+    if depth >= _MAX_LEGACY_JSON_DEPTH:
+        return _projected_null(budget)
+
     marker = id(value)
-    if marker in active_containers:
-        return None
-    active_containers.add(marker)
+    if marker in active_nodes:
+        return _projected_null(budget)
+    active_nodes.add(marker)
     try:
+        if is_output_schema:
+            fields = object.__getattribute__(value, "__dict__")
+            if type(fields) is not dict:
+                return _projected_null(budget)
+            return _legacy_json_project_inner(
+                fields,
+                depth=depth + 1,
+                active_nodes=active_nodes,
+                budget=budget,
+            )
+        if is_enum:
+            try:
+                enum_value = object.__getattribute__(value, "_value_")
+            except BaseException:
+                return _projected_null(budget)
+            return _legacy_json_project_inner(
+                enum_value,
+                depth=depth + 1,
+                active_nodes=active_nodes,
+                budget=budget,
+            )
+
         if value_type is dict:
+            if not budget.take_bytes(2):
+                return _PROJECTION_EXHAUSTED
             projected: dict[Any, Any] = {}
             for index, (key, nested) in enumerate(value.items()):
                 if index >= _MAX_LEGACY_JSON_ITEMS:
+                    budget.exhausted = True
                     break
                 key_type = type(key)
-                if key is None or key_type in (str, bool, float):
+                if (
+                    key is None
+                    or key_type is str
+                    or key_type is bool
+                    or key_type is float
+                ):
                     projected_key = key
                 elif key_type is int:
                     projected_key = _bounded_exact_integer(key)
@@ -135,31 +236,73 @@ def _legacy_json_project(
                         continue
                 else:
                     continue
-                projected[projected_key] = _legacy_json_project(
+                if not budget.take_node():
+                    break
+                separator_bytes = 2 if projected else 0
+                if not budget.take_bytes(
+                    separator_bytes + _json_object_key_size(projected_key) + 2
+                ):
+                    break
+                projected_value = _legacy_json_project_inner(
                     nested,
                     depth=depth + 1,
-                    active_containers=active_containers,
+                    active_nodes=active_nodes,
+                    budget=budget,
                 )
+                if projected_value is _PROJECTION_EXHAUSTED:
+                    break
+                projected[projected_key] = projected_value
             return projected
+        if not budget.take_bytes(2):
+            return _PROJECTION_EXHAUSTED
         projected_items: list[Any] = []
         for index, nested in enumerate(value):
             if index >= _MAX_LEGACY_JSON_ITEMS:
+                budget.exhausted = True
                 break
-            projected_items.append(
-                _legacy_json_project(
-                    nested,
-                    depth=depth + 1,
-                    active_containers=active_containers,
-                )
+            if projected_items and not budget.take_bytes(2):
+                break
+            projected_value = _legacy_json_project_inner(
+                nested,
+                depth=depth + 1,
+                active_nodes=active_nodes,
+                budget=budget,
             )
+            if projected_value is _PROJECTION_EXHAUSTED:
+                break
+            projected_items.append(projected_value)
         return projected_items
     finally:
-        active_containers.remove(marker)
+        active_nodes.remove(marker)
+
+
+def _legacy_json_project(
+    value: Any,
+    *,
+    depth: int = 0,
+    active_containers: set[int] | None = None,
+    fail_on_budget: bool = False,
+) -> Any:
+    """Project legacy wire data without hooks under one whole-graph budget."""
+    budget = _LegacyProjectionBudget()
+    active_nodes = active_containers if active_containers is not None else set()
+    projected = _legacy_json_project_inner(
+        value,
+        depth=depth,
+        active_nodes=active_nodes,
+        budget=budget,
+    )
+    if projected is _PROJECTION_EXHAUSTED:
+        projected = None
+    if fail_on_budget and budget.exhausted:
+        raise RuntimeError("legacy wire projection budget exceeded")
+    return projected
 
 
 def _exact_legacy_scalar(value: Any) -> Any:
     """Keep exact JSON scalars and replace subclasses/objects without hooks."""
-    if value is None or type(value) in (str, float, bool):
+    value_type = type(value)
+    if value is None or value_type is str or value_type is float or value_type is bool:
         return value
     if type(value) is int:
         bounded = _bounded_exact_integer(value)
@@ -224,14 +367,17 @@ def _agent_response_legacy_snapshot(resp: AgentResponse) -> dict[str, Any]:
             "metadata": None,
             "agent_ref": None,
         }
-    return {
-        "request_id": _exact_legacy_scalar(fields.get("request_id")),
-        "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
-        "ok": fields.get("ok") if type(fields.get("ok")) is bool else False,
-        "payload": _legacy_json_project(fields.get("payload")),
-        "metadata": _legacy_json_project(fields.get("metadata")),
-        "agent_ref": _legacy_json_project(fields.get("agent_ref")),
-    }
+    projected = _legacy_json_project(
+        {
+            "request_id": _exact_legacy_scalar(fields.get("request_id")),
+            "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
+            "ok": fields.get("ok") if type(fields.get("ok")) is bool else False,
+            "payload": fields.get("payload"),
+            "metadata": fields.get("metadata"),
+            "agent_ref": fields.get("agent_ref"),
+        }
+    )
+    return projected if type(projected) is dict else {}
 
 
 def _agent_chunk_legacy_snapshot(chunk: AgentResponseChunk) -> dict[str, Any]:
@@ -255,18 +401,21 @@ def _agent_chunk_legacy_snapshot(chunk: AgentResponseChunk) -> dict[str, Any]:
             "agent_ref": None,
             "metadata": {},
         }
-    return {
-        "request_id": _exact_legacy_scalar(fields.get("request_id")),
-        "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
-        "payload": _legacy_json_project(fields.get("payload")),
-        "is_complete": (
-            fields.get("is_complete")
-            if type(fields.get("is_complete")) is bool
-            else False
-        ),
-        "agent_ref": _legacy_json_project(fields.get("agent_ref")),
-        "metadata": _legacy_json_project(fields.get("metadata")),
-    }
+    projected = _legacy_json_project(
+        {
+            "request_id": _exact_legacy_scalar(fields.get("request_id")),
+            "channel_id": _exact_legacy_scalar(fields.get("channel_id")),
+            "is_complete": (
+                fields.get("is_complete")
+                if type(fields.get("is_complete")) is bool
+                else False
+            ),
+            "payload": fields.get("payload"),
+            "agent_ref": fields.get("agent_ref"),
+            "metadata": fields.get("metadata"),
+        }
+    )
+    return projected if type(projected) is dict else {}
 
 
 def _sanitize_fallback_legacy_scalars(
@@ -485,7 +634,7 @@ def encode_agent_response_for_wire(
         logger.info(
             "[E2A][wire][out] form=unary legacy_stashed=false",
         )
-        return _legacy_json_project(wire)
+        return _legacy_json_project(wire, fail_on_budget=True)
     except Exception as e:
         logger.error(
             "[E2A][wire][out][FAIL] stage=encode form=unary exception_class=%s legacy_stashed=true",
@@ -527,7 +676,7 @@ def encode_agent_chunk_for_wire(
                 is_stream=is_stream,
             )
         logger.debug("[E2A][wire][out] form=chunk legacy_stashed=false")
-        return _legacy_json_project(wire)
+        return _legacy_json_project(wire, fail_on_budget=True)
     except Exception as e:
         logger.error(
             "[E2A][wire][out][FAIL] stage=encode form=chunk exception_class=%s legacy_stashed=true",

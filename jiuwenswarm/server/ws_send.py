@@ -24,6 +24,34 @@ _ROUTING_KEYS = (
     "context_id",
     "correlation_id",
 )
+_MAX_ROUTING_INTEGER_BITS = 4_096
+
+
+def _safe_routing_text(value: Any) -> str:
+    """Project a routing scalar without invoking subclass hooks."""
+    value_type = type(value)
+    if value_type is str:
+        return value
+    if value is None:
+        return ""
+    if value_type is bool:
+        return "True" if value else ""
+    if value_type is int:
+        if int.bit_length(value) > _MAX_ROUTING_INTEGER_BITS:
+            return ""
+        return str(value) if value else ""
+    if value_type is float:
+        return str(value) if value else ""
+    return ""
+
+
+def _safe_routing_scalar(value: Any) -> Any:
+    value_type = type(value)
+    if value is None or value_type is str or value_type is bool or value_type is float:
+        return value
+    if value_type is int and int.bit_length(value) <= _MAX_ROUTING_INTEGER_BITS:
+        return value
+    return None
 
 
 def _oversized_payload(actual_bytes: int) -> dict[str, Any]:
@@ -38,14 +66,23 @@ def _oversized_payload(actual_bytes: int) -> dict[str, Any]:
 def _build_oversized_fallback(
     wire: dict[str, Any], actual_bytes: int
 ) -> dict[str, Any]:
-    request_id = str(wire.get("request_id") or "")
-    response_id = str(wire.get("response_id") or request_id)
-    channel_id = str(wire.get("channel") or "")
-    sequence = int(wire.get("sequence") or 0)
-    agent_ref = wire.get("agent_ref")
+    request_id = _safe_routing_text(wire.get("request_id"))
+    response_id = _safe_routing_text(wire.get("response_id"))
+    if not response_id:
+        response_id = request_id
+    channel_id = _safe_routing_text(wire.get("channel"))
+    raw_sequence = wire.get("sequence")
+    sequence = (
+        raw_sequence
+        if type(raw_sequence) is int
+        and int.bit_length(raw_sequence) <= _MAX_ROUTING_INTEGER_BITS
+        else 0
+    )
+    raw_agent_ref = wire.get("agent_ref")
+    agent_ref = raw_agent_ref if type(raw_agent_ref) is dict else None
     payload = _oversized_payload(actual_bytes)
 
-    if wire.get("is_stream"):
+    if wire.get("is_stream") is True:
         payload["event_type"] = "chat.error"
         fallback = encode_agent_chunk_for_wire(
             AgentResponseChunk(
@@ -58,7 +95,7 @@ def _build_oversized_fallback(
             response_id=response_id,
             sequence=sequence,
         )
-    elif wire.get("type") == "event":
+    elif type(wire.get("type")) is str and wire.get("type") == "event":
         fallback = {
             "type": "event",
             "event": "response.error",
@@ -79,11 +116,11 @@ def _build_oversized_fallback(
 
     for key in _ROUTING_KEYS:
         if wire.get(key) is not None:
-            fallback[key] = wire[key]
+            fallback[key] = _safe_routing_scalar(wire[key])
 
     source_metadata = wire.get("metadata")
     if (
-        isinstance(source_metadata, dict)
+        type(source_metadata) is dict
         and source_metadata.get(E2A_WIRE_SERVER_PUSH_KEY) is True
     ):
         metadata = dict(fallback.get("metadata") or {})
@@ -101,22 +138,14 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
         await ws.send(serialized)
         return True
 
-    _preview = serialized[:1000]
-    if len(serialized) > 1000:
-        _preview += "...(truncated)"
+    field_count = dict.__len__(wire) if type(wire) is dict else 0
     logger.error(
-        "AgentServer WebSocket response too large: "
-        "request_id=%s session_id=%s channel=%s type=%s is_stream=%s "
-        "response_kind=%s actual_bytes=%d max_bytes=%d preview=%s",
-        wire.get("request_id"),
-        wire.get("session_id"),
-        wire.get("channel") or wire.get("channel_id"),
-        wire.get("type"),
-        wire.get("is_stream"),
-        wire.get("response_kind"),
+        "AgentServer WebSocket send failed: stage=oversized "
+        "category=wire_budget fallback=true actual_bytes=%d max_bytes=%d "
+        "field_count=%d",
         actual_bytes,
         AGENT_WS_SEND_BUDGET_BYTES,
-        _preview,
+        field_count,
     )
     fallback = _build_oversized_fallback(wire, actual_bytes)
     fallback_json = json.dumps(fallback, ensure_ascii=False)

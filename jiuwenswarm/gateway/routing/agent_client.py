@@ -21,6 +21,7 @@ from websockets.exceptions import (
     ConnectionClosedOK,
     PayloadTooBig,
 )
+from websockets.frames import Close
 
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenswarm.common.e2a.models import (
@@ -89,6 +90,7 @@ _SAFE_EXCEPTION_CLASSES: tuple[tuple[type[BaseException], str], ...] = (
 )
 _CONNECT_FAILURE_MESSAGE = "AgentServer WebSocket connection failed"
 _WIRE_REQUEST_ERROR_MESSAGE = "invalid AgentServer request payload"
+_MAX_WIRE_INTEGER_BITS = 4_096
 
 
 class _ReceiverFailure:
@@ -104,7 +106,10 @@ def _wire_request_id_key(request_id: Any) -> str:
         return request_id
     if type(request_id) is bool:
         return "True" if request_id else "False"
-    if type(request_id) not in (int, float):
+    request_id_type = type(request_id)
+    if request_id_type is not int and request_id_type is not float:
+        raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+    if type(request_id) is int and int.bit_length(request_id) > _MAX_WIRE_INTEGER_BITS:
         raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
 
     converted: str | None = None
@@ -130,9 +135,22 @@ def _validate_exact_wire_json(value: Any) -> None:
             continue
 
         current_type = type(current)
-        if current is None or current_type in (str, int, float, bool):
+        if current_type is int:
+            if int.bit_length(current) > _MAX_WIRE_INTEGER_BITS:
+                raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
             continue
-        if current_type not in (dict, list, tuple):
+        if (
+            current is None
+            or current_type is str
+            or current_type is float
+            or current_type is bool
+        ):
+            continue
+        if (
+            current_type is not dict
+            and current_type is not list
+            and current_type is not tuple
+        ):
             raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
         if current_id in active_containers:
             raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
@@ -228,7 +246,8 @@ def _log_value_shape(value: Any) -> dict[str, Any]:
     """Describe a payload-bearing value without inspecting or stringifying content."""
     if type(value) is dict:
         return {"kind": "object", "field_count": len(value)}
-    if type(value) in (list, tuple):
+    value_type = type(value)
+    if value_type is list or value_type is tuple:
         return {"kind": "array", "item_count": len(value)}
     if value is None:
         return {"kind": "null"}
@@ -246,6 +265,8 @@ def _content_hidden_log_ref(field: str, value: Any) -> str:
         value_type = b"bool"
         raw = b"1" if value else b"0"
     elif type(value) is int:
+        if int.bit_length(value) > _MAX_WIRE_INTEGER_BITS:
+            return "[OUT_OF_RANGE]"
         value_type = b"int"
         raw = str(value).encode("ascii")
     elif type(value) is float:
@@ -281,38 +302,55 @@ def _log_scalar_kind(value: Any) -> str:
     return "non_scalar"
 
 
+def _physical_type_mro(value: Any) -> tuple[type, ...]:
+    """Read the physical type hierarchy without invoking instance/metaclass hooks."""
+    value_type = type(value)
+    try:
+        mro = type.__getattribute__(value_type, "__mro__")
+    except BaseException:
+        return ()
+    return mro if type(mro) is tuple else ()
+
+
+def _physical_type_is(value: Any, expected: type) -> bool:
+    return any(candidate is expected for candidate in _physical_type_mro(value))
+
+
 def _safe_exception_class(exc: BaseException) -> str:
     """Classify an exception without trusting its dynamic class name or text."""
     for cls, category in _SAFE_EXCEPTION_CLASSES:
-        if isinstance(exc, cls):
+        if _physical_type_is(exc, cls):
             return category
     return "Exception"
 
 
 def _content_free_connect_exception(exc: Exception) -> Exception:
     """Preserve a supported public exception family with a static safe message."""
-    if isinstance(exc, TimeoutError):
+    if _physical_type_is(exc, TimeoutError):
         return TimeoutError(_CONNECT_FAILURE_MESSAGE)
-    if isinstance(exc, OSError):
+    if _physical_type_is(exc, OSError):
         return OSError(_CONNECT_FAILURE_MESSAGE)
-    if isinstance(exc, ValueError):
+    if _physical_type_is(exc, ValueError):
         return ValueError(_CONNECT_FAILURE_MESSAGE)
     return RuntimeError(_CONNECT_FAILURE_MESSAGE)
 
 
 def _safe_close_code(exc: BaseException) -> int | None:
     """Return only a protocol-bounded numeric close code, never a reason."""
+    exc_type = type(exc)
+    if not any(
+        exc_type is candidate
+        for candidate in (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK)
+    ):
+        return None
     candidates: list[Any] = []
-    try:
-        candidates.append(getattr(exc, "code", None))
-    except Exception:
-        pass
     for frame_name in ("rcvd", "sent"):
         try:
-            frame = getattr(exc, frame_name, None)
-            candidates.append(getattr(frame, "code", None))
-        except Exception:
-            pass
+            frame = object.__getattribute__(exc, frame_name)
+        except BaseException:
+            continue
+        if type(frame) is Close:
+            candidates.append(object.__getattribute__(frame, "code"))
     for candidate in candidates:
         if type(candidate) is int and 1000 <= candidate <= 4999:
             return candidate
@@ -558,9 +596,9 @@ class WebSocketAgentServerClient(AgentServerClient):
             try:
                 await self._connect_transport(uri)
             except BaseException as exc:
-                if isinstance(exc, asyncio.CancelledError) or not isinstance(
-                    exc, Exception
-                ):
+                if _physical_type_is(
+                    exc, asyncio.CancelledError
+                ) or not _physical_type_is(exc, Exception):
                     connect_failure = exc
                 else:
                     connect_failure = _content_free_connect_exception(exc)
@@ -821,9 +859,9 @@ class WebSocketAgentServerClient(AgentServerClient):
                 try:
                     await self._connect_transport(uri)
                 except BaseException as exc:
-                    if isinstance(exc, asyncio.CancelledError) or not isinstance(
-                        exc, Exception
-                    ):
+                    if _physical_type_is(
+                        exc, asyncio.CancelledError
+                    ) or not _physical_type_is(exc, Exception):
                         connect_failure = exc
                     else:
                         connect_failure = _content_free_connect_exception(exc)

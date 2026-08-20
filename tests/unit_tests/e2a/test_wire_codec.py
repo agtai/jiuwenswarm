@@ -8,6 +8,7 @@ import json
 import logging
 import traceback
 from dataclasses import asdict
+from enum import Enum
 
 import pytest
 from openjiuwen.core.session.stream import OutputSchema
@@ -84,6 +85,62 @@ def test_encode_unary_with_nested_output_schema_is_json_serializable() -> None:
             "type": "answer",
             "index": 0,
             "payload": {"output": "approval accepted", "result_type": "answer"},
+        }
+    }
+
+
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("force_fallback", (False, True))
+def test_exact_output_schema_remains_compatible_on_normal_and_fallback_paths(
+    form,
+    force_fallback,
+    monkeypatch,
+) -> None:
+    output = OutputSchema(
+        type="answer",
+        index=0,
+        payload={"output": "ordinary", "result_type": "answer"},
+    )
+    if force_fallback:
+
+        def fail_conversion(*_args, **_kwargs):
+            raise RuntimeError("forced OutputSchema fallback")
+
+        monkeypatch.setattr(
+            wire_codec,
+            (
+                "e2a_response_from_agent_response"
+                if form == "unary"
+                else "e2a_response_from_agent_chunk"
+            ),
+            fail_conversion,
+        )
+
+    values = {
+        "request_id": "output-schema-request",
+        "channel_id": "web",
+        "payload": {"result": output},
+    }
+    if form == "unary":
+        wire = encode_agent_response_for_wire(
+            AgentResponse(**values),
+            response_id="output-schema-response",
+        )
+        back = parse_agent_server_wire_unary(wire)
+    else:
+        wire = encode_agent_chunk_for_wire(
+            AgentResponseChunk(**values),
+            response_id="output-schema-response",
+            sequence=1,
+        )
+        back = parse_agent_server_wire_chunk(wire)
+
+    json.dumps(wire, ensure_ascii=False)
+    assert back.payload == {
+        "result": {
+            "type": "answer",
+            "index": 0,
+            "payload": {"output": "ordinary", "result_type": "answer"},
         }
     }
 
@@ -974,6 +1031,335 @@ async def test_normal_wire_projection_bounds_cycles_and_unknown_objects(
         "cycle": {"self": None},
         "huge": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("force_fallback", (False, True))
+async def test_wire_projection_never_invokes_hostile_class_or_metaclass_hooks(
+    form,
+    force_fallback,
+    caplog,
+    monkeypatch,
+) -> None:
+    hooks: list[str] = []
+
+    class HostileMeta(type):
+        def __eq__(cls, other):
+            hooks.append("meta.__eq__")
+            raise AssertionError("sentinel-projector-meta-eq")
+
+        def __getattribute__(cls, name):
+            if name in {"__mro__", "__name__"}:
+                hooks.append(f"meta.{name}")
+                raise AssertionError(f"sentinel-projector-meta-{name}")
+            return type.__getattribute__(cls, name)
+
+    class HostileValue(metaclass=HostileMeta):
+        def __getattribute__(self, name):
+            if name == "__class__":
+                hooks.append("instance.__class__")
+                raise AssertionError("sentinel-projector-instance-class")
+            return object.__getattribute__(self, name)
+
+    if force_fallback:
+
+        def fail_conversion(*_args, **_kwargs):
+            raise RuntimeError("sentinel-projector-conversion-message")
+
+        monkeypatch.setattr(
+            wire_codec,
+            (
+                "e2a_response_from_agent_response"
+                if form == "unary"
+                else "e2a_response_from_agent_chunk"
+            ),
+            fail_conversion,
+        )
+
+    source_values = {
+        "request_id": "safe-projector-request",
+        "channel_id": "safe-projector-channel",
+        "payload": {"nested": [{"private": HostileValue()}]},
+    }
+    wire_logger = logging.getLogger("jiuwenswarm.common.e2a.wire_codec")
+    consumer_logger = logging.getLogger(
+        "jiuwenswarm.common.e2a.wire_codec.production_consumer"
+    )
+    for target_logger in (wire_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+
+    escaped: BaseException | None = None
+    formatted = ""
+    sent_payloads: list[str] = []
+
+    class RecordingWebSocket:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(payload)
+
+    try:
+        try:
+            if form == "unary":
+                wire = encode_agent_response_for_wire(
+                    AgentResponse(ok=True, **source_values),
+                    response_id="safe-projector-response",
+                )
+            else:
+                wire = encode_agent_chunk_for_wire(
+                    AgentResponseChunk(is_complete=False, **source_values),
+                    response_id="safe-projector-response",
+                    sequence=31,
+                )
+            assert await ws_send.send_wire_payload(RecordingWebSocket(), wire) is True
+        except BaseException as exc:
+            escaped = exc
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("wire projection consumer failed")
+    finally:
+        for target_logger in (wire_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert escaped is None
+    assert hooks == []
+    assert len(sent_payloads) == 1
+    diagnostics = f"{formatted}\n{caplog.text}\n{sent_payloads[0]}"
+    assert "sentinel-projector" not in diagnostics
+    assert not [record for record in caplog.records if record.exc_info is not None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+async def test_wire_failure_classifier_uses_physical_type_without_hooks(
+    form,
+    caplog,
+    monkeypatch,
+) -> None:
+    hooks: list[str] = []
+
+    class HostileExceptionMeta(type):
+        def __eq__(cls, other):
+            hooks.append("meta.__eq__")
+            raise AssertionError("sentinel-classifier-meta-eq")
+
+        def __getattribute__(cls, name):
+            if name in {"__mro__", "__name__"}:
+                hooks.append(f"meta.{name}")
+                raise AssertionError(f"sentinel-classifier-meta-{name}")
+            return type.__getattribute__(cls, name)
+
+    class HostileRuntimeError(RuntimeError, metaclass=HostileExceptionMeta):
+        def __getattribute__(self, name):
+            if name == "__class__":
+                hooks.append("instance.__class__")
+                raise AssertionError("sentinel-classifier-instance-class")
+            return RuntimeError.__getattribute__(self, name)
+
+    private_failure = HostileRuntimeError("sentinel-classifier-private-message")
+
+    def fail_conversion(*_args, **_kwargs):
+        raise private_failure
+
+    monkeypatch.setattr(
+        wire_codec,
+        (
+            "e2a_response_from_agent_response"
+            if form == "unary"
+            else "e2a_response_from_agent_chunk"
+        ),
+        fail_conversion,
+    )
+    wire_logger = logging.getLogger("jiuwenswarm.common.e2a.wire_codec")
+    wire_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger=wire_logger.name)
+    escaped: BaseException | None = None
+    escaped_context: BaseException | None = None
+    try:
+        try:
+            if form == "unary":
+                wire = encode_agent_response_for_wire(
+                    AgentResponse(
+                        request_id="safe-classifier-request",
+                        channel_id="safe-classifier-channel",
+                        payload={"safe": True},
+                    ),
+                    response_id="safe-classifier-response",
+                )
+            else:
+                wire = encode_agent_chunk_for_wire(
+                    AgentResponseChunk(
+                        request_id="safe-classifier-request",
+                        channel_id="safe-classifier-channel",
+                        payload={"safe": True},
+                    ),
+                    response_id="safe-classifier-response",
+                    sequence=37,
+                )
+        except BaseException as exc:
+            escaped = exc
+            escaped_context = object.__getattribute__(exc, "__context__")
+            object.__setattr__(exc, "__context__", None)
+            object.__setattr__(exc, "__cause__", None)
+    finally:
+        wire_logger.removeHandler(caplog.handler)
+
+    assert escaped is None
+    assert escaped_context is None
+    assert wire["response_kind"] == "e2a.error"
+    assert hooks == []
+    assert "exception_class=RuntimeError" in caplog.text
+    assert "sentinel-classifier" not in caplog.text
+    assert not [record for record in caplog.records if record.exc_info is not None]
+
+
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("force_fallback", (False, True))
+def test_wire_projection_bounds_self_referential_enum(
+    form,
+    force_fallback,
+    monkeypatch,
+) -> None:
+    class SelfReferentialEnum(Enum):
+        VALUE = "ordinary"
+
+    object.__setattr__(
+        SelfReferentialEnum.VALUE,
+        "_value_",
+        SelfReferentialEnum.VALUE,
+    )
+
+    if force_fallback:
+
+        def fail_conversion(*_args, **_kwargs):
+            raise RuntimeError("forced bounded fallback")
+
+        monkeypatch.setattr(
+            wire_codec,
+            (
+                "e2a_response_from_agent_response"
+                if form == "unary"
+                else "e2a_response_from_agent_chunk"
+            ),
+            fail_conversion,
+        )
+
+    values = {
+        "request_id": "safe-enum-request",
+        "channel_id": "safe-enum-channel",
+        "payload": {"recursive": SelfReferentialEnum.VALUE},
+    }
+    if form == "unary":
+        wire = encode_agent_response_for_wire(
+            AgentResponse(**values),
+            response_id="safe-enum-response",
+        )
+    else:
+        wire = encode_agent_chunk_for_wire(
+            AgentResponseChunk(**values),
+            response_id="safe-enum-response",
+            sequence=41,
+        )
+
+    json.dumps(wire, ensure_ascii=False)
+    legacy_key = (
+        E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+        if form == "unary"
+        else E2A_WIRE_LEGACY_AGENT_CHUNK_KEY
+    )
+    if force_fallback:
+        assert wire["metadata"][legacy_key]["payload"]["recursive"] is None
+    else:
+        parser = (
+            parse_agent_server_wire_unary
+            if form == "unary"
+            else parse_agent_server_wire_chunk
+        )
+        assert parser(wire).payload["recursive"] is None
+
+
+def test_legacy_projection_enforces_one_global_node_and_byte_budget(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(wire_codec, "_MAX_LEGACY_JSON_TOTAL_NODES", 64, raising=False)
+    monkeypatch.setattr(wire_codec, "_MAX_LEGACY_JSON_BYTES", 256, raising=False)
+    shared_leaf = ["abcdefghij" for _ in range(32)]
+    aliased = [shared_leaf for _ in range(32)]
+
+    projected = wire_codec._legacy_json_project(aliased)
+
+    def count_nodes(value) -> int:
+        if type(value) is dict:
+            return 1 + sum(1 + count_nodes(item) for item in value.values())
+        if type(value) is list:
+            return 1 + sum(count_nodes(item) for item in value)
+        return 1
+
+    assert count_nodes(projected) <= 64
+    assert len(json.dumps(projected, ensure_ascii=False).encode("utf-8")) <= 256
+
+
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("force_fallback", (False, True))
+def test_public_wire_alias_budget_uses_protocol_compatible_static_fallback(
+    form,
+    force_fallback,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(wire_codec, "_MAX_LEGACY_JSON_TOTAL_NODES", 64)
+    monkeypatch.setattr(wire_codec, "_MAX_LEGACY_JSON_BYTES", 65_536)
+    shared_leaf = list(range(32))
+    aliased = [shared_leaf for _ in range(32)]
+
+    if force_fallback:
+
+        def fail_conversion(*_args, **_kwargs):
+            raise RuntimeError("forced public budget fallback")
+
+        monkeypatch.setattr(
+            wire_codec,
+            (
+                "e2a_response_from_agent_response"
+                if form == "unary"
+                else "e2a_response_from_agent_chunk"
+            ),
+            fail_conversion,
+        )
+
+    values = {
+        "request_id": "safe-budget-request",
+        "channel_id": "safe-budget-channel",
+        "payload": {"aliased": aliased},
+    }
+    if form == "unary":
+        wire = encode_agent_response_for_wire(
+            AgentResponse(**values),
+            response_id="safe-budget-response",
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+    else:
+        wire = encode_agent_chunk_for_wire(
+            AgentResponseChunk(**values),
+            response_id="safe-budget-response",
+            sequence=47,
+        )
+        legacy_key = E2A_WIRE_LEGACY_AGENT_CHUNK_KEY
+
+    assert wire["response_kind"] == "e2a.error"
+    assert wire["body"]["details"] == {
+        "code": "E2A.WIRE_ENCODE_ERROR",
+        "category": "wire_encode",
+    }
+    legacy = wire["metadata"][legacy_key]
+
+    def count_nodes(value) -> int:
+        if type(value) is dict:
+            return 1 + sum(1 + count_nodes(item) for item in value.values())
+        if type(value) is list:
+            return 1 + sum(count_nodes(item) for item in value)
+        return 1
+
+    assert count_nodes(legacy) <= 64
+    json.dumps(wire, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

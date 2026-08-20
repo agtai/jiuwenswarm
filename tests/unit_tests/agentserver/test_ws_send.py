@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,126 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
     assert fallback["metadata"][E2A_WIRE_SERVER_PUSH_KEY] is True
     assert fallback["session_id"] == "session-push"
     assert len(ws.sent[0].encode("utf-8")) <= 2048
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+async def test_oversized_real_wire_logs_only_content_free_bounds(
+    form,
+    caplog,
+    monkeypatch,
+):
+    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
+    private_request = f"sentinel-oversized-{form}-request"
+    private_channel = f"sentinel-oversized-{form}-channel"
+    private_response = f"sentinel-oversized-{form}-response"
+    private_payload = f"sentinel-oversized-{form}-payload"
+    if form == "unary":
+        source = encode_agent_response_for_wire(
+            AgentResponse(
+                request_id=private_request,
+                channel_id=private_channel,
+                payload={"secret": private_payload + "x" * 4096},
+            ),
+            response_id=private_response,
+        )
+    else:
+        source = encode_agent_chunk_for_wire(
+            AgentResponseChunk(
+                request_id=private_request,
+                channel_id=private_channel,
+                payload={"secret": private_payload + "x" * 4096},
+            ),
+            response_id=private_response,
+            sequence=43,
+        )
+
+    target_logger = logging.getLogger("jiuwenswarm.server.ws_send")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.ERROR, logger=target_logger.name)
+    ws = FakeWebSocket()
+    try:
+        assert await ws_send.send_wire_payload(ws, source) is False
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    assert len(ws.sent) == 1
+    sent = json.loads(ws.sent[0])
+    assert sent["response_kind"] == "e2a.error"
+    assert sent["request_id"] == private_request
+    assert sent["response_id"] == private_response
+    assert sent["channel"] == private_channel
+    assert sent["body"]["details"]["code"] == "response_too_large"
+    assert "stage=oversized" in caplog.text
+    assert "actual_bytes=" in caplog.text
+    assert "max_bytes=2048" in caplog.text
+    assert "field_count=" in caplog.text
+    diagnostics = caplog.text
+    forbidden = (
+        private_request,
+        private_channel,
+        private_response,
+        private_payload,
+        "request_id=",
+        "session_id=",
+        "channel=",
+        "response_kind=",
+        "preview=",
+    )
+    assert not [marker for marker in forbidden if marker in diagnostics]
+    assert not [record for record in caplog.records if record.exc_info is not None]
+
+
+@pytest.mark.asyncio
+async def test_oversized_fallback_sanitizes_hostile_scalar_subclasses_without_hooks(
+    caplog,
+    monkeypatch,
+):
+    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
+    hooks: list[str] = []
+
+    class HostileStr(str):
+        def __str__(self):
+            hooks.append("__str__")
+            raise AssertionError("sentinel-ws-hostile-str")
+
+        def __repr__(self):
+            hooks.append("__repr__")
+            raise AssertionError("sentinel-ws-hostile-repr")
+
+        def __getattribute__(self, name):
+            if name == "__class__":
+                hooks.append("__class__")
+                raise AssertionError("sentinel-ws-hostile-class")
+            return str.__getattribute__(self, name)
+
+    source = encode_agent_response_for_wire(
+        AgentResponse(
+            request_id="ordinary-request",
+            channel_id="ordinary-channel",
+            payload={"content": "x" * 4096},
+        ),
+        response_id="ordinary-response",
+    )
+    source["request_id"] = HostileStr("sentinel-ws-request-value")
+    source["response_id"] = HostileStr("sentinel-ws-response-value")
+    source["channel"] = HostileStr("sentinel-ws-channel-value")
+    target_logger = logging.getLogger("jiuwenswarm.server.ws_send")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.ERROR, logger=target_logger.name)
+    ws = FakeWebSocket()
+    try:
+        assert await ws_send.send_wire_payload(ws, source) is False
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    assert hooks == []
+    fallback = json.loads(ws.sent[0])
+    assert fallback["request_id"] == ""
+    assert fallback["response_id"] == ""
+    assert fallback["channel"] is None
+    diagnostics = f"{caplog.text}\n{ws.sent[0]}"
+    assert "sentinel-ws" not in diagnostics
 
 
 @pytest.mark.asyncio

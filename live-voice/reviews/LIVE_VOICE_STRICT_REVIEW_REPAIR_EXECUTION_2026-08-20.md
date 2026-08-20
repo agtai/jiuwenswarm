@@ -68,8 +68,9 @@ close.
 - Capability/owner: Gateway Agent client/logging boundary.
 - Risk: Tier 3 privacy/security.
 - Worker-owned source/tests:
-  `jiuwenswarm/gateway/routing/agent_client.py`, the directly invoked
-  `jiuwenswarm/common/e2a/wire_codec.py`, and their existing focused tests.
+  `jiuwenswarm/gateway/routing/agent_client.py`,
+  `jiuwenswarm/common/e2a/wire_codec.py`,
+  `jiuwenswarm/server/ws_send.py`, and their existing focused test files only.
 - Intended behavior: INFO/DEBUG logs expose only an allowlisted, content-free
   request/response summary; transcript/text/audio/credential/private markers
   never appear at any nesting, casing or separator variant. URI, address,
@@ -79,12 +80,19 @@ close.
   content.
 - Acceptance: first demonstrate current transcript leakage with sentinel
   payloads; verify unary and streaming success/error logs, nested list/dict and
-  malformed/private values; cover connect/send/receive/close diagnostics,
-  low-entropy ref enumeration, untrusted integers and common E2A success,
-  fallback and inverse-error logs; prove the original payload is not mutated
-  and non-Live-Voice supported logging remains compatible.
-- Exclusions: no global logging framework replacement, retention policy or
-  transport payload change.
+  malformed/private values; prove the original payload is not mutated and
+  non-Live-Voice supported logging remains compatible. Cover connect/send/
+  receive/close diagnostics, low-entropy ref enumeration, untrusted integers,
+  common E2A success, fallback and inverse-error logs. Failure classification
+  and legacy projection must not invoke hostile instance/class hooks; projection
+  has one shared whole-graph depth/item budget and fails closed on cycles or
+  aliases; invalid oversized scalar identifiers fail with one static public
+  error before send. The real bounded WebSocket sender must log only static
+  categories and counts on normal/fallback paths while preserving the existing
+  protocol-compatible fallback frame.
+- Exclusions: no global logging framework replacement, retention policy,
+  protocol wire-body/schema change, streaming/TTS behavior or new product
+  classifier.
 
 ### SRR-03 — B41 frontend development WebSocket privacy
 
