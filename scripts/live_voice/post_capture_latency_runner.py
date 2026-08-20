@@ -499,6 +499,7 @@ def _add_prepare_run_parser(commands: argparse._SubParsersAction[argparse.Argume
     prepare.add_argument("--cold-or-warm", choices=("cold", "warm"), required=True)
     prepare.add_argument("--intended-attempts", type=int, required=True)
     prepare.add_argument("--required-successes", type=int, required=True)
+    prepare.add_argument("--experiment-json", type=Path)
 
 
 def _add_run_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -526,6 +527,14 @@ def _prepare_run(args: argparse.Namespace) -> None:
     output = args.output
     if not output.is_absolute() or output.name != "run.json":
         raise ValueError("RUN_OUTPUT_INVALID")
+    experiment = None
+    if args.experiment_json is not None:
+        if not args.experiment_json.is_absolute() or not args.experiment_json.is_file():
+            raise ValueError("EXPERIMENT_INPUT_INVALID")
+        try:
+            experiment = json.loads(args.experiment_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("EXPERIMENT_INPUT_INVALID") from error
     payload = {
         "schema_version": "live-voice.latency-run.v1",
         "run_id": output.parent.name,
@@ -552,7 +561,7 @@ def _prepare_run(args: argparse.Namespace) -> None:
         "profile_ids": args.profile_id,
         "intended_attempts": args.intended_attempts,
         "required_successes": args.required_successes,
-        "experiment": None,
+        "experiment": experiment,
         "optimization_track": "post_capture_pipeline",
         "benchmark_lane": "controlled_browser_fixture",
         "fixture_profile_id": args.fixture_profile_id,

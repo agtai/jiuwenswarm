@@ -67,7 +67,7 @@ test('post-capture benchmark selection requires opt-in, exact Session, and a vis
   const location = {
     search: '?live_voice_post_capture_benchmark=1&run_id=run-20260820-a&profile_id=dialogue_no_tool&input_case_id=dialogue-paris-en-v1&round_index=0&session_id=web_benchmark_session&fixture_url=http%3A%2F%2F127.0.0.1%3A41731%2Ffixture%2Fdialogue-paris-en-v1.wav&result_url=http%3A%2F%2F127.0.0.1%3A41731%2Fresult&start_delay_ms=1000',
     origin: 'http://localhost:5173',
-    pathname: '/project/web_benchmark_session',
+    pathname: '/chat/web_benchmark_session',
   };
   assert.equal(selectProductPostCaptureBenchmark(false, location, 'web_benchmark_session', 'visible'), null);
   assert.equal(selectProductPostCaptureBenchmark(true, location, 'web_foreign', 'visible'), null);

@@ -15,13 +15,13 @@ test('post-capture parser is default-off before reading the location', () => {
       throw new Error('private location');
     },
     origin: 'http://localhost:5173',
-    pathname: '/project/web_benchmark_session',
+    pathname: '/chat/web_benchmark_session',
   };
   assert.equal(parsePostCaptureBenchmarkConfig(false, location), null);
 });
 
 test('post-capture parser accepts one closed loopback configuration', () => {
-  const config = parsePostCaptureBenchmarkConfig(true, { search: validSearch, origin: 'http://localhost:5173', pathname: '/project/web_benchmark_session' });
+  const config = parsePostCaptureBenchmarkConfig(true, { search: validSearch, origin: 'http://localhost:5173', pathname: '/chat/web_benchmark_session' });
   assert.deepEqual(config, {
     run_id: 'run-20260820-a',
     profile_id: 'dialogue_no_tool',
@@ -35,7 +35,7 @@ test('post-capture parser accepts one closed loopback configuration', () => {
 });
 
 test('post-capture parser rejects duplicate, foreign, mismatched and non-canonical configuration', () => {
-  const base = { origin: 'http://localhost:5173', pathname: '/project/web_benchmark_session' };
+  const base = { origin: 'http://localhost:5173', pathname: '/chat/web_benchmark_session' };
   for (const search of [
     `${validSearch}&round_index=1`,
     validSearch.replace('round_index=0', 'round_index=00'),
@@ -44,10 +44,18 @@ test('post-capture parser rejects duplicate, foreign, mismatched and non-canonic
     `${validSearch}&unknown=1`,
   ])
     assert.equal(parsePostCaptureBenchmarkConfig(true, { ...base, search }), null);
+  assert.equal(
+    parsePostCaptureBenchmarkConfig(true, {
+      ...base,
+      pathname: '/project/web_benchmark_session',
+      search: validSearch,
+    }),
+    null,
+  );
 });
 
 test('controller fetches once, starts product once, and posts only its completed batch receipt', async () => {
-  const config = parsePostCaptureBenchmarkConfig(true, { search: validSearch, origin: 'http://localhost:5173', pathname: '/project/web_benchmark_session' });
+  const config = parsePostCaptureBenchmarkConfig(true, { search: validSearch, origin: 'http://localhost:5173', pathname: '/chat/web_benchmark_session' });
   const calls = [];
   const controller = createPostCapturePipelineBenchmark(config, {
     async fetchFixture(url) {
@@ -94,7 +102,7 @@ test('controller fetches once, starts product once, and posts only its completed
 });
 
 test('controller failure and external close emit only unknown and close once', async () => {
-  const config = parsePostCaptureBenchmarkConfig(true, { search: validSearch, origin: 'http://localhost:5173', pathname: '/project/web_benchmark_session' });
+  const config = parsePostCaptureBenchmarkConfig(true, { search: validSearch, origin: 'http://localhost:5173', pathname: '/chat/web_benchmark_session' });
   const results = [];
   const controller = createPostCapturePipelineBenchmark(config, {
     async fetchFixture() {

@@ -648,6 +648,37 @@ def test_prepare_run_cli_writes_one_closed_v1_manifest_and_refuses_overwrite(tmp
     assert run.browser_os_class == "windows-11"
     assert runner.main(argv) == 2
 
+    experiment = tmp_path / "experiment.json"
+    experiment.write_text(
+        json.dumps(
+            {
+                "experiment_id": "tts-first-audio-v1",
+                "target_segment": "tts_request_to_first_downlink",
+                "target_statistic": "p95_ms",
+                "minimum_improvement_ms": 25.0,
+                "response_total_minimum_improvement_ms": 0.0,
+                "guardrails": [
+                    {
+                        "metric": "fallback_rate",
+                        "segment_id": None,
+                        "maximum_regression": 0.0,
+                    }
+                ],
+                "declared_experiment_points": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate_output = tmp_path / "candidate" / "run.json"
+    candidate_argv = argv.copy()
+    candidate_argv[candidate_argv.index("--output") + 1] = str(candidate_output)
+    candidate_argv.extend(("--experiment-json", str(experiment)))
+
+    assert runner.main(candidate_argv) == 0
+    candidate = load_latency_run_config(candidate_output)
+    assert candidate.experiment is not None
+    assert candidate.experiment.target_segment == "tts_request_to_first_downlink"
+
 
 def test_run_cli_rejects_round_outside_the_manifest_before_browser_effects(tmp_path: Path) -> None:
     runner = _load_runner("post_capture_latency_runner_run_invalid")

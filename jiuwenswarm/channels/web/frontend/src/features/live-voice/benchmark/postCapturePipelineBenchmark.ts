@@ -89,7 +89,7 @@ export function parsePostCaptureBenchmarkConfig(
     for (const key of ['run_id', 'input_case_id', 'session_id'] as const) if (!TOKEN.test(values[key])) return null;
     const roundIndex = canonicalInteger(values.round_index, 0, 255);
     const startDelay = canonicalInteger(values.start_delay_ms, 250, 5_000);
-    if (roundIndex === null || startDelay === null || !location.pathname.endsWith(`/${values.session_id}`)) return null;
+    if (roundIndex === null || startDelay === null || location.pathname !== `/chat/${values.session_id}`) return null;
     const fixture = closedLoopbackUrl(values.fixture_url, `/fixture/${values.input_case_id}.wav`);
     const result = closedLoopbackUrl(values.result_url, '/result');
     if (fixture === null || result === null || fixture.origin !== result.origin) return null;
