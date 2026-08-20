@@ -1262,6 +1262,7 @@ export function ChatPanel({
         previous.available === next.available &&
         previous.p1_status === next.p1_status &&
         previous.p1_reason === next.p1_reason &&
+        previous.interruption_degraded_reason === next.interruption_degraded_reason &&
         previous.input === next.input &&
         previous.output === next.output &&
         previous.text_status === next.text_status &&
@@ -1338,6 +1339,10 @@ export function ChatPanel({
           reason: recoveryDiagnostic.reason,
         },
       )
+    : productVoiceState?.interruption_degraded_reason
+      ? t('liveVoice.formal.interruptionDegraded', {
+          reason: productVoiceState.interruption_degraded_reason,
+        })
     : t(`liveVoice.status.${formalVoiceVisualState}`);
   const formalVoiceErrorReason =
     recoveryDiagnostic?.disposition === 'terminal'

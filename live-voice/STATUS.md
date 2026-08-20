@@ -267,6 +267,52 @@ integrated `P1/P2-T1`. Activation grants no implementation credit.
   fresh baseline; targets become release gates only after environment, corpus
   and sample size are frozen.
 
+#### T2-L2A — successor-capture ACK must not gate authoritative playout (SOURCE/AUTOMATED REPAIRED; PHYSICAL OPEN, 2026-08-20)
+
+- **Observed failure:** exact source `6cd8840d5` reached authoritative Agent
+  text and obtained a streaming-TTS downlink descriptor, then failed before
+  opening the browser downlink because the successor microphone uplink's first
+  frame was not ACKed inside the fixed one-second readiness window. The product
+  surfaced `AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED` under the TTS seam and emitted
+  no audible response. This is physical FAIL evidence, not a regression claim
+  against the T1 capture-rotation diff; the ACK gate predates that diff.
+- **Intended behaviour:** establish the authoritative TTS downlink independently
+  of successor-capture readiness. A ready successor capture enables barge-in;
+  a late or failed successor capture degrades interruption/listening truthfully
+  without discarding the response. Initial user capture remains fail-closed
+  until a real first-frame ACK. `playing` may be published only after browser
+  playout owns and schedules audio, never while synthesis/capture preparation
+  alone is pending.
+- **Owner/files:** formal P1 orchestration and its Integrated Web projection —
+  `productP1VoiceRoute.ts`, the minimal
+  `LiveVoiceIntegratedRoutePanel.tsx` status/diagnostic seam and their tests;
+  media adapters or Gateway files only if timing evidence proves an in-scope
+  defect rather than merely adding content-free timing diagnostics.
+- **Risk:** Tier 3 under root `TESTING.md`: capture/playout failure ownership,
+  generation/cancel fencing and physical user-observed truth cross the P1
+  Audio I/O, Realtime Media and Conversation Runtime seams.
+- **Excluded:** Provider/model/voice/billing changes; the T1 30-second rotation
+  contract; P3 Task/Agent policy or schema; weakening initial-capture ACK
+  readiness; raw-audio, transcript, credential or device-identity telemetry;
+  a physical PASS claim before a later real microphone/TTS run.
+- **Acceptance:** deterministic capture-ready, delayed-ACK, never-ACK,
+  late/stale-ACK, capture-failed and cancel/Exit-during-startup oracles; exact
+  once-only downlink/audio scheduling; truthful degraded interruption state;
+  bounded cleanup of capture, downlink, timers and media authorities; zero
+  duplicate Agent/Tool/Task/history or stale-audio effects; affected automated
+  suites and independent Tier-3 review. Real short/long TTS audibility and
+  post-playout listening remain physical acceptance.
+- **Current result:** the downlink and successor capture now start
+  independently; successor readiness failures degrade only interruption,
+  exact cleanup restores the predecessor receipt authority, and `playing` is
+  emitted only after the browser schedules audio. Affected automation is
+  **413/414** Integrated Web (only the unchanged recorded Exit/immediate-restart
+  failure) plus **103/103** browser audio/processor. Source and automated
+  evidence: [P1_T2_SUCCESSOR_CAPTURE_ACK_DECOUPLING_2026-08-20.md](evidence/P1_T2_SUCCESSOR_CAPTURE_ACK_DECOUPLING_2026-08-20.md).
+  Independent Tier-3 review and the recorded real microphone/speaker
+  acceptance remain open; no physical PASS or product-readiness credit is
+  claimed.
+
 ## Dependency route to feature complete
 
 1. ~~Audit all 15 capability/module rows against current source/tests~~ **DONE —

@@ -130,6 +130,7 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   available: boolean;
   p1_status: ProductP1VoiceStatus;
   p1_reason: string | null;
+  interruption_degraded_reason: string | null;
   input: string;
   output: string | null;
   text_status: 'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed';
@@ -1268,6 +1269,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [recoveryDiagnostic, setRecoveryDiagnostic] = useState<ProductLiveVoiceRecoveryDiagnostic | null>(null);
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
+  const [interruptionDegradedReason, setInterruptionDegradedReason] = useState<string | null>(null);
   const [deviceSelection, setDeviceSelection] = useState<Readonly<BrowserAudioDeviceSelectionSnapshot>>({
     status: FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed',
     reason: null,
@@ -3898,6 +3900,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
             setP1VoiceStatus(status);
             setP1VoiceReason(reason);
+            const diagnostics = callbackOwner.captureDiagnostics();
+            setInterruptionDegradedReason(
+              ['playing', 'recognized'].includes(status)
+              && diagnostics.successor_readiness === 'degraded'
+                ? diagnostics.successor_readiness_reason
+                : null,
+            );
             const diagnosticBinding = activationOwnerRef.current?.snapshot().binding ?? null;
             const ownsCurrentDiagnosticBinding =
               mountedRef.current &&
@@ -5375,6 +5384,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         available: productVoiceAvailable,
         p1_status: p1VoiceStatus,
         p1_reason: p1VoiceReason,
+        interruption_degraded_reason: interruptionDegradedReason,
         input: productInput,
         output: productOutput,
         text_status: productTextStatus,
@@ -5402,6 +5412,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [
     p1VoiceReason,
     p1VoiceStatus,
+    interruptionDegradedReason,
     productInput,
     productOperationRetained,
     productOutput,
