@@ -6062,6 +6062,143 @@ def test_historical_cancel_settlement_rejects_impossible_delivered_outbox(
 
 
 @pytest.mark.parametrize(
+    ("persisted_value", "stored_value", "storage_class"),
+    [
+        pytest.param(1.5, 1.5, "real", id="real-one-point-five"),
+        pytest.param(42.5, 42.5, "real", id="real-forty-two-point-five"),
+        pytest.param("1.5", 1.5, "real", id="numeric-text-stored-real"),
+        pytest.param(b"1", b"1", "blob", id="blob-one"),
+        pytest.param(0, 0, "integer", id="integer-zero"),
+        pytest.param(-1, -1, "integer", id="integer-negative"),
+        pytest.param(0.5, 0.5, "real", id="real-below-one"),
+        pytest.param("bad", "bad", "text", id="nonnumeric-text"),
+    ],
+)
+def test_historical_cancel_settlement_rejects_noncanonical_delivery_count(
+    tmp_path: Path,
+    persisted_value: object,
+    stored_value: object,
+    storage_class: str,
+) -> None:
+    (
+        database,
+        _store,
+        executor,
+        _core,
+        _retry_command,
+        _retry_grant,
+        _retried,
+        attempt_a,
+        _attempt_b,
+        _settlement_a,
+        _settlement_b,
+    ) = _formal_cancel_then_retry(tmp_path)
+    with sqlite3.connect(database) as connection:
+        updated = connection.execute(
+            """UPDATE outbox SET delivery_count=?
+               WHERE attempt_id=? AND kind=?""",
+            (
+                persisted_value,
+                attempt_a,
+                OutboxKind.ATTEMPT_CANCEL.value,
+            ),
+        )
+        assert updated.rowcount == 1
+        connection.commit()
+        stored = connection.execute(
+            """SELECT delivery_count, typeof(delivery_count)
+               FROM outbox WHERE attempt_id=? AND kind=?""",
+            (attempt_a, OutboxKind.ATTEMPT_CANCEL.value),
+        ).fetchone()
+    assert stored == (stored_value, storage_class)
+    before = _database_authority_bytes(database)
+    executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    )
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_authority_bytes(database) == before
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    ) == executor_effects
+
+
+@pytest.mark.parametrize(
+    ("persisted_value", "stored_value"),
+    [
+        pytest.param(1, 1, id="integer-one"),
+        pytest.param(42, 42, id="integer-forty-two"),
+        pytest.param(True, 1, id="boolean-affinity-integer-one"),
+        pytest.param(1.0, 1, id="real-affinity-integer-one"),
+        pytest.param("1", 1, id="text-affinity-integer-one"),
+    ],
+)
+def test_historical_cancel_settlement_accepts_integer_delivery_count_storage(
+    tmp_path: Path,
+    persisted_value: object,
+    stored_value: int,
+) -> None:
+    (
+        database,
+        _store,
+        executor,
+        _core,
+        _retry_command,
+        _retry_grant,
+        retried,
+        attempt_a,
+        attempt_b,
+        _settlement_a,
+        _settlement_b,
+    ) = _formal_cancel_then_retry(tmp_path)
+    with sqlite3.connect(database) as connection:
+        updated = connection.execute(
+            """UPDATE outbox SET delivery_count=?
+               WHERE attempt_id=? AND kind=?""",
+            (
+                persisted_value,
+                attempt_a,
+                OutboxKind.ATTEMPT_CANCEL.value,
+            ),
+        )
+        assert updated.rowcount == 1
+        connection.commit()
+        stored = connection.execute(
+            """SELECT delivery_count, typeof(delivery_count)
+               FROM outbox WHERE attempt_id=? AND kind=?""",
+            (attempt_a, OutboxKind.ATTEMPT_CANCEL.value),
+        ).fetchone()
+    assert stored == (stored_value, "integer")
+    assert type(stored[0]) is int
+    before = _database_authority_bytes(database)
+    executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    )
+
+    reopened = SqliteTaskStore(database)
+
+    current = reopened.get_task(str(retried.result["task_id"]), _scope())
+    assert current.attempt_id == attempt_b
+    assert current.state is FormalTaskState.RUNNING
+    assert reopened.get_attempt(attempt_a).outcome is TerminalOutcome.CANCELLED
+    assert _database_authority_bytes(database) == before
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    ) == executor_effects
+
+
+@pytest.mark.parametrize(
     "corruption",
     [
         "cross_epoch_settlement",

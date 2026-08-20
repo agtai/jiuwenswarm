@@ -6957,9 +6957,15 @@ class SqliteTaskStore:
             _dispatch_scope, dispatch_spec, _dispatch_ref, _dispatch_adjustment = (
                 cls._outbox_payload(dispatch_rows[0]["payload_json"])
             )
+            raw_delivery_count = outbox["delivery_count"]
             try:
                 outbox_state = OutboxState(outbox["state"])
-                delivery_count = int(outbox["delivery_count"])
+                if expected_type == "task.cancel":
+                    if type(raw_delivery_count) is not int:
+                        raise TypeError("cancel delivery count is not an integer")
+                    delivery_count = raw_delivery_count
+                else:
+                    delivery_count = int(raw_delivery_count)
             except (TypeError, ValueError) as error:
                 raise cls._corrupt(
                     "formal Task control outbox lifecycle is invalid"
