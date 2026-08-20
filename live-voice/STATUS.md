@@ -30,7 +30,7 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects; **24/88 are closed** on this branch,
+  packet against 88 unique current defects; **27/88 are closed** on this branch,
   beginning with exact authority and privacy boundaries. Progress is counted
   only after reproduced defects,
   affected verification and independent module review close; the
@@ -144,7 +144,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — **24/88 closed**, 64 unique current
+- **Packet:** strict-review remediation — **27/88 closed**, 61 unique current
   defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
@@ -177,24 +177,23 @@ exact-source Alpha result.
   their exact positive, negative, boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
-- **Remaining accounting:** 64 unique defects remain: 11 A findings, 31 B
-  findings, 19 L findings and D1-D3. Three are the activated SRR-20 candidates
-  B12, B13 and B14; the other 61 remain unactivated in the owner-scoped queue.
+- **Remaining accounting:** 61 unique defects remain: 11 A findings, 28 B
+  findings, 19 L findings and D1-D3, all unactivated in the owner-scoped queue.
   C3 continues to alias B42 and B17 continues to alias B13, so neither creates
-  another unique repair. Four findings discovered while closing Wave 9 are
-  routed in §6.1 of the execution contract and are outside the audited 88.
+  another unique repair. Six findings discovered while closing Wave 9 are routed
+  in §6.1 of the execution contract and are outside the audited 88.
 - **Excluded:** new product policy/classifier, schema migration, unrecorded
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** SRR-21/B36+L20+L21 closed at `b0341f41b` after independent
-  Tier-3 review. SRR-20/B12+B13+B14 was **rejected** by independent review at
-  `f04f10027` and carries no closure credit; two blocking findings are returned
-  to its packet owner in §5.9 of the execution contract, B12 having passed in
-  full. Repair those findings on the same worker branch, then obtain a fresh
-  independent review before Main integrates anything from that candidate. Only
-  after SRR-20 closes or is explicitly paused may the next owner-scoped packet
-  be activated from §6.
+- **Next action:** Wave 9 is closed. SRR-21/B36+L20+L21 closed at `b0341f41b`
+  and SRR-20/B12+B13+B14 closed at `0a2361f81` after a reject-then-repair cycle
+  whose second independent review signed `2da9b0a15`. No candidate is in
+  flight. On explicit resume, activate one or more disjoint owner-scoped
+  packets from §6, each frozen from the latest integration branch with its
+  capability/module, risk tier, dependencies, scope, exclusions and acceptance
+  recorded before implementation, and consider the six §6.1 findings for their
+  own scope and risk checkpoints.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original
