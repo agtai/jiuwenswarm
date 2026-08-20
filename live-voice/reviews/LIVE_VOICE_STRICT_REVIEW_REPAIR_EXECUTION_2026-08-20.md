@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 14/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 15/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -548,6 +548,7 @@ and risk checkpoint before implementation.
 | SRR-16 / B16 | 12/88 | `90865abd4`; every natural-language P3 rejection now reports authority and P3 control as unavailable with package-only/no-runtime evidence instead of fabricating a trusted lease or observed runtime. Invalid bearer/structure, missing binding, resolver failure, duplicate/concurrent replay, other-session, stop and restart probes retain zero forbidden effects; 151 registry + 47 real AgentServer route tests passed after independent Tier-3 review and integration |
 | SRR-17 / A25 | 13/88 | `09d2239ff`; consumed and expired P3 confirmations are atomically compacted into a bounded durable replay fence, so only live authority consumes capacity. Exact retained replay and stable expiry remain truthful, evicted tokens never authorize, concurrent reopened issuers cannot exceed capacity, cleanup/insert failure rolls back without partial reclamation, and all forbidden Task mutations stay zero; 45 primary + 349 affected tests passed after independent Tier-3 review and integration |
 | SRR-18 / A23 | 14/88 | `3c85728fd`; submit, barge-in and presentation-ACK operations are frozen and durably checkpointed before pending retention or completed-replay eviction. UTF-8/serialization/checkpoint rejection leaves no ghost authority or network/Agent/Task/media/presentation effects, exact concurrent/restart replay remains once-only, and the 128-entry boundary preserves the old replay until durable successor admission; 90 focused tests plus full candidate/baseline Integrated Web comparison passed after independent Tier-3 review |
+| SRR-19 / L14 | 15/88 | `7f9dac8fe`; both public scheduling entry points now return the exact UTF-8 owner-scope diagnostic with the existing `TASK_SCOPE_REQUIRED` code. Eight invalid-scope cases prove zero Store, scheduler and retained execution-context effects; the full auto-harness suite passed 129/129 under the Tier-1 literal-only boundary |
 
 ## 8. Global exclusions
 
