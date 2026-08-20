@@ -287,13 +287,13 @@ def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | No
     bounded observation budget are malformed and therefore fail closed.
     """
 
-    stack: list[tuple[Any, int]] = [(value, 0)]
+    stack: list[tuple[Any, int, bool]] = [(value, 0, True)]
     seen_containers: set[int] = set()
     explicit_success = False
     visited_nodes = 0
 
     while stack:
-        current, depth = stack.pop()
+        current, depth, strict_status = stack.pop()
         visited_nodes += 1
         if visited_nodes > _TOOL_OUTCOME_MAX_NODES or depth > _TOOL_OUTCOME_MAX_DEPTH:
             return True
@@ -329,14 +329,16 @@ def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | No
             if "status" in current:
                 status = current.get("status")
                 if not isinstance(status, str):
-                    return True
-                normalized_status = status.strip().lower()
-                if normalized_status in _TOOL_FAILURE_STATUSES:
-                    return True
-                if normalized_status in _TOOL_SUCCESS_STATUSES:
-                    explicit_success = True
+                    if strict_status:
+                        return True
                 else:
-                    return True
+                    normalized_status = status.strip().lower()
+                    if normalized_status in _TOOL_FAILURE_STATUSES:
+                        return True
+                    if normalized_status in _TOOL_SUCCESS_STATUSES:
+                        explicit_success = True
+                    elif strict_status:
+                        return True
 
             if "error" in current and _structured_error_present(current.get("error")):
                 return True
@@ -352,13 +354,18 @@ def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | No
                 if exit_failed is False:
                     explicit_success = True
 
-            children = current.values()
+            children = ((child, False) for child in current.values())
         else:
-            children = current
+            # A top-level list represents one or more callback result roots.
+            # Once a result dict is entered, nested status fields can describe
+            # business metadata (for example a Symphony graph node's "final"
+            # state). Known failure states still fail at every depth, while an
+            # unrelated nested status must not override the root outcome.
+            children = ((child, strict_status) for child in current)
 
         if visited_nodes + len(stack) + len(current) > _TOOL_OUTCOME_MAX_NODES:
             return True
-        stack.extend((child, depth + 1) for child in children)
+        stack.extend((child, depth + 1, child_strict) for child, child_strict in children)
 
     return False if explicit_success else None
 
