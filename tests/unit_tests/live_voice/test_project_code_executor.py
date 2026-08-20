@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 import runpy
 import sqlite3
@@ -3098,6 +3099,137 @@ def test_direct_executor_attempt_timeout_is_closed_and_bounded(
             tmp_path / "p3.sqlite3",
             attempt_timeout=value,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("failing_pragma", "expected_statements"),
+    [
+        (1, ("PRAGMA busy_timeout=30000",)),
+        (2, ("PRAGMA busy_timeout=30000", "PRAGMA foreign_keys=ON")),
+    ],
+)
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-ok", "close-fails"])
+def test_direct_journal_setup_failure_closes_its_real_sqlite_handle_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_pragma: int,
+    expected_statements: tuple[str, ...],
+    close_fails: bool,
+) -> None:
+    """Catches a setup PRAGMA escaping the connection cleanup boundary."""
+
+    database = tmp_path / "setup-failure.sqlite3"
+    primary_failure = RuntimeError("PRIVATE_PRAGMA_PRIMARY_SENTINEL")
+    close_failure = RuntimeError("PRIVATE_SQLITE_CLOSE_SENTINEL")
+    real_connect = sqlite3.connect
+    proxies: list[RealConnectionProxy] = []
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+
+    class RealConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+            self.statements: list[str] = []
+            self.close_calls = 0
+
+        @property
+        def row_factory(self):
+            return self.connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value) -> None:
+            self.connection.row_factory = value
+
+        def execute(self, statement: str) -> sqlite3.Cursor:
+            if statement.startswith("PRAGMA"):
+                self.statements.append(statement)
+                if len(self.statements) == failing_pragma:
+                    raise primary_failure
+            return self.connection.execute(statement)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.connection.close()
+            if close_fails:
+                raise close_failure
+
+    def connect(*args, **kwargs) -> RealConnectionProxy:
+        proxy = RealConnectionProxy(real_connect(*args, **kwargs))
+        proxies.append(proxy)
+        return proxy
+
+    def capture_warning(message: str, *args: object) -> None:
+        warnings.append((message, args))
+
+    monkeypatch.setattr(
+        logging.getLogger(project_code_executor.__name__),
+        "warning",
+        capture_warning,
+    )
+    monkeypatch.setattr(project_code_executor.sqlite3, "connect", connect)
+
+    with pytest.raises(RuntimeError) as raised:
+        DirectProjectCodeExecutorAdapter(
+            object(),  # type: ignore[arg-type] -- setup never consults the resolver
+            database,
+        )
+
+    assert raised.value is primary_failure
+    assert len(proxies) == 1
+    proxy = proxies[0]
+    assert tuple(proxy.statements) == expected_statements
+    assert proxy.close_calls == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        proxy.connection.execute("SELECT 1")
+
+    assert database.exists()
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    moved_database = tmp_path / "released.sqlite3"
+    database.replace(moved_database)
+    moved_database.replace(database)
+    probe = real_connect(database, timeout=0.0)
+    try:
+        probe.execute("BEGIN EXCLUSIVE")
+        probe.rollback()
+    finally:
+        probe.close()
+
+    assert warnings == (
+        [("[LiveVoiceP3] direct journal connection cleanup failed", ())]
+        if close_fails
+        else []
+    )
+    rendered_messages = repr(warnings)
+    assert "PRIVATE_PRAGMA_PRIMARY_SENTINEL" not in rendered_messages
+    assert "PRIVATE_SQLITE_CLOSE_SENTINEL" not in rendered_messages
+
+
+def test_direct_journal_connect_failure_has_no_handle_to_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches cleanup being invented when SQLite never returned a handle."""
+
+    database = tmp_path / "connect-failure.sqlite3"
+    primary_failure = RuntimeError("connect failed before ownership")
+    connect_calls = 0
+
+    def fail_connect(*_args, **_kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        raise primary_failure
+
+    monkeypatch.setattr(project_code_executor.sqlite3, "connect", fail_connect)
+
+    with pytest.raises(RuntimeError) as raised:
+        DirectProjectCodeExecutorAdapter(
+            object(),  # type: ignore[arg-type] -- setup never consults the resolver
+            database,
+        )
+
+    assert raised.value is primary_failure
+    assert connect_calls == 1
+    assert not database.exists()
 
 
 def test_attempt_deadline_is_absolute_and_heartbeat_expires_at_exact_boundary(

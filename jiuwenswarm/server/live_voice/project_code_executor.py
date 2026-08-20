@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -75,6 +76,8 @@ from .formal_task_models import (
     TaskResultArtifact,
     utc_now,
 )
+
+logger = logging.getLogger(__name__)
 
 FORMAL_PROJECT_EXECUTOR_ID = "jiuwenswarm_code_agent.project_code"
 DIRECT_PROJECT_EXECUTOR_REF_PREFIX = "d0-project:"
@@ -1226,14 +1229,24 @@ class _DirectProjectAttemptJournal:
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database, timeout=30.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=30000")
-        connection.execute("PRAGMA foreign_keys=ON")
+        primary_error: BaseException | None = None
         try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA foreign_keys=ON")
             with connection:
                 yield connection
+        except BaseException as error:  # noqa: BLE001 -- retain primary failure truth
+            primary_error = error
+            raise
         finally:
-            connection.close()
+            try:
+                connection.close()
+            except BaseException:  # noqa: BLE001 -- never mask the primary failure
+                if primary_error is None:
+                    raise
+                # Exception text may contain the private journal path.
+                logger.warning("[LiveVoiceP3] direct journal connection cleanup failed")
 
     def all_attempts(self) -> tuple[_DirectAttempt, ...]:
         with self._connect() as connection:
