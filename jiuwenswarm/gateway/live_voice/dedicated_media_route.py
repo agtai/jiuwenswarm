@@ -756,6 +756,7 @@ async def run_dedicated_media_socket_leaf(
     binding = session.binding
     attach_sent = False
     socket_touched = False
+    socket_close_started = False
     speech_start_task: asyncio.Task[MediaSpeechStart] | None = None
     speech_start_sent = False
     speech_start_ms: int | None = None
@@ -819,7 +820,10 @@ async def run_dedicated_media_socket_leaf(
         return process_control, cleanup_pending_count
 
     async def close_socket() -> None:
-        nonlocal socket_touched
+        nonlocal socket_close_started, socket_touched
+        if socket_close_started:
+            return
+        socket_close_started = True
         try:
             close = socket.close
         except Exception:
@@ -854,10 +858,25 @@ async def run_dedicated_media_socket_leaf(
         socket_touched = True
         try:
             await send(serialize_media_control(control))
-        except asyncio.CancelledError:
-            if receive_task is not None and not receive_task.done():
-                receive_task.cancel()
+        except (
+            asyncio.CancelledError,
+            GeneratorExit,
+            KeyboardInterrupt,
+            SystemExit,
+        ):
             session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            try:
+                await close_socket()
+            except BaseException:
+                pass
+            try:
+                await settle_owned_tasks(
+                    receive_task,
+                    speech_start_task,
+                    end_of_turn_task,
+                )
+            except BaseException:
+                pass
             raise
         except Exception:
             return False

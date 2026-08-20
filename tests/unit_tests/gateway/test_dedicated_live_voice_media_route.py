@@ -106,6 +106,25 @@ class _CancellationObservedSocket(_BlockingDedicatedSocket):
             raise
 
 
+class _BlockingSendDedicatedSocket(_FakeDedicatedSocket):
+    def __init__(self, incoming: list[object], *, block_at: int = 1) -> None:
+        super().__init__(incoming)
+        self.block_at = block_at
+        self.send_started = asyncio.Event()
+        self.send_cancelled = asyncio.Event()
+
+    async def send(self, message: str | bytes) -> None:
+        if len(self.sent) != self.block_at:
+            self.sent.append(message)
+            return
+        self.send_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.send_cancelled.set()
+            raise
+
+
 class _BlockingCloseDedicatedSocket(_FakeDedicatedSocket):
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.close_calls.append((code, reason))
@@ -1112,6 +1131,152 @@ async def test_socket_close_cancels_custom_end_of_turn_awaitable() -> None:
 
     assert source_future.cancelled()
     assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocked_send",
+    ("malformed_text", "non_detach_text", "invalid_type", "binary_ack"),
+)
+async def test_post_parse_send_cancellation_settles_exact_leaf_cleanup(
+    blocked_send: str,
+) -> None:
+    binding = _binding()
+    if blocked_send == "malformed_text":
+        incoming: object = "not-json"
+    elif blocked_send == "non_detach_text":
+        incoming = serialize_media_control(
+            MediaAck(binding.lease_id, binding.generation.value, 0)
+        )
+    elif blocked_send == "invalid_type":
+        incoming = object()
+    else:
+        incoming = encode_audio_frame(binding, _frame())
+
+    socket = _BlockingSendDedicatedSocket([incoming])
+    cleanup_owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    end_of_turn: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+    audio_frames: list[MediaAudioFrame] = []
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=audio_frames.append,
+            next_end_of_turn=lambda: end_of_turn,
+            cleanup_owner=cleanup_owner,
+        )
+    )
+    await asyncio.wait_for(socket.send_started.wait(), timeout=1)
+    accepted_before_cancel = len(audio_frames)
+
+    route_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(route_task, timeout=1)
+
+    assert socket.send_cancelled.is_set()
+    assert socket.close_calls == [(1000, "live-voice media leaf closed")]
+    assert end_of_turn.cancelled()
+    assert cleanup_owner.snapshot.in_use == 0
+    assert cleanup_owner.snapshot.retained_tasks == 0
+    assert cleanup_owner.snapshot.cleanup_complete is True
+    assert len(audio_frames) == accepted_before_cancel
+
+    successor_binding = replace(binding, lease_id=f"{binding.lease_id}-successor")
+    peer_detach = MediaDetach(
+        lease_id=successor_binding.lease_id,
+        generation=successor_binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+    )
+    successor_socket = _FakeDedicatedSocket([serialize_media_control(peer_detach)])
+    successor = await run_dedicated_media_socket_leaf(
+        _request(successor_binding),
+        socket=successor_socket,
+        on_audio_frame=audio_frames.append,
+    )
+    assert successor.reason_id is MediaDetachReason.PEER_CLOSE
+    assert successor_socket.close_calls == [(1000, "live-voice media leaf closed")]
+
+
+@pytest.mark.asyncio
+async def test_post_parse_send_process_control_preserves_identity_after_cleanup() -> (
+    None
+):
+    binding = _binding()
+    process_control = GeneratorExit("post-parse send process control")
+
+    class _ProcessControlSendSocket(_FakeDedicatedSocket):
+        async def send(self, message: str | bytes) -> None:
+            if self.sent:
+                raise process_control
+            self.sent.append(message)
+
+    socket = _ProcessControlSendSocket(["not-json"])
+    cleanup_owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    end_of_turn: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    with pytest.raises(GeneratorExit) as raised:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: end_of_turn,
+            cleanup_owner=cleanup_owner,
+        )
+
+    assert raised.value is process_control
+    assert socket.close_calls == [(1000, "live-voice media leaf closed")]
+    assert end_of_turn.cancelled()
+    assert cleanup_owner.snapshot.in_use == 0
+    assert cleanup_owner.snapshot.cleanup_complete is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_cancel_during_post_parse_socket_close_still_settles_owner() -> (
+    None
+):
+    binding = _binding()
+
+    class _BlockingCleanupSocket(_BlockingSendDedicatedSocket):
+        def __init__(self) -> None:
+            super().__init__(["not-json"])
+            self.close_started = asyncio.Event()
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.close_calls.append((code, reason))
+            self.close_started.set()
+            await asyncio.Event().wait()
+
+    socket = _BlockingCleanupSocket()
+    cleanup_owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    end_of_turn: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: end_of_turn,
+            cleanup_owner=cleanup_owner,
+        )
+    )
+    await asyncio.wait_for(socket.send_started.wait(), timeout=1)
+
+    route_task.cancel()
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    route_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(route_task, timeout=1)
+
+    assert socket.close_calls == [(1000, "live-voice media leaf closed")]
+    assert end_of_turn.cancelled()
+    assert cleanup_owner.snapshot.in_use == 0
+    assert cleanup_owner.snapshot.retained_tasks == 0
+    assert cleanup_owner.snapshot.cleanup_complete is True
 
 
 @pytest.mark.asyncio
