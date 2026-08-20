@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import hashlib
 import io
 import json
 import sys
@@ -26,6 +27,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.server.live_voice.batch_speech import (
     CANCEL_OPERATION,
     FORMAL_BATCH_SPEECH_FLAG,
+    MAX_RECOGNITION_TEXT_CHARS,
     MAX_SYNTHESIS_AUDIO_BYTES,
     RECOGNIZE_OPERATION,
     SPEECH_API_BASE_ENV,
@@ -101,6 +103,37 @@ def _openai_provider_returning(audio: bytes) -> OpenAICompatibleBatchSpeechProvi
                     request=request,
                 )
             )
+        ),
+    )
+
+
+def _openai_recognition_provider(
+    transcript: str,
+    requests: list[httpx.Request],
+) -> OpenAICompatibleBatchSpeechProvider:
+    def responder(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/v1/audio/transcriptions"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            stream=httpx.ByteStream(
+                json.dumps(
+                    {"text": transcript, "language": "en"}, ensure_ascii=False
+                ).encode("utf-8")
+            ),
+        )
+
+    return OpenAICompatibleBatchSpeechProvider(
+        OpenAICompatibleSpeechConfig(
+            "https://speech.example.test/v1",
+            "server-secret",
+            "stt-model",
+            "tts-model",
+            "voice-model",
+        ),
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(responder)
         ),
     )
 
@@ -563,7 +596,9 @@ async def test_critical_voice_receipt_requires_confirmation_and_expires() -> Non
 
 
 @pytest.mark.asyncio
-async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forging_it() -> None:
+async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forging_it() -> (
+    None
+):
     service = FormalBatchSpeechService(
         CriticalTextProvider(),
         authorization_resolver=ExactAuthorizationResolver(),
@@ -1325,6 +1360,139 @@ async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpo
     )
     assert "server-secret" not in repr(config)
     assert "server-secret" not in repr(provider.capability())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_text", "canonical_text"),
+    [
+        pytest.param(
+            " \tprovider  text\tinside\r\n",
+            "provider  text\tinside",
+            id="ascii-surrounding-whitespace",
+        ),
+        pytest.param(
+            "\u2003e\u0301  provider\ttext\u3000",
+            "e\u0301  provider\ttext",
+            id="unicode-surrounding-whitespace",
+        ),
+    ],
+)
+async def test_openai_recognition_strips_only_surrounding_whitespace(
+    provider_text: str,
+    canonical_text: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    provider = _openai_recognition_provider(provider_text, requests)
+
+    result = await provider.recognize(
+        ProviderRecognitionRequest("canonical-r", _wav(), "en-US")
+    )
+
+    assert result.text == canonical_text
+    assert result.observed_locale == "en"
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_canonical_openai_transcript_drives_event_receipt_and_replays() -> None:
+    provider_text = "\u2003e\u0301  provider\ttext\u3000"
+    canonical_text = "e\u0301  provider\ttext"
+    requests: list[httpx.Request] = []
+    service = _service(_openai_recognition_provider(provider_text, requests))
+
+    first, concurrent_replay = await asyncio.gather(
+        service.recognize(_recognize_request(), CONTEXT),
+        service.recognize(
+            _recognize_request(request_id="request-concurrent-replay"), CONTEXT
+        ),
+    )
+    later_replay = await service.recognize(
+        _recognize_request(request_id="request-later-replay"), CONTEXT
+    )
+
+    assert first["ok"] is True
+    assert concurrent_replay["result"] == first["result"]
+    assert later_replay["result"] == first["result"]
+    assert len(requests) == 1
+    alternative = first["result"]["event"]["hypothesis"]["alternatives"][0]
+    assert alternative == {
+        "raw_text": canonical_text,
+        "display_text": canonical_text,
+        "confidence": None,
+    }
+    receipt = first["result"]["voice_commit_receipt"]
+    binding = {
+        "receipt": receipt,
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "turn_id": "turn-canonical",
+        "commit_id": "commit-canonical",
+        "text": canonical_text,
+        "critical_confirmation": None,
+    }
+    with pytest.raises(ValueError, match="binding is invalid"):
+        await service.claim_voice_commit_receipt(**{**binding, "text": provider_text})
+    claim = await service.claim_voice_commit_receipt(**binding)
+    claim_replay = await service.claim_voice_commit_receipt(**binding)
+
+    assert claim_replay == claim
+    assert (
+        claim["text_sha256"]
+        == hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_recognition_accepts_exact_canonical_text_limit() -> None:
+    requests: list[httpx.Request] = []
+    provider = _openai_recognition_provider(
+        f"\t{'x' * MAX_RECOGNITION_TEXT_CHARS}\u3000", requests
+    )
+
+    result = await provider.recognize(
+        ProviderRecognitionRequest("limit-r", _wav(), "en-US")
+    )
+
+    assert result.text == "x" * MAX_RECOGNITION_TEXT_CHARS
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_text", "reason"),
+    [
+        pytest.param(
+            " \t\u2003\u3000\r\n",
+            "SPEECH_PROVIDER_EMPTY_TRANSCRIPT",
+            id="canonical-empty",
+        ),
+        pytest.param(
+            f"\t{'x' * (MAX_RECOGNITION_TEXT_CHARS + 1)}\u3000",
+            "SPEECH_PROVIDER_TRANSCRIPT_LIMIT",
+            id="canonical-over-limit",
+        ),
+    ],
+)
+async def test_invalid_canonical_openai_transcript_has_no_partial_result_or_receipt(
+    provider_text: str,
+    reason: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    service = _service(_openai_recognition_provider(provider_text, requests))
+
+    rejected = await service.recognize(_recognize_request(), CONTEXT)
+    replay = await service.recognize(
+        _recognize_request(request_id="request-invalid-replay"), CONTEXT
+    )
+
+    assert rejected["ok"] is False
+    assert rejected["result"] is None
+    assert rejected["error"]["reason"] == reason
+    assert replay["error"] == rejected["error"]
+    assert len(requests) == 1
+    assert service._voice_commit_receipts == {}
 
 
 @pytest.mark.asyncio
