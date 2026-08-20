@@ -137,52 +137,35 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** D-088 bounded Wave 2 — P3-2 complete commands/revisions, P3-3
-  capability-driven admission and P3-5A result/event/unread persistence;
-  **closed locally on its scoped source/automation/review/physical Gate**.
-- **Authority:** activation baseline `b1a6290b6ccbe5948c5700a8c6e103798160d7f1`,
-  accepted P3-1 ancestor `d40e0ee3`, [D-087](decisions/DECISIONS.md),
-  [D-088](decisions/DECISIONS.md), the
-  [P3-2/P3-5A map](reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md)
-  and [P3-3 map](reviews/P3_3_CAPABILITY_ADMISSION_ACTIVATION_PREPARATION_2026-08-18.md).
-  Minimum-intervention mode remains active for local closure; every remote-ref
-  update remains separately excluded until exact user approval.
-- **Source state:** P3-2, P3-3, P3-5A, their Task6 composition/control-history
-  seams and the default-off content-free evidence observer are locally
-  implemented and integrated. Schema v5 contains only the frozen P3-3 Attempt
-  facts and P3-5A consumer state beyond the prior schema; no P3-4 D1/D2 DDL was
-  introduced. Post-run repairs preserve closed producer stage diagnostics,
-  derive success only at the trusted Tool callback boundary with failure-first
-  validation, and perform status-only canonical settlement after Direct closes.
-  Child and cumulative Tier-3 reviews report no remaining Critical/Important/
-  Minor finding.
-- **Automated state:** combined command/admission/consumption/composition/
-  observer automation, shared Python/JavaScript contract parity, static checks
-  and the frontend production build pass on the integrated source. Exact
-  commands and counts live in the scoped [review](reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md).
-- **Physical state:** an explicitly authorized third fresh ACL-private Windows
-  production run on `3aa61f0193ac25e3da277f2dd632870355baf95a` passed the
-  closed evidence schema. It produced 14 content-free observations, 7 exact
-  file-Tool pairs and 4 required successful write/edit streams; all production
-  factory/registration, selection, two-project concurrency, A2 busy/zero-effect/
-  same-Attempt dequeue, adjustment, cancellation, reopen, source-integrity and
-  cleanup checks are true. The scoped Wave-2 physical Gate is **PASS**.
-- **Private cleanup:** the first two failed roots remain ACL-private and
-  `CLEANUP_PENDING`; they were not reused or deleted. The successful third root
-  reports `cleanup_complete`, has no remaining bound process and is retained as
-  private out-of-Git evidence. Private configuration values and raw Agent/Tool
-  content were not inspected.
-- **Next action:** form the exact normal-push packet and wait for its separate
-  remote-ref approval. Independently, activate P3-4, P3-5B and P3-6 under their
-  own scoped packets and dependency order; their local work does not require a
-  prior push.
-- **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; positive
-  provide-input/pause/resume or unsupported running controls without real
-  primitives; P3-4 D1/D2; P3-5B Runtime/Web delivery; P3-6 targeting; P3-7 UI;
-  P3-8B retirement; complete P3, feature complete, controlled-candidate PASS,
+- **Packet:** D-089 bounded Wave 3 — P3-4 durability/recovery, P3-5B
+  presentation consumption and P3-6 multi-Task intent resolution; **active on
+  three isolated local worker lanes with Main-only integration ownership**.
+- **Authority:** clean activation baseline
+  `cfff0c43aa599c009ab9517397566fec5c1bdd95`, [D-089](decisions/DECISIONS.md),
+  the [Wave-3 execution packet](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EXECUTION_PACKET_2026-08-20.md),
+  the [P3-4 preparation](reviews/P3_4_DURABILITY_RECOVERY_ACTIVATION_PREPARATION_2026-08-18.md)
+  and [P3-5B/P3-6 preparation](reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
+  Minimum-intervention mode is active for task-scoped local work; every
+  remote-ref update remains separately excluded until exact user approval.
+- **Source state:** D-088 Wave-2 P3-2/P3-3/P3-5A source and physical evidence
+  remain accepted on their exact sources. Schema remains v5 and the integrated
+  P3-4/P3-5B/P3-6 source is pending. No worker preparation, test harness,
+  corpus or pure asset currently grants Wave-3 product credit.
+- **Execution:** worker branches are `codex/w3-p3-4`, `codex/w3-p3-5b` and
+  `codex/w3-p3-6`. P3-4 has a narrow exclusive implementation lease for its
+  frozen Core/Store/Executor seams; P3-5B and P3-6 own non-overlapping
+  presentation and Resolver/Bridge surfaces. Main owns all shared composition,
+  schema semantics, integration history, Tier-3 verdict and evidence.
+- **Next action:** finish lane RED/GREEN and affected evidence, integrate in
+  P3-4 → P3-5B → P3-6 → shared-composition order, complete independent review,
+  then run one final broad Gate and the minimum honest ACL-private physical
+  scenarios.
+- **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; unsupported
+  controls without real primitives; P3-7 UI; P3-8B retirement; P3-9 cumulative
+  acceptance; complete P3, feature complete, controlled-candidate PASS,
   Production, `develop` integration and every remote update.
-- **Evidence:** the sanitized facts, zero-effect matrix, physical dispositions
-  and explicit unknowns are recorded in the
+- **Inherited Wave-2 evidence:** its sanitized facts, zero-effect matrix,
+  physical dispositions and explicit unknowns remain recorded in the
   [Wave-2 evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md).
 
 ## Dependency route to feature complete
