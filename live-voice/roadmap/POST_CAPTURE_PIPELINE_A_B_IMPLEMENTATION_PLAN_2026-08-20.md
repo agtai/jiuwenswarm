@@ -630,6 +630,7 @@ python scripts/live_voice/post_capture_latency_runner.py prepare-run
   --cold-or-warm warm
   --intended-attempts 1
   --required-successes 1
+  [--experiment-json /abs/private/experiment.json]
 
 python scripts/live_voice/post_capture_latency_runner.py run
   --run-json ABSOLUTE_RUN_JSON
@@ -859,6 +860,15 @@ git commit -m "feat(live-voice): compare post-capture A B A runs"
 ---
 
 ### Task 7: Verify one clean automated warm smoke and document execution
+
+> **Progress — 2026-08-20:** operational setup, run, report, cleanup and A/B/A
+> commands are documented in `E2E_RUNBOOK.md` §7.7. Follow-up commit
+> `7074e10b2` makes candidate preparation accept a validated private
+> `--experiment-json` and binds the Browser URL to the real
+> `/chat/<session_id>` route. The current worktree still contains unrelated
+> product-code changes and the user deferred the real baseline run; therefore a
+> truthful clean automated smoke, failure journey, sanitized evidence, STATUS
+> smoke credit and final independent Tier-3 review all remain open.
 
 **Risk:** Tier 3 real-path evidence, but not physical acceptance.
 

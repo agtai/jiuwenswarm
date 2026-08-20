@@ -647,6 +647,129 @@ unset JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_OUTPUT_ROOT
 unset VITE_FEATURE_LIVE_VOICE_LATENCY_PROBE
 ```
 
+### 7.7 Controlled post-capture WAV runner (no microphone)
+
+This route measures `browser.eot_received` through authoritative playout/ACK on
+the real saved-chat product path. It does not measure or accept microphone,
+capture quality, physical first-audible latency, a Production SLO, or a product
+journey. The methodology and decision boundary remain owned by the
+[fixed-audio benchmark draft](../roadmap/FIXED_AUDIO_LATENCY_BENCHMARK_DRAFT_2026-08-19.md).
+
+Use one clean implementation commit, a saved disposable Code Session, isolated
+`JIUWENSWARM_DATA_DIR`, and paths outside the repository. A dirty source may be
+used only to debug the harness; the runner refuses artifact credit unless
+`source_state` is `clean`. Keep WAV files, manifests, JSONL and reports private.
+
+Create a closed fixture manifest beside the WAV. `wav_path` is relative to the
+manifest directory; SHA-256 is lowercase hex. The runner accepts only PCM16,
+48 kHz, mono WAV files up to 4 MiB and rechecks the hash immediately before
+serving:
+
+```json
+{
+  "schema_version": "live-voice.fixed-audio-fixture.v0",
+  "fixture_profile_id": "en-v1-fixed-wav",
+  "cases": [
+    {
+      "profile_id": "dialogue_no_tool",
+      "input_case_id": "dialogue-paris-en-v1",
+      "wav_path": "dialogue-paris-en-v1.wav",
+      "sha256": "REPLACE_WITH_64_LOWERCASE_HEX",
+      "sample_rate_hz": 48000
+    }
+  ]
+}
+```
+
+Prepare A1 or A2 without an experiment. `RUN_DIR` must be a new absolute
+directory and its basename becomes `run_id`:
+
+```bash
+RUN_DIR=/abs/private/runs/baseline-before
+
+uv run python scripts/live_voice/post_capture_latency_runner.py prepare-run \
+  --output "$RUN_DIR/run.json" \
+  --git-commit "$(git rev-parse HEAD)" \
+  --source-state clean \
+  --fixture-profile-id en-v1-fixed-wav \
+  --profile-id dialogue_no_tool \
+  --input-case-id dialogue-paris-en-v1 \
+  --environment-profile windows-chrome-wsl2 \
+  --browser-profile chrome-151 \
+  --browser-os-class windows-11 \
+  --gateway-profile wsl2-python-3.11 \
+  --agent-profile wsl2-python-3.11 \
+  --stt-profile openai-gpt-4o-mini-transcribe \
+  --tts-profile openai-gpt-4o-mini-tts-marin \
+  --audio-profile pcm16-48000-mono \
+  --vad-profile openai-server-vad-1200ms \
+  --playout-profile webaudio-lead-1000ms \
+  --cold-or-warm warm \
+  --intended-attempts 1 \
+  --required-successes 1
+```
+
+For B, pass one absolute `--experiment-json` whose value is the closed
+`LatencyExperiment` object. The target must belong to the post-capture
+allowlist; capture-startup/first-frame targets are rejected. A1, B and A2 must
+otherwise declare identical environment, provider, playout, flags, ordered
+profiles/cases and attempt counts.
+
+Start the normal AgentServer, Gateway/WebChannel and Vite route described in
+the preceding sections. All Python producers receive the same three probe
+variables; the Vite process additionally receives the benchmark flag:
+
+```bash
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_ENABLED=1
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_RUN_CONFIG="$RUN_DIR/run.json"
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_OUTPUT_ROOT=/abs/private/runs
+export VITE_FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK=true
+```
+
+Run one explicit round. `--browser-command-json '[]'` means the operator owns
+the already-running visible Browser: the command prints the one-time
+`/chat/<session>` URL and waits. Open that URL in the exact saved Session. No
+Live Voice button, microphone selection or manual speech is used. Alternatively
+provide a JSON argv containing exactly one `{url}` token; the runner starts and
+terminates only that child and never invokes a shell.
+
+```bash
+uv run python scripts/live_voice/post_capture_latency_runner.py run \
+  --run-json "$RUN_DIR/run.json" \
+  --fixture-manifest /abs/private/corpus/en-v1/fixture.json \
+  --profile-id dialogue_no_tool \
+  --round-index 0 \
+  --session-id web_REPLACE_SAVED_SESSION \
+  --web-origin http://localhost:5173 \
+  --browser-command-json '[]' \
+  --timeout-seconds 180 \
+  --start-delay-ms 1000
+```
+
+Exit `0` requires the exact completed result plus one Browser, Gateway STT,
+Gateway TTS and Agent foreground shard for that round, no fallback/failure/
+capacity/underrun/rebuffer, and a numeric `response_total`. Exit `2` is invalid
+configuration; exit `3` is an executed attempt without credit. The runner
+writes `report.json`, `report.csv` and `report.md` only in the private run
+directory after the shard gate passes.
+
+After A1, B and A2 reports exist, compare them without starting any service or
+Browser:
+
+```bash
+uv run python scripts/live_voice/post_capture_latency_runner.py compare \
+  --baseline-before /abs/private/runs/baseline-before/report.json \
+  --candidate /abs/private/runs/candidate/report.json \
+  --baseline-after /abs/private/runs/baseline-after/report.json \
+  --output /abs/private/runs/comparison.json
+```
+
+An `improved` result requires B to improve against both A1 and A2 while
+baseline latency, denominator and failure-rate drift remain smaller than the
+minimum candidate gain. Always perform normal service shutdown/export drain,
+then unset all four variables. Do not update STATUS or create repository
+evidence until one independently reviewed clean-source smoke actually passes.
+
 ## 8. 先做文字工具冒烟，再做语音
 
 先用文字发送一个强制使用真实终端工具、结果可核对的请求：
