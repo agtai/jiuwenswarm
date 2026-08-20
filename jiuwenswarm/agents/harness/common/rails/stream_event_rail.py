@@ -229,11 +229,12 @@ def _nonzero_exit(value: Any) -> bool | None:
 
 def _infer_tool_result_error(value: Any) -> bool | None:
     if isinstance(value, dict):
+        explicit_success = False
         if "success" in value:
             if _boolish_false(value.get("success")):
                 return True
             if _boolish_true(value.get("success")):
-                return False
+                explicit_success = True
         if _boolish_true(value.get("is_error")) or _boolish_true(value.get("isError")):
             return True
         status = value.get("status")
@@ -241,15 +242,19 @@ def _infer_tool_result_error(value: Any) -> bool | None:
             return True
         for key in ("exit_code", "exitCode", "returncode", "return_code"):
             exit_failed = _nonzero_exit(value.get(key))
-            if exit_failed is not None:
-                return exit_failed
+            if exit_failed:
+                return True
+            if exit_failed is False:
+                explicit_success = True
         for key in ("data", "raw_output", "rawOutput", "result"):
             nested = value.get(key)
             if isinstance(nested, (dict, list)):
                 nested_error = _infer_tool_result_error(nested)
-                if nested_error is not None:
-                    return nested_error
-        return None
+                if nested_error:
+                    return True
+                if nested_error is False:
+                    explicit_success = True
+        return False if explicit_success else None
 
     if isinstance(value, list):
         for item in value:
@@ -282,6 +287,24 @@ def _infer_tool_result_error(value: Any) -> bool | None:
         if exit_match:
             return int(exit_match.group(1)) != 0
     return None
+
+
+def _resolved_tool_callback_error_state(
+    value: Any,
+    *,
+    force_error: bool = False,
+) -> bool:
+    """Resolve outcome at the trusted Tool callback boundary.
+
+    A callback exception or an explicit structured failure remains an error.
+    Otherwise, normal callback completion is the success authority; arbitrary
+    result text is never interpreted as a success signal.
+    """
+
+    if force_error:
+        return True
+    inferred = _infer_tool_result_error(value)
+    return inferred if inferred is not None else False
 
 
 class JiuSwarmStreamEventRail(DeepAgentRail):
@@ -859,7 +882,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             elif ctx.exception is None:
                 raise RuntimeError("FORMAL_TOOL_EVENT_SEQUENCE_INVALID")
         else:
-            await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+            await self._emit_tool_result(
+                session,
+                tc,
+                ctx.inputs.tool_result,
+                force_error=ctx.exception is not None,
+            )
         self._symphony_stream_handler.request_force_finish(
             ctx,
             tc,
@@ -962,18 +990,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 tool_result_payload,
                 frozen_raw_output,
             )
-        error_state = (
-            True
-            if force_error
-            else _infer_tool_result_error(
-                raw_output if raw_output is not None else result
-            )
+        error_state = _resolved_tool_callback_error_state(
+            raw_output if raw_output is not None else result,
+            force_error=force_error,
         )
-        if error_state is not None:
-            tool_result_payload["success"] = not error_state
-            if error_state:
-                tool_result_payload["status"] = "error"
-                tool_result_payload["is_error"] = True
+        tool_result_payload["success"] = not error_state
+        if error_state:
+            tool_result_payload["status"] = "error"
+            tool_result_payload["is_error"] = True
         return OutputSchema(
             type="tool_result",
             index=0,
@@ -1032,6 +1056,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         session: Session,
         tool_call: Any,
         result: Any,
+        *,
+        force_error: bool = False,
     ) -> None:
         try:
             raw_output = _structured_tool_result_payload(result)
@@ -1047,12 +1073,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     tool_result_payload,
                     raw_output,
                 )
-            error_state = _infer_tool_result_error(raw_output if raw_output is not None else result)
-            if error_state is not None:
-                tool_result_payload["success"] = not error_state
-                if error_state:
-                    tool_result_payload["status"] = "error"
-                    tool_result_payload["is_error"] = True
+            error_state = _resolved_tool_callback_error_state(
+                raw_output if raw_output is not None else result,
+                force_error=force_error,
+            )
+            tool_result_payload["success"] = not error_state
+            if error_state:
+                tool_result_payload["status"] = "error"
+                tool_result_payload["is_error"] = True
             await session.write_stream(
                 OutputSchema(
                     type="tool_result",
