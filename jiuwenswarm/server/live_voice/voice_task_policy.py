@@ -35,6 +35,28 @@ from .formal_task_models import (
 )
 
 
+# P3-6 policy-parity vocabulary.  ``FormalTaskPolicyAdapter.map`` retains its
+# currently composed P3-1 subset; the production multi-Task resolver uses this
+# closed vocabulary without claiming that an unsupported Core/Executor command
+# has acquired an implementation.
+FORMAL_TASK_QUERY_OPERATIONS = frozenset(
+    {"task.get", "task.list", "task.status", "task.events", "task.result"}
+)
+FORMAL_TASK_MUTATION_OPERATIONS = frozenset(
+    {
+        "task.create",
+        "task.update",
+        "task.adjust",
+        "task.provide_input",
+        "task.pause",
+        "task.resume",
+        "task.reprioritize",
+        "task.cancel",
+        "task.create_successor",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class FormalTaskPolicyInput:
     """A committed semantic decision plus separate trusted policy artifacts."""
@@ -119,13 +141,23 @@ class FormalTaskInvocation:
 class FormalTaskPolicyAdapter:
     """Fail closed before a formal command/query reaches the Task Core."""
 
-    _QUERIES = frozenset(
-        {"task.get", "task.list", "task.status", "task.events", "task.result"}
-    )
+    _QUERIES = FORMAL_TASK_QUERY_OPERATIONS
     _COMMANDS = frozenset({"task.create", "task.adjust", "task.cancel", "task.retry"})
 
     def __init__(self, commits: TurnCommitLedger | None = None) -> None:
         self._commits = commits
+
+    @staticmethod
+    def accepts_production_operation(operation: str) -> bool:
+        """Return whether P3-6 may submit ``operation`` to closed policy.
+
+        This is vocabulary parity only.  State/capability policy can still
+        return ``unsupported`` or ``conflict`` before Core invocation.
+        """
+
+        return operation in (
+            FORMAL_TASK_QUERY_OPERATIONS | FORMAL_TASK_MUTATION_OPERATIONS
+        )
 
     def map(self, intent: FormalTaskPolicyInput) -> FormalTaskInvocation:
         self._validate_common(intent)
@@ -727,6 +759,8 @@ class FormalTaskPolicyAdapter:
 
 
 __all__ = [
+    "FORMAL_TASK_MUTATION_OPERATIONS",
+    "FORMAL_TASK_QUERY_OPERATIONS",
     "FormalTaskInvocation",
     "FormalTaskPolicyAdapter",
     "FormalTaskPolicyInput",

@@ -14,7 +14,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
@@ -26,6 +26,14 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 
 from .demo_fixture_contract import DEMO_ITINERARY_TASK_NAME
 from .task_core import TaskCommand, TaskSpec
+
+if TYPE_CHECKING:
+    from .production_task_intent import (
+        BoundedClarificationOwner,
+        ProductionTaskAuthorityReader,
+        ProductionTaskIntentRequest,
+        ProductionTaskResolution,
+    )
 
 
 class VoiceTaskBridgeViolation(ValueError):
@@ -1074,6 +1082,41 @@ class VoiceTaskBridge:
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         return result
+
+    def resolve_production(
+        self,
+        request: ProductionTaskIntentRequest,
+        authority: ProductionTaskAuthorityReader,
+        clarification_owner: BoundedClarificationOwner | None = None,
+    ) -> ProductionTaskResolution:
+        """Run the generalized production resolver through the real Bridge.
+
+        The injected authority exposes authenticated Core reads only.  The
+        optional clarification owner is dedicated pre-command state and is not
+        retained by this Bridge instance.
+        """
+
+        from .production_task_intent import (
+            ProductionMultiTaskResolver,
+            ProductionTaskAuthorityReader,
+            ProductionTaskIntentRequest,
+        )
+
+        if not isinstance(request, ProductionTaskIntentRequest):
+            raise VoiceTaskBridgeViolation(
+                "INVALID_PRODUCTION_TASK_INTENT_REQUEST",
+                "production task resolution requires one closed request",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if not isinstance(authority, ProductionTaskAuthorityReader):
+            raise VoiceTaskBridgeViolation(
+                "AUTHENTICATED_TASK_AUTHORITY_REQUIRED",
+                "production task resolution requires authenticated Core reads",
+                ErrorCode.UNAVAILABLE,
+            )
+        return ProductionMultiTaskResolver(clarification_owner).resolve(
+            request, authority
+        )
 
     def resolve_unified(
         self,
