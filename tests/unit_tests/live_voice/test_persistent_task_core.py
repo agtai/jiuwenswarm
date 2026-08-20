@@ -4595,6 +4595,217 @@ def test_outbox_completion_rejects_cross_bound_observation_without_mutation(
     assert _database_dump(database) == after_completion
 
 
+@pytest.mark.asyncio
+async def test_core_rejects_mixed_outbox_observations_and_retries_exact_delivery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    setup_core = PersistentTaskCore(store, _Executor())
+
+    invocation_b = _create(tmp_path, identity_suffix="-mixed-b")
+    created_b = setup_core.execute(
+        invocation_b.envelope,
+        invocation_b.authorization,
+        context=invocation_b.context,
+        now=NOW,
+    )
+    assert created_b.ok and created_b.result is not None
+    item_b = store.claim_outbox("setup-b")
+    assert item_b is not None
+    observations_b = _observations(item_b)
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{item_b.attempt_id}",
+        observations=(observations_b[0],),
+    )
+
+    invocation_a = _create(tmp_path, identity_suffix="-mixed-a")
+    created_a = setup_core.execute(
+        invocation_a.envelope,
+        invocation_a.authorization,
+        context=invocation_a.context,
+        now=NOW,
+    )
+    assert created_a.ok and created_a.result is not None
+    task_a = str(created_a.result["task_id"])
+    attempt_a = str(created_a.result["attempt_id"])
+    command_a = invocation_a.envelope.command_id
+    task_b = str(created_b.result["task_id"])
+    attempt_b = str(created_b.result["attempt_id"])
+    command_b = invocation_b.envelope.command_id
+
+    class _MixedObservationExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivery: ExecutorDeliveryResult | None = None
+
+        async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
+            assert item.task_id == task_a
+            assert item.attempt_id == attempt_a
+            self.dispatches.append(item.attempt_id)
+            executor_ref = f"legacy:{attempt_b}"
+            observation_a = replace(_observations(item)[0], executor_ref=executor_ref)
+            observation_b = observations_b[1]
+            self.delivery = ExecutorDeliveryResult(
+                executor_ref,
+                (observation_a, observation_b),
+            )
+            return self.delivery
+
+    class _RecordingExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivery: ExecutorDeliveryResult | None = None
+
+        async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
+            self.delivery = await super().dispatch(item)
+            return self.delivery
+
+    def authority_snapshot(
+        task_ids: tuple[str, ...],
+        attempt_ids: tuple[str, ...],
+        command_ids: tuple[str, ...],
+    ) -> dict[str, tuple[tuple[object, ...], ...]]:
+        task_placeholders = ",".join("?" for _ in task_ids)
+        attempt_placeholders = ",".join("?" for _ in attempt_ids)
+        command_placeholders = ",".join("?" for _ in command_ids)
+        with sqlite3.connect(database) as connection:
+            return {
+                "tasks": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM tasks WHERE task_id IN ({task_placeholders}) "
+                        "ORDER BY task_id",
+                        task_ids,
+                    )
+                ),
+                "attempts": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM attempts "
+                        f"WHERE attempt_id IN ({attempt_placeholders}) "
+                        "ORDER BY attempt_id",
+                        attempt_ids,
+                    )
+                ),
+                "commands": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM commands "
+                        f"WHERE command_id IN ({command_placeholders}) "
+                        "ORDER BY scope_key, command_id",
+                        command_ids,
+                    )
+                ),
+                "task_events": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM task_events "
+                        f"WHERE task_id IN ({task_placeholders}) "
+                        "ORDER BY task_id, seq",
+                        task_ids,
+                    )
+                ),
+                "executor_events": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM executor_events "
+                        f"WHERE attempt_id IN ({attempt_placeholders}) "
+                        "ORDER BY attempt_id, source_seq",
+                        attempt_ids,
+                    )
+                ),
+            }
+
+    def outbox_snapshot(outbox_id: str) -> dict[str, object]:
+        with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM outbox WHERE outbox_id=?", (outbox_id,)
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    outbox_a = str(created_a.result["outbox_id"])
+    before_outbox_a = outbox_snapshot(outbox_a)
+    before_outbox_b = outbox_snapshot(item_b.outbox_id)
+    authority_ids = ((task_a, task_b), (attempt_a, attempt_b), (command_a, command_b))
+    before_authority = authority_snapshot(*authority_ids)
+    before_b_authority = authority_snapshot((task_b,), (attempt_b,), (command_b,))
+    executor = _MixedObservationExecutor()
+    core = PersistentTaskCore(store, executor)
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="mixed-observation-worker")
+
+    assert raised.value.reason == "EXECUTOR_OBSERVATION_BINDING_MISMATCH"
+    assert raised.value.code is ErrorCode.RESULT_UNKNOWN
+    assert executor.delivery is not None
+    assert executor.dispatches == [attempt_a]
+    assert attempt_b not in executor.dispatches
+    assert executor.cancels == []
+    assert executor.adjustments == []
+    assert executor.adjustment_settlements == []
+    assert executor.retry_readiness_calls == []
+
+    after_authority = authority_snapshot(*authority_ids)
+    assert after_authority["tasks"] == before_authority["tasks"]
+    assert after_authority["attempts"] == before_authority["attempts"]
+    assert after_authority["commands"] == before_authority["commands"]
+    assert after_authority["task_events"] == before_authority["task_events"]
+    assert after_authority["executor_events"] == before_authority["executor_events"]
+    after_outbox_b = outbox_snapshot(item_b.outbox_id)
+    assert after_outbox_b == before_outbox_b
+
+    after_outbox_a = outbox_snapshot(outbox_a)
+    expected_outbox_a = dict(before_outbox_a)
+    expected_outbox_a.update(
+        {
+            "delivery_count": before_outbox_a["delivery_count"] + 1,
+            "last_error": "outbox completion observations must bind its exact delivery",
+            "updated_at": after_outbox_a["updated_at"],
+        }
+    )
+    assert before_outbox_a["state"] == OutboxState.PENDING.value
+    assert before_outbox_a["claimed_by"] is None
+    assert before_outbox_a["claimed_at"] is None
+    assert before_outbox_a["claim_token"] is None
+    assert before_outbox_a["last_error"] is None
+    assert after_outbox_a == expected_outbox_a
+    assert after_outbox_a["state"] == OutboxState.PENDING.value
+    assert after_outbox_a["claimed_by"] is None
+    assert after_outbox_a["claimed_at"] is None
+    assert after_outbox_a["claim_token"] is None
+    assert after_outbox_a["updated_at"] >= before_outbox_a["updated_at"]
+
+    reopened = SqliteTaskStore(database)
+    retry_executor = _RecordingExecutor()
+    retry_core = PersistentTaskCore(reopened, retry_executor)
+    assert await retry_core.drain_outbox_once(worker_id="exact-a-retry") is True
+    assert retry_executor.delivery is not None
+    assert retry_executor.dispatches == [attempt_a]
+    assert attempt_b not in retry_executor.dispatches
+    assert retry_executor.cancels == []
+    assert retry_executor.adjustments == []
+    assert retry_executor.adjustment_settlements == []
+    assert reopened.get_task(task_a, _scope()).state is FormalTaskState.RUNNING
+    assert reopened.get_attempt(attempt_a).state is FormalAttemptState.RUNNING
+    assert outbox_snapshot(item_b.outbox_id) == before_outbox_b
+    assert authority_snapshot((task_b,), (attempt_b,), (command_b,)) == (
+        before_b_authority
+    )
+
+    delivered_outbox_a = outbox_snapshot(outbox_a)
+    assert delivered_outbox_a["state"] == OutboxState.DELIVERED.value
+    assert delivered_outbox_a["delivery_count"] == 2
+    after_exact_delivery = _database_dump(database)
+    replay = reopened.apply_observations(retry_executor.delivery.observations)
+    assert replay.disposition is TaskMutationDisposition.NOOP
+    assert replay.events == ()
+    assert _database_dump(database) == after_exact_delivery
+
+
 @pytest.mark.parametrize(
     "binding_field",
     ("task_id", "attempt_id", "executor_id", "executor_ref"),
