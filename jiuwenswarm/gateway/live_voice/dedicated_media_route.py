@@ -841,6 +841,26 @@ async def run_dedicated_media_socket_leaf(
             # cannot confirm physical closure.
             pass
 
+    async def settle_transport_interruption() -> None:
+        """Close exact authority and settle every child behind one primary."""
+
+        try:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+        except BaseException:
+            pass
+        try:
+            await close_socket()
+        except BaseException:
+            pass
+        try:
+            await settle_owned_tasks(
+                receive_task,
+                speech_start_task,
+                end_of_turn_task,
+            )
+        except BaseException:
+            pass
+
     async def send_control(
         control: MediaAck
         | MediaDetach
@@ -851,6 +871,14 @@ async def run_dedicated_media_socket_leaf(
         nonlocal socket_touched
         try:
             send = socket.send
+        except (
+            asyncio.CancelledError,
+            GeneratorExit,
+            KeyboardInterrupt,
+            SystemExit,
+        ):
+            await settle_transport_interruption()
+            raise
         except Exception:
             return False
         if not callable(send):
@@ -864,19 +892,7 @@ async def run_dedicated_media_socket_leaf(
             KeyboardInterrupt,
             SystemExit,
         ):
-            session.close(MediaDetachReason.TRANSPORT_CLOSED)
-            try:
-                await close_socket()
-            except BaseException:
-                pass
-            try:
-                await settle_owned_tasks(
-                    receive_task,
-                    speech_start_task,
-                    end_of_turn_task,
-                )
-            except BaseException:
-                pass
+            await settle_transport_interruption()
             raise
         except Exception:
             return False
@@ -1027,16 +1043,13 @@ async def run_dedicated_media_socket_leaf(
     while True:
         try:
             recv = socket.recv
-        except _PROCESS_CONTROL:
-            session.close(MediaDetachReason.TRANSPORT_CLOSED)
-            try:
-                await close_socket()
-            except BaseException:
-                pass
-            try:
-                await settle_owned_tasks(end_of_turn_task)
-            except BaseException:
-                pass
+        except (
+            asyncio.CancelledError,
+            GeneratorExit,
+            KeyboardInterrupt,
+            SystemExit,
+        ):
+            await settle_transport_interruption()
             raise
         except Exception:
             recv = None

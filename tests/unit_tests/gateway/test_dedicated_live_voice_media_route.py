@@ -1235,6 +1235,120 @@ async def test_post_parse_send_process_control_preserves_identity_after_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_attach_send_descriptor_cancellation_closes_exact_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _binding()
+    cancellation = asyncio.CancelledError("attach send descriptor cancellation")
+    cleanup_failure = GeneratorExit("attach close secondary")
+    captured: list[ActiveDedicatedMediaRoute] = []
+    create_route = route_module.create_dedicated_media_route
+
+    def capture_route(*args: Any, **kwargs: Any):
+        activation = create_route(*args, **kwargs)
+        if isinstance(activation, ActiveDedicatedMediaRoute):
+            captured.append(activation)
+        return activation
+
+    monkeypatch.setattr(route_module, "create_dedicated_media_route", capture_route)
+
+    class _AttachDescriptorCancellationSocket(_FakeDedicatedSocket):
+        @property
+        def send(self):
+            raise cancellation
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.close_calls.append((code, reason))
+            raise cleanup_failure
+
+    socket = _AttachDescriptorCancellationSocket([])
+    cleanup_owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: asyncio.get_running_loop().create_future(),
+            cleanup_owner=cleanup_owner,
+        )
+
+    assert raised.value is cancellation
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert len(captured) == 1
+    assert captured[0].session.snapshot().closed is True
+    assert socket.close_calls == [(1000, "live-voice media leaf closed")]
+    assert cleanup_owner.snapshot.in_use == 0
+    assert cleanup_owner.snapshot.retained_tasks == 0
+    assert cleanup_owner.snapshot.cleanup_complete is True
+
+
+@pytest.mark.asyncio
+async def test_receive_descriptor_cancellation_settles_exact_session_and_eot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _binding()
+    cancellation = asyncio.CancelledError("receive descriptor cancellation")
+    captured: list[ActiveDedicatedMediaRoute] = []
+    create_route = route_module.create_dedicated_media_route
+
+    def capture_route(*args: Any, **kwargs: Any):
+        activation = create_route(*args, **kwargs)
+        if isinstance(activation, ActiveDedicatedMediaRoute):
+            captured.append(activation)
+        return activation
+
+    monkeypatch.setattr(route_module, "create_dedicated_media_route", capture_route)
+
+    class _ReceiveDescriptorCancellationSocket(_FakeDedicatedSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.recv_lookups = 0
+
+        @property
+        def recv(self):
+            self.recv_lookups += 1
+            if self.recv_lookups == 2:
+                raise cancellation
+            return self._recv
+
+        async def _recv(self) -> bytes:
+            await asyncio.sleep(0)
+            return encode_audio_frame(binding, _frame())
+
+    socket = _ReceiveDescriptorCancellationSocket()
+    cleanup_owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    audio_frames: list[MediaAudioFrame] = []
+    end_of_turn: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=audio_frames.append,
+            next_end_of_turn=lambda: end_of_turn,
+            cleanup_owner=cleanup_owner,
+        )
+
+    assert raised.value is cancellation
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert len(captured) == 1
+    assert captured[0].session.snapshot().closed is True
+    assert socket.recv_lookups == 2
+    assert len(socket.sent) == 2
+    assert len(audio_frames) == 1
+    assert socket.close_calls == [(1000, "live-voice media leaf closed")]
+    assert end_of_turn.cancelled()
+    assert cleanup_owner.snapshot.in_use == 0
+    assert cleanup_owner.snapshot.retained_tasks == 0
+    assert cleanup_owner.snapshot.cleanup_complete is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "blocked_send",
     ("malformed_text", "non_detach_text", "invalid_type", "binary_ack"),
