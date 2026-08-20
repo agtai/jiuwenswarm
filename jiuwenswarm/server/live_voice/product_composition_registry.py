@@ -679,6 +679,14 @@ class AgentServerProductCompositionRegistry:
             tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
         self._progress_generations: dict[tuple[str, str, str, str], int] = {}
+        # Exact high-water values cover the active working set. Evicting the
+        # whole entry at capacity would erase the generation high-water mark and
+        # let a superseded generation activate again, so the conservative max
+        # sketch retains it for this registry lifetime without unbounded RAM.
+        # Collisions can only fail closed.
+        self._progress_generation_fence = tuple(
+            array("Q", [0]) * (1 << 15) for _ in range(4)
+        )
         self._progress_targets: dict[tuple[str, str, str, str], _ProgressTarget] = {}
         self._progress_deliveries: dict[
             tuple[str, str, str, str], dict[str, _ProgressDelivery]
@@ -1102,9 +1110,62 @@ class AgentServerProductCompositionRegistry:
                 continue
             for closed_key in closed_keys:
                 self._closed_progress_routes.pop(closed_key, None)
-            self._progress_generations.pop(retained_key, None)
+            retired = self._progress_generations.pop(retained_key, None)
+            if retired is not None:
+                self._record_progress_generation(retained_key, retired)
             return True
         return False
+
+    def _progress_generation_indices(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> tuple[int, int, int, int]:
+        digest = hashlib.sha256("\0".join(key).encode("utf-8")).digest()
+        capacity = len(self._progress_generation_fence[0])
+        return (
+            int.from_bytes(digest[0:4], "big") % capacity,
+            int.from_bytes(digest[4:8], "big") % capacity,
+            int.from_bytes(digest[8:12], "big") % capacity,
+            int.from_bytes(digest[12:16], "big") % capacity,
+        )
+
+    def _record_progress_generation(
+        self,
+        key: tuple[str, str, str, str],
+        generation: int,
+    ) -> None:
+        encoded = generation + 1
+        for row, index in zip(
+            self._progress_generation_fence,
+            self._progress_generation_indices(key),
+            strict=True,
+        ):
+            if encoded > row[index]:
+                row[index] = encoded
+
+    def _progress_generation_high_water(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> int:
+        encoded = min(
+            row[index]
+            for row, index in zip(
+                self._progress_generation_fence,
+                self._progress_generation_indices(key),
+                strict=True,
+            )
+        )
+        return int(encoded) - 1
+
+    def _fenced_progress_generation(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> int | None:
+        current = self._progress_generations.get(key)
+        if current is not None:
+            return current
+        fenced = self._progress_generation_high_water(key)
+        return fenced if fenced >= 0 else None
 
     @classmethod
     def _reserve_progress_delivery(
@@ -7986,7 +8047,7 @@ class AgentServerProductCompositionRegistry:
 
             key = (routed_session, task_id, origin_id, generation_id)
             existing = self._progress_routes.get(key)
-            previous_generation = self._progress_generations.get(key)
+            previous_generation = self._fenced_progress_generation(key)
             state = _AuthorityState()
             preauthorized_authority: ProductSegmentActivation | None = None
             if (

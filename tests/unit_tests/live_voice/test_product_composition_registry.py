@@ -5974,6 +5974,198 @@ async def test_progress_generation_admission_is_bounded_without_unsafe_eviction(
 
 
 @pytest.mark.asyncio
+async def test_evicted_progress_generation_still_rejects_the_old_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity eviction releases heavy route state, never the replay fence.
+
+    Evicting the whole key drops its generation high-water mark, so a
+    superseded generation can activate again against the same exact identity.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    fenced_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+
+    superseding = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=2),
+        request_id="request-fence-superseding",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert superseding.ok is True
+    assert registry._progress_generations[fenced_key] == 2
+    fenced_event = cast(Mapping[str, object], pushed[0]["payload"])
+
+    closed = await registry.handle_p3_progress_close(
+        params=_progress_params(generation=2),
+        request_id="request-fence-close",
+        session_id="session-product",
+    )
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(fenced_event),
+        request_id="request-fence-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert closed.ok is True
+    assert acknowledged.ok is True
+
+    # Fill the bound so the settled key becomes the eviction candidate.
+    for index in (2, 3):
+        filler = await registry.handle_p3_progress_activate(
+            params=_progress_params(
+                origin_id=f"web-surface-{index}",
+                generation_id=f"web-generation-{index}",
+            ),
+            request_id=f"request-fence-filler-{index}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        await asyncio.sleep(0)
+        assert filler.ok is True
+
+    # Eviction must release the heavy closed-route state, which is what the
+    # bound exists to reclaim.
+    assert fenced_key not in registry._progress_routes
+    assert all(
+        closed_key[:4] != fenced_key for closed_key in registry._closed_progress_routes
+    )
+    effects = (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+    )
+
+    # Restore admission room so the replay is judged by the generation fence
+    # rather than by capacity refusal, which would hide a missing fence.
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+    replayed = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=1),
+        request_id="request-fence-old-generation",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+
+    assert replayed.ok is False
+    replay_error = cast(dict, replayed.payload["error"])
+    assert replay_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+    assert replay_error["code"] == ErrorCode.CONFLICT.value
+    assert fenced_key not in registry._progress_routes
+    assert (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+    ) == effects
+
+    # A strictly newer generation is still admitted, so the fence refuses
+    # replay without freezing the identity.
+    successor = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=3),
+        request_id="request-fence-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    assert successor.ok is True
+    assert registry._progress_generations[fenced_key] == 3
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_progress_generation_fence_never_forgets_an_evicted_generation(
+    tmp_path: Path,
+) -> None:
+    """The fence has fixed memory and is never evicted, unlike the exact map."""
+
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    keys = [
+        ("session-product", "task-1", f"web-surface-{index}", "web-generation-1")
+        for index in range(2048)
+    ]
+    fence_rows = registry._progress_generation_fence
+    footprint = tuple(len(row) for row in fence_rows)
+
+    for index, key in enumerate(keys):
+        registry._record_progress_generation(key, index + 1)
+
+    # Far past _PROGRESS_GENERATION_CAPACITY the very first key is still fenced,
+    # and the sketch has not grown by a single slot.
+    assert registry._progress_generation_high_water(keys[0]) >= 1
+    assert registry._fenced_progress_generation(keys[0]) >= 1
+    assert registry._fenced_progress_generation(keys[-1]) >= len(keys)
+    assert tuple(len(row) for row in registry._progress_generation_fence) == footprint
+
+    # An unrecorded key reads as absent rather than as generation 0.
+    absent = ("session-product", "task-1", "web-surface-absent", "web-generation-1")
+    assert registry._progress_generation_high_water(absent) == -1
+    assert registry._fenced_progress_generation(absent) is None
+
+    # The sketch is monotonic: a lower generation never lowers the high-water.
+    registry._record_progress_generation(keys[0], 500)
+    registry._record_progress_generation(keys[0], 2)
+    assert registry._fenced_progress_generation(keys[0]) >= 500
+
+    # The exact working set always wins over the conservative sketch.
+    registry._progress_generations[keys[0]] = 501
+    assert registry._fenced_progress_generation(keys[0]) == 501
+
+
+@pytest.mark.asyncio
+async def test_concurrent_progress_activation_admits_one_generation_owner(
+    tmp_path: Path,
+) -> None:
+    """Simultaneous activations of one key linearize to a single owner."""
+
+    registry, p3, _manager, _pushed = _registry(tmp_path)
+    key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+
+    results = await asyncio.gather(
+        *(
+            registry.handle_p3_progress_activate(
+                params=_progress_params(generation=generation),
+                request_id=f"request-progress-concurrent-{generation}",
+                session_id="session-product",
+                channel_id="web",
+            )
+            for generation in (1, 2)
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert [result.ok for result in results].count(True) >= 1
+    # Whichever ordering wins, the retained fence never regresses below the
+    # highest generation that was ever admitted.
+    admitted = [
+        cast(Mapping[str, object], result.payload["result"])["generation"]
+        for result in results
+        if result.ok
+    ]
+    assert registry._fenced_progress_generation(key) == max(admitted)
+    assert len(p3.subscription_calls) == len(admitted)
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
 async def test_progress_authority_failure_allocates_no_subscription_or_sink(
     tmp_path: Path,
 ) -> None:
