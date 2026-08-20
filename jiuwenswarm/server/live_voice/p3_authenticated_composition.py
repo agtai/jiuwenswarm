@@ -16,6 +16,7 @@ import hmac
 import logging
 import math
 import os
+import stat
 import subprocess
 import threading
 import time
@@ -209,7 +210,22 @@ def _required_text(value: object, field_name: str, *, maximum: int = 4096) -> st
 def _resolve_database_path(configured: str) -> Path:
     """Keep formal Store files under the application-owned P3 directory."""
 
-    store_root = (get_user_workspace_dir() / "live_voice" / "p3alpha").resolve()
+    live_voice_root = get_user_workspace_dir() / "live_voice"
+    p3alpha_root = live_voice_root / "p3alpha"
+    for component in (live_voice_root, p3alpha_root):
+        try:
+            attributes = getattr(os.lstat(component), "st_file_attributes", 0)
+        except OSError:
+            attributes = 0
+        if component.is_symlink() or attributes & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_AUTH_CONFIGURATION",
+                "P3 database must remain under the application-owned P3 directory",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+    store_root = p3alpha_root.resolve()
     candidate = (
         Path(configured).expanduser()
         if configured

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import subprocess
 import threading
@@ -58,6 +59,7 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     ResolvedAuthority,
     ServerSessionProjectAuthorityResolver,
     StaticBearerAuthenticator,
+    _resolve_database_path,
     create_p3_composition_from_environment,
 )
 from jiuwenswarm.server.live_voice.p3_confirmation import (
@@ -2981,6 +2983,62 @@ def test_enabled_gate_rejects_store_artifact_outside_application_workspace(
 
     assert raised.value.reason == "INVALID_P3_AUTH_CONFIGURATION"
     assert not database.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+@pytest.mark.parametrize("junction_level", ["live_voice", "p3alpha"])
+def test_database_resolver_rejects_existing_windows_store_junction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    junction_level: str,
+) -> None:
+    data_root = tmp_path / f"data-{junction_level}"
+    data_root.mkdir()
+    outside = tmp_path / f"outside-{junction_level}"
+    outside.mkdir()
+    live_voice = data_root / "live_voice"
+    if junction_level == "live_voice":
+        junction = live_voice
+        outside_database = outside / "p3alpha" / "must-not-exist.sqlite3"
+    else:
+        live_voice.mkdir()
+        junction = live_voice / "p3alpha"
+        outside_database = outside / "must-not-exist.sqlite3"
+    created = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "New-Item -ItemType Junction -Path $env:JUNCTION_PATH "
+            "-Target $env:JUNCTION_TARGET | Out-Null",
+        ],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "JUNCTION_PATH": str(junction),
+            "JUNCTION_TARGET": str(outside),
+        },
+    )
+    assert created.returncode == 0
+    configured = data_root / "live_voice" / "p3alpha" / "must-not-exist.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition."
+        "get_user_workspace_dir",
+        lambda: data_root,
+    )
+
+    violation = None
+    try:
+        resolved = _resolve_database_path(str(configured))
+        SqliteTaskStore(resolved)
+    except FormalTaskViolation as exc:
+        violation = exc
+
+    assert not outside_database.exists()
+    assert violation is not None
+    assert violation.reason == "INVALID_P3_AUTH_CONFIGURATION"
 
 
 def test_server_resolver_checks_allow_list_before_project_storage(

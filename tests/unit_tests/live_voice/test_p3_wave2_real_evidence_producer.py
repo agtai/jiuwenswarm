@@ -409,6 +409,7 @@ def test_registered_scenario_database_is_accepted_by_product_store_resolver(
 
     private_root = tmp_path / "private-database-root"
     private_root.mkdir()
+    _make_private_acl(private_root)
     projects: list[SimpleNamespace] = []
 
     def initialize_project(path: Path, *, title: str) -> None:
@@ -440,8 +441,78 @@ def test_registered_scenario_database_is_accepted_by_product_store_resolver(
     assert scenario.database == expected
     assert resolved == expected
     assert not expected.exists()
-    assert not expected.parent.exists()
+    assert expected.parent.is_dir()
+    assert not producer._is_reparse_or_symlink(private_root / "live_voice")
+    assert not producer._is_reparse_or_symlink(expected.parent)
+    assert expected.parent.resolve() == (
+        private_root.resolve() / "live_voice" / "p3alpha"
+    )
     assert len(projects) == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+@pytest.mark.parametrize("junction_level", ["live_voice", "p3alpha"])
+def test_registration_rejects_existing_windows_store_junction_before_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    junction_level: str,
+) -> None:
+    from jiuwenswarm.server.runtime.session import project_store, session_metadata
+
+    private_root, _output = _private_cli_paths(
+        tmp_path, f"store-junction-{junction_level}"
+    )
+    outside = tmp_path / f"store-outside-{junction_level}"
+    outside.mkdir()
+    live_voice = private_root / "live_voice"
+    if junction_level == "live_voice":
+        junction = live_voice
+        outside_database = outside / "p3alpha" / "p3-wave2.sqlite3"
+    else:
+        live_voice.mkdir()
+        junction = live_voice / "p3alpha"
+        outside_database = outside / "p3-wave2.sqlite3"
+    created = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "New-Item -ItemType Junction -Path $env:JUNCTION_PATH "
+            "-Target $env:JUNCTION_TARGET | Out-Null",
+        ],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "JUNCTION_PATH": str(junction),
+            "JUNCTION_TARGET": str(outside),
+        },
+    )
+    assert created.returncode == 0
+    project_calls: list[str] = []
+    monkeypatch.setattr(
+        producer,
+        "_initialize_private_project",
+        lambda *_args, **_kwargs: project_calls.append("initialize"),
+    )
+    monkeypatch.setattr(
+        project_store,
+        "create_or_restore_project",
+        lambda *_args, **_kwargs: project_calls.append("register"),
+    )
+    monkeypatch.setattr(
+        session_metadata,
+        "init_session_metadata",
+        lambda **_kwargs: project_calls.append("session"),
+    )
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._register_private_scenario(private_root)
+
+    assert raised.value.reason == "PRIVATE_PATH_REPARSE_POINT"
+    assert project_calls == []
+    assert not outside_database.exists()
 
 
 def test_blocking_private_preflight_is_bounded_by_worker_supervisor(

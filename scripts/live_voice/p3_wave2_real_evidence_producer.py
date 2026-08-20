@@ -642,6 +642,49 @@ def _validated_private_paths(
     return root, output
 
 
+def _prepare_private_store_database(private_root: Path) -> Path:
+    live_voice_root = private_root / "live_voice"
+    store_root = live_voice_root / "p3alpha"
+    components = (live_voice_root, store_root)
+    if any(_is_reparse_or_symlink(path) for path in components):
+        raise ClosedEvidenceFailure("PRIVATE_PATH_REPARSE_POINT")
+    if any(path.exists() for path in components):
+        raise ClosedEvidenceFailure("PRIVATE_STORE_PATH_EXISTS")
+    try:
+        for path in components:
+            path.mkdir()
+            if _is_reparse_or_symlink(path):
+                raise ClosedEvidenceFailure("PRIVATE_PATH_REPARSE_POINT")
+        resolved_live_voice = live_voice_root.resolve(strict=True)
+        resolved_store_root = store_root.resolve(strict=True)
+    except ClosedEvidenceFailure:
+        raise
+    except FileExistsError as exc:
+        if any(_is_reparse_or_symlink(path) for path in components):
+            raise ClosedEvidenceFailure("PRIVATE_PATH_REPARSE_POINT") from exc
+        raise ClosedEvidenceFailure("PRIVATE_STORE_PATH_EXISTS") from exc
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_STORE_UNAVAILABLE") from exc
+    if (
+        resolved_live_voice != private_root / "live_voice"
+        or resolved_store_root.parent != resolved_live_voice
+        or resolved_store_root != resolved_live_voice / "p3alpha"
+        or any(_is_reparse_or_symlink(path) for path in components)
+    ):
+        raise ClosedEvidenceFailure("PRIVATE_PATH_RESOLVE_ESCAPE")
+    _validate_private_acl(components, require_root_protected=False)
+    database = store_root / "p3-wave2.sqlite3"
+    if database.exists() or _is_reparse_or_symlink(database):
+        raise ClosedEvidenceFailure("PRIVATE_STORE_PATH_EXISTS")
+    try:
+        resolved_database = database.resolve(strict=False)
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_STORE_UNAVAILABLE") from exc
+    if resolved_database.parent != resolved_store_root:
+        raise ClosedEvidenceFailure("PRIVATE_PATH_RESOLVE_ESCAPE")
+    return database
+
+
 def _set_private_roots(private_root: Path) -> None:
     values = {
         "JIUWENSWARM_DATA_DIR": str(private_root),
@@ -1278,6 +1321,7 @@ def _register_private_scenario(private_root: Path) -> _RegisteredScenario:
         init_session_metadata,
     )
 
+    database = _prepare_private_store_database(private_root)
     run_id = secrets.token_hex(8)
     projects_root = private_root / "projects"
     try:
@@ -1319,9 +1363,7 @@ def _register_private_scenario(private_root: Path) -> _RegisteredScenario:
         run_id=run_id,
         principal_id=principal_id,
         token=secrets.token_urlsafe(48),
-        database=(
-            private_root / "live_voice" / "p3alpha" / "p3-wave2.sqlite3"
-        ),
+        database=database,
         projects={"A1": project_a, "A2": project_a, "B1": project_b},
         project_paths=paths,
         sessions=sessions,
