@@ -2,9 +2,11 @@
 
 > **Date:** 2026-08-19
 > **Status:** working development methodology. The two-track optimization split
-> in §2.1 was accepted for the next latency experiments on 2026-08-20; this
-> document is still not a product specification, benchmark result, active
-> implementation packet, or product-readiness claim.
+> in §2.1 and the A1/B/A2 execution loop in §5.1 were accepted for the next
+> latency experiments on 2026-08-20. The controlled post-capture runner exists,
+> but clean baseline execution and optimization acceptance remain open. This
+> document is still not a product specification, benchmark result, or
+> product-readiness claim.
 > **Purpose:** provide a reproducible method for comparing the current Live
 > Voice baseline with one latency optimization at a time.
 > **Governing documents:** the measurement boundaries remain owned by
@@ -30,12 +32,13 @@ The benchmark should therefore combine:
 The primary optimization loop is:
 
 ```text
-freeze corpus and environment
-    -> measure baseline A
-    -> apply one optimization B
-    -> re-measure candidate B
-    -> re-run baseline A when drift is material
-    -> compare stages, total latency and guardrails
+review and freeze one clean reference
+    -> smoke the measurement path
+    -> measure baseline A1
+    -> implement one optimization B in an isolated worktree
+    -> measure candidate B
+    -> re-run the unchanged reference as A2
+    -> compare A1/B/A2 stages, totals, denominators and guardrails
 ```
 
 This is a controlled, reproducible experiment, not a perfectly invariant one.
@@ -245,11 +248,46 @@ For each declared profile and corpus case:
 9. collect correlated stage, total, quality and failure measurements;
 10. reset the product state before the next attempt.
 
-Case order should be fixed or deterministically randomized and recorded. When
-Provider or network drift may influence the conclusion, use an `A/B/A` design:
-baseline build A, candidate build B, then baseline A again. Interleaving A and B
-is statistically stronger when the execution harness can switch builds without
-changing other run inputs.
+Case order should be fixed or deterministically randomized and recorded. Every
+optimization decision uses A1/B/A2: baseline reference, candidate, then the
+unchanged baseline reference again. Interleaving reference and candidate is
+statistically stronger when the execution harness can switch builds without
+changing other run inputs, but it does not remove the final drift check.
+
+### 5.1 Agreed optimization execution order
+
+The next work follows one closed loop rather than treating historical numbers,
+new baselines and optimization results as one population:
+
+1. review the implemented probe/runner, resolve unrelated product-code dirt,
+   pin JiuwenSwarm and Agent-Core identities, and pass one clean no-Tool smoke;
+2. establish the current A1 baseline with the fixed corpus and one frozen
+   environment, first as a small pilot and then with the declared sample size;
+3. analyze the earlier manual measurements only as qualitative historical
+   evidence and compare their bottleneck direction—not their percentages—with
+   A1;
+4. reconcile A1 with the retained Hongxing optimization findings and current
+   latency documents, classifying each hypothesis as `confirmed`,
+   `partially_confirmed`, `not_reproduced`, `not_yet_measured`, or
+   `methodologically_incompatible`;
+5. rank the confirmed/open Live Voice-owned hypotheses, then implement exactly
+   one named optimization per branch/worktree created from the same reference
+   commit and dependency pin;
+6. execute B and the unchanged-reference A2 with the same corpus, environment,
+   state and attempt order, then accept, revise or discard the optimization
+   from the closed A1/B/A2 result.
+
+Earlier manual Browser-clock tables remain useful for identifying candidate
+stages, reproducing symptoms and checking whether A1 tells the same broad
+story. They are not a numerical baseline for the new harness because input,
+Browser operation, manifest truth, run state and available stage boundaries
+differ. A direct old-code/new-code latency claim would require re-running both
+sources under the same current harness contract; it cannot be reconstructed by
+subtracting the historical table from A1.
+
+The first accepted A1 population belongs to Track 2. Track 1 capture/endpointing
+continues independently because only it requires the supported Browser capture
+surface and speech-end/recognition-quality guardrails.
 
 ## 6. Sample sizes and reporting
 
@@ -314,21 +352,24 @@ measure -> establish baseline -> apply one optimization -> re-measure -> compare
 It does not create a general observability platform or require dynamic
 critical-path analysis before the first useful baseline.
 
-## 8. Proposed artifacts — not yet accepted
+## 8. Artifact boundary and remaining acceptance
 
-The eventual implementation may need:
+The development implementation now provides a private fixed-WAV manifest,
+default-off controlled Browser composition, supervised post-capture runner,
+v1 reports and clean-source A1/B/A2 comparison. Their existence grants no
+baseline or optimization credit before clean execution and review.
+
+The stable benchmark still needs decisions or accepted assets for:
 
 - a public corpus manifest and lossless audio artifacts;
 - a private machine/run profile with a sanitized exported fingerprint;
 - reproducible Task and Tool fixtures;
 - a Browser audio-feed harness for Windows Chrome;
 - a deterministic capture/endpointing PCM diagnostic harness;
-- a run-bound post-capture pipeline runner that does not require microphone or
-  manual UI operation;
 - an optional deterministic Agent/Presentation fixture profile for isolating
   Live Voice output stages;
-- a runner that restores state, feeds audio and validates outcomes;
-- baseline/candidate reports produced by the latency probe.
+- unattended state restore/cold-run orchestration where later justified;
+- reviewed clean baseline, candidate and physical/capture evidence.
 
 Artifact paths, exact browser-input technology, corpus licensing and fixture
 ownership are intentionally left open for review in the main design thread.
@@ -356,22 +397,24 @@ decide:
    Live Voice-only output experiments without being mistaken for real-Agent
    E2E.
 
-## 10. Next cross-worktree A/B optimization harness
+## 10. Next cross-worktree A1/B/A2 optimization harness
 
-This section records the agreed next experimental direction. It does not by
-itself activate an implementation packet and grants no baseline or optimization
+This section records the agreed experimental direction. It does not by itself
+activate a specific optimization packet and grants no baseline or optimization
 credit; those require the clean compatible executions below.
 
 ### 10.1 Experiment boundary
 
-Baseline A and candidate B run as two separate immutable executions. The
-harness must never switch source trees inside an already warmed backend or
-reuse one `run_id`, output directory, report, Browser storage namespace, Task
-store, or JiuwenSwarm data directory across A and B.
+Baseline-before A1, candidate B and baseline-after A2 run as three separate
+immutable executions. A1 and A2 use the same unchanged reference source; B
+contains one named optimization. The harness must never switch source trees
+inside an already warmed backend or reuse one `run_id`, output directory,
+report, Browser storage namespace, Task store, or JiuwenSwarm data directory
+across A1, B and A2.
 
 Each invocation identifies at least:
 
-- experiment role: `baseline` or `candidate`;
+- experiment role: `baseline_before`, `candidate`, or `baseline_after`;
 - optimization track and benchmark lane;
 - exact first and terminal measurement boundaries;
 - exact clean JiuwenSwarm worktree and commit;
@@ -444,13 +487,34 @@ conflicting batches, unexpected fallback/degradation, wrong Task state,
 forbidden effects, exporter-drain failure or an incompatible run manifest stop
 the experiment and remain in its denominator.
 
-Comparison is allowed only when A and B agree on every declared compatibility
-dimension other than the exact source commit and the named optimization. The
-result must show stage-by-stage and total absolute/relative deltas, denominators
-and guardrails, and must report `inconclusive` when the apparent improvement is
-smaller than run variability or merely moves the wait downstream.
+Comparison is allowed only when A1, B and A2 agree on every declared
+compatibility dimension other than B's exact source commit and named
+optimization. B must improve against both A1 and A2. A1→A2 latency,
+denominator and failure drift must be smaller than the minimum candidate gain.
+The result must show stage-by-stage and total absolute/relative deltas,
+denominators and guardrails, and must report `inconclusive` when the apparent
+improvement is smaller than drift or merely moves the wait downstream.
 
-### 10.5 Deliberately deferred automation
+### 10.5 Optimization ranking and worktree policy
+
+Rank one optimization candidate at a time using, in order:
+
+1. contribution to `response_total` and the affected user-visible headline;
+2. repeatability and p95 stability of the stage in A1;
+3. direct ownership by Live Voice rather than Agent-Core/model/Tool internals;
+4. evidence that reducing the wait will not move it into a downstream stage or
+   successor recovery;
+5. failure, fallback, underrun, rebuffer, ACK and semantic-risk guardrails;
+6. implementation complexity and rollback cost.
+
+Each candidate worktree starts from the same reviewed reference commit, pins
+the same Agent-Core identity and declares one target segment, hypothesis,
+minimum gain, response-total expectation, guardrails and exclusions. Unrelated
+optimizations never share one B population. A passing B may become the next
+reference only after its own review and A1/B/A2 acceptance; otherwise the
+branch is revised or discarded.
+
+### 10.6 Deliberately deferred automation
 
 The current MVP does not need to:
 

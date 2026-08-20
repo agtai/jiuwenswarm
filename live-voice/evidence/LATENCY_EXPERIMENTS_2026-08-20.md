@@ -396,16 +396,26 @@ profile. Real-Agent and deterministic-response samples remain separate.
 
 ## 8. Next A/B loop
 
+The A–G tables in this record are historical hypothesis evidence, not A1. They
+may be used to check whether a new clean baseline reproduces the same broad
+bottleneck direction, but they must not be pooled with the fixed-WAV runner or
+used to calculate an old→new percentage. Hongxing's retained optimization
+findings have the same role until the new runner confirms them. During A1
+analysis, classify every historical/Hongxing hypothesis as `confirmed`,
+`partially_confirmed`, `not_reproduced`, `not_yet_measured`, or
+`methodologically_incompatible`.
+
 Each optimization receives its own clean candidate worktree and one named
 change. The loop is:
 
 ```text
-clean baseline A
-    → automated Track 2 warm/cold population
-    → apply one Live Voice optimization B
-    → compatible automated Track 2 population
-    → baseline A again when Provider/network drift is material
-    → stage-by-stage and total comparison
+reviewed clean reference and smoke
+    → automated Track 2 baseline A1
+    → rank A1 plus historical/Hongxing hypotheses
+    → apply one Live Voice optimization B in one worktree
+    → compatible automated Track 2 candidate B
+    → unchanged-reference baseline A2
+    → stage-by-stage, total, denominator and drift comparison
     → Controlled Browser verification for affected Browser/output seams
     → physical Track 1 or full-journey verification when required
 ```
