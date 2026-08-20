@@ -6989,6 +6989,12 @@ class SqliteTaskStore:
                     raise cls._corrupt(
                         "formal Task cancel outbox carries adjustment authority"
                     )
+                if outbox_state is OutboxState.DELIVERED and (
+                    delivery_count < 1 or outbox["last_error"] is not None
+                ):
+                    raise cls._corrupt(
+                        "formal Task delivered cancel outbox lifecycle is not canonical"
+                    )
             else:
                 if (
                     adjustment is None

@@ -5997,6 +5997,71 @@ def test_historical_cancel_settlement_reopens_and_replays_after_retry_running(
 
 
 @pytest.mark.parametrize(
+    ("delivery_count", "last_error"),
+    [
+        (0, None),
+        (0, "FORGED_CANCEL_FAILURE"),
+        (42, "FORGED_CANCEL_FAILURE"),
+    ],
+)
+def test_historical_cancel_settlement_rejects_impossible_delivered_outbox(
+    tmp_path: Path,
+    delivery_count: int,
+    last_error: str | None,
+) -> None:
+    (
+        database,
+        _store,
+        executor,
+        _core,
+        _retry_command,
+        _retry_grant,
+        _retried,
+        attempt_a,
+        _attempt_b,
+        _settlement_a,
+        _settlement_b,
+    ) = _formal_cancel_then_retry(tmp_path)
+    with sqlite3.connect(database) as connection:
+        canonical = connection.execute(
+            """SELECT state, delivery_count, last_error
+               FROM outbox WHERE attempt_id=? AND kind=?""",
+            (attempt_a, OutboxKind.ATTEMPT_CANCEL.value),
+        ).fetchone()
+        assert canonical == (OutboxState.DELIVERED.value, 1, None)
+        updated = connection.execute(
+            """UPDATE outbox SET state=?, delivery_count=?, last_error=?
+               WHERE attempt_id=? AND kind=?""",
+            (
+                OutboxState.DELIVERED.value,
+                delivery_count,
+                last_error,
+                attempt_a,
+                OutboxKind.ATTEMPT_CANCEL.value,
+            ),
+        )
+        assert updated.rowcount == 1
+        connection.commit()
+    before = _database_authority_bytes(database)
+    executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    )
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_authority_bytes(database) == before
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.retry_readiness_calls),
+    ) == executor_effects
+
+
+@pytest.mark.parametrize(
     "corruption",
     [
         "cross_epoch_settlement",
