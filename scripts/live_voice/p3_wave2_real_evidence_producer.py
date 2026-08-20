@@ -1571,22 +1571,6 @@ def _cli_paths(argv: list[str]) -> tuple[Path, Path]:
     return _validated_private_paths(Path(argv[1]), Path(argv[3]))
 
 
-def _raw_cli_paths(argv: list[str]) -> tuple[Path, Path]:
-    if (
-        len(argv) != 4
-        or argv[0] != "--private-root"
-        or argv[2] != "--output"
-    ):
-        raise ClosedEvidenceFailure("PRIVATE_CLI_INVALID")
-    private_root = Path(argv[1])
-    output_path = Path(argv[3])
-    if not private_root.is_absolute():
-        raise ClosedEvidenceFailure("PRIVATE_ROOT_NOT_ABSOLUTE")
-    if not output_path.is_absolute():
-        raise ClosedEvidenceFailure("PRIVATE_OUTPUT_NOT_ABSOLUTE")
-    return private_root, output_path
-
-
 def _worker_command(arguments: list[str], remaining: float) -> list[str]:
     bootstrap = (
         "import sys; from scripts.live_voice import "
@@ -1618,46 +1602,144 @@ def _worker_entry(arguments: list[str], remaining: float) -> int:
     return 0
 
 
-def _remove_failed_output(private_root: Path, output_path: Path) -> None:
+def _create_windows_kill_job(process: subprocess.Popen[bytes]) -> object | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("per_process_user_time_limit", ctypes.c_longlong),
+            ("per_job_user_time_limit", ctypes.c_longlong),
+            ("limit_flags", wintypes.DWORD),
+            ("minimum_working_set_size", ctypes.c_size_t),
+            ("maximum_working_set_size", ctypes.c_size_t),
+            ("active_process_limit", wintypes.DWORD),
+            ("affinity", ctypes.c_size_t),
+            ("priority_class", wintypes.DWORD),
+            ("scheduling_class", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("read_operation_count", ctypes.c_ulonglong),
+            ("write_operation_count", ctypes.c_ulonglong),
+            ("other_operation_count", ctypes.c_ulonglong),
+            ("read_transfer_count", ctypes.c_ulonglong),
+            ("write_transfer_count", ctypes.c_ulonglong),
+            ("other_transfer_count", ctypes.c_ulonglong),
+        ]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("basic_limit_information", BasicLimitInformation),
+            ("io_info", IoCounters),
+            ("process_memory_limit", ctypes.c_size_t),
+            ("job_memory_limit", ctypes.c_size_t),
+            ("peak_process_memory_used", ctypes.c_size_t),
+            ("peak_job_memory_used", ctypes.c_size_t),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    kernel.SetInformationJobObject.restype = wintypes.BOOL
+    kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
+    information = ExtendedLimitInformation()
+    information.basic_limit_information.limit_flags = 0x00002000
+    if not kernel.SetInformationJobObject(
+        job,
+        9,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        kernel.CloseHandle(job)
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
     try:
-        if (
-            output_path.parent == private_root
-            and output_path.exists()
-            and not _is_reparse_or_symlink(output_path)
-            and output_path.is_file()
-        ):
-            output_path.unlink()
-    except OSError:
-        pass
+        process_handle = wintypes.HANDLE(int(getattr(process, "_handle")))
+    except (AttributeError, TypeError, ValueError) as exc:
+        kernel.CloseHandle(job)
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE") from exc
+    if not kernel.AssignProcessToJobObject(job, process_handle):
+        kernel.CloseHandle(job)
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
+    return job
 
 
-def _terminate_worker_tree(process: subprocess.Popen[bytes], *, deadline: float) -> None:
-    remaining = max(0.05, deadline - time.monotonic())
+def _resume_windows_worker(process: subprocess.Popen[bytes]) -> None:
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        process_handle = wintypes.HANDLE(int(getattr(process, "_handle")))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE") from exc
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    if ntdll.NtResumeProcess(process_handle) != 0:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
+
+
+def _terminate_windows_job(job: object) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel.TerminateJobObject.restype = wintypes.BOOL
+    if not kernel.TerminateJobObject(job, 2):
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED")
+
+
+def _close_windows_job(job: object | None) -> None:
+    if os.name != "nt" or job is None:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    if not kernel.CloseHandle(job):
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
+
+
+def _terminate_owned_worker(
+    process: subprocess.Popen[bytes],
+    *,
+    windows_job: object | None,
+    deadline: float,
+) -> None:
     if os.name == "nt":
-        try:
-            terminated = subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=remaining,
-            )
-            if terminated.returncode != 0:
-                process.kill()
-        except (OSError, subprocess.SubprocessError):
+        if windows_job is None:
             with contextlib.suppress(OSError):
                 process.kill()
+        else:
+            _terminate_windows_job(windows_job)
     else:
         import signal
 
         with contextlib.suppress(OSError):
             os.killpg(process.pid, signal.SIGKILL)
-    if process.poll() is None:
-        with contextlib.suppress(OSError):
-            process.kill()
     with contextlib.suppress(OSError, subprocess.SubprocessError):
-        process.wait(timeout=max(0.05, deadline - time.monotonic()))
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
 
 
 def _validate_worker_output(
@@ -1699,7 +1781,9 @@ def _supervise_production_worker(
     if worker_remaining <= 0:
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
     creationflags = (
-        subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004
+        if os.name == "nt"
+        else 0
     )
     try:
         process = subprocess.Popen(
@@ -1713,25 +1797,38 @@ def _supervise_production_worker(
         )
     except OSError as exc:
         raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED") from exc
+    windows_job: object | None = None
+    terminated = False
     try:
-        return_code = process.wait(timeout=worker_remaining)
-    except subprocess.TimeoutExpired:
-        _terminate_worker_tree(process, deadline=deadline)
-        _remove_failed_output(private_root, output_path)
-        raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED") from None
+        windows_job = _create_windows_kill_job(process)
+        _resume_windows_worker(process)
+        try:
+            return_code = process.wait(timeout=worker_remaining)
+        except subprocess.TimeoutExpired:
+            terminated = True
+            _terminate_owned_worker(
+                process,
+                windows_job=windows_job,
+                deadline=deadline,
+            )
+            raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED") from None
+    except BaseException:
+        if not terminated:
+            terminated = True
+            _terminate_owned_worker(
+                process,
+                windows_job=windows_job,
+                deadline=deadline,
+            )
+        raise
+    finally:
+        _close_windows_job(windows_job)
     if time.monotonic() >= deadline:
-        _remove_failed_output(private_root, output_path)
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
     if return_code != 0:
-        _remove_failed_output(private_root, output_path)
         raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED")
-    try:
-        aggregate = _validate_worker_output(private_root, output_path)
-    except BaseException:  # noqa: BLE001 -- invalid evidence is never retained
-        _remove_failed_output(private_root, output_path)
-        raise
+    aggregate = _validate_worker_output(private_root, output_path)
     if time.monotonic() >= deadline:
-        _remove_failed_output(private_root, output_path)
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
     return aggregate
 
@@ -1740,13 +1837,13 @@ def main(argv: list[str] | None = None) -> int:
     deadline = time.monotonic() + _IN_PROCESS_LIMIT_SECONDS
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        private_root, output_path = _raw_cli_paths(arguments)
         with open(os.devnull, "w", encoding="utf-8") as quiet:
             with (
                 contextlib.redirect_stdout(quiet),
                 contextlib.redirect_stderr(quiet),
                 _silence_process_fds(),
             ):
+                private_root, output_path = _cli_paths(arguments)
                 aggregate = _supervise_production_worker(
                     arguments,
                     private_root,

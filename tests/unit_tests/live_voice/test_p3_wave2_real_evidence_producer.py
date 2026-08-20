@@ -68,6 +68,15 @@ def _make_private_acl(root: Path) -> None:
         assert secured.returncode == 0
 
 
+def _private_cli_paths(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    private_root = tmp_path / name
+    (private_root / "config").mkdir(parents=True)
+    (private_root / "config" / "config.yaml").write_text("{}", encoding="utf-8")
+    (private_root / ".env").write_text("", encoding="utf-8")
+    _make_private_acl(private_root)
+    return private_root, private_root / "raw-evidence.json"
+
+
 def _observation(
     *,
     sequence: int,
@@ -251,6 +260,7 @@ def test_private_writer_rejects_relative_existing_and_oversized_output(
     with pytest.raises(ClosedEvidenceFailure) as existing:
         write_private_evidence(output, document)
     assert existing.value.reason == "PRIVATE_OUTPUT_EXISTS"
+    assert output.read_text(encoding="utf-8") == "existing"
 
     oversized = dict(document)
     oversized["observations"] = document["observations"] * 512
@@ -387,7 +397,121 @@ def test_cli_uses_fixed_private_production_path_and_accepts_no_runner(
     assert str(private_root) not in captured.out
 
 
-def test_cli_global_deadline_kills_the_worker_and_emits_no_evidence(
+@pytest.mark.parametrize(
+    ("existing_kind", "reason"),
+    [
+        ("regular", "PRIVATE_OUTPUT_EXISTS"),
+        ("symlink", "PRIVATE_PATH_REPARSE_POINT"),
+        ("junction", "PRIVATE_PATH_REPARSE_POINT"),
+    ],
+)
+def test_parent_preflight_never_spawns_for_any_existing_output_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    existing_kind: str,
+    reason: str,
+) -> None:
+    private_root, output = _private_cli_paths(
+        tmp_path,
+        f"existing-{existing_kind}",
+    )
+    sentinel = b"CALLER_EXISTING_OUTPUT_SENTINEL"
+    target = tmp_path / f"{existing_kind}-target"
+    emulated_symlink = False
+    if existing_kind == "regular":
+        output.write_bytes(sentinel)
+    elif existing_kind == "symlink":
+        target.write_bytes(sentinel)
+        try:
+            output.symlink_to(target)
+        except OSError:
+            output.write_bytes(sentinel)
+            original = producer._is_reparse_or_symlink
+            monkeypatch.setattr(
+                producer,
+                "_is_reparse_or_symlink",
+                lambda path: path == output or original(path),
+            )
+            emulated_symlink = True
+    else:
+        target.mkdir()
+        (target / "sentinel.bin").write_bytes(sentinel)
+        created = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:JUNCTION_PATH "
+                "-Target $env:JUNCTION_TARGET | Out-Null",
+            ],
+            check=False,
+            capture_output=True,
+            env={
+                **os.environ,
+                "JUNCTION_PATH": str(output),
+                "JUNCTION_TARGET": str(target),
+            },
+        )
+        assert created.returncode == 0
+    spawned: list[bool] = []
+
+    def forbidden_spawn(*_args, **_kwargs):
+        spawned.append(True)
+        return {
+            "ok": True,
+            "observation_count": 4,
+            "paired_file_tool_count": 2,
+            "write_edit_pair_count": 1,
+        }
+
+    monkeypatch.setattr(producer, "_supervise_production_worker", forbidden_spawn)
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+    assert spawned == []
+    if existing_kind == "regular" or emulated_symlink:
+        assert output.read_bytes() == sentinel
+    elif existing_kind == "symlink":
+        assert output.is_symlink()
+        assert target.read_bytes() == sentinel
+    else:
+        assert (target / "sentinel.bin").read_bytes() == sentinel
+    assert capsys.readouterr() == (
+        json.dumps({"ok": False, "reason": reason}, separators=(",", ":"), sort_keys=True)
+        + "\n",
+        "",
+    )
+
+
+def test_worker_failure_retains_its_unowned_output_for_cleanup_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "worker-failure")
+    sentinel = b"WORKER_FAILURE_OUTPUT_SENTINEL"
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda arguments, _remaining: [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes("
+            f"{sentinel!r}); raise SystemExit(2)",
+            arguments[3],
+        ],
+    )
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+    assert output.read_bytes() == sentinel
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_PRODUCER_FAILED"}\n',
+        "",
+    )
+
+
+def test_cli_global_deadline_kills_tree_and_retains_cleanup_pending_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys,
@@ -398,14 +522,32 @@ def test_cli_global_deadline_kills_the_worker_and_emits_no_evidence(
     (private_root / ".env").write_text("", encoding="utf-8")
     _make_private_acl(private_root)
     output = private_root / "raw-evidence.json"
+    escaped = private_root / "escaped-descendant.txt"
+    taskkill_calls: list[object] = []
+    real_run = producer.subprocess.run
+
+    def forbid_taskkill(arguments, *args, **kwargs):
+        if arguments and str(arguments[0]).casefold() == "taskkill":
+            taskkill_calls.append(arguments)
+            raise AssertionError("PID-based taskkill is forbidden")
+        return real_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(producer.subprocess, "run", forbid_taskkill)
     monkeypatch.setattr(producer, "_IN_PROCESS_LIMIT_SECONDS", 0.2)
     monkeypatch.setattr(
         producer,
         "_worker_command",
-        lambda _arguments, _remaining: [
+        lambda arguments, _remaining: [
             sys.executable,
             "-c",
-            "import os,time; os.write(1,b'PRIVATE_CHILD_SENTINEL'); time.sleep(5)",
+            "import os,pathlib,subprocess,sys,time; "
+            "subprocess.Popen([sys.executable,'-c',"
+            "'import pathlib,sys,time; time.sleep(0.8); '"
+            "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[2]]); "
+            "pathlib.Path(sys.argv[1]).write_bytes(b'TIMEOUT_OUTPUT_SENTINEL'); "
+            "os.write(1,b'PRIVATE_CHILD_SENTINEL'); time.sleep(5)",
+            arguments[3],
+            str(escaped),
         ],
         raising=False,
     )
@@ -418,9 +560,207 @@ def test_cli_global_deadline_kills_the_worker_and_emits_no_evidence(
 
     assert exit_code == 2
     assert elapsed < 2
-    assert not output.exists()
+    assert output.read_bytes() == b"TIMEOUT_OUTPUT_SENTINEL"
+    time.sleep(1)
+    assert not escaped.exists()
+    assert taskkill_calls == []
     assert capsys.readouterr() == (
         '{"ok":false,"reason":"REAL_SCENARIO_DEADLINE_EXCEEDED"}\n',
+        "",
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object ownership")
+@pytest.mark.parametrize("leader_state", ["exited", "concurrent-exit"])
+def test_windows_timeout_uses_stable_job_handle_after_leader_exit_and_pid_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    leader_state: str,
+) -> None:
+    class ReusedPidProcess:
+        def __init__(self) -> None:
+            self.polls = [0] if leader_state == "exited" else [None, 0]
+            self.waited = False
+
+        @property
+        def pid(self):
+            raise AssertionError("reused PID must never be consulted")
+
+        def poll(self):
+            return self.polls.pop(0) if self.polls else 0
+
+        def wait(self, *, timeout: float):
+            assert timeout >= 0
+            self.waited = True
+            return 0
+
+        def kill(self):
+            raise AssertionError("stable Job handle must own termination")
+
+    process = ReusedPidProcess()
+    job = object()
+    terminated: list[object] = []
+    monkeypatch.setattr(
+        producer,
+        "_terminate_windows_job",
+        lambda owner: terminated.append(owner),
+        raising=False,
+    )
+
+    producer._terminate_owned_worker(
+        process,
+        windows_job=job,
+        deadline=time.monotonic() + 1,
+    )
+
+    assert terminated == [job]
+    assert process.waited is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object ownership")
+def test_windows_job_assignment_failure_fails_closed_and_kills_by_process_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "job-assignment-failure")
+
+    class OwnedProcessHandle:
+        def __init__(self) -> None:
+            self.killed = False
+            self.waited = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, *, timeout: float):
+            assert timeout >= 0
+            self.waited = True
+            return 1
+
+    process = OwnedProcessHandle()
+    monkeypatch.setattr(producer.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        producer,
+        "_create_windows_kill_job",
+        lambda _process: (_ for _ in ()).throw(
+            ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._supervise_production_worker(
+            ["--private-root", str(private_root), "--output", str(output)],
+            private_root,
+            output,
+            deadline=time.monotonic() + 1,
+        )
+
+    assert raised.value.reason == "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
+    assert process.killed is True
+    assert process.waited is True
+
+
+def test_normal_worker_close_kills_owned_descendant_without_taskkill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "normal-owned-tree")
+    escaped = private_root / "normal-escaped-descendant.txt"
+    taskkill_calls: list[object] = []
+    real_run = producer.subprocess.run
+
+    def forbid_taskkill(arguments, *args, **kwargs):
+        if arguments and str(arguments[0]).casefold() == "taskkill":
+            taskkill_calls.append(arguments)
+            raise AssertionError("PID-based taskkill is forbidden")
+        return real_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(producer.subprocess, "run", forbid_taskkill)
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda _arguments, _remaining: [
+            sys.executable,
+            "-c",
+            "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+            "'import pathlib,sys,time; time.sleep(0.8); '"
+            "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[1]])",
+            str(escaped),
+        ],
+    )
+    monkeypatch.setattr(
+        producer,
+        "_validate_worker_output",
+        lambda _root, _output: {
+            "ok": True,
+            "observation_count": 4,
+            "paired_file_tool_count": 2,
+            "write_edit_pair_count": 1,
+        },
+    )
+
+    aggregate = producer._supervise_production_worker(
+        ["--private-root", str(private_root), "--output", str(output)],
+        private_root,
+        output,
+        deadline=time.monotonic() + 5,
+    )
+
+    assert aggregate["ok"] is True
+    time.sleep(1)
+    assert not escaped.exists()
+    assert taskkill_calls == []
+
+
+def test_invalid_worker_evidence_is_retained_for_cleanup_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "invalid-evidence")
+    sentinel = b"PRIVATE_INVALID_EVIDENCE_SENTINEL"
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda arguments, _remaining: [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes("
+            f"{sentinel!r})",
+            arguments[3],
+        ],
+    )
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+    assert output.read_bytes() == sentinel
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"EVIDENCE_JSON_INVALID"}\n',
+        "",
+    )
+
+
+def test_competing_output_created_after_parent_preflight_is_never_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    private_root, output = _private_cli_paths(tmp_path, "competing-output")
+    sentinel = b"CALLER_RACE_OUTPUT_SENTINEL"
+    real_popen = subprocess.Popen
+
+    def racing_popen(_command, **kwargs):
+        output.write_bytes(sentinel)
+        return real_popen(
+            [sys.executable, "-c", "raise SystemExit(2)"],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(producer.subprocess, "Popen", racing_popen)
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+    assert output.read_bytes() == sentinel
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_PRODUCER_FAILED"}\n',
         "",
     )
 
@@ -764,8 +1104,7 @@ def test_cli_exception_cannot_leak_fd_or_child_output(
     monkeypatch: pytest.MonkeyPatch,
     capfd,
 ) -> None:
-    private_root = tmp_path / "exception-private"
-    output = private_root / "raw-evidence.json"
+    private_root, output = _private_cli_paths(tmp_path, "exception-private")
 
     def leaking_failure(*_args, **_kwargs):
         os.write(1, b"PRIVATE_EXCEPTION_STDOUT_SENTINEL\n")
