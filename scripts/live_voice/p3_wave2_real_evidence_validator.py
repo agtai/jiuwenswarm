@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,16 @@ from jsonschema import Draft202012Validator
 MAX_EVIDENCE_BYTES = 64 * 1024
 SCHEMA_PATH = Path(__file__).with_name("p3_wave2_real_evidence.schema.json")
 _REAL_BOUNDARY_CHECKS = frozenset({"real_agent_observed", "real_tool_observed"})
+_INVALID_IDENTITY_DIGESTS = frozenset(
+    {
+        "sha256:"
+        + hashlib.sha256(marker).hexdigest()
+        for marker in (
+            b"live-voice.invalid-tool-name",
+            b"live-voice.invalid-tool-call-id",
+        )
+    }
+)
 
 
 class EvidenceValidationError(RuntimeError):
@@ -49,8 +61,15 @@ def observation_counts(observations: list[dict[str, object]]) -> dict[str, int]:
         last_sequences[stream_key] = sequence
         tool_kind = str(observation["file_tool_kind"])
         result_status = str(observation["result_status"])
-        if tool_kind == "unknown" or result_status == "unknown":
+        invalid_identity = (
+            tool_kind == "unknown"
+            or result_status == "unknown"
+            or observation["tool_name_digest"] in _INVALID_IDENTITY_DIGESTS
+            or observation["call_id_digest"] in _INVALID_IDENTITY_DIGESTS
+        )
+        if invalid_identity:
             unknown += 1
+            continue
         pair_key = (*stream_key, str(observation["call_id_digest"]))
         pair_value = (str(observation["tool_name_digest"]), tool_kind)
         if observation["event_kind"] == "tool_call":
@@ -89,6 +108,11 @@ def _successful_write_edit_streams(
     ] = {}
     successful: set[tuple[str, str, str]] = set()
     for observation in observations:
+        if (
+            observation["tool_name_digest"] in _INVALID_IDENTITY_DIGESTS
+            or observation["call_id_digest"] in _INVALID_IDENTITY_DIGESTS
+        ):
+            continue
         stream = (
             str(observation["task_ref"]),
             str(observation["attempt_ref"]),
@@ -125,6 +149,38 @@ def _schema() -> dict[str, Any]:
     return value
 
 
+def _canonical_utc_timestamp(value: object) -> datetime:
+    if type(value) is not str or not value.endswith("Z"):
+        raise EvidenceValidationError("EVIDENCE_TIMESTAMP_INVALID")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00").astimezone(UTC)
+    except ValueError as exc:
+        raise EvidenceValidationError("EVIDENCE_TIMESTAMP_INVALID") from exc
+    canonical = parsed.isoformat(
+        timespec="seconds" if parsed.microsecond == 0 else "microseconds"
+    ).replace("+00:00", "Z")
+    if value != canonical:
+        raise EvidenceValidationError("EVIDENCE_TIMESTAMP_INVALID")
+    return parsed
+
+
+def _validate_observation_timestamps(
+    observations: list[dict[str, object]],
+) -> None:
+    latest: dict[tuple[str, str, str, str], datetime] = {}
+    for observation in observations:
+        stream = (
+            str(observation["task_ref"]),
+            str(observation["attempt_ref"]),
+            str(observation["run_ref"]),
+            str(observation["stream_kind"]),
+        )
+        observed_at = _canonical_utc_timestamp(observation["observed_at"])
+        if stream in latest and observed_at < latest[stream]:
+            raise EvidenceValidationError("EVIDENCE_TIMESTAMP_REVERSED")
+        latest[stream] = observed_at
+
+
 def validate_evidence_bytes(raw: bytes) -> dict[str, object]:
     if type(raw) is not bytes or len(raw) > MAX_EVIDENCE_BYTES:
         raise EvidenceValidationError("EVIDENCE_TOO_LARGE")
@@ -141,6 +197,13 @@ def validate_evidence_bytes(raw: bytes) -> dict[str, object]:
     bindings = document["bindings"]
     task_refs = bindings["task_refs"]
     attempt_refs = bindings["attempt_refs"]
+    run_refs = bindings["run_refs"]
+    if (
+        len(set(task_refs.values())) != 3
+        or len(set(attempt_refs.values())) != 3
+        or len(set(run_refs.values())) != 4
+    ):
+        raise EvidenceValidationError("EVIDENCE_SCENARIO_BINDING_MISMATCH")
     scenario_pairs = {
         (task_refs[label], attempt_refs[label]) for label in ("A1", "A2", "B1")
     }
@@ -150,6 +213,44 @@ def validate_evidence_bytes(raw: bytes) -> dict[str, object]:
         for observation in document["observations"]
     ):
         raise EvidenceValidationError("EVIDENCE_SCENARIO_BINDING_MISMATCH")
+    required_bindings = {
+        (
+            task_refs["A1"],
+            attempt_refs["A1"],
+            run_refs["A1_initial"],
+            "initial",
+        ),
+        (
+            task_refs["A2"],
+            attempt_refs["A2"],
+            run_refs["A2_initial"],
+            "initial",
+        ),
+        (
+            task_refs["A2"],
+            attempt_refs["A2"],
+            run_refs["A2_adjustment"],
+            "adjustment",
+        ),
+        (
+            task_refs["B1"],
+            attempt_refs["B1"],
+            run_refs["B1_initial"],
+            "initial",
+        ),
+    }
+    observed_bindings = {
+        (
+            observation["task_ref"],
+            observation["attempt_ref"],
+            observation["run_ref"],
+            observation["stream_kind"],
+        )
+        for observation in document["observations"]
+    }
+    if observed_bindings != required_bindings:
+        raise EvidenceValidationError("EVIDENCE_SCENARIO_BINDING_MISMATCH")
+    _validate_observation_timestamps(document["observations"])
 
     counts = document["counts"]
     if counts["observer_failures"]:

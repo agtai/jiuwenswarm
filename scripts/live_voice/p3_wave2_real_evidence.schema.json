@@ -38,10 +38,11 @@
     "bindings": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task_refs", "attempt_refs", "profile_sha256", "requirements_sha256"],
+      "required": ["task_refs", "attempt_refs", "run_refs", "profile_sha256", "requirements_sha256"],
       "properties": {
         "task_refs": {"$ref": "#/$defs/scenario_refs"},
         "attempt_refs": {"$ref": "#/$defs/scenario_refs"},
+        "run_refs": {"$ref": "#/$defs/run_refs"},
         "profile_sha256": {"$ref": "#/$defs/sha256"},
         "requirements_sha256": {"$ref": "#/$defs/sha256"}
       }
@@ -134,6 +135,17 @@
         "A1": {"$ref": "#/$defs/id"},
         "A2": {"$ref": "#/$defs/id"},
         "B1": {"$ref": "#/$defs/id"}
+      }
+    },
+    "run_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["A1_initial", "A2_initial", "A2_adjustment", "B1_initial"],
+      "properties": {
+        "A1_initial": {"$ref": "#/$defs/id"},
+        "A2_initial": {"$ref": "#/$defs/id"},
+        "A2_adjustment": {"$ref": "#/$defs/id"},
+        "B1_initial": {"$ref": "#/$defs/id"}
       }
     },
     "observation": {

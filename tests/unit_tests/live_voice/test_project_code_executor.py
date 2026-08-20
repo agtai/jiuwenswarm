@@ -1449,6 +1449,58 @@ async def test_direct_stream_observer_maps_unknown_tool_and_error_without_raw_fi
         await adapter.close()
 
 
+@pytest.mark.parametrize("invalid", [None, "", 7, "bad\x00id", "x" * 257])
+def test_direct_stream_observer_marks_every_invalid_call_identity_closed(
+    invalid: object,
+) -> None:
+    expected = "sha256:" + hashlib.sha256(
+        b"live-voice.invalid-tool-call-id"
+    ).hexdigest()
+
+    observation = project_code_executor._closed_direct_stream_observation(
+        {
+            "event_type": "chat.tool_call",
+            "tool_call": {"tool_name": "write_file", "tool_call_id": invalid},
+        },
+        task_ref="task-1",
+        attempt_ref="attempt-1",
+        run_ref="run-1",
+        sequence=1,
+        stream_kind="initial",
+        observed_at="2026-08-20T10:00:00Z",
+    )
+
+    assert observation is not None
+    assert observation.file_tool_kind == "write"
+    assert observation.call_id_digest == expected
+
+
+@pytest.mark.parametrize("invalid", [None, "", 7, "bad\x00name", "x" * 65])
+def test_direct_stream_observer_marks_every_invalid_tool_identity_unknown(
+    invalid: object,
+) -> None:
+    expected = "sha256:" + hashlib.sha256(
+        b"live-voice.invalid-tool-name"
+    ).hexdigest()
+
+    observation = project_code_executor._closed_direct_stream_observation(
+        {
+            "event_type": "chat.tool_call",
+            "tool_call": {"tool_name": invalid, "tool_call_id": "call-1"},
+        },
+        task_ref="task-1",
+        attempt_ref="attempt-1",
+        run_ref="run-1",
+        sequence=1,
+        stream_kind="initial",
+        observed_at="2026-08-20T10:00:00Z",
+    )
+
+    assert observation is not None
+    assert observation.file_tool_kind == "unknown"
+    assert observation.tool_name_digest == expected
+
+
 @pytest.mark.asyncio
 async def test_direct_stream_observer_failure_and_awaitable_never_change_execution(
     tmp_path: Path,

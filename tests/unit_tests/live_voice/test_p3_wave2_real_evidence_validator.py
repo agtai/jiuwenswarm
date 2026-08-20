@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -28,6 +29,12 @@ from scripts.live_voice.p3_wave2_real_evidence_validator import (
 SHA_A = "sha256:" + "a" * 64
 SHA_B = "sha256:" + "b" * 64
 SHA_C = "sha256:" + "c" * 64
+INVALID_CALL_SHA = "sha256:" + hashlib.sha256(
+    b"live-voice.invalid-tool-call-id"
+).hexdigest()
+INVALID_TOOL_SHA = "sha256:" + hashlib.sha256(
+    b"live-voice.invalid-tool-name"
+).hexdigest()
 
 
 def _valid_document(tmp_path: Path) -> dict[str, object]:
@@ -125,6 +132,12 @@ def test_schema_closes_every_object_and_validator_accepts_exact_document(
         "paired_file_tool_count",
         "write_edit_pair_count",
     }
+    assert document["bindings"].get("run_refs") == {
+        "A1_initial": "run-A1-initial",
+        "A2_initial": "run-A2-initial",
+        "A2_adjustment": "run-A2-adjustment",
+        "B1_initial": "run-B1-initial",
+    }
 
 
 @pytest.mark.parametrize(
@@ -215,7 +228,7 @@ def test_validator_rejects_observation_outside_exact_a1_a2_b1_bindings(
     assert raised.value.reason == "EVIDENCE_SCENARIO_BINDING_MISMATCH"
 
 
-def test_validator_requires_real_initial_pairs_and_a2_adjustment_pair(
+def test_validator_requires_bound_initial_pairs_and_a2_adjustment_pair(
     tmp_path: Path,
 ) -> None:
     document = _valid_document(tmp_path)
@@ -237,4 +250,138 @@ def test_validator_requires_real_initial_pairs_and_a2_adjustment_pair(
             json.dumps(document, separators=(",", ":")).encode("utf-8")
         )
 
-    assert raised.value.reason == "EVIDENCE_SCENARIO_OBSERVATION_INCOMPLETE"
+    assert raised.value.reason == "EVIDENCE_SCENARIO_BINDING_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    ("identity_kind", "invalid_sides"),
+    [
+        ("call_id_digest", (0,)),
+        ("call_id_digest", (1,)),
+        ("call_id_digest", (0, 1)),
+        ("tool_name_digest", (0,)),
+        ("tool_name_digest", (1,)),
+        ("tool_name_digest", (0, 1)),
+    ],
+)
+def test_validator_never_pairs_closed_invalid_tool_or_call_identity(
+    tmp_path: Path,
+    identity_kind: str,
+    invalid_sides: tuple[int, ...],
+) -> None:
+    document = _valid_document(tmp_path)
+    invalid_digest = (
+        INVALID_CALL_SHA
+        if identity_kind == "call_id_digest"
+        else INVALID_TOOL_SHA
+    )
+    for index in invalid_sides:
+        document["observations"][index][identity_kind] = invalid_digest
+
+    computed = observation_counts(document["observations"])
+    assert computed["paired_file_tools"] == 3
+    assert computed["write_edit_pairs"] == 3
+    assert computed["unknown_observations"] == len(invalid_sides)
+
+    with pytest.raises(EvidenceValidationError) as raised:
+        validate_evidence_bytes(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+    assert raised.value.reason == "EVIDENCE_UNKNOWN_OBSERVATION"
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "2026-02-30T10:00:00Z",
+        "2026-08-20T25:00:00Z",
+        "2026-08-20T10:00:00.0Z",
+    ],
+)
+def test_validator_rejects_invalid_or_noncanonical_utc_calendar_timestamp(
+    tmp_path: Path,
+    invalid: str,
+) -> None:
+    document = _valid_document(tmp_path)
+    document["observations"][0]["observed_at"] = invalid
+
+    with pytest.raises(EvidenceValidationError) as raised:
+        validate_evidence_bytes(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+    assert raised.value.reason == "EVIDENCE_TIMESTAMP_INVALID"
+
+
+def test_validator_rejects_time_reversal_inside_one_stream(tmp_path: Path) -> None:
+    document = _valid_document(tmp_path)
+    document["observations"][0]["observed_at"] = "2026-08-20T10:00:01Z"
+    document["observations"][1]["observed_at"] = "2026-08-20T10:00:00Z"
+
+    with pytest.raises(EvidenceValidationError) as raised:
+        validate_evidence_bytes(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+    assert raised.value.reason == "EVIDENCE_TIMESTAMP_REVERSED"
+
+
+@pytest.mark.parametrize("binding_kind", ["task_refs", "attempt_refs"])
+def test_validator_requires_each_scenario_task_and_attempt_reference_unique(
+    tmp_path: Path,
+    binding_kind: str,
+) -> None:
+    document = _valid_document(tmp_path)
+    refs = document["bindings"][binding_kind]
+    duplicate = refs["A1"]
+    replaced = refs["A2"]
+    refs["A2"] = duplicate
+    observation_key = "task_ref" if binding_kind == "task_refs" else "attempt_ref"
+    for observation in document["observations"]:
+        if observation[observation_key] == replaced:
+            observation[observation_key] = duplicate
+
+    with pytest.raises(EvidenceValidationError) as raised:
+        validate_evidence_bytes(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+    assert raised.value.reason == "EVIDENCE_SCENARIO_BINDING_MISMATCH"
+
+
+def test_validator_rejects_an_unbound_extra_run_for_a_required_stream(
+    tmp_path: Path,
+) -> None:
+    document = _valid_document(tmp_path)
+    extra = [dict(item) for item in document["observations"][:2]]
+    for item in extra:
+        item["run_ref"] = "run-A1-extra"
+    document["observations"].extend(extra)
+    document["counts"] = observation_counts(document["observations"])
+    document["counts"].update(
+        {"observer_failures": 0, "dropped_observations": 0}
+    )
+
+    with pytest.raises(EvidenceValidationError) as raised:
+        validate_evidence_bytes(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+    assert raised.value.reason == "EVIDENCE_SCENARIO_BINDING_MISMATCH"
+
+
+def test_validator_rejects_one_run_reused_for_initial_and_adjustment(
+    tmp_path: Path,
+) -> None:
+    document = _valid_document(tmp_path)
+    for observation in document["observations"]:
+        if observation["task_ref"] == "task-A2" and observation["stream_kind"] == "adjustment":
+            observation["run_ref"] = "run-A2-initial"
+
+    with pytest.raises(EvidenceValidationError) as raised:
+        validate_evidence_bytes(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+    assert raised.value.reason == "EVIDENCE_SCENARIO_BINDING_MISMATCH"

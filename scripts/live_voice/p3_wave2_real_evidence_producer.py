@@ -16,8 +16,10 @@ import contextlib
 import hashlib
 import inspect
 import json
+import math
 import os
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -33,6 +35,7 @@ try:
         MAX_EVIDENCE_BYTES,
         observation_counts,
         validate_evidence_bytes,
+        validate_evidence_file,
     )
 except ModuleNotFoundError as import_error:
     if import_error.name not in {"scripts", "scripts.live_voice"}:
@@ -42,6 +45,7 @@ except ModuleNotFoundError as import_error:
         MAX_EVIDENCE_BYTES,
         observation_counts,
         validate_evidence_bytes,
+        validate_evidence_file,
     )
 
 
@@ -159,6 +163,38 @@ def _encode(document: dict[str, object]) -> bytes:
         raise ClosedEvidenceFailure("EVIDENCE_JSON_INVALID") from exc
 
 
+def _required_run_refs(
+    summary: ScenarioSummary,
+    observations: list[dict[str, object]],
+) -> dict[str, str]:
+    task_refs = dict(zip(("A1", "A2", "B1"), summary.task_refs))
+    attempt_refs = dict(zip(("A1", "A2", "B1"), summary.attempt_refs))
+    required = {
+        "A1_initial": (task_refs["A1"], attempt_refs["A1"], "initial"),
+        "A2_initial": (task_refs["A2"], attempt_refs["A2"], "initial"),
+        "A2_adjustment": (task_refs["A2"], attempt_refs["A2"], "adjustment"),
+        "B1_initial": (task_refs["B1"], attempt_refs["B1"], "initial"),
+    }
+    run_refs: dict[str, str] = {}
+    for name, binding in required.items():
+        runs = {
+            str(observation["run_ref"])
+            for observation in observations
+            if (
+                observation["task_ref"],
+                observation["attempt_ref"],
+                observation["stream_kind"],
+            )
+            == binding
+        }
+        if len(runs) != 1:
+            raise ClosedEvidenceFailure("EVIDENCE_SCENARIO_BINDING_MISMATCH")
+        run_refs[name] = runs.pop()
+    if len(set(run_refs.values())) != len(run_refs):
+        raise ClosedEvidenceFailure("EVIDENCE_SCENARIO_BINDING_MISMATCH")
+    return run_refs
+
+
 def build_evidence_document(
     summary: ScenarioSummary,
     collector: ObservationCollector,
@@ -169,6 +205,16 @@ def build_evidence_document(
         "observer_failures": observer_failures,
         "dropped_observations": dropped,
     }
+    for key, reason in (
+        ("observer_failures", "EVIDENCE_OBSERVER_FAILURE"),
+        ("dropped_observations", "EVIDENCE_DROPPED_OBSERVATION"),
+        ("sequence_gaps", "EVIDENCE_SEQUENCE_GAP"),
+        ("unknown_observations", "EVIDENCE_UNKNOWN_OBSERVATION"),
+        ("unpaired_observations", "EVIDENCE_TOOL_PAIRING_INVALID"),
+    ):
+        if counts[key]:
+            raise ClosedEvidenceFailure(reason)
+    run_refs = _required_run_refs(summary, observations)
     document: dict[str, object] = {
         "schema_version": "live-voice.p3-wave2-real-evidence.v1",
         "source_sha256": summary.source_sha256,
@@ -182,6 +228,7 @@ def build_evidence_document(
         "bindings": {
             "task_refs": dict(zip(("A1", "A2", "B1"), summary.task_refs)),
             "attempt_refs": dict(zip(("A1", "A2", "B1"), summary.attempt_refs)),
+            "run_refs": run_refs,
             "profile_sha256": summary.profile_sha256,
             "requirements_sha256": summary.requirements_sha256,
         },
@@ -232,7 +279,32 @@ def sanitized_aggregate_line(aggregate: dict[str, object]) -> str:
     return json.dumps(aggregate, separators=(",", ":"), sort_keys=True) + "\n"
 
 
+@contextlib.contextmanager
+def _silence_process_fds():
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    null_descriptor = os.open(os.devnull, os.O_RDWR)
+    try:
+        with contextlib.suppress(BaseException):
+            sys.stdout.flush()
+            sys.stderr.flush()
+        os.dup2(null_descriptor, 1)
+        os.dup2(null_descriptor, 2)
+        yield
+    finally:
+        with contextlib.suppress(BaseException):
+            sys.stdout.flush()
+            sys.stderr.flush()
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(null_descriptor)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+
+
 _IN_PROCESS_LIMIT_SECONDS = 12 * 60
+_MAX_PROCESS_TERMINATION_SECONDS = 5.0
+_MAX_COMPOSITION_CLEANUP_SECONDS = 30.0
 _POLL_SECONDS = 0.25
 _ROOT_ENVIRONMENT = {
     "JIUWENSWARM_DATA_DIR",
@@ -269,6 +341,29 @@ class _RealScenarioFacts:
     real_tool_observed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectAuthoritySnapshot:
+    journal_record_present: bool
+    worker_present: bool
+    applying_present: bool
+    checkpoint_present: bool
+    retained_cleanup_present: bool
+    worktree_present: bool
+    attempt_agent_owner_present: bool
+    attempt_agent_pin_present: bool
+    attempt_agent_lease_present: bool
+
+    @property
+    def all_clear(self) -> bool:
+        return not any(asdict(self).values())
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceSnapshot:
+    head: bytes
+    status: bytes
+
+
 def _utc_text(value: datetime | None = None) -> str:
     current = value or datetime.now(UTC)
     return current.astimezone(UTC).isoformat(timespec="microseconds").replace(
@@ -285,6 +380,212 @@ def _closed_basename(value: str) -> bool:
     )
 
 
+def _is_reparse_or_symlink(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _windows_acl(path: Path) -> dict[str, object]:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer = ctypes.c_void_p
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [pointer]
+    kernel.LocalFree.restype = pointer
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_uint,
+        pointer,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.ConvertSidToStringSidW.argtypes = [
+        pointer,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    advapi.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        ctypes.c_uint,
+        wintypes.DWORD,
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+    ]
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.GetSecurityDescriptorControl.argtypes = [
+        pointer,
+        ctypes.POINTER(ctypes.c_ushort),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.GetAce.argtypes = [pointer, wintypes.DWORD, ctypes.POINTER(pointer)]
+    advapi.IsValidSid.argtypes = [pointer]
+
+    def sid_text(sid: pointer) -> str:
+        rendered = wintypes.LPWSTR()
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(rendered)):
+            raise OSError(ctypes.get_last_error(), "SID conversion failed")
+        try:
+            return str(rendered.value)
+        finally:
+            kernel.LocalFree(rendered)
+
+    token = wintypes.HANDLE()
+    try:
+        if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            raise OSError(ctypes.get_last_error(), "process token unavailable")
+        required = wintypes.DWORD()
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(required))
+        token_user = ctypes.create_string_buffer(required.value)
+        if not advapi.GetTokenInformation(
+            token,
+            1,
+            token_user,
+            required,
+            ctypes.byref(required),
+        ):
+            raise OSError(ctypes.get_last_error(), "token user unavailable")
+        user_sid = ctypes.cast(token_user, ctypes.POINTER(pointer)).contents
+        user = sid_text(user_sid)
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE") from exc
+    finally:
+        if token:
+            kernel.CloseHandle(token)
+
+    descriptor = pointer()
+    dacl = pointer()
+    status = advapi.GetNamedSecurityInfoW(
+        str(path),
+        1,
+        0x00000004,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0 or not descriptor:
+        if descriptor:
+            kernel.LocalFree(descriptor)
+        raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE")
+    if not dacl:
+        kernel.LocalFree(descriptor)
+        raise ClosedEvidenceFailure("PRIVATE_ACL_NOT_PRIVATE")
+
+    class Acl(ctypes.Structure):
+        _fields_ = [
+            ("revision", ctypes.c_ubyte),
+            ("reserved", ctypes.c_ubyte),
+            ("size", ctypes.c_ushort),
+            ("ace_count", ctypes.c_ushort),
+            ("reserved2", ctypes.c_ushort),
+        ]
+
+    try:
+        control = ctypes.c_ushort()
+        revision = wintypes.DWORD()
+        if not advapi.GetSecurityDescriptorControl(
+            descriptor, ctypes.byref(control), ctypes.byref(revision)
+        ):
+            raise OSError(ctypes.get_last_error(), "ACL control unavailable")
+        acl = ctypes.cast(dacl, ctypes.POINTER(Acl)).contents
+        rules: list[dict[str, str]] = []
+        for index in range(acl.ace_count):
+            ace = pointer()
+            if not advapi.GetAce(dacl, index, ctypes.byref(ace)):
+                raise OSError(ctypes.get_last_error(), "ACL entry unavailable")
+            ace_type = ctypes.c_ubyte.from_address(ace.value).value
+            if ace_type == 0x04:
+                rules.append({"sid": "UNSUPPORTED_ALLOW_ACE", "type": "Allow"})
+                continue
+            if ace_type not in {0x00, 0x05, 0x09, 0x0B}:
+                continue
+            sid_offset = 8
+            if ace_type in {0x05, 0x0B}:
+                object_flags = ctypes.c_uint32.from_address(ace.value + 8).value
+                sid_offset = 12 + (16 if object_flags & 1 else 0) + (
+                    16 if object_flags & 2 else 0
+                )
+            sid = pointer(ace.value + sid_offset)
+            if not advapi.IsValidSid(sid):
+                raise OSError(ctypes.get_last_error(), "ACL SID invalid")
+            rules.append({"sid": sid_text(sid), "type": "Allow"})
+        return {
+            "user": user,
+            "protected": bool(control.value & 0x1000),
+            "rules": rules,
+        }
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE") from exc
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def _validate_private_acl(
+    paths: tuple[Path, ...],
+    *,
+    require_root_protected: bool = True,
+) -> None:
+    if os.name == "nt":
+        current_sid: str | None = None
+        for index, path in enumerate(paths):
+            payload = _windows_acl(path)
+            user = payload.get("user")
+            rules = payload.get("rules")
+            if type(user) is not str or not isinstance(rules, list):
+                raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE")
+            if current_sid is None:
+                current_sid = user
+            elif user != current_sid:
+                raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE")
+            allowed = {current_sid, "S-1-5-18", "S-1-5-32-544"}
+            allow_sids = {
+                rule.get("sid")
+                for rule in rules
+                if isinstance(rule, dict) and rule.get("type") == "Allow"
+            }
+            if (
+                (
+                    require_root_protected
+                    and index == 0
+                    and payload.get("protected") is not True
+                )
+                or current_sid not in allow_sids
+                or not allow_sids.issubset(allowed)
+                or any(not isinstance(rule, dict) for rule in rules)
+            ):
+                raise ClosedEvidenceFailure("PRIVATE_ACL_NOT_PRIVATE")
+        return
+    try:
+        current_uid = os.geteuid()
+        if any(
+            path.stat(follow_symlinks=False).st_uid != current_uid
+            or stat.S_IMODE(path.stat(follow_symlinks=False).st_mode) & 0o077
+            for path in paths
+        ):
+            raise ClosedEvidenceFailure("PRIVATE_ACL_NOT_PRIVATE")
+    except AttributeError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE") from exc
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_ACL_UNAVAILABLE") from exc
+
+
 def _validated_private_paths(
     private_root: Path,
     output_path: Path,
@@ -293,12 +594,34 @@ def _validated_private_paths(
         raise ClosedEvidenceFailure("PRIVATE_ROOT_NOT_ABSOLUTE")
     if not output_path.is_absolute():
         raise ClosedEvidenceFailure("PRIVATE_OUTPUT_NOT_ABSOLUTE")
+    if _is_reparse_or_symlink(private_root) or _is_reparse_or_symlink(output_path):
+        raise ClosedEvidenceFailure("PRIVATE_PATH_REPARSE_POINT")
     try:
         root = private_root.resolve(strict=True)
     except OSError as exc:
         raise ClosedEvidenceFailure("PRIVATE_ROOT_UNAVAILABLE") from exc
     if not root.is_dir() or not _closed_basename(root.name):
         raise ClosedEvidenceFailure("PRIVATE_ROOT_INVALID")
+    config_dir = root / "config"
+    config = config_dir / "config.yaml"
+    dotenv = root / ".env"
+    if any(
+        _is_reparse_or_symlink(path)
+        for path in (config_dir, config, dotenv)
+    ):
+        raise ClosedEvidenceFailure("PRIVATE_PATH_REPARSE_POINT")
+    try:
+        resolved_config_dir = config_dir.resolve(strict=True)
+        resolved_config = config.resolve(strict=True)
+        resolved_dotenv = dotenv.resolve(strict=True)
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_CONFIGURATION_UNAVAILABLE") from exc
+    if (
+        resolved_config_dir != root / "config"
+        or resolved_config.parent != resolved_config_dir
+        or resolved_dotenv.parent != root
+    ):
+        raise ClosedEvidenceFailure("PRIVATE_PATH_RESOLVE_ESCAPE")
     output = output_path.resolve(strict=False)
     if not output.is_relative_to(root) or output.parent != root:
         raise ClosedEvidenceFailure("PRIVATE_OUTPUT_OUTSIDE_ROOT")
@@ -306,8 +629,6 @@ def _validated_private_paths(
         raise ClosedEvidenceFailure("PRIVATE_OUTPUT_BASENAME_INVALID")
     if output.exists():
         raise ClosedEvidenceFailure("PRIVATE_OUTPUT_EXISTS")
-    config = root / "config" / "config.yaml"
-    dotenv = root / ".env"
     if (
         config.name != "config.yaml"
         or dotenv.name != ".env"
@@ -317,6 +638,7 @@ def _validated_private_paths(
         or dotenv.is_symlink()
     ):
         raise ClosedEvidenceFailure("PRIVATE_CONFIGURATION_UNAVAILABLE")
+    _validate_private_acl((root, resolved_config_dir, resolved_config, resolved_dotenv))
     return root, output
 
 
@@ -375,6 +697,103 @@ def _git_snapshot(root: Path) -> tuple[bytes, bytes]:
     )
 
 
+def _clean_source_snapshot(root: Path) -> _SourceSnapshot:
+    try:
+        head = _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    except ClosedEvidenceFailure as exc:
+        raise ClosedEvidenceFailure("SOURCE_HEAD_UNAVAILABLE") from exc
+    if len(head) != 40 or any(byte not in b"0123456789abcdef" for byte in head):
+        raise ClosedEvidenceFailure("SOURCE_HEAD_UNAVAILABLE")
+    try:
+        status = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    except ClosedEvidenceFailure as exc:
+        raise ClosedEvidenceFailure("SOURCE_STATUS_UNAVAILABLE") from exc
+    if status != b"":
+        raise ClosedEvidenceFailure("SOURCE_TREE_DIRTY")
+    return _SourceSnapshot(head=head, status=status)
+
+
+def _direct_authority_snapshot(
+    *,
+    executor: object,
+    agent_manager: object,
+    project_root: Path,
+    attempt_ref: str,
+) -> _DirectAuthoritySnapshot:
+    from jiuwenswarm.server.live_voice.project_code_executor import (
+        _attempt_worktree_paths,
+        _worktree_registered,
+    )
+
+    try:
+        journal = getattr(executor, "_journal")
+        parent, worktree = _attempt_worktree_paths(project_root, attempt_ref)
+        expected_root = os.path.normcase(str(worktree.resolve(strict=False)))
+        channel_agents = getattr(agent_manager, "agents", {}).get(
+            "live_voice_formal_task", {}
+        )
+        create_params = getattr(agent_manager, "_agent_create_params", {}).get(
+            "live_voice_formal_task", {}
+        )
+        matching_agents: list[object] = []
+        if isinstance(channel_agents, dict):
+            for agent in channel_agents.values():
+                agent_root = getattr(agent, "_jiuwenswarm_agent_project_dir", None)
+                if type(agent_root) is str and os.path.normcase(
+                    str(Path(agent_root).resolve(strict=False))
+                ) == expected_root:
+                    matching_agents.append(agent)
+        matching_leases = False
+        if isinstance(create_params, dict):
+            for params in create_params.values():
+                config = params.get("config") if isinstance(params, dict) else None
+                configured_root = (
+                    config.get("project_dir") if isinstance(config, dict) else None
+                )
+                if type(configured_root) is str and os.path.normcase(
+                    str(Path(configured_root).resolve(strict=False))
+                ) == expected_root:
+                    matching_leases = True
+        pins = getattr(agent_manager, "_agent_pins", {})
+        borrowers = getattr(agent_manager, "_agent_borrowers", {})
+        return _DirectAuthoritySnapshot(
+            journal_record_present=journal.get(attempt_ref) is not None,
+            worker_present=attempt_ref in getattr(executor, "_running", {}),
+            applying_present=attempt_ref in getattr(executor, "_applying", set()),
+            checkpoint_present=(
+                attempt_ref
+                in getattr(executor, "_adjustment_checkpoints", {})
+            ),
+            retained_cleanup_present=(
+                attempt_ref
+                in getattr(executor, "_retained_worktree_cleanups", {})
+            ),
+            worktree_present=(
+                parent.exists()
+                or worktree.exists()
+                or _worktree_registered(project_root, worktree)
+            ),
+            attempt_agent_owner_present=bool(matching_agents),
+            attempt_agent_pin_present=(
+                isinstance(pins, dict)
+                and any(pins.get(id(agent), 0) for agent in matching_agents)
+            ),
+            attempt_agent_lease_present=(
+                matching_leases
+                or (
+                    isinstance(borrowers, dict)
+                    and any(
+                        borrowers.get(id(agent)) for agent in matching_agents
+                    )
+                )
+            ),
+        )
+    except ClosedEvidenceFailure:
+        raise
+    except BaseException as exc:  # noqa: BLE001 -- expose only a closed reason
+        raise ClosedEvidenceFailure("DIRECT_AUTHORITY_SNAPSHOT_UNAVAILABLE") from exc
+
+
 def _initialize_private_project(path: Path, *, title: str) -> None:
     try:
         path.mkdir()
@@ -397,27 +816,19 @@ def _successful_pair(
     stream_kind: str,
 ) -> bool:
     observations, _failures, _dropped = collector.snapshot()
-    pending: dict[str, tuple[str, str]] = {}
-    for observation in observations:
-        if (
-            observation.get("task_ref") != task_ref
-            or observation.get("stream_kind") != stream_kind
-        ):
-            continue
-        pair = (
-            str(observation.get("tool_name_digest")),
-            str(observation.get("file_tool_kind")),
-        )
-        call_id = str(observation.get("call_id_digest"))
-        if observation.get("event_kind") == "tool_call":
-            pending[call_id] = pair
-        elif (
-            pending.pop(call_id, None) == pair
-            and observation.get("result_status") == "success"
-            and pair[1] in {"write", "edit"}
-        ):
-            return True
-    return False
+    stream = [
+        observation
+        for observation in observations
+        if observation.get("task_ref") == task_ref
+        and observation.get("stream_kind") == stream_kind
+    ]
+    counts = observation_counts(stream)
+    return (
+        counts["write_edit_pairs"] >= 1
+        and counts["unknown_observations"] == 0
+        and counts["sequence_gaps"] == 0
+        and counts["unpaired_observations"] == 0
+    )
 
 
 async def _wait_stage(
@@ -661,6 +1072,16 @@ async def _run_fixed_scenario(
     project_a_before_queue = _git_snapshot(scenario.project_paths["A1"])
 
     task_a2, attempt_a2 = await create("A2")
+    a2_authority_before_busy = await _await_before_deadline(
+        asyncio.to_thread(
+            _direct_authority_snapshot,
+            executor=composition._core.executor,
+            agent_manager=agent_manager,
+            project_root=scenario.project_paths["A2"],
+            attempt_ref=attempt_a2,
+        ),
+        deadline=deadline,
+    )
 
     def a2_busy() -> bool:
         admission = store.admission_projection(task_a2, scopes["A2"])
@@ -679,11 +1100,23 @@ async def _run_fixed_scenario(
         deadline=deadline,
         reason="REAL_A2_BUSY_TIMEOUT",
     )
+    a2_authority_after_busy = await _await_before_deadline(
+        asyncio.to_thread(
+            _direct_authority_snapshot,
+            executor=composition._core.executor,
+            agent_manager=agent_manager,
+            project_root=scenario.project_paths["A2"],
+            attempt_ref=attempt_a2,
+        ),
+        deadline=deadline,
+    )
     observations_before_release, failures_before_release, dropped_before_release = (
         collector.snapshot()
     )
     a2_zero_pre_release_effect = (
-        not any(item.get("task_ref") == task_a2 for item in observations_before_release)
+        a2_authority_before_busy.all_clear
+        and a2_authority_after_busy.all_clear
+        and not any(item.get("task_ref") == task_a2 for item in observations_before_release)
         and failures_before_release == 0
         and dropped_before_release == 0
         and _git_snapshot(scenario.project_paths["A1"])
@@ -916,13 +1349,15 @@ def _configure_product_environment(scenario: _RegisteredScenario) -> None:
 async def _run_production_cli(
     private_root: Path,
     output_path: Path,
+    *,
+    hard_deadline: float,
 ) -> dict[str, object]:
     source_root = Path(__file__).resolve().parents[2]
     if private_root.is_relative_to(source_root) or source_root.is_relative_to(
         private_root
     ):
         raise ClosedEvidenceFailure("PRIVATE_ROOT_SOURCE_OVERLAP")
-    source_before = _git_snapshot(source_root)
+    source_before = _clean_source_snapshot(source_root)
     _load_private_configuration(private_root)
 
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
@@ -968,8 +1403,10 @@ async def _run_production_cli(
         raise ClosedEvidenceFailure("EVIDENCE_OBSERVER_HEALTH_INVALID")
     facts: _RealScenarioFacts | None = None
     primary: BaseException | None = None
-    deadline = time.monotonic() + _IN_PROCESS_LIMIT_SECONDS
+    deadline = hard_deadline - _MAX_COMPOSITION_CLEANUP_SECONDS
     try:
+        if deadline <= time.monotonic():
+            raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
         await _await_before_deadline(composition.start(), deadline=deadline)
         facts = await _run_fixed_scenario(
             composition=composition,
@@ -984,7 +1421,10 @@ async def _run_production_cli(
     except BaseException as exc:  # noqa: BLE001 -- cleanup still owns every resource
         primary = exc
     try:
-        await composition.stop()
+        await _await_before_deadline(
+            composition.stop(),
+            deadline=hard_deadline,
+        )
     except BaseException as exc:  # noqa: BLE001 -- cleanup failure is closed
         raise ClosedEvidenceFailure("REAL_SCENARIO_CLEANUP_FAILED") from exc
     if primary is not None:
@@ -1042,9 +1482,11 @@ async def _run_production_cli(
         not executor.has_live_workers
         and not getattr(manager, "agents", {}).get("live_voice_formal_task")
     )
-    source_after = _git_snapshot(source_root)
-    source_untouched = source_after == source_before
-    source_sha256 = "sha256:" + hashlib.sha256(source_before[0]).hexdigest()
+    source_after = _clean_source_snapshot(source_root)
+    if source_after != source_before:
+        raise ClosedEvidenceFailure("SOURCE_SNAPSHOT_CHANGED")
+    source_untouched = True
+    source_sha256 = "sha256:" + hashlib.sha256(source_before.head).hexdigest()
     summary = ScenarioSummary(
         run_id=f"wave2-run-{scenario.run_id}",
         source_sha256=source_sha256,
@@ -1094,6 +1536,8 @@ async def _run_production_cli(
         real_tool_observed=facts.real_tool_observed,
     )
     document = build_evidence_document(summary, collector)
+    if time.monotonic() >= hard_deadline:
+        raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
     write_private_evidence(output_path, document)
     return validate_evidence_bytes(_encode(document))
 
@@ -1127,14 +1571,187 @@ def _cli_paths(argv: list[str]) -> tuple[Path, Path]:
     return _validated_private_paths(Path(argv[1]), Path(argv[3]))
 
 
+def _raw_cli_paths(argv: list[str]) -> tuple[Path, Path]:
+    if (
+        len(argv) != 4
+        or argv[0] != "--private-root"
+        or argv[2] != "--output"
+    ):
+        raise ClosedEvidenceFailure("PRIVATE_CLI_INVALID")
+    private_root = Path(argv[1])
+    output_path = Path(argv[3])
+    if not private_root.is_absolute():
+        raise ClosedEvidenceFailure("PRIVATE_ROOT_NOT_ABSOLUTE")
+    if not output_path.is_absolute():
+        raise ClosedEvidenceFailure("PRIVATE_OUTPUT_NOT_ABSOLUTE")
+    return private_root, output_path
+
+
+def _worker_command(arguments: list[str], remaining: float) -> list[str]:
+    bootstrap = (
+        "import sys; from scripts.live_voice import "
+        "p3_wave2_real_evidence_producer as p; "
+        "raise SystemExit(p._worker_entry(sys.argv[1:5], float(sys.argv[5])))"
+    )
+    return [sys.executable, "-c", bootstrap, *arguments, f"{remaining:.9f}"]
+
+
+def _worker_entry(arguments: list[str], remaining: float) -> int:
+    if (
+        not math.isfinite(remaining)
+        or remaining <= 0
+        or remaining > _IN_PROCESS_LIMIT_SECONDS
+    ):
+        return 2
+    try:
+        with _silence_process_fds():
+            private_root, output_path = _cli_paths(arguments)
+            asyncio.run(
+                _run_production_cli(
+                    private_root,
+                    output_path,
+                    hard_deadline=time.monotonic() + remaining,
+                )
+            )
+    except BaseException:  # noqa: BLE001 -- the parent owns the closed result
+        return 2
+    return 0
+
+
+def _remove_failed_output(private_root: Path, output_path: Path) -> None:
+    try:
+        if (
+            output_path.parent == private_root
+            and output_path.exists()
+            and not _is_reparse_or_symlink(output_path)
+            and output_path.is_file()
+        ):
+            output_path.unlink()
+    except OSError:
+        pass
+
+
+def _terminate_worker_tree(process: subprocess.Popen[bytes], *, deadline: float) -> None:
+    remaining = max(0.05, deadline - time.monotonic())
+    if os.name == "nt":
+        try:
+            terminated = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=remaining,
+            )
+            if terminated.returncode != 0:
+                process.kill()
+        except (OSError, subprocess.SubprocessError):
+            with contextlib.suppress(OSError):
+                process.kill()
+    else:
+        import signal
+
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        with contextlib.suppress(OSError):
+            process.kill()
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        process.wait(timeout=max(0.05, deadline - time.monotonic()))
+
+
+def _validate_worker_output(
+    private_root: Path,
+    output_path: Path,
+) -> dict[str, object]:
+    if (
+        output_path.parent != private_root
+        or _is_reparse_or_symlink(output_path)
+        or not output_path.is_file()
+    ):
+        raise ClosedEvidenceFailure("PRIVATE_OUTPUT_UNAVAILABLE")
+    try:
+        if output_path.resolve(strict=True).parent != private_root.resolve(strict=True):
+            raise ClosedEvidenceFailure("PRIVATE_PATH_RESOLVE_ESCAPE")
+        if output_path.stat().st_size > MAX_EVIDENCE_BYTES:
+            raise ClosedEvidenceFailure("EVIDENCE_TOO_LARGE")
+        _validate_private_acl((output_path,), require_root_protected=False)
+        return validate_evidence_file(output_path)
+    except EvidenceValidationError as exc:
+        raise ClosedEvidenceFailure(exc.reason) from None
+    except OSError as exc:
+        raise ClosedEvidenceFailure("PRIVATE_OUTPUT_UNAVAILABLE") from exc
+
+
+def _supervise_production_worker(
+    arguments: list[str],
+    private_root: Path,
+    output_path: Path,
+    *,
+    deadline: float,
+) -> dict[str, object]:
+    remaining = deadline - time.monotonic()
+    termination_reserve = min(
+        _MAX_PROCESS_TERMINATION_SECONDS,
+        max(0.05, remaining * 0.1),
+    )
+    worker_remaining = remaining - termination_reserve
+    if worker_remaining <= 0:
+        raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
+    creationflags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    )
+    try:
+        process = subprocess.Popen(
+            _worker_command(arguments, worker_remaining),
+            cwd=Path(__file__).resolve().parents[2],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            start_new_session=os.name != "nt",
+        )
+    except OSError as exc:
+        raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED") from exc
+    try:
+        return_code = process.wait(timeout=worker_remaining)
+    except subprocess.TimeoutExpired:
+        _terminate_worker_tree(process, deadline=deadline)
+        _remove_failed_output(private_root, output_path)
+        raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED") from None
+    if time.monotonic() >= deadline:
+        _remove_failed_output(private_root, output_path)
+        raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
+    if return_code != 0:
+        _remove_failed_output(private_root, output_path)
+        raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED")
+    try:
+        aggregate = _validate_worker_output(private_root, output_path)
+    except BaseException:  # noqa: BLE001 -- invalid evidence is never retained
+        _remove_failed_output(private_root, output_path)
+        raise
+    if time.monotonic() >= deadline:
+        _remove_failed_output(private_root, output_path)
+        raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
+    return aggregate
+
+
 def main(argv: list[str] | None = None) -> int:
+    deadline = time.monotonic() + _IN_PROCESS_LIMIT_SECONDS
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        private_root, output_path = _cli_paths(arguments)
+        private_root, output_path = _raw_cli_paths(arguments)
         with open(os.devnull, "w", encoding="utf-8") as quiet:
-            with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
-                aggregate = asyncio.run(
-                    _run_production_cli(private_root, output_path)
+            with (
+                contextlib.redirect_stdout(quiet),
+                contextlib.redirect_stderr(quiet),
+                _silence_process_fds(),
+            ):
+                aggregate = _supervise_production_worker(
+                    arguments,
+                    private_root,
+                    output_path,
+                    deadline=deadline,
                 )
     except ClosedEvidenceFailure as exc:
         emit_sanitized_result(None, exc)

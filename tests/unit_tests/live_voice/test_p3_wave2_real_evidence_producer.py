@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+from dataclasses import asdict
 from pathlib import Path
 import subprocess
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 
+from scripts.live_voice import p3_wave2_real_evidence_producer as producer
 from jiuwenswarm.server.live_voice.project_code_executor import (
     DirectStreamObservation,
 )
@@ -30,6 +36,36 @@ from scripts.live_voice.p3_wave2_real_evidence_validator import (
 SHA_A = "sha256:" + "a" * 64
 SHA_B = "sha256:" + "b" * 64
 SHA_C = "sha256:" + "c" * 64
+INVALID_CALL_SHA = "sha256:" + hashlib.sha256(
+    b"live-voice.invalid-tool-call-id"
+).hexdigest()
+INVALID_TOOL_SHA = "sha256:" + hashlib.sha256(
+    b"live-voice.invalid-tool-name"
+).hexdigest()
+
+
+def _make_private_acl(root: Path) -> None:
+    if os.name != "nt":
+        for path in (root, *root.rglob("*")):
+            path.chmod(0o700 if path.is_dir() else 0o600)
+        return
+    current_sid = producer._windows_acl(root)["user"]
+    for path in (root, *root.rglob("*")):
+        inheritance = "(OI)(CI)F" if path.is_dir() else "F"
+        secured = subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"*{current_sid}:{inheritance}",
+                f"*S-1-5-18:{inheritance}",
+                f"*S-1-5-32-544:{inheritance}",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        assert secured.returncode == 0
 
 
 def _observation(
@@ -233,6 +269,44 @@ def test_collector_merges_adapter_health_and_fails_closed(tmp_path: Path) -> Non
     assert raised.value.reason == "EVIDENCE_OBSERVER_FAILURE"
 
 
+@pytest.mark.parametrize(
+    ("identity_kind", "invalid_sides"),
+    [
+        ("call_id_digest", (0,)),
+        ("call_id_digest", (1,)),
+        ("call_id_digest", (0, 1)),
+        ("tool_name_digest", (0,)),
+        ("tool_name_digest", (1,)),
+        ("tool_name_digest", (0, 1)),
+    ],
+)
+def test_invalid_identity_never_earns_physical_tool_credit(
+    identity_kind: str,
+    invalid_sides: tuple[int, ...],
+) -> None:
+    observations = [
+        _observation(sequence=1, event_kind="tool_call"),
+        _observation(
+            sequence=2,
+            event_kind="tool_result",
+            result_status="success",
+        ),
+    ]
+    invalid_digest = (
+        INVALID_CALL_SHA
+        if identity_kind == "call_id_digest"
+        else INVALID_TOOL_SHA
+    )
+    collector = ObservationCollector(capacity=2)
+    for index, observation in enumerate(observations):
+        values = asdict(observation)
+        if index in invalid_sides:
+            values[identity_kind] = invalid_digest
+        collector(DirectStreamObservation(**values))
+
+    assert producer._successful_pair(collector, "task-A1", stream_kind="initial") is False
+
+
 def test_emit_sanitized_result_writes_exactly_one_closed_line(capsys) -> None:
     emit_sanitized_result(
         {
@@ -266,11 +340,18 @@ def test_cli_uses_fixed_private_production_path_and_accepts_no_runner(
         "PRIVATE_CONFIG_SENTINEL", encoding="utf-8"
     )
     (private_root / ".env").write_text("PRIVATE_ENV_SENTINEL", encoding="utf-8")
+    _make_private_acl(private_root)
     output = private_root / "raw-evidence.json"
-    calls: list[tuple[Path, Path]] = []
+    calls: list[tuple[list[str], Path, Path, float]] = []
 
-    async def fixed_production(private: Path, raw_output: Path):
-        calls.append((private, raw_output))
+    def fixed_production(
+        arguments: list[str],
+        private: Path,
+        raw_output: Path,
+        *,
+        deadline: float,
+    ):
+        calls.append((arguments, private, raw_output, deadline))
         return {
             "ok": True,
             "observation_count": 4,
@@ -279,7 +360,8 @@ def test_cli_uses_fixed_private_production_path_and_accepts_no_runner(
         }
 
     monkeypatch.setattr(
-        "scripts.live_voice.p3_wave2_real_evidence_producer._run_production_cli",
+        "scripts.live_voice.p3_wave2_real_evidence_producer."
+        "_supervise_production_worker",
         fixed_production,
     )
 
@@ -288,12 +370,59 @@ def test_cli_uses_fixed_private_production_path_and_accepts_no_runner(
     )
 
     assert exit_code == 0
-    assert calls == [(private_root.resolve(), output.resolve())]
+    assert len(calls) == 1
+    arguments, private, raw_output, deadline = calls[0]
+    assert arguments == [
+        "--private-root",
+        str(private_root),
+        "--output",
+        str(output),
+    ]
+    assert (private, raw_output) == (private_root, output)
+    assert deadline > time.monotonic()
     captured = capsys.readouterr()
     assert captured.out.count("\n") == 1
     assert captured.err == ""
     assert "PRIVATE_" not in captured.out
     assert str(private_root) not in captured.out
+
+
+def test_cli_global_deadline_kills_the_worker_and_emits_no_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    private_root = tmp_path / "deadline-private"
+    (private_root / "config").mkdir(parents=True)
+    (private_root / "config" / "config.yaml").write_text("{}", encoding="utf-8")
+    (private_root / ".env").write_text("", encoding="utf-8")
+    _make_private_acl(private_root)
+    output = private_root / "raw-evidence.json"
+    monkeypatch.setattr(producer, "_IN_PROCESS_LIMIT_SECONDS", 0.2)
+    monkeypatch.setattr(
+        producer,
+        "_worker_command",
+        lambda _arguments, _remaining: [
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'PRIVATE_CHILD_SENTINEL'); time.sleep(5)",
+        ],
+        raising=False,
+    )
+
+    started = time.monotonic()
+    exit_code = main(
+        ["--private-root", str(private_root), "--output", str(output)]
+    )
+    elapsed = time.monotonic() - started
+
+    assert exit_code == 2
+    assert elapsed < 2
+    assert not output.exists()
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_SCENARIO_DEADLINE_EXCEEDED"}\n',
+        "",
+    )
 
 
 def test_fresh_import_does_not_import_jiuwenswarm_and_invalid_cli_is_closed(
@@ -366,3 +495,318 @@ def test_fresh_import_does_not_import_jiuwenswarm_and_invalid_cli_is_closed(
     assert invalid.stdout == '{"ok":false,"reason":"PRIVATE_ROOT_NOT_ABSOLUTE"}\n'
     assert invalid.stderr == ""
     assert "SENTINEL" not in invalid.stdout
+
+
+@pytest.mark.parametrize(
+    "occupied_field",
+    [
+        "journal_record_present",
+        "worker_present",
+        "applying_present",
+        "checkpoint_present",
+        "retained_cleanup_present",
+        "worktree_present",
+        "attempt_agent_owner_present",
+        "attempt_agent_pin_present",
+        "attempt_agent_lease_present",
+    ],
+)
+def test_direct_authority_snapshot_fails_closed_for_every_a2_prelease_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    occupied_field: str,
+) -> None:
+    project = tmp_path / "project-a"
+    project.mkdir()
+    subprocess.run(
+        ["git", "-C", str(project), "init", "--initial-branch=main"],
+        check=True,
+        capture_output=True,
+    )
+
+    class Journal:
+        record = None
+
+        def get(self, _attempt_id: str):
+            return self.record
+
+    journal = Journal()
+    executor = SimpleNamespace(
+        _journal=journal,
+        _running={},
+        _applying=set(),
+        _adjustment_checkpoints={},
+        _retained_worktree_cleanups={},
+    )
+    manager = SimpleNamespace(
+        agents={},
+        _agent_create_params={},
+        _agent_pins={},
+        _agent_borrowers={},
+    )
+    parent = tmp_path / "attempt-parent"
+    worktree = parent / "checkout"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.project_code_executor."
+        "_attempt_worktree_paths",
+        lambda _root, _attempt: (parent, worktree),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.project_code_executor."
+        "_worktree_registered",
+        lambda _root, _worktree: False,
+    )
+
+    clear = producer._direct_authority_snapshot(
+        executor=executor,
+        agent_manager=manager,
+        project_root=project,
+        attempt_ref="attempt-A2",
+    )
+    assert clear.all_clear is True
+    assert set(asdict(clear).values()) == {False}
+
+    agent = SimpleNamespace(_jiuwenswarm_agent_project_dir=str(worktree))
+    if occupied_field == "journal_record_present":
+        journal.record = object()
+    elif occupied_field == "worker_present":
+        executor._running["attempt-A2"] = object()
+    elif occupied_field == "applying_present":
+        executor._applying.add("attempt-A2")
+    elif occupied_field == "checkpoint_present":
+        executor._adjustment_checkpoints["attempt-A2"] = object()
+    elif occupied_field == "retained_cleanup_present":
+        executor._retained_worktree_cleanups["attempt-A2"] = object()
+    elif occupied_field == "worktree_present":
+        parent.mkdir()
+    elif occupied_field == "attempt_agent_lease_present":
+        manager._agent_create_params = {
+            "live_voice_formal_task": {
+                "agent-A2": {"config": {"project_dir": str(worktree)}}
+            }
+        }
+    else:
+        manager.agents = {"live_voice_formal_task": {"agent-A2": agent}}
+        if occupied_field == "attempt_agent_pin_present":
+            manager._agent_pins[id(agent)] = 1
+    occupied = producer._direct_authority_snapshot(
+        executor=executor,
+        agent_manager=manager,
+        project_root=project,
+        attempt_ref="attempt-A2",
+    )
+    assert occupied.all_clear is False
+    assert getattr(occupied, occupied_field) is True
+
+
+@pytest.mark.parametrize(
+    "broad_sid",
+    ["S-1-1-0", "S-1-5-11", "S-1-5-32-545"],
+)
+def test_private_preflight_rejects_a_real_broad_windows_acl(
+    tmp_path: Path,
+    broad_sid: str,
+) -> None:
+    private_root = tmp_path / "broad-private-root"
+    (private_root / "config").mkdir(parents=True)
+    (private_root / "config" / "config.yaml").write_text("{}", encoding="utf-8")
+    (private_root / ".env").write_text("", encoding="utf-8")
+    if os.name == "nt":
+        granted = subprocess.run(
+            [
+                "icacls",
+                str(private_root),
+                "/grant",
+                f"*{broad_sid}:(OI)(CI)R",
+                "/T",
+                "/C",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        assert granted.returncode == 0
+    else:
+        private_root.chmod(0o755)
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._validated_private_paths(
+            private_root.resolve(),
+            (private_root / "raw-evidence.json").resolve(),
+        )
+
+    assert raised.value.reason == "PRIVATE_ACL_NOT_PRIVATE"
+
+
+def test_private_preflight_accepts_only_current_user_system_and_admins(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "private-allowlist"
+    (private_root / "config").mkdir(parents=True)
+    (private_root / "config" / "config.yaml").write_text("{}", encoding="utf-8")
+    (private_root / ".env").write_text("", encoding="utf-8")
+    _make_private_acl(private_root)
+    output = private_root / "raw-evidence.json"
+
+    assert producer._validated_private_paths(private_root, output) == (
+        private_root.resolve(),
+        output.resolve(),
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+@pytest.mark.parametrize("junction_kind", ["root", "config", "output"])
+def test_private_preflight_rejects_real_windows_junctions(
+    tmp_path: Path,
+    junction_kind: str,
+) -> None:
+    target = tmp_path / f"{junction_kind}-target"
+    target.mkdir()
+    private_root = tmp_path / f"{junction_kind}-private"
+    if junction_kind == "root":
+        (target / "config").mkdir()
+        (target / "config" / "config.yaml").write_text("{}", encoding="utf-8")
+        (target / ".env").write_text("", encoding="utf-8")
+        junction = private_root
+    else:
+        private_root.mkdir()
+        (private_root / ".env").write_text("", encoding="utf-8")
+        if junction_kind == "config":
+            (target / "config.yaml").write_text("{}", encoding="utf-8")
+            junction = private_root / "config"
+        else:
+            (private_root / "config").mkdir()
+            (private_root / "config" / "config.yaml").write_text(
+                "{}", encoding="utf-8"
+            )
+            junction = private_root / "raw-evidence.json"
+    created = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "New-Item -ItemType Junction -Path $env:JUNCTION_PATH "
+            "-Target $env:JUNCTION_TARGET | Out-Null",
+        ],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "JUNCTION_PATH": str(junction),
+            "JUNCTION_TARGET": str(target),
+        },
+    )
+    assert created.returncode == 0
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._validated_private_paths(
+            private_root.absolute(),
+            (private_root / "raw-evidence.json").absolute(),
+        )
+
+    assert raised.value.reason == "PRIVATE_PATH_REPARSE_POINT"
+
+
+@pytest.mark.parametrize("linked_basename", ["config.yaml", ".env"])
+def test_private_preflight_rejects_real_configuration_symlinks(
+    tmp_path: Path,
+    linked_basename: str,
+) -> None:
+    private_root = tmp_path / f"{linked_basename}-private"
+    (private_root / "config").mkdir(parents=True)
+    config = private_root / "config" / "config.yaml"
+    dotenv = private_root / ".env"
+    linked = dotenv if linked_basename == ".env" else config
+    normal = config if linked is dotenv else dotenv
+    normal.write_text("{}", encoding="utf-8")
+    target = tmp_path / f"{linked_basename}-target"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        linked.symlink_to(target)
+    except OSError:
+        pytest.skip("file symlinks unavailable on this host")
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._validated_private_paths(
+            private_root.absolute(),
+            (private_root / "raw-evidence.json").absolute(),
+        )
+
+    assert raised.value.reason == "PRIVATE_PATH_REPARSE_POINT"
+
+
+def test_fd_silence_blocks_os_write_and_child_output_then_restores_fds(
+    capfd,
+) -> None:
+    with producer._silence_process_fds():
+        os.write(1, b"PRIVATE_FD_STDOUT_SENTINEL\n")
+        os.write(2, b"PRIVATE_FD_STDERR_SENTINEL\n")
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os; os.write(1,b'PRIVATE_CHILD_OUT_SENTINEL\\n'); "
+                "os.write(2,b'PRIVATE_CHILD_ERR_SENTINEL\\n')",
+            ],
+            check=False,
+        )
+        assert child.returncode == 0
+    print("RESTORED_STDOUT")
+    print("RESTORED_STDERR", file=sys.stderr)
+
+    captured = capfd.readouterr()
+    assert captured.out == "RESTORED_STDOUT\n"
+    assert captured.err == "RESTORED_STDERR\n"
+
+
+def test_cli_exception_cannot_leak_fd_or_child_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd,
+) -> None:
+    private_root = tmp_path / "exception-private"
+    output = private_root / "raw-evidence.json"
+
+    def leaking_failure(*_args, **_kwargs):
+        os.write(1, b"PRIVATE_EXCEPTION_STDOUT_SENTINEL\n")
+        os.write(2, b"PRIVATE_EXCEPTION_STDERR_SENTINEL\n")
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os; os.write(1,b'PRIVATE_EXCEPTION_CHILD_OUT'); "
+                "os.write(2,b'PRIVATE_EXCEPTION_CHILD_ERR')",
+            ],
+            check=False,
+        )
+        raise RuntimeError("PRIVATE_EXCEPTION_DETAIL")
+
+    monkeypatch.setattr(producer, "_supervise_production_worker", leaking_failure)
+
+    assert main(["--private-root", str(private_root), "--output", str(output)]) == 2
+    assert capfd.readouterr() == (
+        '{"ok":false,"reason":"REAL_PRODUCER_FAILED"}\n',
+        "",
+    )
+
+
+@pytest.mark.parametrize("dirty_kind", ["tracked", "untracked"])
+def test_source_snapshot_rejects_every_dirty_source_state(
+    tmp_path: Path,
+    dirty_kind: str,
+) -> None:
+    source = tmp_path / "source"
+    producer._initialize_private_project(source, title="Clean Source")
+    before = producer._clean_source_snapshot(source)
+    assert len(before.head) == 40
+    assert before.status == b""
+
+    if dirty_kind == "tracked":
+        (source / "README.md").write_text("dirty\n", encoding="utf-8")
+    else:
+        (source / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(ClosedEvidenceFailure) as raised:
+        producer._clean_source_snapshot(source)
+
+    assert raised.value.reason == "SOURCE_TREE_DIRTY"
