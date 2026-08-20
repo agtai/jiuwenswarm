@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 11/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 12/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -405,7 +405,7 @@ These groups route work after the currently active packets; they are not yet
 worker write authority. Each activation removes its IDs from this queue and
 freezes smaller owner-specific packets before editing.
 
-- Generation/successor/authority cleanup: B7, B12, B13, B14, B16, B18, B32,
+- Generation/successor/authority cleanup: B7, B12, B13, B14, B18, B32,
   B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an alias of B13.
 - Cancellation/teardown/retained cleanup: A7, A8, A19, A20, A22, B6,
   B21, B23, B24, D1, D3 and L7.
@@ -437,6 +437,7 @@ and risk checkpoint before implementation.
 | SRR-14 / A12 | 9/88 | `bafab7c91`; a durable cross-adapter user cancel observed after normal Agent return now settles exactly as `CANCELLED`, while shutdown/heartbeat/lost-owner interruption remains `INTERRUPTED`; isolated patch zero effects, exact replay, reopen, 100 module tests and independent Tier-3 review passed |
 | SRR-15 / A16 | 10/88 | `58121cb70` + `0644edb14` + `75b26f7fc`; every uplink media send/receive descriptor and post-parse cancellation/process-control boundary now closes the exact session/socket and settles speech/EOT/cleanup ownership without replacing the primary failure; only pre-boundary legal audio/ACK effects remain, a successor route stays usable, 134 leaf/registration tests pass under asyncio debug, and independent Tier-3 review signed the final candidate |
 | SRR-13 / A11 | 11/88 | `0c7db2994` + `870cb993f` + `73b308362`; every synchronous Task Store operation used by async drain/reconcile now runs off the event-loop while one retained owner survives repeated caller cancellation. The first caller cancellation wins ordinary worker/release failure, process-control and inner cancellation remain authoritative, exact claims are released or durably recoverable, and restart/successor delivery remains once-only; 12 focused asyncio-debug cases plus 231 Core and 101 composition tests passed, and independent Tier-3 review signed the final candidate |
+| SRR-16 / B16 | 12/88 | `90865abd4`; every natural-language P3 rejection now reports authority and P3 control as unavailable with package-only/no-runtime evidence instead of fabricating a trusted lease or observed runtime. Invalid bearer/structure, missing binding, resolver failure, duplicate/concurrent replay, other-session, stop and restart probes retain zero forbidden effects; 151 registry + 47 real AgentServer route tests passed after independent Tier-3 review and integration |
 
 ## 8. Global exclusions
 

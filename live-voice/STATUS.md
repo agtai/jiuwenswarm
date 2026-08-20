@@ -30,7 +30,7 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects; **9/88 are closed** on this branch,
+  packet against 88 unique current defects; **12/88 are closed** on this branch,
   beginning with exact authority and privacy boundaries. Progress is counted
   only after reproduced defects,
   affected verification and independent module review close; the
@@ -141,7 +141,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — **9/88 closed**, 79 unique current
+- **Packet:** strict-review remediation — **12/88 closed**, 76 unique current
   defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
@@ -158,16 +158,19 @@ exact-source Alpha result.
   3 owns streaming queued-terminal retirement, event-loop-safe batch resampling
   and cold schedule execution-agent initialization. Wave 4 owns Task Core
   blocking-store isolation, Code Executor user-cancel terminal truth and
-  Dedicated Media post-reservation cancellation cleanup.
+  Dedicated Media post-reservation cancellation cleanup. Wave 5 owns P3
+  observed-fact manifest integrity and durable confirmation capacity.
 - **Risk:** Wave 1 contains five independent Tier-3 authority/privacy/durability
   boundaries. Wave 2 contains three Tier-3 authority/terminal boundaries and
   one Tier-2 Gateway lifecycle boundary. Wave 3 contains two Tier-3 terminal/
   authority boundaries and one Tier-2 responsiveness boundary; this umbrella
   does not automatically propagate Tier 3 to later repairs. Wave 4 contains
   three independent Tier-3 durability, terminal-authority and media-lifecycle
+  boundaries. Wave 5 contains independent Tier-3 authority and durability
   boundaries.
 - **Included:** C5, A21, B41, B9 and B10 in Wave 1; A8+B6, A3, A20 and B7 in
   Wave 2; A2+B2, A4 and A18 in Wave 3; A11, A12 and residual A16 in Wave 4;
+  B16 and A25 in Wave 5;
   their exact positive, negative, boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
@@ -175,9 +178,9 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** repair the A21/A20/A8+B6 review findings, finish A11 and A16
-  independent review, and re-review A2+B2; integrate only exact reviewed
-  commits, then run affected and cumulative integration checks.
+- **Next action:** repair the A21/A20/A8+B6 review findings, finish A25 and
+  independently re-review A2+B2; integrate only exact reviewed commits, then
+  run affected and cumulative integration checks.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original
