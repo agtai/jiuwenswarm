@@ -68,9 +68,19 @@ constructor field and therefore must retain 50/250/500 RPCs.
   field `batch_size`.
 - [x] Run focused tests, integrated Web and formatting checks.
 - [x] Commit as `test(live-voice): freeze bounded-pull benchmark input`.
-- [ ] Execute replacement A1 in a clean detached worktree: five samples each,
+- [x] Execute replacement A1 in a clean detached worktree: five samples each,
   85 ms delay, batch size 16. Mark the earlier `a9142dd2d` A1 preliminary and
   record the new exact reference commit/result.
+
+**Replacement A1:** `PASS — P2 CAUSAL BASELINE ONLY`
+
+- Exact reference: `c8f24834bb92205c6a23a85035066ea8f0b3e8cc`
+- Run ID: `p2-a1-batch16-20260820T233928Z-c8f24834b`
+- Five attempts per population; batch-size input 16; owner remained legacy
+- RPC totals: 50 / 250 / 500
+- p50: 863.272 / 4,330.481 / 8,649.853 ms
+- p95: 869.882 / 4,365.143 / 8,700.057 ms
+- All forbidden effects: zero
 
 ## Task 2: Bounded runtime drain
 

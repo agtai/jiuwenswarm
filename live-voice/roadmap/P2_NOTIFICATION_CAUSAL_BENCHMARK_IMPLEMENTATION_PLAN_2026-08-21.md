@@ -271,7 +271,7 @@ git commit -m "docs(live-voice): record causal P2 A1"
 
 ## A1 Result — 2026-08-21
 
-**Status:** `PASS — P2 CAUSAL BASELINE ONLY`
+**Status:** `PRELIMINARY PASS — SUPERSEDED BY CANDIDATE-NEUTRAL A1`
 
 - Exact source: `a9142dd2d9b69000a086d4c6b97c2a711ee4cd9c`
 - Run ID: `p2-a1-20260820T232850Z-a9142dd2d`
@@ -287,6 +287,23 @@ git commit -m "docs(live-voice): record causal P2 A1"
 | 100 | 500 | 8,640.025 ms | 8,698.774 ms |
 
 The curve confirms the expected near-linear one-notification-per-RPC cost on
-the current source. It is the A1 oracle for one P2 transport candidate; it is
-not a physical Live Voice, Browser, first-audible or Production baseline. The
-private 0600 report remains outside the repository.
+the current source. The later batch-neutral runner adds prospective batch size
+16 without changing this legacy owner, so `a9142dd2d` is retained as
+preliminary evidence rather than the B comparison oracle.
+
+### Replacement A1
+
+- Exact source: `c8f24834bb92205c6a23a85035066ea8f0b3e8cc`
+- Run ID: `p2-a1-batch16-20260820T233928Z-c8f24834b`
+- Batch-size input: 16, ignored by the legacy owner as intended
+- Attempts: 15/15 successful; every forbidden effect zero
+
+| Total notifications, final last | RPCs across 5 attempts | p50 | p95 |
+|---:|---:|---:|---:|
+| 10 | 50 | 863.272 ms | 869.882 ms |
+| 50 | 250 | 4,330.481 ms | 4,365.143 ms |
+| 100 | 500 | 8,649.853 ms | 8,700.057 ms |
+
+This replacement is the exact A1/A2 reference for bounded pull. Neither A1 is
+a physical Live Voice, Browser, first-audible or Production baseline. Both
+private 0600 reports remain outside the repository.
