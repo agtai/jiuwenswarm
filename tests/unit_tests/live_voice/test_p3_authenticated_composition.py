@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import sqlite3
 import subprocess
@@ -24,6 +25,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommitLedger,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
+    AdmissionPolicy,
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -40,6 +42,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
     utc_now,
+)
+from jiuwenswarm.server.live_voice.executor_capabilities import (
+    ExecutorCapabilityProfile,
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
@@ -157,6 +162,14 @@ def _observations(
             attempt_outcome=states[seq][1],
             occurred_at=utc_now(),
             raw_status=(outcome.value if outcome is not None else "running"),
+            adapter_id=(
+                None if item.selection is None else item.selection.adapter_id
+            ),
+            capability_profile_digest=(
+                None
+                if item.selection is None
+                else item.selection.capability_profile_digest
+            ),
         )
         for seq in range(item.source_seq + 1, target_seq + 1)
     )
@@ -321,6 +334,7 @@ def _harness(
     allowed_project_ids: frozenset[str] = frozenset({"project-1", "project-2"}),
     allowed_operations: frozenset[str] = P3_OPERATIONS,
     commit_ledger: TurnCommitLedger | None = None,
+    executor_profiles: tuple[ExecutorCapabilityProfile, ...] | None = None,
 ) -> _Harness:
     database = tmp_path / "formal-tasks.sqlite3"
     executor = _Executor()
@@ -355,6 +369,7 @@ def _harness(
         policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=3600,
         clock=lambda: NOW,
+        executor_profiles=executor_profiles,
     )
     return _Harness(
         composition,
@@ -2321,6 +2336,228 @@ def test_factory_accepts_reconciliation_interval_boundaries(
     assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
 
 
+def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches factory startup allocating authority before static selection."""
+
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / "factory-static-mismatch.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    direct = DirectProjectCodeExecutorAdapter.capability_profile()
+    incompatible = replace(
+        direct,
+        operation_versions=tuple(
+            (operation, "v2" if operation == "dispatch" else version)
+            for operation, version in direct.operation_versions
+        ),
+    )
+    monkeypatch.setattr(
+        DirectProjectCodeExecutorAdapter,
+        "capability_profile",
+        classmethod(lambda cls: incompatible),
+    )
+    adapter_calls: list[str] = []
+    store_calls: list[str] = []
+
+    def forbidden_adapter_init(self, *_args, **_kwargs) -> None:
+        del self
+        adapter_calls.append("adapter")
+        raise AssertionError("static mismatch reached Adapter construction")
+
+    class ForbiddenStore:
+        def __init__(self, *_args, **_kwargs) -> None:
+            store_calls.append("store")
+            raise AssertionError("static mismatch reached Store construction")
+
+    monkeypatch.setattr(
+        DirectProjectCodeExecutorAdapter,
+        "__init__",
+        forbidden_adapter_init,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.SqliteTaskStore",
+        ForbiddenStore,
+    )
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert rejected.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+    assert rejected.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert adapter_calls == []
+    assert store_calls == []
+    assert database.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_product_create_persists_exact_direct_selection_and_admission(
+    tmp_path: Path,
+) -> None:
+    """Catches product Task creation omitting or recomputing selection facts."""
+
+    profile = DirectProjectCodeExecutorAdapter.capability_profile()
+    later_profile = replace(
+        profile,
+        profile_id="zz-live-voice.direct-project-code.d0.v1",
+    )
+    harness = _harness(
+        tmp_path,
+        executor_profiles=(later_profile, profile),
+    )
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-selected-create"),
+            request_id="request-selected-create",
+            session_id="session-1",
+        )
+
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        task = harness.composition._core.store.get_task(task_id, _scope())
+        attempt = harness.composition._core.store.get_attempt(task.attempt_id)
+        selection = attempt.selection
+        assert selection is not None
+        assert selection.adapter_id == profile.adapter_id
+        assert selection.capability_profile_digest == profile.digest_sha256()
+        assert json.loads(selection.capability_profile_json) == profile.to_dict()
+        assert json.loads(selection.execution_requirements_json) == {
+            "durability_level": "D0",
+            "executor_id": FORMAL_PROJECT_EXECUTOR_ID,
+            "operation_versions": [
+                ["adjust.demo-itinerary-checkpoint", "v1"],
+                ["cancel", "v1"],
+                ["dispatch", "v1"],
+                ["reconcile.d0", "v1"],
+                ["status", "v1"],
+            ],
+            "project_serialization": "exclusive",
+            "schema_version": "live-voice.task-execution-requirements.v1",
+            "side_effect_class": "project_mutation",
+        }
+        admission = harness.composition._core.store.admission_projection(
+            task_id, _scope()
+        )
+        assert admission is not None
+        assert admission.deadline_at == "2026-08-05T13:00:00Z"
+        assert harness.composition._core._admission_policy == AdmissionPolicy(
+            deadline_seconds=3600,
+            initial_backoff_seconds=1,
+            max_backoff_seconds=60,
+            max_attempts=120,
+        )
+        frozen_selection = selection
+    finally:
+        await harness.composition.stop()
+
+    reopened = _harness(
+        tmp_path,
+        executor_profiles=(later_profile,),
+    )
+    reopened_task = reopened.composition._core.store.get_task(task_id, _scope())
+    reopened_attempt = reopened.composition._core.store.get_attempt(
+        reopened_task.attempt_id
+    )
+    assert reopened_attempt.selection == frozen_selection
+
+
+@pytest.mark.asyncio
+async def test_product_static_mismatch_has_zero_task_executor_or_project_effect(
+    tmp_path: Path,
+) -> None:
+    """Catches route-level mismatch reaching Core after a resolved Task spec."""
+
+    direct = DirectProjectCodeExecutorAdapter.capability_profile()
+    incompatible = replace(
+        direct,
+        operation_versions=tuple(
+            (operation, "v2" if operation == "dispatch" else version)
+            for operation, version in direct.operation_versions
+        ),
+    )
+    harness = _harness(tmp_path, executor_profiles=(incompatible,))
+    await harness.composition.start()
+    try:
+        params = _issued_create_params(harness, "command-static-mismatch")
+        before = _store_counts(harness.database)
+        project_before = tuple(sorted(path.name for path in tmp_path.iterdir()))
+
+        rejected = await harness.composition.handle(
+            operation="task.create",
+            params=params,
+            request_id="request-static-mismatch",
+            session_id="session-1",
+        )
+
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == (
+            "EXECUTOR_CAPABILITY_UNAVAILABLE"
+        )
+        assert rejected.payload["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+        assert _store_counts(harness.database) == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        assert tuple(sorted(path.name for path in tmp_path.iterdir())) == project_before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_product_retry_reuses_persisted_selection_after_profile_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches retry reselecting from a changed process capability profile."""
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        lambda: NOW,
+    )
+    profile = DirectProjectCodeExecutorAdapter.capability_profile()
+    harness = _harness(tmp_path, executor_profiles=(profile,))
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        predecessor = harness.composition._core.store.get_task(task_id, _scope())
+        frozen = harness.composition._core.store.get_attempt(
+            predecessor.attempt_id
+        ).selection
+        assert frozen is not None
+
+        changed_profile = replace(
+            profile,
+            profile_id="live-voice.direct-project-code.d0.v2",
+        )
+        harness.composition._executor_profiles = (changed_profile,)
+        retried = await _apply_retry(
+            harness,
+            task_id,
+            command_id="command-selected-retry",
+        )
+
+        successor = harness.composition._core.store.get_attempt(
+            str(retried["attempt_id"])
+        )
+        assert successor.selection == frozen
+        assert (
+            successor.selection.capability_profile_digest
+            == profile.digest_sha256()
+        )
+        assert successor.selection.capability_profile_digest != (
+            changed_profile.digest_sha256()
+        )
+    finally:
+        await harness.composition.stop()
+
+
 @pytest.mark.parametrize(
     ("demo_policy", "fixture_enabled"), [("0", False), ("1", True)]
 )
@@ -3728,7 +3965,10 @@ async def test_retry_fails_closed_while_executor_cleanup_is_pending(
         assert rejected.payload["error"]["reason"] == (
             "TASK_RETRY_EXECUTOR_CLEANUP_PENDING"
         )
-        assert rejected.payload["error"]["code"] == "UNAVAILABLE"
+        assert rejected.payload["error"]["code"] == "RESULT_UNKNOWN"
+        assert rejected.payload["extensions"]["live_voice.command"][
+            "disposition"
+        ] == "unknown"
         after = await _effects(harness)
         # Readiness itself was evaluated once and nothing else moved.
         assert after[:4] == before[:4]

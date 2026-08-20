@@ -50,6 +50,8 @@ from .demo_fixture_contract import DEMO_ITINERARY_TASK_NAME
 from .executor_capabilities import (
     EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
+    ExecutorSelection,
+    TaskExecutionRequirements,
 )
 from .formal_task_models import (
     ExecutorDeliveryResult,
@@ -62,6 +64,7 @@ from .formal_task_models import (
     FormalTaskViolation,
     OutboxKind,
     PersistentAttemptRecord,
+    PersistedExecutorSelection,
     PersistentOutboxItem,
     PersistentTaskRecord,
     TaskAdjustmentDeliveryResult,
@@ -2631,6 +2634,7 @@ class DirectProjectCodeExecutorAdapter:
 
     async def _dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_DISPATCH)
+        self._selection_binding(item.selection, require_current_profile=True)
         if self._closed:
             raise FormalTaskViolation(
                 "EXECUTOR_CAPABILITY_UNAVAILABLE",
@@ -2656,7 +2660,11 @@ class DirectProjectCodeExecutorAdapter:
         existing = await asyncio.to_thread(self._journal.get, item.attempt_id)
         if existing is not None:
             self._require_attempt_binding(existing, item, root)
-            return self._delivery(existing, after_seq=item.source_seq)
+            return self._delivery(
+                existing,
+                after_seq=item.source_seq,
+                selection=item.selection,
+            )
         if len(self._running) >= _MAX_DIRECT_RUNNING_WORKERS:
             raise FormalTaskViolation(
                 "EXECUTOR_CAPACITY_EXHAUSTED",
@@ -2715,7 +2723,11 @@ class DirectProjectCodeExecutorAdapter:
             )
             if not created:
                 self._require_attempt_binding(record, item, root)
-                return self._delivery(record, after_seq=item.source_seq)
+                return self._delivery(
+                    record,
+                    after_seq=item.source_seq,
+                    selection=item.selection,
+                )
             record = await asyncio.to_thread(
                 self._journal.start,
                 item.attempt_id,
@@ -2723,7 +2735,11 @@ class DirectProjectCodeExecutorAdapter:
                 now=self._clock(),
             )
             if record.state is FormalAttemptState.TERMINAL:
-                return self._delivery(record, after_seq=item.source_seq)
+                return self._delivery(
+                    record,
+                    after_seq=item.source_seq,
+                    selection=item.selection,
+                )
             ownership = await asyncio.to_thread(
                 _AttemptOwnershipLock.try_acquire,
                 root,
@@ -2747,7 +2763,11 @@ class DirectProjectCodeExecutorAdapter:
                 ownership.release()
                 ownership = None
                 if record is not None:
-                    return self._delivery(record, after_seq=item.source_seq)
+                    return self._delivery(
+                        record,
+                        after_seq=item.source_seq,
+                        selection=item.selection,
+                    )
                 raise FormalTaskViolation(
                     "ATTEMPT_NOT_FOUND",
                     "direct Executor attempt is unavailable",
@@ -2770,7 +2790,11 @@ class DirectProjectCodeExecutorAdapter:
             await worker_started.wait()
             current = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert current is not None
-            return self._delivery(current, after_seq=item.source_seq)
+            return self._delivery(
+                current,
+                after_seq=item.source_seq,
+                selection=item.selection,
+            )
         except asyncio.CancelledError:
             if worker is not None:
                 self._interruptions[item.attempt_id] = (
@@ -3510,6 +3534,7 @@ class DirectProjectCodeExecutorAdapter:
 
     async def adjust(self, item: PersistentOutboxItem) -> TaskAdjustmentDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_ADJUST)
+        self._selection_binding(item.selection, require_current_profile=False)
         expected_ref = f"{_DIRECT_EXECUTOR_REF_PREFIX}{item.attempt_id}"
         if item.executor_ref != expected_ref or item.adjustment is None:
             raise FormalTaskViolation(
@@ -3576,6 +3601,7 @@ class DirectProjectCodeExecutorAdapter:
 
     async def cancel(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_CANCEL)
+        self._selection_binding(item.selection, require_current_profile=False)
         if item.executor_ref != f"{_DIRECT_EXECUTOR_REF_PREFIX}{item.attempt_id}":
             raise FormalTaskViolation(
                 "EXECUTOR_REFERENCE_MISMATCH",
@@ -3594,7 +3620,11 @@ class DirectProjectCodeExecutorAdapter:
         )
         record = await asyncio.to_thread(self._journal.request_cancel, item.attempt_id)
         if record.state is FormalAttemptState.TERMINAL:
-            return self._delivery(record, after_seq=item.source_seq)
+            return self._delivery(
+                record,
+                after_seq=item.source_seq,
+                selection=item.selection,
+            )
         task = self._running.get(item.attempt_id)
         if task is None:
             recovered = await asyncio.to_thread(
@@ -3608,7 +3638,11 @@ class DirectProjectCodeExecutorAdapter:
                     "direct Executor cancellation awaits its active process lease",
                     ErrorCode.UNAVAILABLE,
                 )
-            return self._delivery(refreshed, after_seq=item.source_seq)
+            return self._delivery(
+                refreshed,
+                after_seq=item.source_seq,
+                selection=item.selection,
+            )
         if record.raw_status == "applying":
             done, _ = await asyncio.wait({task}, timeout=self._cancel_timeout)
             if not done:
@@ -3619,7 +3653,11 @@ class DirectProjectCodeExecutorAdapter:
                 )
             refreshed = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert refreshed is not None
-            return self._delivery(refreshed, after_seq=item.source_seq)
+            return self._delivery(
+                refreshed,
+                after_seq=item.source_seq,
+                selection=item.selection,
+            )
         self._interruptions.setdefault(
             item.attempt_id,
             ("cancelled", "TASK_CANCEL_ACKNOWLEDGED"),
@@ -3643,7 +3681,11 @@ class DirectProjectCodeExecutorAdapter:
                 task.result()
         refreshed = await asyncio.to_thread(self._journal.get, item.attempt_id)
         assert refreshed is not None
-        return self._delivery(refreshed, after_seq=item.source_seq)
+        return self._delivery(
+            refreshed,
+            after_seq=item.source_seq,
+            selection=item.selection,
+        )
 
     async def status(
         self,
@@ -3659,6 +3701,16 @@ class DirectProjectCodeExecutorAdapter:
                 "reconciliation must query the exact original formal attempt",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
+        selected = self._parsed_selection(attempt.selection)
+        if selected is not None and selected.profile != self.capability_profile():
+            return self._resolution_observation(
+                task.task_id,
+                attempt.attempt_id,
+                attempt.executor_ref,
+                ExecutorResolution.UNAVAILABLE,
+                "EXECUTOR_SELECTION_PROFILE_DRIFT",
+                selection=attempt.selection,
+            )
         record = await asyncio.to_thread(self._journal.get, attempt.attempt_id)
         if record is None:
             return self._resolution_observation(
@@ -3667,6 +3719,7 @@ class DirectProjectCodeExecutorAdapter:
                 attempt.executor_ref,
                 ExecutorResolution.LOST,
                 "DIRECT_EXECUTOR_ATTEMPT_NOT_FOUND",
+                selection=attempt.selection,
             )
         self._require_record_binding(record, task, attempt)
         if (
@@ -3676,7 +3729,11 @@ class DirectProjectCodeExecutorAdapter:
             await asyncio.to_thread(self._journal.recover_expired, now=self._clock())
             record = await asyncio.to_thread(self._journal.get, attempt.attempt_id)
             assert record is not None
-        return self._delivery(record, after_seq=attempt.source_seq)
+        return self._delivery(
+            record,
+            after_seq=attempt.source_seq,
+            selection=attempt.selection,
+        )
 
     def retained_cleanup_attempt_ids(self) -> tuple[str, ...]:
         """Expose bounded cleanup truth without leaking temporary paths."""
@@ -3863,6 +3920,55 @@ class DirectProjectCodeExecutorAdapter:
             raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING")
 
     @staticmethod
+    def _parsed_selection(
+        selection: PersistedExecutorSelection | None,
+    ) -> ExecutorSelection | None:
+        if selection is None:
+            return None
+        try:
+            parsed = ExecutorSelection(
+                profile=ExecutorCapabilityProfile.from_dict(
+                    json.loads(selection.capability_profile_json)
+                ),
+                profile_digest=selection.capability_profile_digest,
+                requirements=TaskExecutionRequirements.from_dict(
+                    json.loads(selection.execution_requirements_json)
+                ),
+            )
+        except (TypeError, UnicodeDecodeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_INVALID",
+                "persisted Executor selection is not a compatible canonical binding",
+                ErrorCode.PROTOCOL_VIOLATION,
+            ) from error
+        if selection.adapter_id != parsed.profile.adapter_id:
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_ADAPTER_MISMATCH",
+                "persisted Executor selection changed its selected adapter",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        return parsed
+
+    @classmethod
+    def _selection_binding(
+        cls,
+        selection: PersistedExecutorSelection | None,
+        *,
+        require_current_profile: bool,
+    ) -> tuple[str | None, str | None]:
+        parsed = cls._parsed_selection(selection)
+        if parsed is None:
+            return None, None
+        if require_current_profile and parsed.profile != cls.capability_profile():
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_PROFILE_MISMATCH",
+                "new dispatch does not match the frozen Direct capability profile",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        assert selection is not None
+        return selection.adapter_id, selection.capability_profile_digest
+
+    @staticmethod
     def _require_item(item: PersistentOutboxItem, *, expected_kind: OutboxKind) -> None:
         if item.spec.executor_id != FORMAL_PROJECT_EXECUTOR_ID:
             raise FormalTaskViolation(
@@ -3916,8 +4022,16 @@ class DirectProjectCodeExecutorAdapter:
             )
 
     def _delivery(
-        self, record: _DirectAttempt, *, after_seq: int
+        self,
+        record: _DirectAttempt,
+        *,
+        after_seq: int,
+        selection: PersistedExecutorSelection | None = None,
     ) -> ExecutorDeliveryResult:
+        adapter_id, capability_profile_digest = self._selection_binding(
+            selection,
+            require_current_profile=False,
+        )
         observations = []
         result_artifacts: tuple[TaskResultArtifact, ...] = ()
         if record.outcome is TerminalOutcome.COMPLETED:
@@ -3975,6 +4089,8 @@ class DirectProjectCodeExecutorAdapter:
                     result_artifacts=(
                         result_artifacts if seq == record.source_seq else ()
                     ),
+                    adapter_id=adapter_id,
+                    capability_profile_digest=capability_profile_digest,
                 )
             )
         return ExecutorDeliveryResult(record.executor_ref, tuple(observations))
@@ -3986,7 +4102,13 @@ class DirectProjectCodeExecutorAdapter:
         executor_ref: str | None,
         resolution: ExecutorResolution,
         error: str,
+        *,
+        selection: PersistedExecutorSelection | None = None,
     ) -> ExecutorObservation:
+        adapter_id, capability_profile_digest = self._selection_binding(
+            selection,
+            require_current_profile=False,
+        )
         return ExecutorObservation(
             resolution=resolution,
             executor_id=self.executor_id,
@@ -4000,6 +4122,8 @@ class DirectProjectCodeExecutorAdapter:
             occurred_at=self._clock(),
             raw_status=None,
             error=error,
+            adapter_id=adapter_id,
+            capability_profile_digest=capability_profile_digest,
         )
 
 

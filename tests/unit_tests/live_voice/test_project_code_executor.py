@@ -40,12 +40,19 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     OutboxKind,
     OutboxState,
     PersistentAttemptRecord,
+    PersistedExecutorSelection,
     PersistentOutboxItem,
     PersistentTaskRecord,
     ResolvedTaskContext,
     TaskAdjustmentRequest,
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
+)
+from jiuwenswarm.server.live_voice.executor_capabilities import (
+    TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+    ExecutorCapabilityProfile,
+    TaskExecutionRequirements,
+    select_executor,
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
@@ -482,6 +489,33 @@ def _item(project: Path, *, kind=OutboxKind.ATTEMPT_DISPATCH, source_seq=-1):
     )
 
 
+def _direct_selection(
+    profile: ExecutorCapabilityProfile | None = None,
+) -> PersistedExecutorSelection:
+    selected_profile = profile or DirectProjectCodeExecutorAdapter.capability_profile()
+    requirements = TaskExecutionRequirements(
+        schema_version=TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+        executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+        operation_versions=(
+            ("dispatch", "v1"),
+            ("status", "v1"),
+            ("cancel", "v1"),
+            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("reconcile.d0", "v1"),
+        ),
+        durability_level="D0",
+        side_effect_class="project_mutation",
+        project_serialization="exclusive",
+    )
+    selection = select_executor((selected_profile,), requirements)
+    return PersistedExecutorSelection(
+        adapter_id=selection.profile.adapter_id,
+        capability_profile_json=selection.profile.canonical_bytes(),
+        capability_profile_digest=selection.profile_digest,
+        execution_requirements_json=selection.requirements.canonical_bytes(),
+    )
+
+
 def _adjustment_item(
     project: Path,
     *,
@@ -516,6 +550,7 @@ def _direct_task_attempt(
     source_seq: int = 1,
     task_id: str = "task-1",
     attempt_id: str = "attempt-1",
+    selection: PersistedExecutorSelection | None = None,
 ) -> tuple[PersistentTaskRecord, PersistentAttemptRecord]:
     task = PersistentTaskRecord(
         task_id,
@@ -541,6 +576,7 @@ def _direct_task_attempt(
         FormalAttemptState.RUNNING,
         None,
         source_seq,
+        selection=selection,
     )
     return task, attempt
 
@@ -1072,6 +1108,7 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
         assert unsupported.isdisjoint(
             operation for operation, _version in first_profile.operation_versions
         )
+        assert not hasattr(ProjectCodeExecutorAdapter, "capability_profile")
         canonical = first_profile.canonical_bytes().decode("ascii")
         assert tmp_path.name not in canonical
         assert "sqlite" not in canonical
@@ -1082,6 +1119,129 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_delivery_and_status_bind_the_persisted_selection(
+    tmp_path: Path,
+) -> None:
+    """Catches selected lifecycle observations losing their immutable profile."""
+
+    project = tmp_path / "selected-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "selected.sqlite3",
+    )
+    selection = _direct_selection()
+    item = replace(_item(project), selection=selection)
+
+    try:
+        delivered = await adapter.dispatch(item)
+        assert delivered.observations
+        assert {
+            (event.adapter_id, event.capability_profile_digest)
+            for event in delivered.observations
+        } == {(selection.adapter_id, selection.capability_profile_digest)}
+
+        await asyncio.wait_for(executor.finished.wait(), timeout=2)
+        await _wait_direct_settled(adapter)
+        task, attempt = _direct_task_attempt(project, selection=selection)
+        terminal = await adapter.status(task, attempt)
+
+        assert isinstance(terminal, ExecutorDeliveryResult)
+        assert terminal.observations
+        assert {
+            (event.adapter_id, event.capability_profile_digest)
+            for event in terminal.observations
+        } == {(selection.adapter_id, selection.capability_profile_digest)}
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_dispatch_rejects_profile_drift_before_any_effect(
+    tmp_path: Path,
+) -> None:
+    """Catches a new Attempt running under a profile other than its selection."""
+
+    project = tmp_path / "mismatched-profile-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "mismatched-profile.sqlite3",
+    )
+    changed_profile = replace(
+        DirectProjectCodeExecutorAdapter.capability_profile(),
+        profile_id="live-voice.direct-project-code.d0.v2",
+    )
+    item = replace(_item(project), selection=_direct_selection(changed_profile))
+    before_status = _git(project, "status", "--short")
+
+    try:
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.dispatch(item)
+
+        assert rejected.value.reason == "EXECUTOR_SELECTION_PROFILE_MISMATCH"
+        assert rejected.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get(item.attempt_id) is None
+        assert _git(project, "status", "--short") == before_status
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_status_reports_profile_drift_under_old_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches restart drift rewriting history or appearing as known truth."""
+
+    project = tmp_path / "status-profile-drift-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "status-profile-drift.sqlite3",
+    )
+    selection = _direct_selection()
+    item = replace(_item(project), selection=selection)
+
+    try:
+        await adapter.dispatch(item)
+        await asyncio.wait_for(executor.finished.wait(), timeout=2)
+        await _wait_direct_settled(adapter)
+        changed_profile = replace(
+            DirectProjectCodeExecutorAdapter.capability_profile(),
+            profile_id="live-voice.direct-project-code.d0.v2",
+        )
+        monkeypatch.setattr(
+            DirectProjectCodeExecutorAdapter,
+            "capability_profile",
+            classmethod(lambda cls: changed_profile),
+        )
+        task, attempt = _direct_task_attempt(project, selection=selection)
+        before_status = _git(project, "status", "--short")
+
+        observed = await adapter.status(task, attempt)
+
+        assert isinstance(observed, ExecutorObservation)
+        assert observed.resolution is ExecutorResolution.UNAVAILABLE
+        assert observed.error == "EXECUTOR_SELECTION_PROFILE_DRIFT"
+        assert observed.adapter_id == selection.adapter_id
+        assert (
+            observed.capability_profile_digest
+            == selection.capability_profile_digest
+        )
+        assert adapter._journal.get(item.attempt_id) is not None
+        assert _git(project, "status", "--short") == before_status
+    finally:
+        await adapter.close()
 
 
 @pytest.mark.asyncio

@@ -39,9 +39,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
 from .formal_task_models import (
+    AdmissionPolicy,
     FormalTaskViolation,
     FormalTaskSpec,
     PersistentTaskRecord,
+    PersistedExecutorSelection,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
     TaskResultAvailability,
@@ -49,6 +51,13 @@ from .formal_task_models import (
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
     utc_now,
+)
+from .executor_capabilities import (
+    TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+    ExecutorCapabilityProfile,
+    ExecutorSelection,
+    TaskExecutionRequirements,
+    select_executor,
 )
 from .persistent_task_core import PersistentTaskCore, ReconciliationEventSink
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
@@ -69,6 +78,7 @@ from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
+    FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
 from .task_event_subscription import TaskEventSubscription
@@ -117,6 +127,46 @@ _DEMO_ADJUSTMENT_CHECKPOINT_ENV = (
     "JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED"
 )
 _PRODUCT_P2_OPERATION = "agent.chat"
+
+_PRODUCT_DIRECT_OPERATION_VERSIONS = (
+    ("dispatch", "v1"),
+    ("status", "v1"),
+    ("cancel", "v1"),
+    ("adjust.demo-itinerary-checkpoint", "v1"),
+    ("reconcile.d0", "v1"),
+)
+_PRODUCT_ADMISSION_POLICY = AdmissionPolicy(
+    deadline_seconds=3_600,
+    initial_backoff_seconds=1,
+    max_backoff_seconds=60,
+    max_attempts=120,
+)
+
+
+def _product_execution_requirements(
+    *, executor_id: str, side_effect_class: str
+) -> TaskExecutionRequirements:
+    return TaskExecutionRequirements(
+        schema_version=TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+        executor_id=executor_id,
+        operation_versions=_PRODUCT_DIRECT_OPERATION_VERSIONS,
+        durability_level="D0",
+        side_effect_class=side_effect_class,
+        project_serialization="exclusive",
+    )
+
+
+def _persisted_executor_selection(
+    selection: ExecutorSelection,
+) -> PersistedExecutorSelection:
+    """Adapt the approved selector value without recanonicalizing its bytes."""
+
+    return PersistedExecutorSelection(
+        adapter_id=selection.profile.adapter_id,
+        capability_profile_json=selection.profile.canonical_bytes(),
+        capability_profile_digest=selection.profile_digest,
+        execution_requirements_json=selection.requirements.canonical_bytes(),
+    )
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:
@@ -592,6 +642,7 @@ class _PreparedRetrySnapshot:
     correlation_id: str
     product_request: TaskRetryProductRequestFingerprint
     replayed: bool
+    selection: PersistedExecutorSelection | None
 
 
 class ClosableBindingResolver(Protocol):
@@ -930,8 +981,23 @@ class P3AuthenticatedComposition:
         telemetry: P3TelemetrySink | None = None,
         reconcile_interval: float = 30.0,
         clock: Callable[[], str] = utc_now,
+        executor_profiles: tuple[ExecutorCapabilityProfile, ...] | None = None,
+        admission_policy: AdmissionPolicy = _PRODUCT_ADMISSION_POLICY,
     ) -> None:
         _validate_reconcile_interval(reconcile_interval)
+        if executor_profiles is not None and (
+            type(executor_profiles) is not tuple
+            or not executor_profiles
+            or any(
+                type(profile) is not ExecutorCapabilityProfile
+                for profile in executor_profiles
+            )
+        ):
+            raise TypeError(
+                "executor_profiles must be a non-empty tuple of exact profiles"
+            )
+        if not isinstance(admission_policy, AdmissionPolicy):
+            raise TypeError("admission_policy must be an AdmissionPolicy")
         self._authenticator = authenticator
         self._authority_resolver = authority_resolver
         self._core = core
@@ -955,6 +1021,8 @@ class P3AuthenticatedComposition:
         self._telemetry = telemetry or LoggingP3TelemetrySink()
         self._reconcile_interval = reconcile_interval
         self._clock = clock
+        self._executor_profiles = executor_profiles
+        self._admission_policy = admission_policy
         self._lifecycle_lock = asyncio.Lock()
         self._reconcile_lock = asyncio.Lock()
         self._active_condition = asyncio.Condition()
@@ -1614,6 +1682,62 @@ class P3AuthenticatedComposition:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
 
+    @staticmethod
+    def _resolved_create_spec(
+        command: CommandEnvelope,
+        context: ResolvedTaskContext,
+    ) -> FormalTaskSpec:
+        """Close the exact Task spec before selecting an Executor profile."""
+
+        if command.command_type != "task.create":
+            raise FormalTaskViolation(
+                "INVALID_TASK_CREATE_INTENT",
+                "Executor selection requires an exact task.create command",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        payload = command.payload
+        attributes = payload.get("attributes")
+        if type(attributes) is not dict:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_ATTRIBUTES",
+                "task attributes must be a string map",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return FormalTaskSpec(
+            name=payload.get("name"),
+            instruction=payload.get("instruction"),
+            origin=command.origin,
+            context=context,
+            executor_id=payload.get("executor_id"),
+            required_capabilities=tuple(command.required_capabilities),
+            side_effect_class=payload.get("side_effect_class"),
+            attributes=tuple(sorted(attributes.items())),
+        )
+
+    def _select_create_executor(
+        self,
+        command: CommandEnvelope,
+        context: ResolvedTaskContext | None,
+    ) -> PersistedExecutorSelection | None:
+        """Select statically before Core can create Store or project effects."""
+
+        if self._executor_profiles is None:
+            return None
+        if context is None:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_CONTEXT_REQUIRED",
+                "task.create requires server-resolved project context",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        spec = self._resolved_create_spec(command, context)
+        requirements = _product_execution_requirements(
+            executor_id=spec.executor_id,
+            side_effect_class=spec.side_effect_class,
+        )
+        return _persisted_executor_selection(
+            select_executor(self._executor_profiles, requirements)
+        )
+
     def _resolve_retry_snapshot(
         self,
         *,
@@ -1646,6 +1770,22 @@ class P3AuthenticatedComposition:
         if replay is not None:
             replayed_spec = replay.resulting_spec
             self._require_retry_executor(replayed_spec)
+            replay_result = replay.original_result.result
+            if replay_result is None or type(replay_result.get("attempt_id")) is not str:
+                raise FormalTaskViolation(
+                    "TASK_RETRY_REPLAY_BINDING_MISMATCH",
+                    "applied retry replay does not identify its durable successor",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            replayed_attempt = self._core.store.get_attempt(
+                str(replay_result["attempt_id"])
+            )
+            if replayed_attempt.task_id != task_id:
+                raise FormalTaskViolation(
+                    "TASK_RETRY_REPLAY_BINDING_MISMATCH",
+                    "applied retry replay does not bind its durable successor",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
             return _PreparedRetrySnapshot(
                 precondition=replay.precondition,
                 context=replayed_spec.context,
@@ -1653,6 +1793,7 @@ class P3AuthenticatedComposition:
                 correlation_id=replay.original_command.correlation_id,
                 product_request=product_request,
                 replayed=True,
+                selection=replayed_attempt.selection,
             )
         snapshot = self._core.read_current_retry_authority(
             scope=authority.scope,
@@ -1672,6 +1813,7 @@ class P3AuthenticatedComposition:
             correlation_id=snapshot.task.correlation_id,
             product_request=product_request,
             replayed=False,
+            selection=snapshot.attempt.selection,
         )
 
     async def _read_status_retry_admission(
@@ -2424,6 +2566,18 @@ class P3AuthenticatedComposition:
             )
             invocation = self._policy.map(intent)
             if isinstance(invocation.envelope, CommandEnvelope):
+                selection = (
+                    self._select_create_executor(
+                        invocation.envelope,
+                        invocation.context,
+                    )
+                    if operation == "task.create"
+                    else (
+                        retry_snapshot.selection
+                        if operation == "task.retry" and retry_snapshot is not None
+                        else None
+                    )
+                )
                 result = await self._run_blocking(
                     self._core.execute,
                     invocation.envelope,
@@ -2434,6 +2588,10 @@ class P3AuthenticatedComposition:
                         current_background_session_id
                         if operation == "task.create"
                         else None
+                    ),
+                    selection=selection,
+                    admission_policy=(
+                        self._admission_policy if selection is not None else None
                     ),
                 )
             else:
@@ -2887,6 +3045,13 @@ def create_p3_composition_from_environment(
         ) from exc
     database = str(os.getenv(_DATABASE_ENV) or "").strip()
     database_path = _resolve_database_path(database)
+    direct_selection = select_executor(
+        (DirectProjectCodeExecutorAdapter.capability_profile(),),
+        _product_execution_requirements(
+            executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+            side_effect_class="project_mutation",
+        ),
+    )
     principal = AuthenticatedPrincipal(
         principal_id=principal_id,
         allowed_project_ids=project_ids,
@@ -2928,6 +3093,7 @@ def create_p3_composition_from_environment(
         store,
         executor,
         reconciliation_event_sink=reconciliation_event_sink,
+        admission_policy=_PRODUCT_ADMISSION_POLICY,
     )
     return P3AuthenticatedComposition(
         authenticator=authenticator,
@@ -2939,6 +3105,8 @@ def create_p3_composition_from_environment(
         telemetry=telemetry,
         policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=interval,
+        executor_profiles=(direct_selection.profile,),
+        admission_policy=_PRODUCT_ADMISSION_POLICY,
     )
 
 
