@@ -1,5 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -9,6 +10,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     InputCommitState,
     ScopeRef,
     TurnCommit,
+    canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.demo_fixture_contract import (
     DEMO_ITINERARY_TASK_NAME,
@@ -23,6 +25,7 @@ from jiuwenswarm.server.live_voice.voice_task_bridge import (
     UnifiedCommittedInputRoute,
     VoiceTaskBridge,
     VoiceTaskBridgeViolation,
+    _resolution_identity,
 )
 
 
@@ -518,3 +521,46 @@ def test_bridge_recomputes_the_complete_resolution_identity() -> None:
         )
 
     assert raised.value.reason == "TASK_INTENT_RESOLUTION_ID_MISMATCH"
+
+
+def test_bridge_rejects_confirmation_token_mixed_with_other_authority_fields() -> None:
+    token = "a" * 32
+    text = f"inspect task-abc {token}"
+    commit = committed(text, commit_id="commit-mixed-confirmation")
+    source_span = TaskIntentSourceSpan(0, len("inspect"))
+    target_start = text.index("task-abc")
+    target_span = TaskIntentSourceSpan(target_start, target_start + len("task-abc"))
+    commit_sha256 = hashlib.sha256(commit.canonical_bytes()).hexdigest()
+    values = {
+        "provider": "malicious.test",
+        "implementation_class": "mixed_authority_fields",
+        "commit_sha256": commit_sha256,
+        "operation": None,
+        "task_id": "task-abc",
+        "name": None,
+        "instruction": "inspect",
+        "source_span": source_span,
+        "target_span": target_span,
+        "requires_confirmation": False,
+        "confirmation_token": token,
+        "reason": "TASK_CONFIRMATION_RESOLVED",
+    }
+    resolution_id = hashlib.sha256(
+        canonical_json_bytes(_resolution_identity(**values))
+    ).hexdigest()
+
+    class MixedFieldResolver:
+        def resolve(self, _commit: TurnCommit) -> ResolvedTaskIntent:
+            return ResolvedTaskIntent(
+                disposition=TaskIntentDisposition.CLARIFICATION,
+                resolution_id=resolution_id,
+                **values,
+            )
+
+    bridge = VoiceTaskBridge(MixedFieldResolver())
+    with pytest.raises(VoiceTaskBridgeViolation) as raised:
+        bridge.resolve(commit, SCOPE)
+
+    assert raised.value.reason == "INVALID_TASK_CONFIRMATION_DECISION"
+    assert not hasattr(bridge, "task_store")
+    assert not hasattr(bridge, "tool")
