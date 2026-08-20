@@ -294,6 +294,80 @@ Wave 3 applies all relevant D-032 P/N/B/S/T/C/R/F/I/K/X dimensions recorded in
 the acceptance above. Worker commits alone receive no credit; independent
 Tier-2/3 review and integration verification remain mandatory.
 
+## 5.4 Wave 4 activation — disjoint durability, terminal and media cleanup
+
+Wave 4 starts from integration commit `4923f05cd` after the first eight unique
+closures. Its three source/test ownership sets are disjoint from each other and
+from the still-running Wave 2/3 returns. A worker may not broaden a packet into
+shared schema, classifier or another module owner without a new checkpoint.
+
+### SRR-13 — A11 Persistent Task Core blocking-store isolation
+
+- Capability/owner: `PersistentTaskCore` asynchronous outbox delivery and
+  reconciliation orchestration around the synchronous SQLite Task Store.
+- Risk: Tier 3 durable Task authority, event-loop availability and restart
+  recovery.
+- Dependency: preserve integrated SRR-01/C5 exact Executor-observation binding
+  and zero-write rejection semantics.
+- Worker-owned source/tests: `jiuwenswarm/server/live_voice/persistent_task_core.py`
+  and `tests/unit_tests/live_voice/test_persistent_task_core.py` only.
+- Intended behavior: execute each blocking Store operation through the existing
+  blocking runner or an equivalent owner-scoped thread boundary while keeping
+  async Executor calls on the owning event loop. Cancellation cannot publish a
+  partial authority transition or let a late blocking result mutate a new
+  attempt/claim owner.
+- Acceptance: deterministic Store barriers reproduce the baseline heartbeat and
+  barge delay; positive delivery/reconciliation remains exact; cancellation at
+  every Store/Executor boundary, competing Task/scope work, SQLite
+  serialization, reopen recovery, mixed-observation rejection and exact replay
+  prove no duplicate dispatch, terminalization or cross-attempt effects.
+- Exclusions: no Store schema/migration, global executor policy, outbox lease or
+  retry policy, Executor protocol, C5 binding relaxation or physical latency
+  claim.
+
+### SRR-14 — A12 Code Executor persisted user-cancel terminal truth
+
+- Capability/owner: `ProjectCodeExecutor` attempt execution and journal-backed
+  cancellation terminalization.
+- Risk: Tier 3 Task terminal authority, retry lineage and crash/restart truth.
+- Worker-owned source/tests: `jiuwenswarm/server/live_voice/project_code_executor.py`
+  and `tests/unit_tests/live_voice/test_project_code_executor.py` only.
+- Intended behavior: an explicit persisted user cancel that is observed and
+  acknowledged settles exactly once as `CANCELLED`; `INTERRUPTED` remains
+  reserved for shutdown, lost ownership and other non-user interruption causes.
+- Acceptance: deterministic barriers order journal persistence, in-memory
+  signal and executor observation; assert one terminal event, cancellation ACK
+  and correct retry-readiness across both orderings and reopen. Shutdown/lost-
+  owner controls remain `INTERRUPTED`, neighboring attempts are unchanged and
+  stale/replayed cancel produces zero new effects.
+- Exclusions: no journal schema, new terminal enum/retry policy, process
+  supervision, Task Store protocol or unrelated timeout/capability behavior.
+
+### SRR-15 — A16 Dedicated Media post-reservation cancellation cleanup
+
+- Capability/owner: Dedicated Media uplink socket leaf after exact authority
+  reservation and attach.
+- Risk: Tier 3 media authority, socket/child lifecycle and cancellation truth.
+- Worker-owned source/tests: `jiuwenswarm/gateway/live_voice/dedicated_media_route.py`
+  and `tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py` only.
+- Intended behavior: one idempotent outer cleanup boundary owns every
+  post-reservation receive, detach, protocol-error and binary-ACK send. Caller
+  cancellation remains authoritative only after the exact session is closed,
+  socket closure is attempted once and receive/speech/EOT children are settled
+  or truthfully retained.
+- Acceptance: deterministic send barriers cancel separately at malformed-text
+  detach, non-detach text, invalid message-type detach and binary ACK; exact
+  reservation usage returns to zero, socket/child calls are once-only, no late
+  ACK/audio/history/Task/Tool effect appears, another lease is unaffected and a
+  later valid route succeeds. Include process-control, cleanup-error and
+  duplicate-cancel orderings without swallowing the authoritative exception.
+- Exclusions: no media schema/codec, binding/capacity policy, downlink behavior,
+  Speech semantics, Provider/device change or physical transport claim.
+
+Wave 4 applies all relevant D-032 P/N/B/S/T/C/R/F/I/K/X dimensions recorded in
+the acceptance above. Worker commits alone receive no credit; independent
+Tier-3 review and integration verification remain mandatory.
+
 ## 6. Queued repair programs
 
 These groups route work after the currently active packets; they are not yet
@@ -302,12 +376,12 @@ freezes smaller owner-specific packets before editing.
 
 - Generation/successor/authority cleanup: B7, B12, B13, B14, B16, B18, B32,
   B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an alias of B13.
-- Cancellation/teardown/retained cleanup: A7, A8, A16, A19, A20, A22, B6,
+- Cancellation/teardown/retained cleanup: A7, A8, A19, A20, A22, B6,
   B21, B23, B24, D1, D3 and L7.
 - Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, A25, B4, B11,
   B42, L5 and L18. C3 remains an alias of B42.
-- Event-loop, lock and filesystem responsiveness: A11, A14, B15, B25 and B27.
-- Protocol/state/compatibility: A3, A12, A23, B1, B3, B5, B8, B19,
+- Event-loop, lock and filesystem responsiveness: A14, B15, B25 and B27.
+- Protocol/state/compatibility: A3, A23, B1, B3, B5, B8, B19,
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L14, L15, L16, L17 and L22.
 
