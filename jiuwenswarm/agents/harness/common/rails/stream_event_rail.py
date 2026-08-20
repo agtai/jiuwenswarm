@@ -51,6 +51,24 @@ from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 _FORMAL_TOOL_EVENT_CAPACITY = 192
+_TOOL_OUTCOME_MAX_DEPTH = 32
+_TOOL_OUTCOME_MAX_NODES = 2048
+_TOOL_FAILURE_STATUSES = frozenset(
+    {
+        "error",
+        "failed",
+        "failure",
+        "rejected",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "skipped",
+        "permission_denied",
+        "denied",
+        "aborted",
+        "timeout",
+    }
+)
 
 
 class FormalToolEventCapture:
@@ -124,6 +142,13 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
+
+
+def _tool_callback_outcome_value(result: Any) -> Any:
+    detailed_output = _structured_tool_result_payload(result)
+    if detailed_output is None or detailed_output is result:
+        return result
+    return [result, detailed_output]
 
 
 def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
@@ -202,16 +227,30 @@ def _ask_user_question_payload_from_interrupt(tool_call: Any, interrupt: Any) ->
     return convert_interactions_to_ask_user_question([{"id": request_id, "value": value_obj}])
 
 
+def _boolish_state(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"false", "0", "no"}:
+            return False
+        if normalized in {"true", "1", "yes"}:
+            return True
+    return None
+
+
 def _boolish_false(value: Any) -> bool:
-    if value is False:
-        return True
-    return isinstance(value, str) and value.strip().lower() in {"false", "0", "no"}
+    return _boolish_state(value) is False
 
 
 def _boolish_true(value: Any) -> bool:
-    if value is True:
-        return True
-    return isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}
+    return _boolish_state(value) is True
 
 
 def _nonzero_exit(value: Any) -> bool | None:
@@ -227,41 +266,93 @@ def _nonzero_exit(value: Any) -> bool | None:
     return None
 
 
-def _infer_tool_result_error(value: Any) -> bool | None:
-    if isinstance(value, dict):
-        explicit_success = False
-        if "success" in value:
-            if _boolish_false(value.get("success")):
-                return True
-            if _boolish_true(value.get("success")):
-                explicit_success = True
-        if _boolish_true(value.get("is_error")) or _boolish_true(value.get("isError")):
-            return True
-        status = value.get("status")
-        if isinstance(status, str) and status.strip().lower() in {"error", "failed", "failure"}:
-            return True
-        for key in ("exit_code", "exitCode", "returncode", "return_code"):
-            exit_failed = _nonzero_exit(value.get(key))
-            if exit_failed:
-                return True
-            if exit_failed is False:
-                explicit_success = True
-        for key in ("data", "raw_output", "rawOutput", "result"):
-            nested = value.get(key)
-            if isinstance(nested, (dict, list)):
-                nested_error = _infer_tool_result_error(nested)
-                if nested_error:
-                    return True
-                if nested_error is False:
-                    explicit_success = True
-        return False if explicit_success else None
+def _structured_error_present(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (bytes, bytearray, dict, list, tuple, set)):
+        return len(value) > 0
+    if isinstance(value, (int, float)):
+        return value != 0
+    return True
 
-    if isinstance(value, list):
-        for item in value:
-            item_error = _infer_tool_result_error(item)
-            if item_error:
+
+def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | None:
+    """Scan JSON-like callback output without trusting traversal order.
+
+    Every nested dict/list is inspected. Cycles and structures beyond the
+    bounded observation budget are malformed and therefore fail closed.
+    """
+
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    seen_containers: set[int] = set()
+    explicit_success = False
+    visited_nodes = 0
+
+    while stack:
+        current, depth = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > _TOOL_OUTCOME_MAX_NODES or depth > _TOOL_OUTCOME_MAX_DEPTH:
+            return True
+
+        if not isinstance(current, (dict, list)):
+            continue
+        identity = id(current)
+        if identity in seen_containers:
+            return True
+        seen_containers.add(identity)
+
+        if isinstance(current, dict):
+            if "success" in current:
+                success = _boolish_state(current.get("success"))
+                if success is False:
+                    return True
+                if success is True:
+                    explicit_success = True
+
+            for key in ("is_error", "isError"):
+                if key not in current:
+                    continue
+                is_error = _boolish_state(current.get(key))
+                if is_error is True:
+                    return True
+                if is_error is False:
+                    explicit_success = True
+
+            status = current.get("status")
+            if (
+                isinstance(status, str)
+                and status.strip().lower() in _TOOL_FAILURE_STATUSES
+            ):
                 return True
-        return None
+
+            if "error" in current and _structured_error_present(current.get("error")):
+                return True
+
+            for key in ("exit_code", "exitCode", "returncode", "return_code"):
+                if key not in current:
+                    continue
+                exit_failed = _nonzero_exit(current.get(key))
+                if exit_failed is True:
+                    return True
+                if exit_failed is False:
+                    explicit_success = True
+
+            children = current.values()
+        else:
+            children = current
+
+        if visited_nodes + len(stack) + len(current) > _TOOL_OUTCOME_MAX_NODES:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+
+    return False if explicit_success else None
+
+
+def _infer_tool_result_error(value: Any) -> bool | None:
+    if isinstance(value, (dict, list)):
+        return _scan_structured_tool_result(value)
 
     if isinstance(value, str):
         text = value.strip()
@@ -272,9 +363,7 @@ def _infer_tool_result_error(value: Any) -> bool | None:
         except Exception:
             parsed = None
         if isinstance(parsed, (dict, list)):
-            parsed_error = _infer_tool_result_error(parsed)
-            if parsed_error is not None:
-                return parsed_error
+            return _scan_structured_tool_result(parsed)
         if re.search(r"\bsuccess\s*[:=]\s*False\b", text, re.IGNORECASE):
             return True
         if text.startswith("[ERROR]"):
@@ -284,8 +373,8 @@ def _infer_tool_result_error(value: Any) -> bool | None:
             text,
             re.IGNORECASE,
         )
-        if exit_match:
-            return int(exit_match.group(1)) != 0
+        if exit_match and int(exit_match.group(1)) != 0:
+            return True
     return None
 
 
@@ -303,7 +392,10 @@ def _resolved_tool_callback_error_state(
 
     if force_error:
         return True
-    inferred = _infer_tool_result_error(value)
+    try:
+        inferred = _infer_tool_result_error(value)
+    except BaseException:  # noqa: BLE001 -- malformed outcomes fail closed
+        return True
     return inferred if inferred is not None else False
 
 
@@ -865,6 +957,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
+        callback_failed = _resolved_tool_callback_error_state(
+            _tool_callback_outcome_value(ctx.inputs.tool_result),
+            force_error=ctx.exception is not None,
+        )
         capture = self._formal_tool_event_captures.get(sid)
         if capture is not None:
             tool_call_id = self._tool_call_id(tc)
@@ -876,7 +972,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         ctx.exception
                         if ctx.exception is not None
                         else ctx.inputs.tool_result,
-                        force_error=ctx.exception is not None,
+                        force_error=callback_failed,
                     ),
                 )
             elif ctx.exception is None:
@@ -886,13 +982,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 session,
                 tc,
                 ctx.inputs.tool_result,
-                force_error=ctx.exception is not None,
+                force_error=callback_failed,
             )
-        self._symphony_stream_handler.request_force_finish(
-            ctx,
-            tc,
-            ctx.inputs.tool_result,
-        )
+        if not callback_failed:
+            self._symphony_stream_handler.request_force_finish(
+                ctx,
+                tc,
+                ctx.inputs.tool_result,
+            )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -991,7 +1088,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 frozen_raw_output,
             )
         error_state = _resolved_tool_callback_error_state(
-            raw_output if raw_output is not None else result,
+            _tool_callback_outcome_value(result),
             force_error=force_error,
         )
         tool_result_payload["success"] = not error_state
@@ -1074,7 +1171,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     raw_output,
                 )
             error_state = _resolved_tool_callback_error_state(
-                raw_output if raw_output is not None else result,
+                _tool_callback_outcome_value(result),
                 force_error=force_error,
             )
             tool_result_payload["success"] = not error_state

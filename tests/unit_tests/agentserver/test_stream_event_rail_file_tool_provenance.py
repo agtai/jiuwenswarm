@@ -26,27 +26,37 @@ class _StreamSession:
         self.chunks.append(chunk)
 
 
+class _DetailedResult(dict):
+    def __init__(self, value: dict[str, object], detailed_output: object) -> None:
+        super().__init__(value)
+        self.detailed_output = detailed_output
+
+
 def _tool_context(
     session: _StreamSession,
     *,
     result: object,
     exception: BaseException | None = None,
+    tool_name: str = "write_file",
 ):
     tool_call = SimpleNamespace(
         id="call-write-1",
-        name="write_file",
+        name=tool_name,
         arguments={"path": "PRIVATE_PATH_SENTINEL"},
     )
+    force_finish_requests = []
     return SimpleNamespace(
         session=session,
         inputs=ToolCallInputs(
             tool_call=tool_call,
-            tool_name="write_file",
+            tool_name=tool_name,
             tool_args=dict(tool_call.arguments),
             tool_result=result,
         ),
         extra={},
         exception=exception,
+        request_force_finish=force_finish_requests.append,
+        force_finish_requests=force_finish_requests,
     )
 
 
@@ -101,6 +111,34 @@ async def test_normal_file_tool_callback_produces_content_free_success_pair() ->
     assert "PRIVATE_PATH_SENTINEL" not in repr(observations)
     assert private_result not in json.dumps(closed)
     assert "PRIVATE_PATH_SENTINEL" not in json.dumps(closed)
+
+
+@pytest.mark.parametrize(
+    "success_result",
+    [
+        pytest.param({"success": True}, id="boolean-success-true"),
+        pytest.param({"success": 1}, id="numeric-success-one"),
+        pytest.param({"success": "1"}, id="string-success-one"),
+        pytest.param({"is_error": False}, id="boolean-is-error-false"),
+        pytest.param({"is_error": 0}, id="numeric-is-error-zero"),
+        pytest.param({"isError": "0"}, id="string-is-error-zero"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_supported_structured_success_markers_keep_callback_success(
+    success_result: object,
+) -> None:
+    rail = JiuSwarmStreamEventRail()
+    session = _StreamSession()
+    ctx = _tool_context(session, result=success_result)
+
+    await rail.before_tool_call(ctx)
+    await rail.after_tool_call(ctx)
+
+    observations = _direct_observations(session.chunks)
+    counts = observation_counts([asdict(item) for item in observations])
+    assert observations[-1].result_status == "success"
+    assert counts["write_edit_pairs"] == 1
 
 
 @pytest.mark.asyncio
@@ -166,6 +204,154 @@ async def test_structured_failure_overrides_conflicting_success_signal() -> None
         observation_counts([asdict(item) for item in observations])["write_edit_pairs"]
         == 0
     )
+
+
+@pytest.mark.parametrize(
+    "failure_result",
+    [
+        pytest.param({"success": 0}, id="numeric-success-zero"),
+        pytest.param({"success": "0"}, id="string-success-zero"),
+        pytest.param({"is_error": 1}, id="numeric-is-error-one"),
+        pytest.param({"isError": "1"}, id="string-is-error-one"),
+        *[
+            pytest.param({"status": status}, id=f"status-{status}")
+            for status in (
+                "error",
+                "failed",
+                "failure",
+                "rejected",
+                "cancelled",
+                "canceled",
+                "interrupted",
+                "skipped",
+                "permission_denied",
+                "denied",
+                "aborted",
+                "timeout",
+            )
+        ],
+        pytest.param(
+            {"error": "PRIVATE_STRUCTURED_ERROR_SENTINEL"},
+            id="nonempty-error",
+        ),
+        pytest.param(
+            _DetailedResult(
+                {"status": "failed"},
+                detailed_output={"success": True},
+            ),
+            id="outer-failure-with-detailed-success",
+        ),
+        pytest.param(
+            {
+                "data": {
+                    "result": {
+                        "items": [
+                            {"success": True},
+                            {"status": "cancelled"},
+                        ]
+                    }
+                }
+            },
+            id="deep-failure-after-success",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_explicit_structured_failure_blocks_file_tool_success(
+    failure_result: object,
+) -> None:
+    rail = JiuSwarmStreamEventRail()
+    session = _StreamSession()
+    ctx = _tool_context(session, result=failure_result)
+
+    await rail.before_tool_call(ctx)
+    await rail.after_tool_call(ctx)
+
+    observations = _direct_observations(session.chunks)
+    counts = observation_counts([asdict(item) for item in observations])
+    assert observations[-1].result_status == "error"
+    assert counts["paired_file_tools"] == 1
+    assert counts["write_edit_pairs"] == 0
+    assert "PRIVATE_STRUCTURED_ERROR_SENTINEL" not in repr(observations)
+
+
+@pytest.mark.parametrize("malformed_kind", ["cycle", "too-deep", "too-many-nodes"])
+@pytest.mark.asyncio
+async def test_malformed_structured_outcomes_fail_closed_without_recursion(
+    malformed_kind: str,
+) -> None:
+    if malformed_kind == "cycle":
+        malformed_result: dict[str, object] = {}
+        malformed_result["wrapper"] = malformed_result
+    elif malformed_kind == "too-deep":
+        malformed_result = {"value": "ordinary callback output"}
+        for _ in range(128):
+            malformed_result = {"wrapper": malformed_result}
+    else:
+        malformed_result = {
+            "items": [{"value": index} for index in range(5000)],
+        }
+
+    rail = JiuSwarmStreamEventRail()
+    session = _StreamSession()
+    ctx = _tool_context(session, result=malformed_result)
+
+    await rail.before_tool_call(ctx)
+    await rail.after_tool_call(ctx)
+
+    observations = _direct_observations(session.chunks)
+    counts = observation_counts([asdict(item) for item in observations])
+    assert observations[-1].result_status == "error"
+    assert counts["paired_file_tools"] == 1
+    assert counts["write_edit_pairs"] == 0
+
+
+@pytest.mark.parametrize(
+    ("result", "exception"),
+    [
+        pytest.param(
+            {
+                "status": "permission_denied",
+                "direct_display": True,
+                "content": "PRIVATE_FAILED_DISPLAY_SENTINEL",
+            },
+            None,
+            id="structured-failure",
+        ),
+        pytest.param(
+            {
+                "success": True,
+                "direct_display": True,
+                "content": "PRIVATE_EXCEPTION_DISPLAY_SENTINEL",
+            },
+            RuntimeError("PRIVATE_CALLBACK_EXCEPTION_SENTINEL"),
+            id="callback-exception",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_symphony_callback_never_requests_force_finish(
+    result: object,
+    exception: BaseException | None,
+) -> None:
+    rail = JiuSwarmStreamEventRail()
+    session = _StreamSession()
+    ctx = _tool_context(
+        session,
+        result=result,
+        exception=exception,
+        tool_name="symphony_compose_graph",
+    )
+
+    await rail.before_tool_call(ctx)
+    await rail.after_tool_call(ctx)
+
+    observations = _direct_observations(session.chunks)
+    assert observations[-1].result_status == "error"
+    assert ctx.force_finish_requests == []
+    assert "PRIVATE_FAILED_DISPLAY_SENTINEL" not in repr(observations)
+    assert "PRIVATE_EXCEPTION_DISPLAY_SENTINEL" not in repr(observations)
+    assert "PRIVATE_CALLBACK_EXCEPTION_SENTINEL" not in repr(observations)
 
 
 def test_raw_result_text_without_callback_authority_remains_unknown() -> None:
