@@ -495,6 +495,11 @@ _TASK_EVENT_CONSUMPTION_FOREIGN_KEYS = frozenset(
     }
 )
 _StoredRecordT = TypeVar("_StoredRecordT")
+_TaskReadSnapshot = tuple[
+    PersistentTaskRecord,
+    PersistentAttemptRecord,
+    PersistentAdmissionRecord | None,
+]
 _OUTBOX_BINDING_SELECT = """
     SELECT o.*, a.attempt_id AS canonical_attempt_id,
            a.task_id AS attempt_task_id,
@@ -707,11 +712,16 @@ def _utc_datetime(value: str) -> datetime:
 
 
 def _utc_plus_seconds(value: str, seconds: float) -> str:
-    return (
-        (_utc_datetime(value) + timedelta(seconds=seconds))
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
+    base = _utc_datetime(value)
+    try:
+        absolute = base + timedelta(seconds=seconds)
+    except (OverflowError, ValueError) as error:
+        raise FormalTaskViolation(
+            "INVALID_ADMISSION_POLICY",
+            "admission policy exceeds the representable UTC timestamp range",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from error
+    return absolute.isoformat().replace("+00:00", "Z")
 
 
 def _selection_from_attempt_row(
@@ -880,6 +890,30 @@ class SqliteTaskStore:
                 "formal Task Store read is unavailable",
                 ErrorCode.UNAVAILABLE,
             ) from exc
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _snapshot_reader(self) -> Iterator[sqlite3.Connection]:
+        """Hold one explicit SQLite read snapshot across related projections."""
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            yield connection
+            connection.rollback()
+        except sqlite3.Error as exc:
+            try:
+                connection.rollback()
+            finally:
+                raise FormalTaskViolation(
+                    "TASK_STORE_UNAVAILABLE",
+                    "formal Task Store snapshot read is unavailable",
+                    ErrorCode.UNAVAILABLE,
+                ) from exc
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -2167,7 +2201,37 @@ class SqliteTaskStore:
                    ORDER BY seq""",
                 (row["attempt_id"],),
             ).fetchall()
+            binding_rows = connection.execute(
+                """
+                SELECT c.fingerprint,
+                       c.created_at AS command_created_at,
+                       c.result_json AS command_result_json,
+                       o.command_id AS dispatch_command_id,
+                       o.created_at AS dispatch_created_at,
+                       o.state AS dispatch_state,
+                       o.delivery_count, o.claimed_by, o.claimed_at,
+                       o.claim_token, o.last_error
+                FROM outbox AS o
+                JOIN commands AS c
+                  ON c.command_id=o.command_id
+                 AND c.scope_key=(
+                     SELECT scope_key FROM tasks WHERE task_id=o.task_id
+                 )
+                WHERE o.attempt_id=? AND o.kind=?
+                """,
+                (row["attempt_id"], OutboxKind.ATTEMPT_DISPATCH.value),
+            ).fetchall()
+            if len(binding_rows) != 1:
+                raise cls._corrupt(
+                    "formal Task Attempt lacks one immutable dispatch authority"
+                )
+            dispatch_binding = binding_rows[0]
+            fingerprint = _json_load(dispatch_binding["fingerprint"])
             if all(value is None for value in values):
+                if type(fingerprint) is dict and "executor_selection" in fingerprint:
+                    raise cls._corrupt(
+                        "selected formal Task Attempt cannot become legacy"
+                    )
                 if reprioritize_rows:
                     raise cls._corrupt(
                         "legacy formal Task Attempt has reprioritize authority"
@@ -2209,24 +2273,6 @@ class SqliteTaskStore:
                     enqueued_at=row["admission_enqueued_at"],
                     queued=False,
                 )
-                binding_rows = connection.execute(
-                    """
-                    SELECT c.fingerprint, o.state AS dispatch_state,
-                           o.delivery_count, o.claimed_by, o.claimed_at,
-                           o.claim_token, o.last_error
-                    FROM outbox AS o
-                    JOIN commands AS c
-                      ON c.command_id=o.command_id
-                     AND c.scope_key=(
-                         SELECT scope_key FROM tasks WHERE task_id=o.task_id
-                     )
-                    WHERE o.attempt_id=? AND o.kind=?
-                    """,
-                    (row["attempt_id"], OutboxKind.ATTEMPT_DISPATCH.value),
-                ).fetchall()
-                if len(binding_rows) != 1:
-                    raise ValueError("selected Attempt lacks one dispatch fingerprint")
-                dispatch_binding = binding_rows[0]
                 if row["state"] == FormalAttemptState.ACCEPTED.value and (
                     dispatch_binding["dispatch_state"]
                     == OutboxState.PENDING.value
@@ -2250,7 +2296,37 @@ class SqliteTaskStore:
                     raise ValueError(
                         "selected pending dispatch lacks closed pre-effect history"
                     )
-                fingerprint = _json_load(dispatch_binding["fingerprint"])
+                boundary_rows = connection.execute(
+                    """
+                    SELECT occurred_at FROM task_events
+                    WHERE task_id=? AND attempt_id=? AND causation_id=?
+                      AND event_type IN ('task.accepted', 'task.retry_accepted')
+                    """,
+                    (
+                        row["task_id"],
+                        row["attempt_id"],
+                        dispatch_binding["dispatch_command_id"],
+                    ),
+                ).fetchall()
+                command_result = _json_load(
+                    dispatch_binding["command_result_json"]
+                )
+                if (
+                    len(boundary_rows) != 1
+                    or type(command_result) is not dict
+                    or any(
+                        timestamp != row["admission_enqueued_at"]
+                        for timestamp in (
+                            dispatch_binding["dispatch_created_at"],
+                            dispatch_binding["command_created_at"],
+                            command_result.get("observed_at"),
+                            boundary_rows[0]["occurred_at"],
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "selected Attempt enqueue time changed from creation authority"
+                    )
                 if type(fingerprint) is not dict or "executor_selection" not in fingerprint:
                     raise ValueError("selected Attempt fingerprint changed")
                 initial_selection = _selection_from_fingerprint_payload(
@@ -8008,14 +8084,13 @@ class SqliteTaskStore:
                 )
             exponent = next_count - 1
             saturation_exponent = math.ceil(
-                math.log2(
-                    policy.max_backoff_seconds / policy.initial_backoff_seconds
-                )
+                math.log2(policy.max_backoff_seconds)
+                - math.log2(policy.initial_backoff_seconds)
             )
             delay = (
                 policy.max_backoff_seconds
                 if exponent >= saturation_exponent
-                else policy.initial_backoff_seconds * (2**exponent)
+                else math.ldexp(policy.initial_backoff_seconds, exponent)
             )
             next_eligible_at = _utc_plus_seconds(observed_at, delay)
             changed = connection.execute(
@@ -9507,6 +9582,13 @@ class SqliteTaskStore:
                     connection, attempt, TaskMutationDisposition.NOOP
                 )
             if (
+                task["reconciliation_state"]
+                == ReconciliationState.REQUIRED.value
+            ):
+                return self._mutation_result(
+                    connection, attempt, TaskMutationDisposition.NOOP
+                )
+            if (
                 task["reconciliation_state"] == ReconciliationState.RESOLVED.value
                 and task["reconciliation_reason"] == reason
             ):
@@ -9632,6 +9714,85 @@ class SqliteTaskStore:
                 self._require_task_row(connection, task_id, scope)
             )
 
+    def _task_read_snapshot_from_rows(
+        self, task: sqlite3.Row, attempt: sqlite3.Row
+    ) -> _TaskReadSnapshot:
+        selection = _stored_record(
+            "executor selection", lambda: _selection_from_attempt_row(attempt)
+        )
+        admission: PersistentAdmissionRecord | None = None
+        if selection is not None:
+            reconciliation_required = (
+                task["reconciliation_state"] == ReconciliationState.REQUIRED.value
+            )
+            admission = _stored_record(
+                "admission",
+                lambda: PersistentAdmissionRecord(
+                    task_id=task["task_id"],
+                    attempt_id=attempt["attempt_id"],
+                    priority=AdmissionPriority(attempt["admission_priority"]),
+                    reason=attempt["admission_reason"],
+                    attempt_count=int(attempt["admission_attempt_count"]),
+                    next_eligible_at=attempt["admission_next_eligible_at"],
+                    deadline_at=attempt["admission_deadline_at"],
+                    enqueued_at=attempt["admission_enqueued_at"],
+                    queued=bool(attempt["is_queued"]),
+                    reconciliation_required=reconciliation_required,
+                    reconciliation_reason=(
+                        task["reconciliation_reason"]
+                        if reconciliation_required
+                        else None
+                    ),
+                    manual_action=(
+                        "verify_external_ownership_and_settle"
+                        if reconciliation_required
+                        else None
+                    ),
+                ),
+            )
+        return (
+            self._task_from_row(task),
+            self._attempt_from_row(attempt),
+            admission,
+        )
+
+    def _task_read_attempt_row(
+        self, connection: sqlite3.Connection, task: sqlite3.Row
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            """
+            SELECT a.*,
+                   EXISTS(
+                       SELECT 1 FROM outbox AS o
+                       WHERE o.task_id=a.task_id
+                         AND o.attempt_id=a.attempt_id
+                         AND o.kind=? AND o.state=?
+                   ) AS is_queued
+            FROM attempts AS a
+            WHERE a.attempt_id=? AND a.task_id=?
+            """,
+            (
+                OutboxKind.ATTEMPT_DISPATCH.value,
+                OutboxState.PENDING.value,
+                task["attempt_id"],
+                task["task_id"],
+            ),
+        ).fetchone()
+        if row is None:
+            raise self._corrupt("Task read snapshot lost its current Attempt")
+        return row
+
+    def task_read_snapshot(
+        self, task_id: str, scope: ScopeRef
+    ) -> _TaskReadSnapshot:
+        """Read Task, current Attempt, and admission from one SQLite snapshot."""
+
+        with self._snapshot_reader() as connection:
+            task = self._require_task_row(connection, task_id, scope)
+            self._hit("task_read_snapshot.after_task")
+            attempt = self._task_read_attempt_row(connection, task)
+            return self._task_read_snapshot_from_rows(task, attempt)
+
     def list_tasks(self, scope: ScopeRef) -> tuple[PersistentTaskRecord, ...]:
         with self._reader() as connection:
             rows = connection.execute(
@@ -9702,6 +9863,76 @@ class SqliteTaskStore:
             next_cursor = tasks[-1].task_id if has_more and tasks else None
             return tasks, next_cursor, has_more
 
+    def list_task_read_snapshots_page(
+        self,
+        scope: ScopeRef,
+        *,
+        cursor: str | None = None,
+        limit: int = _DEFAULT_TASK_PAGE_LIMIT,
+    ) -> tuple[tuple[_TaskReadSnapshot, ...], str | None, bool]:
+        """Read one Task page and every current Attempt from one snapshot."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_TASK_PAGE_LIMIT:
+            raise FormalTaskViolation(
+                "INVALID_TASK_PAGE_LIMIT",
+                f"task.list limit must be between 1 and {_MAX_TASK_PAGE_LIMIT}",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if cursor is not None and (
+            type(cursor) is not str
+            or not cursor.strip()
+            or "\x00" in cursor
+            or len(cursor) > 256
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_LIST_CURSOR",
+                "task.list cursor must be one bounded Task identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        scope_key = _scope_key(scope)
+        with self._snapshot_reader() as connection:
+            if cursor is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE scope_key=?
+                    ORDER BY created_at, task_id
+                    LIMIT ?
+                    """,
+                    (scope_key, limit + 1),
+                ).fetchall()
+            else:
+                anchor = self._require_task_row(connection, cursor, scope)
+                rows = connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE scope_key=?
+                      AND (created_at>? OR (created_at=? AND task_id>?))
+                    ORDER BY created_at, task_id
+                    LIMIT ?
+                    """,
+                    (
+                        scope_key,
+                        anchor["created_at"],
+                        anchor["created_at"],
+                        anchor["task_id"],
+                        limit + 1,
+                    ),
+                ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            self._hit("list_task_read_snapshots_page.after_tasks")
+            snapshots = tuple(
+                self._task_read_snapshot_from_rows(
+                    task, self._task_read_attempt_row(connection, task)
+                )
+                for task in page_rows
+            )
+            next_cursor = (
+                snapshots[-1][0].task_id if has_more and snapshots else None
+            )
+            return snapshots, next_cursor, has_more
+
     def get_attempt(self, attempt_id: str) -> PersistentAttemptRecord:
         with self._reader() as connection:
             row = connection.execute(
@@ -9720,62 +9951,11 @@ class SqliteTaskStore:
     ) -> PersistentAdmissionRecord | None:
         """Return persisted queue facts without changing canonical lifecycle."""
 
-        with self._reader() as connection:
+        with self._snapshot_reader() as connection:
             task = self._require_task_row(connection, task_id, scope)
-            row = connection.execute(
-                """
-                SELECT a.*,
-                       EXISTS(
-                           SELECT 1 FROM outbox AS o
-                           WHERE o.task_id=a.task_id
-                             AND o.attempt_id=a.attempt_id
-                             AND o.kind=? AND o.state=?
-                       ) AS is_queued
-                FROM attempts AS a
-                WHERE a.attempt_id=? AND a.task_id=?
-                """,
-                (
-                    OutboxKind.ATTEMPT_DISPATCH.value,
-                    OutboxState.PENDING.value,
-                    task["attempt_id"],
-                    task_id,
-                ),
-            ).fetchone()
-            if row is None:
-                raise self._corrupt("Task admission projection lost its current Attempt")
-            selection = _stored_record(
-                "executor selection", lambda: _selection_from_attempt_row(row)
-            )
-            if selection is None:
-                return None
-            reconciliation_required = (
-                task["reconciliation_state"] == ReconciliationState.REQUIRED.value
-            )
-            return _stored_record(
-                "admission",
-                lambda: PersistentAdmissionRecord(
-                    task_id=task_id,
-                    attempt_id=row["attempt_id"],
-                    priority=AdmissionPriority(row["admission_priority"]),
-                    reason=row["admission_reason"],
-                    attempt_count=int(row["admission_attempt_count"]),
-                    next_eligible_at=row["admission_next_eligible_at"],
-                    deadline_at=row["admission_deadline_at"],
-                    enqueued_at=row["admission_enqueued_at"],
-                    queued=bool(row["is_queued"]),
-                    reconciliation_required=reconciliation_required,
-                    reconciliation_reason=(
-                        task["reconciliation_reason"]
-                        if reconciliation_required
-                        else None
-                    ),
-                    manual_action=(
-                        "verify_external_ownership_and_settle"
-                        if reconciliation_required
-                        else None
-                    ),
-                ),
-            )
+            return self._task_read_snapshot_from_rows(
+                task, self._task_read_attempt_row(connection, task)
+            )[2]
 
     def events(
         self,

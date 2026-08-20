@@ -14,7 +14,7 @@ import math
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
@@ -207,6 +207,20 @@ class AdmissionPolicy:
                 raise FormalTaskViolation(
                     "INVALID_ADMISSION_POLICY",
                     f"admission policy {field_name} must be positive",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                duration = timedelta(seconds=value)
+            except (OverflowError, ValueError) as error:
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    f"admission policy {field_name} is not representable",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from error
+            if duration <= timedelta(0):
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    f"admission policy {field_name} is below timestamp precision",
                     ErrorCode.INVALID_ARGUMENT,
                 )
         if self.max_backoff_seconds < self.initial_backoff_seconds:

@@ -31,6 +31,7 @@ from .formal_task_models import (
     FormalTaskViolation,
     OutboxKind,
     PersistedExecutorSelection,
+    PersistentAdmissionRecord,
     PersistentAttemptRecord,
     PersistentOutboxItem,
     PersistentTaskEvent,
@@ -695,10 +696,11 @@ class PersistentTaskCore:
                 ErrorCode.UNAVAILABLE,
             )
 
+    @staticmethod
     def _task_read_projection(
-        self, task: PersistentTaskRecord
+        task: PersistentTaskRecord,
+        admission: PersistentAdmissionRecord | None,
     ) -> tuple[dict[str, object], dict[str, object] | None]:
-        admission = self.store.admission_projection(task.task_id, task.scope)
         admission_payload = None if admission is None else admission.to_dict()
         task_payload = task.to_dict()
         task_payload["queued"] = bool(admission is not None and admission.queued)
@@ -761,13 +763,16 @@ class PersistentTaskCore:
                     )
                 cursor = payload.get("cursor")
                 limit = payload.get("limit", 50)
-                tasks, next_cursor, has_more = self.store.list_tasks_page(
-                    query.scope,
-                    cursor=cursor,
-                    limit=limit,
+                snapshots, next_cursor, has_more = (
+                    self.store.list_task_read_snapshots_page(
+                        query.scope,
+                        cursor=cursor,
+                        limit=limit,
+                    )
                 )
                 projected_tasks = [
-                    self._task_read_projection(task)[0] for task in tasks
+                    self._task_read_projection(task, admission)[0]
+                    for task, _attempt, admission in snapshots
                 ]
                 result: Mapping[str, object] = {
                     "tasks": projected_tasks,
@@ -782,11 +787,15 @@ class PersistentTaskCore:
                     frozenset(),
                     field_name=f"{query.query_type} payload",
                 )
-                task = self.store.get_task(query.target_ref.id, query.scope)
-                task_payload, admission_payload = self._task_read_projection(task)
+                task, attempt, admission = self.store.task_read_snapshot(
+                    query.target_ref.id, query.scope
+                )
+                task_payload, admission_payload = self._task_read_projection(
+                    task, admission
+                )
                 result = {
                     "task": task_payload,
-                    "attempt": self.store.get_attempt(task.attempt_id).to_dict(),
+                    "attempt": attempt.to_dict(),
                     "admission": admission_payload,
                 }
             elif query.query_type == "task.events":
@@ -1027,6 +1036,20 @@ class PersistentTaskCore:
                     unavailable += 1
                     continue
                 if not resolution.observations:
+                    if attempt.selection is not None:
+                        receipt = self.store.mark_reconciliation_pending(
+                            task.task_id,
+                            attempt.attempt_id,
+                            "EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED",
+                        )
+                        if (
+                            receipt.disposition
+                            is TaskMutationDisposition.SUPERSEDED
+                        ):
+                            superseded += 1
+                            continue
+                        unavailable += 1
+                        continue
                     receipt = self.store.mark_reconciliation_resolved(
                         task.task_id,
                         attempt.attempt_id,
@@ -1062,6 +1085,32 @@ class PersistentTaskCore:
                     task.task_id,
                     attempt.attempt_id,
                     "EXECUTOR_STATUS_BINDING_MISMATCH",
+                )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
+                unavailable += 1
+                continue
+            expected_selection_binding = (
+                (None, None)
+                if attempt.selection is None
+                else (
+                    attempt.selection.adapter_id,
+                    attempt.selection.capability_profile_digest,
+                )
+            )
+            if any(
+                (
+                    observation.adapter_id,
+                    observation.capability_profile_digest,
+                )
+                != expected_selection_binding
+                for observation in observations
+            ):
+                receipt = self.store.mark_reconciliation_pending(
+                    task.task_id,
+                    attempt.attempt_id,
+                    "EXECUTOR_STATUS_SELECTION_MISMATCH",
                 )
                 if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
                     superseded += 1

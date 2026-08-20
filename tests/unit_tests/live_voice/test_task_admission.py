@@ -20,11 +20,16 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     AdmissionDisposition,
     AdmissionPolicy,
     AdmissionPriority,
+    ExecutorDeliveryResult,
+    ExecutorObservation,
+    ExecutorResolution,
     FormalAttemptState,
     FormalTaskState,
     FormalTaskViolation,
     OutboxState,
     PersistedExecutorSelection,
+    ReconciliationState,
+    TaskMutationDisposition,
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
@@ -76,6 +81,53 @@ def test_admission_policy_rejects_non_finite_or_boolean_bounds(
         AdmissionPolicy(**policy_kwargs)
 
     assert invalid.value.reason == "INVALID_ADMISSION_POLICY"
+
+
+@pytest.mark.parametrize(
+    "policy_kwargs",
+    [
+        {"deadline_seconds": 1e308},
+        {"initial_backoff_seconds": 1e-308},
+        {"max_backoff_seconds": 1e308},
+        {
+            "initial_backoff_seconds": 1e-308,
+            "max_backoff_seconds": 1e308,
+        },
+    ],
+)
+def test_admission_policy_rejects_finite_unrepresentable_durations(
+    policy_kwargs: dict[str, object],
+) -> None:
+    """Catches finite policy values leaking timedelta or ratio overflow."""
+
+    with pytest.raises(FormalTaskViolation) as invalid:
+        AdmissionPolicy(**policy_kwargs)
+
+    assert invalid.value.reason == "INVALID_ADMISSION_POLICY"
+
+
+def test_admission_deadline_overflow_is_normalized_with_zero_store_effect(
+    tmp_path: Path,
+) -> None:
+    """Catches representable duration overflowing its absolute UTC deadline."""
+
+    store = SqliteTaskStore(tmp_path / "deadline-overflow.sqlite")
+    invocation = _create(tmp_path, identity_suffix="-deadline-overflow")
+    policy = AdmissionPolicy(deadline_seconds=1e12)
+    before = store.counts()
+
+    result = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        selection=_selection(),
+        admission_policy=policy,
+    )
+
+    assert not result.ok and result.error is not None
+    assert result.error.reason == "INVALID_ADMISSION_POLICY"
+    assert store.counts() == before
 
 
 def test_falsy_nonpolicy_carriers_are_not_silently_defaulted(tmp_path: Path) -> None:
@@ -512,6 +564,194 @@ def test_v5_partial_selection_group_fails_closed_on_reopen(tmp_path: Path) -> No
             "UPDATE attempts SET adapter_id='direct-v1' WHERE attempt_id=?",
             (str(created.result["attempt_id"]),),
         )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+
+
+def _selected_authority_attempt(
+    tmp_path: Path, lineage: str
+) -> tuple[Path, str]:
+    """Create one selected Attempt through the named immutable command lineage."""
+
+    if lineage in {"create", "terminal"}:
+        database = tmp_path / f"selected-authority-{lineage}.sqlite"
+        store = SqliteTaskStore(database)
+        _task_id, attempt_id = _selected_create(
+            store,
+            tmp_path,
+            suffix=f"-selected-authority-{lineage}",
+        )
+        if lineage == "terminal":
+            item = store.claim_outbox(
+                "selected-authority-terminal", observed_at=NOW
+            )
+            assert item is not None and item.selection is not None
+            observations = tuple(
+                replace(
+                    observation,
+                    adapter_id=item.selection.adapter_id,
+                    capability_profile_digest=(
+                        item.selection.capability_profile_digest
+                    ),
+                )
+                for observation in _observations(
+                    item, outcome=TerminalOutcome.CANCELLED
+                )
+            )
+            store.complete_outbox(
+                item,
+                executor_ref=f"legacy:{item.attempt_id}",
+                observations=observations,
+            )
+        return database, attempt_id
+
+    store, _executor, core, predecessor_id, predecessor_attempt_id = (
+        _terminal_task(tmp_path)
+    )
+    database = store.database_path
+    selection = _selection()
+    if lineage == "retry":
+        command, grant = _retry(
+            predecessor_id,
+            predecessor_attempt_id,
+            TerminalOutcome.CANCELLED,
+            2,
+            command_id="command-selected-authority-retry",
+        )
+        result = core.execute(
+            command,
+            grant,
+            context=replace(
+                _context(tmp_path), revision_value="selected-authority-retry"
+            ),
+            now=NOW,
+            selection=selection,
+            admission_policy=AdmissionPolicy(),
+        )
+    else:
+        assert lineage == "successor"
+        predecessor = store.get_task(predecessor_id, _scope())
+        terminal_event = store.events(predecessor_id, _scope())[-1]
+        command, grant = _successor_command(
+            predecessor,
+            terminal_event,
+            result_sha256=None,
+            command_id="command-selected-authority-successor",
+        )
+        result = core.execute(
+            command,
+            grant,
+            context=replace(
+                _context(tmp_path), revision_value="selected-authority-successor"
+            ),
+            now=NOW,
+            selection=selection,
+            admission_policy=AdmissionPolicy(),
+        )
+    assert result.ok and result.result is not None
+    return database, str(result.result["attempt_id"])
+
+
+@pytest.mark.parametrize("lineage", ["create", "retry", "successor", "terminal"])
+def test_selected_attempt_cannot_downgrade_to_legacy_when_columns_are_cleared(
+    tmp_path: Path, lineage: str
+) -> None:
+    """Catches immutable selected command authority reopening as legacy."""
+
+    database, attempt_id = _selected_authority_attempt(tmp_path, lineage)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE attempts SET "
+            + ", ".join(f"{column}=NULL" for column in ADMISSION_COLUMNS)
+            + " WHERE attempt_id=?",
+            (attempt_id,),
+        )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+
+
+def test_selected_attempt_partial_clear_fails_closed_on_reopen(
+    tmp_path: Path,
+) -> None:
+    """Catches a selected row shedding one required admission authority fact."""
+
+    database, attempt_id = _selected_authority_attempt(tmp_path, "create")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE attempts SET admission_deadline_at=NULL WHERE attempt_id=?",
+            (attempt_id,),
+        )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+
+
+@pytest.mark.parametrize("lineage", ["create", "retry", "successor"])
+@pytest.mark.parametrize(
+    "forged_enqueued_at",
+    ["2026-08-05T11:59:59Z", "2026-08-05T12:00:01Z"],
+)
+def test_selected_enqueue_timestamp_is_bound_to_immutable_creation_authority(
+    tmp_path: Path, lineage: str, forged_enqueued_at: str
+) -> None:
+    """Catches FIFO authority drifting earlier or later than real creation."""
+
+    database, attempt_id = _selected_authority_attempt(tmp_path, lineage)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE attempts SET admission_enqueued_at=? WHERE attempt_id=?",
+            (forged_enqueued_at, attempt_id),
+        )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+
+
+@pytest.mark.parametrize("authority", ["dispatch", "boundary"])
+def test_selected_enqueue_rejects_changed_creation_timestamp_authority(
+    tmp_path: Path, authority: str
+) -> None:
+    """Catches admission FIFO trusting a dispatch or event timestamp rewrite."""
+
+    database, attempt_id = _selected_authority_attempt(tmp_path, "create")
+    with sqlite3.connect(database) as connection:
+        if authority == "dispatch":
+            connection.execute(
+                "UPDATE outbox SET created_at=? WHERE attempt_id=? AND kind=?",
+                (
+                    "2026-08-05T12:00:01Z",
+                    attempt_id,
+                    "attempt.dispatch",
+                ),
+            )
+        else:
+            connection.execute(
+                """UPDATE task_events SET occurred_at=?
+                   WHERE attempt_id=? AND event_type='task.accepted'""",
+                ("2026-08-05T12:00:01Z", attempt_id),
+            )
         connection.commit()
     before = _database_dump(database)
 
@@ -1528,6 +1768,211 @@ async def test_reconcile_preserves_manual_admission_reconciliation_required(
     assert reopened_admission.reconciliation_required is True
 
 
+def _selected_running_required_attempt(
+    tmp_path: Path, *, suffix: str
+) -> tuple[Path, str, str, PersistedExecutorSelection]:
+    database = tmp_path / f"selected-required{suffix}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id, attempt_id = _selected_create(
+        store, tmp_path, suffix=f"-selected-required{suffix}"
+    )
+    item = store.claim_outbox(f"selected-required{suffix}", observed_at=NOW)
+    assert item is not None and item.selection is not None
+    _complete_selected(store, item)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """UPDATE tasks SET reconciliation_state=?, reconciliation_reason=?
+               WHERE task_id=?""",
+            (
+                ReconciliationState.REQUIRED.value,
+                "EXECUTOR_ADMISSION_OWNERSHIP_UNKNOWN_MANUAL_ACTION_REQUIRED",
+                task_id,
+            ),
+        )
+        connection.commit()
+    return database, task_id, attempt_id, item.selection
+
+
+@pytest.mark.asyncio
+async def test_selected_required_reconcile_rejects_empty_status_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """Catches executor-ref equality resolving selected work without selection proof."""
+
+    database, task_id, _attempt_id, _selection_epoch = (
+        _selected_running_required_attempt(tmp_path, suffix="-empty")
+    )
+
+    class EmptyStatusExecutor(_Executor):
+        async def status(self, _task, attempt):  # type: ignore[no-untyped-def]
+            return ExecutorDeliveryResult(attempt.executor_ref, ())
+
+    store = SqliteTaskStore(database)
+    executor = EmptyStatusExecutor()
+    core = PersistentTaskCore(store, executor)
+    before = _database_dump(database)
+
+    summary = await core.reconcile()
+
+    task = store.get_task(task_id, _scope())
+    assert summary["known"] == 0
+    assert summary["unavailable"] == 1
+    assert task.reconciliation_state is ReconciliationState.REQUIRED
+    assert (
+        task.reconciliation_reason
+        == "EXECUTOR_ADMISSION_OWNERSHIP_UNKNOWN_MANUAL_ACTION_REQUIRED"
+    )
+    assert _database_dump(database) == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+    reopened = SqliteTaskStore(database).get_task(task_id, _scope())
+    assert reopened.reconciliation_state is ReconciliationState.REQUIRED
+
+
+def test_mark_reconciliation_resolved_cannot_downgrade_manual_required(
+    tmp_path: Path,
+) -> None:
+    """Catches a generic automatic settlement clearing manual ownership fencing."""
+
+    database, task_id, attempt_id, _selection_epoch = (
+        _selected_running_required_attempt(tmp_path, suffix="-direct-resolved")
+    )
+    store = SqliteTaskStore(database)
+    before = _database_dump(database)
+
+    result = store.mark_reconciliation_resolved(
+        task_id, attempt_id, "EXECUTOR_STATE_UNCHANGED"
+    )
+
+    assert result.disposition is TaskMutationDisposition.NOOP
+    assert (
+        store.get_task(task_id, _scope()).reconciliation_state
+        is ReconciliationState.REQUIRED
+    )
+    assert _database_dump(database) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["missing", "wrong"])
+async def test_selected_required_reconcile_rejects_unbound_status_observation(
+    tmp_path: Path, binding: str
+) -> None:
+    """Catches selected status evidence with absent or changed profile authority."""
+
+    database, task_id, attempt_id, selection = (
+        _selected_running_required_attempt(tmp_path, suffix=f"-{binding}")
+    )
+
+    class UnboundStatusExecutor(_Executor):
+        async def status(self, task, attempt):  # type: ignore[no-untyped-def]
+            adapter_id = None if binding == "missing" else selection.adapter_id
+            digest = None if binding == "missing" else "0" * 64
+            return ExecutorObservation(
+                resolution=ExecutorResolution.LOST,
+                executor_id=self.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task.task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=None,
+                source_seq=None,
+                attempt_state=None,
+                attempt_outcome=None,
+                occurred_at=NOW,
+                raw_status="lost",
+                error="EXECUTOR_ATTEMPT_LOST",
+                adapter_id=adapter_id,
+                capability_profile_digest=digest,
+            )
+
+    store = SqliteTaskStore(database)
+    executor = UnboundStatusExecutor()
+    before = _database_dump(database)
+
+    summary = await PersistentTaskCore(store, executor).reconcile()
+
+    assert summary["known"] == 0
+    assert summary["unavailable"] == 1
+    task = store.get_task(task_id, _scope())
+    assert task.attempt_id == attempt_id
+    assert task.reconciliation_state is ReconciliationState.REQUIRED
+    assert _database_dump(database) == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
+@pytest.mark.asyncio
+async def test_selected_required_reconcile_accepts_exact_selection_observation(
+    tmp_path: Path,
+) -> None:
+    """Preserves automatic settlement when status carries exact selected authority."""
+
+    database, task_id, _attempt_id, selection = (
+        _selected_running_required_attempt(tmp_path, suffix="-exact")
+    )
+
+    class ExactStatusExecutor(_Executor):
+        async def status(self, task, attempt):  # type: ignore[no-untyped-def]
+            return ExecutorObservation(
+                resolution=ExecutorResolution.LOST,
+                executor_id=self.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task.task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=None,
+                source_seq=None,
+                attempt_state=None,
+                attempt_outcome=None,
+                occurred_at=NOW,
+                raw_status="lost",
+                error="EXECUTOR_ATTEMPT_LOST",
+                adapter_id=selection.adapter_id,
+                capability_profile_digest=selection.capability_profile_digest,
+            )
+
+    store = SqliteTaskStore(database)
+    summary = await PersistentTaskCore(store, ExactStatusExecutor()).reconcile()
+
+    task = store.get_task(task_id, _scope())
+    assert summary["lost"] == 1
+    assert task.state is FormalTaskState.TERMINAL
+    assert task.outcome is TerminalOutcome.INTERRUPTED
+    assert task.reconciliation_state is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_reconcile_empty_status_remains_compatible(
+    tmp_path: Path,
+) -> None:
+    """Catches selected proof requirements disabling legacy empty status audit."""
+
+    database = tmp_path / "legacy-empty-status.sqlite"
+    store = SqliteTaskStore(database)
+    invocation = _create(tmp_path, identity_suffix="-legacy-empty-status")
+    created = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    item = store.claim_outbox("legacy-empty-status", observed_at=NOW)
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+
+    summary = await PersistentTaskCore(store, _Executor()).reconcile()
+
+    task = store.get_task(str(created.result["task_id"]), _scope())
+    assert summary["known"] == 1
+    assert task.reconciliation_state is ReconciliationState.RESOLVED
+    assert task.reconciliation_reason == "EXECUTOR_STATE_UNCHANGED"
+
+
 def test_status_and_list_project_queued_without_new_canonical_state(
     tmp_path: Path,
 ) -> None:
@@ -1558,6 +2003,174 @@ def test_status_and_list_project_queued_without_new_canonical_state(
     assert listed.result["tasks"][0]["queued"] is True
     assert listed.result["tasks"][0]["admission"]["priority"] == "normal"
     assert _database_dump(store.database_path) == before
+
+
+def test_status_projection_uses_one_snapshot_during_legal_retry(
+    tmp_path: Path,
+) -> None:
+    """Catches terminal Attempt A being combined with queued retry Attempt B."""
+
+    seed_store, _seed_executor, _seed_core, task_id, attempt_a = _terminal_task(
+        tmp_path
+    )
+    database = seed_store.database_path
+    retry, grant = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.CANCELLED,
+        2,
+        command_id="command-status-snapshot-retry",
+    )
+    external_store = SqliteTaskStore(database)
+    external_core = PersistentTaskCore(external_store, _Executor())
+    race_attempt: list[str] = []
+    post_race_dump: list[tuple[str, ...]] = []
+
+    def failpoint(name: str) -> None:
+        if name != "task_read_snapshot.after_task" or race_attempt:
+            return
+        retried = external_core.execute(
+            retry,
+            grant,
+            context=replace(
+                _context(tmp_path), revision_value="status-snapshot-retry"
+            ),
+            now=NOW,
+            selection=_selection(),
+            admission_policy=AdmissionPolicy(),
+        )
+        assert retried.ok and retried.result is not None
+        race_attempt.append(str(retried.result["attempt_id"]))
+        post_race_dump.append(_database_dump(database))
+
+    executor = _Executor()
+    core = PersistentTaskCore(
+        SqliteTaskStore(database, failpoint=failpoint), executor
+    )
+    query = _status(task_id)
+
+    status = core.query(query.envelope, query.authorization, now=NOW)
+
+    assert race_attempt and race_attempt[0] != attempt_a
+    assert status.ok and status.result is not None
+    assert status.result["task"]["attempt_id"] == attempt_a
+    assert status.result["task"]["state"] == "terminal"
+    assert status.result["task"]["queued"] is False
+    assert status.result["attempt"]["attempt_id"] == attempt_a
+    assert status.result["admission"] is None
+    assert external_store.get_task(task_id, _scope()).attempt_id == race_attempt[0]
+    assert _database_dump(database) == post_race_dump[0]
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
+@pytest.mark.parametrize("mutation", ["retry", "successor", "settlement"])
+def test_list_projection_uses_one_snapshot_during_legal_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Catches a page Task being combined with post-page Attempt authority."""
+
+    if mutation == "settlement":
+        database = tmp_path / "list-snapshot-settlement.sqlite"
+        seed_store = SqliteTaskStore(database)
+        task_id, attempt_id = _selected_create(
+            seed_store, tmp_path, suffix="-list-snapshot-settlement"
+        )
+        expected_state = "accepted"
+        expected_queued = True
+    else:
+        seed_store, _executor, _core, task_id, attempt_id = _terminal_task(
+            tmp_path
+        )
+        database = seed_store.database_path
+        expected_state = "terminal"
+        expected_queued = False
+    external_store = SqliteTaskStore(database)
+    external_core = PersistentTaskCore(external_store, _Executor())
+    predecessor = external_store.get_task(task_id, _scope())
+    terminal_event = external_store.events(task_id, _scope())[-1]
+    race_ids: list[str] = []
+    post_race_dump: list[tuple[str, ...]] = []
+
+    def failpoint(name: str) -> None:
+        if name != "list_task_read_snapshots_page.after_tasks" or race_ids:
+            return
+        if mutation == "retry":
+            command, grant = _retry(
+                task_id,
+                attempt_id,
+                TerminalOutcome.CANCELLED,
+                2,
+                command_id="command-list-snapshot-retry",
+            )
+            changed = external_core.execute(
+                command,
+                grant,
+                context=replace(
+                    _context(tmp_path), revision_value="list-snapshot-retry"
+                ),
+                now=NOW,
+                selection=_selection(),
+                admission_policy=AdmissionPolicy(),
+            )
+            assert changed.ok and changed.result is not None
+            race_ids.append(str(changed.result["attempt_id"]))
+        elif mutation == "successor":
+            command, grant = _successor_command(
+                predecessor,
+                terminal_event,
+                result_sha256=None,
+                command_id="command-list-snapshot-successor",
+            )
+            changed = external_core.execute(
+                command,
+                grant,
+                context=replace(
+                    _context(tmp_path), revision_value="list-snapshot-successor"
+                ),
+                now=NOW,
+                selection=_selection(),
+                admission_policy=AdmissionPolicy(),
+            )
+            assert changed.ok and changed.result is not None
+            race_ids.append(str(changed.result["task_id"]))
+        else:
+            item = external_store.claim_outbox(
+                "list-snapshot-settlement", observed_at=NOW
+            )
+            assert item is not None and item.attempt_id == attempt_id
+            _complete_selected(external_store, item)
+            race_ids.append(item.attempt_id)
+        post_race_dump.append(_database_dump(database))
+
+    executor = _Executor()
+    core = PersistentTaskCore(
+        SqliteTaskStore(database, failpoint=failpoint), executor
+    )
+    query = _list_tasks(limit=10)
+
+    listed = core.query(query.envelope, query.authorization, now=NOW)
+
+    assert race_ids
+    assert listed.ok and listed.result is not None
+    assert listed.result["has_more"] is False
+    assert len(listed.result["tasks"]) == 1
+    task = listed.result["tasks"][0]
+    assert task["task_id"] == task_id
+    assert task["attempt_id"] == attempt_id
+    assert task["state"] == expected_state
+    assert task["queued"] is expected_queued
+    if mutation == "settlement":
+        assert task["admission"]["attempt_id"] == attempt_id
+        assert task["admission"]["queued"] is True
+        assert external_store.get_task(task_id, _scope()).state is FormalTaskState.RUNNING
+    else:
+        assert task["admission"] is None
+    assert _database_dump(database) == post_race_dump[0]
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
 
 
 def test_reconciliation_projection_exposes_bounded_manual_action(tmp_path: Path) -> None:
