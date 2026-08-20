@@ -6510,12 +6510,14 @@ test('enabled mounted panel remount reconciles the exact predecessor and reopens
   }
 });
 
-test('mounted hands-free bar keeps status transcript and Exit while hiding every manual command in English and Chinese', async () => {
-  for (const [language, statusLabel, exitLabel] of [
-    ['en', 'Understanding and answering', 'Exit Live Voice'],
-    ['zh', '正在理解并回答', '退出 Live Voice'],
+test('mounted hands-free bar exposes bounded playout controls while hiding legacy commands in English and Chinese', async () => {
+  for (const [language, statusLabel, interruptLabel, stopLabel, exitLabel] of [
+    ['en', 'Reading the response', 'Interrupt and speak', 'Stop playback', 'Exit Live Voice'],
+    ['zh', '正在朗读回答', '打断并说话', '停止播放', '退出 Live Voice'],
   ]) {
     const i18n = await createI18n(language);
+    let interrupts = 0;
+    let stops = 0;
     let renderer;
     try {
       await act(async () => {
@@ -6526,7 +6528,7 @@ test('mounted hands-free bar keeps status transcript and Exit while hiding every
             React.createElement(MountedLiveVoiceDemoBar, {
               active: true,
               available: true,
-              status: 'thinking',
+              status: 'speaking',
               interimTranscript: '',
               committedTranscript: '第二天最早的固定安排是什么？',
               editableTranscript: 'must not become editable',
@@ -6546,16 +6548,50 @@ test('mounted hands-free bar keeps status transcript and Exit while hiding every
               onEnable() {},
               onExit() {},
               onPrimaryAction() {},
+              onInterruptAndSpeak() {
+                interrupts += 1;
+              },
+              onStopPlayback() {
+                stops += 1;
+              },
             }),
           ),
         );
       });
       assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-command-center' }).length, 0);
       assert.equal(renderer.root.findAllByType('textarea').length, 0);
-      assert.equal(renderer.root.findAllByProps({ className: 'live-voice-demo__primary' }).length, 0);
+      const interrupt = renderer.root.findByProps({ 'aria-label': interruptLabel });
+      const stop = renderer.root.findByProps({ 'aria-label': stopLabel });
+      await act(async () => interrupt.props.onClick());
+      await act(async () => stop.props.onClick());
+      assert.equal(interrupts, 1);
+      assert.equal(stops, 1);
       assert.equal(renderer.root.findByProps({ role: 'status' }).children.includes(statusLabel), true);
       assert.equal(renderer.root.findByProps({ className: 'live-voice-demo__transcript live-voice-demo__transcript--committed' }).children[0], '第二天最早的固定安排是什么？');
       assert.equal(renderer.root.findByProps({ 'aria-label': exitLabel }).props.type, 'button');
+      await act(async () => {
+        renderer.update(
+          React.createElement(
+            I18nextProvider,
+            { i18n },
+            React.createElement(MountedLiveVoiceDemoBar, {
+              active: true,
+              available: true,
+              status: 'thinking',
+              interimTranscript: '',
+              committedTranscript: '第二天最早的固定安排是什么？',
+              handsFree: true,
+              onEnable() {},
+              onExit() {},
+              onPrimaryAction() {},
+              onInterruptAndSpeak() {},
+              onStopPlayback() {},
+            }),
+          ),
+        );
+      });
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': interruptLabel }).length, 0);
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': stopLabel }).length, 0);
     } finally {
       if (renderer) await act(async () => renderer.unmount());
     }

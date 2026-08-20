@@ -1598,10 +1598,14 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /formalVoiceErrorReason/);
   assert.match(source, /productVoiceState\?\.text_status === 'failed'/);
   assert.match(formalProps, /handsFree:\s*true/);
+  assert.match(formalProps, /onInterruptAndSpeak:[\s\S]*?productVoiceControlRef\.current\?\.stop\(\)/);
+  assert.match(formalProps, /onStopPlayback:[\s\S]*?productVoiceControlRef\.current\?\.stop\(\)/);
   assert.doesNotMatch(formalProps, /commandCenter:|editableTranscript:|setCommandRoute|setTaskOperation|setTaskId|submitCommand/);
   assert.match(barSource, /data-testid="live-voice-command-center"/);
   assert.match(barSource, /data-testid="live-voice-command-task-confirmation"/);
   assert.match(barSource, /!handsFree/);
+  assert.match(barSource, /handsFree\s*&&\s*status === 'speaking'\s*&&\s*onInterruptAndSpeak/);
+  assert.match(barSource, /handsFree\s*&&\s*status === 'speaking'\s*&&\s*onStopPlayback/);
 });
 
 test('integrated route diagnostics remain vertically reachable in a bounded panel', async () => {
