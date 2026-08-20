@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 21/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 24/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -63,16 +63,18 @@ At the start of every new Session:
    `STATUS.md` `Current execution packet`, this checkpoint, §6 and §7. Read a
    closed wave record or the historical revalidation only for a disputed
    finding mechanism.
-3. Preserve the current **21/88 closed, 67 remaining** count. The closed set is
+3. Preserve the current **24/88 closed, 64 remaining** count. The closed set is
    A2, A3, A4, A8, A11, A12, A16, A18, A20, A21, A23, A25, B2, B6, B7, B9,
-   B10, B16, B41, C5 and L14. A8+B6 share SRR-06 and A2+B2 share SRR-10; each
-   pair still counts as two unique defects.
-4. No candidate is implemented or awaiting review. SRR-10/A2+B2 closed after an
-   independent Tier-3 review signed
-   `e97cee0bc17c8d2981d9e4f82d194a5148799a02` and Main applied its four
-   reviewed source/test commits onto this branch as `ea55258ff`, `8ecd38267`,
-   `90a5f17ad` and `b5e6dd6e7`. Its stale worker branch
-   `codex/lv-srr10-stream-terminal` was never merged and must not be.
+   B10, B16, B36, B41, C5, L14, L20 and L21. A8+B6 share SRR-06, A2+B2 share
+   SRR-10 and B36+L20+L21 share SRR-21; each shared packet still counts one
+   unique defect per finding.
+4. SRR-20/B12+B13+B14 is implemented and **REJECTED by independent review**.
+   Its isolated worktree is
+   `D:\XGG AI\openjiuwen\jiuwenswarm-srr20-gen-authority`, branch
+   `codex/lv-srr20-generation-authority`, candidate `f04f10027`. It carries
+   **0 closure credit**. Two blocking findings are returned to the packet
+   owner and recorded in §5.9; B12 passed in full. Do not integrate any part
+   of this candidate until a re-review passes the repaired module diff.
 5. Activate one or more disjoint owner-scoped packets from §6. Freeze each
    packet from the latest integration branch and record its capability/module,
    risk tier, dependencies, scope, exclusions and acceptance before editing.
@@ -590,7 +592,7 @@ packets.
   scheduler/Store/Task, persistence, schema, protocol or error-code change; do
   not alter the separate `幂等任务缺少服务端所有者范围` diagnostic.
 
-## 5.9 Wave 9 ownership record — ACTIVE
+## 5.9 Wave 9 ownership record — SRR-21 CLOSED, SRR-20 AWAITING REVIEW
 
 Wave 9 is frozen from integration baseline `c4301ef98`, the SRR-10 closure
 record. Its two writer surfaces are disjoint: one backend Python module and one
@@ -636,6 +638,60 @@ after that branch merges; B18 and D2 stay unactivated in §6.
   Gateway route or conformance source change, no other module owner, no
   physical Provider claim.
 
+- Review outcome — **REJECTED at `f04f10027`, 0 closure credit.** Independent
+  Tier-3 review confirmed the scope surface (exactly the two owned files, no
+  `critical_token_safety.py`, Gateway, conformance or other owner edit, no
+  protocol/schema change), reproduced B12 and B14 as genuine business RED on
+  baseline `455873109`, and confirmed Ruff parity, format, `py_compile`,
+  `git diff --check` and the adjacent-seam `pywintypes` failure as
+  byte-identical pre-existing. Two blocking findings are returned to the packet
+  owner:
+  - **BLOCKING-1 (HIGH, candidate-introduced).** The B14 release at
+    `product_composition_registry.py:2608-2618` also fires on the **successful**
+    default dispatch path. `_accepted_turn_commits_by_commit` is written only in
+    the `dispatch_target == "task"` branch at `:2537`, and `result_unknown` is
+    set only inside that same branch, so for `dispatch_target == "agent"` — the
+    default at `:3013` — all three conjuncts are true on success and
+    `release_commit` wipes the gate's per-commit evidence one turn early. The
+    two map operations are no-ops there, but the gate release is not: it shortens
+    the contracted "until the outer route is fenced" lifetime, leaves at-most-once
+    resting on `agent_conversation_runtime.py` alone, and changes
+    `GATE_CAPACITY_EXCEEDED` accounting, which this packet's exclusions forbid.
+    Minimum fix: add `dispatch_target == "task"` as the first conjunct, and pin
+    gate retention across a successful agent-target submit with a regression test.
+    The reviewer verified that narrowing restores baseline state exactly and keeps
+    all candidate tests green.
+  - **BLOCKING-2 (HIGH).** B13's acceptance — an old origin/token cannot act
+    after replacement — is unproven and false on the reachable surface. In a real
+    journey `_voice_task_origins` is already empty before replacement, so the added
+    `_drop_voice_task_origins_for_route_locked(key)` had no observable effect; the
+    actionable path is `_obtain_task_intent_commit` at `:3172-3184`, whose four
+    conditions all still hold after replacement because
+    `_accepted_voice_commit_routes` is keyed by session and interaction only, with
+    no activation id or generation. The candidate test hand-injects
+    `_VoiceTaskOrigin` entries and pokes a private lease field, never acts with the
+    superseded identity, and asserts nothing about the critical token. The recorded
+    rationale is also wrong: `_release_task_intent_commit_locked` returns early for
+    `source == "voice"` and never reaches the conditional release. The decision to
+    omit `release_interaction` is nevertheless correct on other grounds — it would
+    pop `_latest_input_generation` and re-open stale-input admission for the
+    successor. Repair the acceptance with a real-journey test that acts with the
+    superseded identity and asserts the critical-token outcome, or explicitly
+    re-scope that clause.
+  - **Evidence gaps to close with the repair:** restart coverage is required by
+    this record's acceptance and is absent; the concurrency test uses
+    `asyncio.gather` with near-tautological assertions instead of a deterministic
+    barrier; there is no oversized-generation boundary test for the new fence
+    despite the file's own precedent; and no test pins the successful-path gate
+    retention contract, which is exactly where BLOCKING-1 escaped. Two of the five
+    new tests fail on baseline only through `AttributeError` on new internal
+    fields, so they are not defect reproductions.
+  - **B12 passed in full**: the sketch is byte-identical in shape to the accepted
+    `_p2_response_generation_fence` precedent, collisions can only raise a cell and
+    therefore only fail closed, the exact layer wins over the sketch, unrecorded
+    keys read as absent rather than generation 0, and oversized generations fail
+    closed upstream before reaching the fence.
+
 ### SRR-21 — B36+L20+L21 formal task leaf and intent authority
 
 - Capability/owner: formal task control-leaf snapshot monotonicity, mutation
@@ -665,6 +721,22 @@ after that branch merges; B18 and D2 stay unactivated in §6.
   removal failure first blocks submit and then `recoverPending` cannot
   resurrect the cancelled token, with zero Gateway mutation. Restart/replay and
   concurrent-adoption coverage are required.
+- Cursor wording, made exact during review: the leaf retains the consumed event
+  cursor **while the snapshot still describes the event head that produced it**,
+  and otherwise clears it and requires a complete `task.events` replay.
+  Unconditional retention is not implementable: `#adoptEvents` requires
+  `existing.last_event_seq === after_seq` for an incremental fetch, so a
+  snapshot ahead of the cursor would make the record self-contradictory. The
+  defect being closed is the unconditional reset to null, not the safe clear.
+- Candidate state — **CLOSED, 3 unique defects credited:** independent Tier-3
+  review signed `f5c186934` and Main applied `9c855b11c` and `f5c186934` onto
+  the integration branch as `155c15b36` and `b0341f41b`, byte-identical to the
+  signed candidate. The worker branch `codex/lv-srr21-formal-task-authority`
+  was not merged.
+- Review note: the reviewer first saw a false green because the tests import
+  the tsc output under `node_modules/.cache/live-voice-integrated-web/`, not
+  the `.ts` sources. Any baseline comparison on this package **must recompile**
+  before running `node --test`, or it silently exercises the previous build.
 - Exclusions: no new product policy or classifier, no protocol/schema change,
   no backend source change, no touch of `productP1VoiceRoute.ts` or
   `LiveVoiceIntegratedRoutePanel.tsx` (owned by the parallel p1p2 branch), no
@@ -672,10 +744,10 @@ after that branch merges; B18 and D2 stay unactivated in §6.
 
 ## 6. Queued repair programs
 
-The 67 remaining unique defects consist of the six activated Wave 9
-candidates B12, B13, B14, B36, L20 and L21 plus the 61 unactivated defects
-below. These groups are not worker write authority. Each activation removes its
-IDs from this queue and freezes smaller owner-specific packets before editing.
+The 64 remaining unique defects consist of the three activated SRR-20
+candidates B12, B13 and B14 plus the 61 unactivated defects below. These groups
+are not worker write authority. Each activation removes its IDs from this queue
+and freezes smaller owner-specific packets before editing.
 
 - Generation/successor/authority cleanup (**7**): B18, B32, B37, B38, B39, D2
   and L19. B12, B13, B14, B36, L20 and L21 moved to the active Wave 9 packets.
@@ -691,10 +763,43 @@ IDs from this queue and freezes smaller owner-specific packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 9 + 12 + 4 + 29 = 61`; adding the six activated
-Wave 9 candidates gives the 67 unique remaining defects. By historical family
-that remainder is 11 A, 32 B, 21 L and three D findings, of which the
+The queue arithmetic is `7 + 9 + 12 + 4 + 29 = 61`; adding the three activated
+SRR-20 candidates gives the 64 unique remaining defects. By historical family
+that remainder is 11 A, 31 B, 19 L and three D findings, of which the
 unactivated 61 are 11 A, 28 B, 19 L and three D.
+
+### 6.1 Findings routed out of Wave 9
+
+These were discovered while closing Wave 9. They are **not** part of the 88
+audited defects and do not change that denominator. Each needs its own scope
+and risk checkpoint before activation.
+
+- **Cross-process cancellation durability (from L20/SRR-21).** A cancellation
+  tombstone that survives a process restart is not representable in
+  `live-voice.formal-task-intent-recovery.v2`: its phases are
+  `resolving|clarification|awaiting_confirmation|post_create_binding`,
+  `replace()` enforces `generation + 1` and `save()` requires absence. A true
+  cross-process tombstone needs a v3 phase or a journal API addition, both
+  excluded from SRR-21. The delivered owner-scoped tombstone fails submit and
+  recovery closed and settles retryably; the restart residual is pinned by the
+  characterization test `a restarted owner replays a lost cancellation as an
+  explicit confirmation, never as a dispatch`, which proves the successor
+  issues zero `live_voice.composition.p3.intent` calls and re-presents the
+  server-held confirmation as a new explicit user decision.
+- **`task.list` replaces the whole replica (sibling of B36).** The list branch
+  of `adopt` still overwrites every record and drops every cursor, so a stale
+  list can roll a task back. SRR-21's recorded behavior names `task.get` and
+  `task.status` only, and adding a monotonic merge would change the list's
+  full-replacement (including deletion) semantics. No product exposure today:
+  `LiveVoiceIntegratedRoutePanel.tsx` performs zero `task.list` adoptions.
+- **Deterministic mounted-panel failure.** The pre-existing
+  `liveVoiceIntegratedRoutePanelMounted.test.mjs:7342` failure reproduces
+  deterministically when that file runs alone, so it is a real defect rather
+  than a load flake. It belongs to the panel owner on
+  `agtai/hx/0819_live_voice_p1p2`.
+- **`npm run lint` is unusable package-wide.** No ESLint configuration exists
+  in `jiuwenswarm/channels/web/frontend` or any ancestor directory, so the
+  script fails for reasons unrelated to any packet. Infrastructure gap.
 
 The queue excludes the already fixed A10, A24, B31 and L23; superseded B26;
 and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared
@@ -725,6 +830,7 @@ and risk checkpoint before implementation.
 | SRR-02 / A21 | 17/88 | `4567becf3`…`4b08240dc`; Agent-client, E2A codec and WebSocket-send diagnostics are content-free across unary/stream success, failure, fallback and reconnect cleanup. Hook-free physical classification, a whole-graph projection budget and strict UTF-8 preflight prevent hostile objects, oversized identifiers, cycles/aliases and lone surrogates from reaching logs, public exception contents or transport sends while preserving supported OutputSchema/E2A/legacy wire behavior; 142 focused plus 61 direct and 292 additional consumer tests passed after independent Tier-3 review |
 | SRR-06 / A8+B6 | 19/88 | `a9e3d6ab8`…`5affa2c8c`; Harness now separates business terminal truth from stream-cleanup disposition, retains one general Awaitable cleanup owner through deadline/cancellation, and preserves terminal ownership across startup and direct-cancel races. Real terminal-owner cancellation propagates without fabricated terminal/_END; public close adopts its abandoned stream cleanup exactly once, remains pending while blocked, and removes only the settled abandoned record. Known completed/cancelled truth survives cleanup failure, unknown+failure becomes failed, and normal rounds remain isolated; 99 Harness + 79 consumer tests and a 10-run race probe passed after independent Tier-3 review |
 | SRR-10 / A2+B2 | 21/88 | `ea55258ff`…`b5e6dd6e7`; a FINAL/COMPLETED that was published but not yet dequeued now retires locally on exact cancel — sensitive transcript/PCM queue released, `partial_text` cleared, session and transport converged — without issuing another Provider cancel or rewriting terminal truth. Active cancel is unchanged, and unknown, stale, wrong-generation and already-retired references still reject. Dequeue-vs-cancel and duplicate cancel linearize on one synchronous claim so only one winner reports success; caller cancellation mid-retirement leaves exactly one retained owner genuinely pending instead of a fabricated completion; provider close keeps cleaning neighbouring sessions, transports, queues, maps and owners through ordinary, cancellation and process-control failures while preserving chronological first-failure truth and content-free identity; reap and transport cleanup stay once-only. Independent Tier-3 review reproduced the defect on baseline `3d488e8c3` — candidate tests RED with conformance `RECOGNITION_ALREADY_TERMINAL`/`SYNTHESIS_ALREADY_TERMINAL` violations — then passed 94 provider and 155 affected conformance/route cases under asyncio debug, with the one disclosed pre-existing route failure byte-identical on baseline, candidate and integration, zero new Ruff findings and unchanged formatting |
+| SRR-21 / B36+L20+L21 | 24/88 | `155c15b36`…`b0341f41b`; an authoritative `task.get`/`task.status` snapshot can no longer roll a formal task replica back. Attempt rollback and identity forgery, event-head rollback, terminal resurrection and terminal-outcome change all reject through the existing `validTaskStateTransition` rule rather than a new policy, and the consumed event cursor survives a refresh that still describes the head that produced it instead of resetting to null. Legacy `{ok:true,result}` success no longer carries mutation authority for create, cancel or retry while queries keep accepting it. A cancelled destructive confirmation is invalidated with, not after, its durable removal: an owner-scoped cancellation tombstone fails both submit and `recoverPending` closed before any journal claim or Gateway call, and settles retryably. Independent Tier-3 review reproduced all three mechanisms RED on baseline `455873109` after recompiling (6 business assertions), then passed 49 focused and 418 package cases with the one disclosed mounted-panel failure unchanged, typecheck and build clean |
 
 ### 7.1 Closed-fix revalidation entrypoints
 
@@ -750,6 +856,7 @@ mechanism and integration seam are reviewed again.
 | A20 | `python -m pytest tests/unit_tests/gateway/test_app_gateway_shutdown.py tests/unit_tests/gateway/test_app_gateway_acp.py --no-cov --asyncio-debug` |
 | A8, B6 | `python -m pytest tests/unit_tests/live_voice/test_agent_conversation_runtime.py --no-cov --asyncio-debug` |
 | A2, B2 | `python -m pytest tests/unit_tests/live_voice/test_openai_streaming_speech.py --no-cov --asyncio-debug` |
+| B36, L20, L21 | From `jiuwenswarm/channels/web/frontend`: `npm run test:live-voice-integrated-web`; require the formal task leaf and intent blocks to pass and compare any full-suite failure with the disclosed mounted-panel baseline below. A source-level baseline comparison **must recompile** first, because the tests import the tsc output under `node_modules/.cache/`. |
 | L14 | `python -m pytest tests/unit_tests/auto_harness/test_schedule_task_service.py --no-cov` |
 | A23 | From `jiuwenswarm/channels/web/frontend`: `npm run test:live-voice-integrated-web`; require the Product Web activation cases to pass and compare any full-suite failure with the disclosed mounted-panel baseline below |
 
