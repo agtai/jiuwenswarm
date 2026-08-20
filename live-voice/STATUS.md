@@ -178,7 +178,9 @@ exact-source Alpha result.
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
 - **Remaining accounting:** 61 unique defects remain: 11 A findings, 28 B
-  findings, 19 L findings and D1-D3, all unactivated in the owner-scoped queue.
+  findings, 19 L findings and D1-D3. Four are the activated Wave 10 candidates
+  A1, A6, A13 and B4; the other 57 remain unactivated in the owner-scoped
+  queue.
   C3 continues to alias B42 and B17 continues to alias B13, so neither creates
   another unique repair. Six findings discovered while closing Wave 9 are routed
   in §6.1 of the execution contract and are outside the audited 88.
@@ -186,14 +188,16 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** Wave 9 is closed. SRR-21/B36+L20+L21 closed at `b0341f41b`
-  and SRR-20/B12+B13+B14 closed at `0a2361f81` after a reject-then-repair cycle
-  whose second independent review signed `2da9b0a15`. No candidate is in
-  flight. On explicit resume, activate one or more disjoint owner-scoped
-  packets from §6, each frozen from the latest integration branch with its
-  capability/module, risk tier, dependencies, scope, exclusions and acceptance
-  recorded before implementation, and consider the six §6.1 findings for their
-  own scope and risk checkpoints.
+- **Next action:** Wave 10 is frozen from `ab46ad3e4` with three disjoint packets
+  recorded in §5.10 of the repair execution contract, all from batch 2 of the
+  revalidation's priority ordering: SRR-22 owns A6+B4 in the conversation
+  runtime, SRR-23 owns A13 in the composition registry and SRR-24 owns A1 in
+  the conformance identity ledger. They share the accepted release-heavy-state
+  plus retain-compact-fence shape rather than an LRU. Each still requires
+  deterministic RED reproduction, a minimum owner-scoped fix,
+  negative/concurrency/restart evidence, independent review by someone who did
+  not implement it, and Main-only integration with an affected rerun before the
+  numerator advances.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original

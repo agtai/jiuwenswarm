@@ -738,30 +738,138 @@ after that branch merges; B18 and D2 stay unactivated in §6.
   `LiveVoiceIntegratedRoutePanel.tsx` (owned by the parallel p1p2 branch), no
   other module owner.
 
+## 5.10 Wave 10 ownership record — ACTIVE
+
+Wave 10 is frozen from integration baseline `ab46ad3e4`, the Wave 9 closure
+record. Its three writer surfaces are disjoint. All three packets come from
+batch 2 of the historical revalidation's priority ordering, "unbounded lifetime
+state with permanent refusal", and they deliberately share one shape that two
+independent reviews have already accepted: release the heavy state a bound
+exists to reclaim, and retain a separate compact fence so the released identity
+can never be replayed. SRR-17/A25 established the durable form of that fence and
+SRR-20/B12 the fixed-memory sketch form; a plain LRU remains excluded.
+
+B11 belongs to the same batch but is deliberately excluded: `project_code_executor.py`
+is being modified in parallel on `agtai/hx/0812_live_voice_w3`, so it must be
+routed after that branch merges. A5, A9, A15, A17 and B42 stay unactivated in §6.
+
+### SRR-22 — A6+B4 conversation runtime critical-key lifetime
+
+- Capability/owner: `agent_conversation_runtime` critical publication identity,
+  queue capacity and bridge-consumer supervision.
+- Risk: Tier 3 authority and availability. A6 and B4 share one packet because
+  both are the same `_critical_keys` double-duty defect.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/agent_conversation_runtime.py` and
+  `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` only.
+- Intended behavior:
+  - A6 (`:184-242,347-363` and `:2640-2652,2793-2799`): queue capacity is sized
+    by queued items and no longer shares one ledger with replay identity, and a
+    publication failure surfaces explicitly without terminating the sole
+    long-lived bridge consumer.
+  - B4 (`:192,214-235,284,347-363`): `_critical_keys` stops being both a
+    uniqueness ledger and a capacity counter; released entries leave a bounded
+    replay tombstone, and progress notification gets an independent quota so it
+    cannot starve terminal or presentation delivery.
+- Acceptance: each mechanism is reproduced RED first. Then an injected critical
+  publish violation yields an explicit failure and the next request is still
+  delivered; drain and discard past capacity leave the runtime usable while
+  duplicates still fail; progress cannot starve terminal or presentation
+  notification. Concurrency, restart/replay and zero forbidden
+  Agent/Tool/Task/audio-history effects on every rejected path are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no other module owner, no Gateway route change, no physical Provider claim.
+  SRR-06/A8+B6 closed the terminal-truth and cleanup-ownership boundary in this
+  same file; do not reopen or weaken it.
+
+### SRR-23 — A13 composition registry accepted-commit lifetime
+
+- Capability/owner: `ProductCompositionRegistry` accepted turn-commit retention
+  across capacity eviction, route close and active-route shutdown.
+- Risk: Tier 3 authority and availability.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/product_composition_registry.py` and
+  `tests/unit_tests/live_voice/test_product_composition_registry.py` only.
+- Intended behavior: A13 (`:2470-2479`, `:2553-2573`, `:1813-1818`,
+  `:5861-5864`, `:8786-8788`, `:7158-7170`, `:8856-8862` at audit line numbers)
+  — an abandoned closed-route origin gets a bounded late-create grace, after
+  which its heavy state is released and only a compact stale/replay fence is
+  retained. Repeating a successful task-origin submit and closing the route
+  without a P3 create must not fill the 128 accepted entries for the registry
+  lifetime.
+- Also delivered in this packet, outside the audited 88 and credited only in
+  §6.1: the superseded identity that survives close then higher-generation
+  reactivate. It lives in the same file and the same helper family, and its
+  minimum direction is recorded in §6.1. Keep it in a separate commit so the
+  numerator stays exact.
+- Acceptance: reproduce RED first. Then 128 abandoned routes do not block a new
+  submit; one late create succeeds within the grace and is refused after it;
+  retired replay is stable and stale replay is refused; the existing eviction
+  tests keep passing. Concurrency, restart/replay and zero forbidden effects on
+  every rejected path are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no capacity-policy change beyond the recorded grace and fence, no Gateway or
+  conformance source change, no other module owner. SRR-20 closed the
+  progress-generation fence, the replacement cleanup and the definite-failure
+  release in this same file; do not reopen or weaken them.
+
+### SRR-24 — A1 conformance identity ledger lifetime
+
+- Capability/owner: `StreamingSpeechConformance` generation and response
+  identity retention, with provider and product-route capacity alignment.
+- Risk: Tier 3 authority and availability. This is the most user-visible defect
+  in the batch: after 64 distinct streams the conformance owner refuses further
+  streaming for its whole lifetime.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/streaming_speech.py`,
+  `jiuwenswarm/server/live_voice/openai_streaming_speech.py`,
+  `jiuwenswarm/server/live_voice/dedicated_media_registration.py` and their
+  focused tests only.
+- Intended behavior: A1 (`streaming_speech.py:469-490,522-523,1028-1048,`
+  `1215-1238,1597-1606`) — terminal reap releases heavy terminal identities by
+  connection or session instead of retaining the 64-entry identity ledger for
+  the conformance instance lifetime, a bounded generation tombstone keeps stale
+  replay refusable, and the default provider at
+  `openai_streaming_speech.py:879-881` and the product TTS allocation at
+  `dedicated_media_registration.py:2658-2687` are aligned to the same capacity
+  truth.
+- Acceptance: reproduce RED first, proving that the 65th distinct stream is
+  refused today. Then more than 64 sequential successful streams remain usable
+  while stale generation replay is still rejected with its exact existing
+  reason; provider and route capacities agree; identity/isolation across
+  connections and sessions holds. Concurrency, restart/replay and zero
+  forbidden effects are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no Gateway route source change, no physical Provider claim. SRR-10/A2+B2
+  closed queued-terminal retirement in `openai_streaming_speech.py`; its
+  fences, its reap semantics and its exception priority must survive unchanged,
+  and the packet must rerun that file's focused suite to prove it.
+
 ## 6. Queued repair programs
 
-The 61 remaining unique defects are the unactivated defects below; no
-candidate is in flight. These groups are not worker write authority. Each
-activation removes its IDs from this queue and freezes smaller owner-specific
-packets before editing.
+The 61 remaining unique defects consist of the four activated Wave 10
+candidates A1, A6, A13 and B4 plus the 57 unactivated defects below. These
+groups are not worker write authority. Each activation removes its IDs from
+this queue and freezes smaller owner-specific packets before editing.
 
 - Generation/successor/authority cleanup (**7**): B18, B32, B37, B38, B39, D2
   and L19. B12, B13, B14, B36, L20 and L21 moved to the active Wave 9 packets.
   B17 remains an inactive alias of B13 and is activated with it.
 - Cancellation/teardown/retained cleanup (**9**): A7, A19, A22, B21, B23,
   B24, D1, D3 and L7.
-- Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, B4, B11,
-  B42, L5 and L18 (**12**). C3 remains an active audit-ID alias of B42 and
-  adds no unique defect.
+- Capacity/lifetime/replay (**8**): A5, A9, A15, A17, B11, B42, L5 and L18.
+  A1, A6, A13 and B4 moved to the active Wave 10 packets. C3 remains an active
+  audit-ID alias of B42 and adds no unique defect.
 - Event-loop, lock and filesystem responsiveness (**4**): A14, B15, B25 and
   B27.
 - Protocol/state/compatibility (**29**): B1, B3, B5, B8, B19,
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 9 + 12 + 4 + 29 = 61`, the complete remainder now
-that Wave 9 closed. By historical family that remainder is 11 A, 28 B, 19 L and
-three D findings.
+The queue arithmetic is `7 + 9 + 8 + 4 + 29 = 57`; adding the four activated
+Wave 10 candidates gives the 61 unique remaining defects. By historical family
+that remainder is 11 A, 28 B, 19 L and three D findings, of which the
+unactivated 57 are 8 A, 27 B, 19 L and three D.
 
 ### 6.1 Findings routed out of Wave 9
 
