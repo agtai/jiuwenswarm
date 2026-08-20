@@ -920,6 +920,62 @@ async def test_wire_fallback_bounds_exact_integer_identity_conversion(
         assert wire["channel"] is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+async def test_normal_wire_projection_bounds_cycles_and_unknown_objects(
+    form,
+) -> None:
+    hooks: list[str] = []
+
+    class HostileObject:
+        def __getattribute__(self, name):
+            if name in {"model_dump", "dict", "__dict__"}:
+                hooks.append(name)
+                raise AssertionError(f"sentinel-normal-object-{name}")
+            return object.__getattribute__(self, name)
+
+        def __str__(self) -> str:
+            hooks.append("__str__")
+            raise AssertionError("sentinel-normal-object-str")
+
+    cycle: dict[str, object] = {}
+    cycle["self"] = cycle
+    payload = {
+        "unknown": HostileObject(),
+        "cycle": cycle,
+        "huge": 10**5000,
+    }
+    if form == "unary":
+        wire = encode_agent_response_for_wire(
+            AgentResponse(
+                request_id="normal-safe-request",
+                channel_id="normal-safe-channel",
+                payload=payload,
+            ),
+            response_id="normal-safe-response",
+        )
+        back = parse_agent_server_wire_unary(wire)
+    else:
+        wire = encode_agent_chunk_for_wire(
+            AgentResponseChunk(
+                request_id="normal-safe-request",
+                channel_id="normal-safe-channel",
+                payload=payload,
+            ),
+            response_id="normal-safe-response",
+            sequence=29,
+        )
+        back = parse_agent_server_wire_chunk(wire)
+
+    assert hooks == []
+    json.dumps(wire)
+    assert back.payload == {
+        "unknown": None,
+        "cycle": {"self": None},
+        "huge": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # SDD-0010 — wire truncation keeps budget / token_count / child meta
 # ---------------------------------------------------------------------------
