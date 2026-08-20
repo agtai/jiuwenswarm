@@ -1124,6 +1124,180 @@ def test_ack_history_result_tamper_is_corrupt(
     assert database.read_bytes() == before_reopen_bytes
 
 
+@pytest.mark.parametrize(
+    (
+        "label",
+        "acknowledged_seq",
+        "target_noop",
+        "field_path",
+        "original_value",
+        "replacement",
+    ),
+    (
+        (
+            "history-version-bool",
+            1,
+            False,
+            ("consumption_history", "version"),
+            1,
+            True,
+        ),
+        (
+            "history-version-float",
+            1,
+            False,
+            ("consumption_history", "version"),
+            1,
+            1.0,
+        ),
+        ("advanced-true-int", 1, False, ("advanced",), True, 1),
+        ("advanced-false-int", 1, True, ("advanced",), False, 0),
+        ("top-seq-zero-bool", 0, False, ("acked_through_seq",), 0, False),
+        ("top-seq-one-bool", 1, False, ("acked_through_seq",), 1, True),
+        ("top-seq-zero-float", 0, False, ("acked_through_seq",), 0, 0.0),
+        ("top-seq-one-float", 1, False, ("acked_through_seq",), 1, 1.0),
+        (
+            "current-seq-zero-bool",
+            0,
+            False,
+            ("consumption_history", "current", "acked_through_seq"),
+            0,
+            False,
+        ),
+        (
+            "current-seq-one-bool",
+            1,
+            False,
+            ("consumption_history", "current", "acked_through_seq"),
+            1,
+            True,
+        ),
+        (
+            "current-seq-zero-float",
+            0,
+            False,
+            ("consumption_history", "current", "acked_through_seq"),
+            0,
+            0.0,
+        ),
+        (
+            "current-seq-one-float",
+            1,
+            False,
+            ("consumption_history", "current", "acked_through_seq"),
+            1,
+            1.0,
+        ),
+        (
+            "previous-seq-zero-bool",
+            0,
+            True,
+            ("consumption_history", "previous", "acked_through_seq"),
+            0,
+            False,
+        ),
+        (
+            "previous-seq-one-bool",
+            1,
+            True,
+            ("consumption_history", "previous", "acked_through_seq"),
+            1,
+            True,
+        ),
+        (
+            "previous-seq-zero-float",
+            0,
+            True,
+            ("consumption_history", "previous", "acked_through_seq"),
+            0,
+            0.0,
+        ),
+        (
+            "previous-seq-one-float",
+            1,
+            True,
+            ("consumption_history", "previous", "acked_through_seq"),
+            1,
+            1.0,
+        ),
+    ),
+    ids=lambda value: value if type(value) is str else None,
+)
+def test_ack_result_json_scalar_type_substitution_is_corrupt_and_not_replayable(
+    tmp_path: Path,
+    label: str,
+    acknowledged_seq: int,
+    target_noop: bool,
+    field_path: tuple[str, ...],
+    original_value: object,
+    replacement: object,
+) -> None:
+    """Catches Python equality accepting a different durable JSON scalar type."""
+
+    database = tmp_path / f"ack-result-type-{label}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix=f"-ack-result-type-{label}")
+    if acknowledged_seq == 1:
+        item = store.claim_outbox(f"ack-result-type-{label}-worker")
+        assert item is not None
+        store.complete_outbox(
+            item,
+            executor_ref=f"legacy:{item.attempt_id}",
+            observations=_observations(item),
+        )
+    events = store.events(task_id, _scope())
+    observed_at = _after(events[-1].occurred_at)
+    first, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=acknowledged_seq,
+        acked_event_id=events[acknowledged_seq].event_id,
+        expected_event_head=events[-1].seq,
+        command_id=f"command-ack-result-type-{label}-first",
+    )
+    assert store.ack_events(first, observed_at=observed_at).ok
+    target = first
+    target_observed_at = observed_at
+    if target_noop:
+        target, _grant_unused = _ack_command(
+            task_id,
+            presentation_class="text",
+            acked_through_seq=acknowledged_seq,
+            acked_event_id=events[acknowledged_seq].event_id,
+            expected_event_head=events[-1].seq,
+            command_id=f"command-ack-result-type-{label}-noop",
+        )
+        target_observed_at = _after(observed_at)
+        assert store.ack_events(target, observed_at=target_observed_at).ok
+
+    result_json = _command_result_json(database, target.command_id)
+    stored_result = result_json["result"]
+    assert type(stored_result) is dict
+    field_owner = stored_result
+    for field in field_path[:-1]:
+        field_owner = field_owner[field]
+        assert type(field_owner) is dict
+    stored_value = field_owner[field_path[-1]]
+    assert type(stored_value) is type(original_value)
+    assert stored_value == original_value
+    assert type(replacement) is not type(original_value)
+    field_owner[field_path[-1]] = replacement
+    _replace_command_result_json(database, target.command_id, result_json)
+    before_verification_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as reopen_corrupt:
+        SqliteTaskStore(database)
+    with pytest.raises(FormalTaskViolation) as replay_corrupt:
+        store.ack_events(
+            replace(target, request_id=f"request-{target.command_id}-replay"),
+            observed_at=_after(target_observed_at),
+        )
+
+    assert reopen_corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert replay_corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_verification_bytes
+
+
 def test_legacy_seed_anchor_survives_noop_and_multiple_higher_acks(
     tmp_path: Path,
 ) -> None:

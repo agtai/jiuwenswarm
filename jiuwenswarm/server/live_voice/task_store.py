@@ -2541,6 +2541,26 @@ class SqliteTaskStore:
         )
 
     @classmethod
+    def _ack_result_types_exact(cls, stored: object, expected: object) -> bool:
+        """Compare an ACK result without Python's bool/number coercion."""
+
+        if type(stored) is not type(expected):
+            return False
+        if type(stored) is dict:
+            assert type(expected) is dict
+            return stored.keys() == expected.keys() and all(
+                cls._ack_result_types_exact(stored[key], expected[key])
+                for key in stored
+            )
+        if type(stored) is list:
+            assert type(expected) is list
+            return len(stored) == len(expected) and all(
+                cls._ack_result_types_exact(stored_item, expected_item)
+                for stored_item, expected_item in zip(stored, expected, strict=True)
+            )
+        return True
+
+    @classmethod
     def _verify_v5_ack_semantics(
         cls,
         connection: sqlite3.Connection,
@@ -2724,10 +2744,19 @@ class SqliteTaskStore:
                 origin=origin,
                 previous=previous,
             )
+            try:
+                result_bytes_match = canonical_json_bytes(
+                    value
+                ) == canonical_json_bytes(expected_value)
+            except (ContractViolation, UnicodeError) as error:
+                raise cls._corrupt(
+                    "formal Task ACK result is not canonical"
+                ) from error
             if (
                 not result.ok
                 or type(value) is not dict
-                or value != expected_value
+                or not result_bytes_match
+                or not cls._ack_result_types_exact(value, expected_value)
                 or result.observed_at != row["created_at"]
                 or dict(result.extensions)
                 != command_result_extensions(TaskCommandDisposition.APPLIED)
