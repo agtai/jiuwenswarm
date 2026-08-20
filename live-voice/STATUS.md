@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-19. This is the only mutable source for current product
+> Updated: 2026-08-20. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -29,9 +29,14 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** execute P3-2 complete command, adjustment and
-  successor-revision semantics on the accepted P3-1 canonical Task model. The
-  deferred P1/P2 issue is recorded in the
+- **Current highest priority:** execute the user-routed strict-review repair
+  packet against 88 unique current defects, beginning with exact authority and
+  privacy boundaries. Progress is counted only after reproduced defects,
+  affected verification and independent module review close; the
+  [repair execution contract](reviews/LIVE_VOICE_STRICT_REVIEW_REPAIR_EXECUTION_2026-08-20.md)
+  owns the branch-local packet detail. P3-2 remains contract-frozen under D-087
+  and resumes after this packet closes or is explicitly re-routed. The deferred
+  P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
   and must close before a later controlled-candidate or feature-complete claim.
 - **Integration:** integration with a `develop` ref is deferred until the
@@ -135,52 +140,37 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** P3-2 — complete command, adjustment and successor-revision
-  semantics.
-- **Frozen contract:** [D-087](decisions/DECISIONS.md) and the
-  [P3-2/P3-5A Core/Store design and oracle map](reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md)
-  freeze the P3-2 six-item contract on the accepted P3-1 model. P3-5A remains
-  inactive unless STATUS records a separate assignment or bounded multi-package
-  batch.
-- **Objective:** add one coherent, versioned command model for `update`,
-  `provide_input`, capability-truthful `pause/resume/reprioritize` (currently
-  unsupported), exact cancel outcomes and explicit successor revision without
-  rewriting terminal Task/TaskResult truth.
-- **Capability/modules:** Task Control Core/Store own command admission,
-  idempotency, event/outbox/result truth and successor creation; the selected
-  Executor seam owns only operations backed by a proven capability. Text and
-  Voice callers consume the same command results.
-- **Risk:** Tier 3 under root `TESTING.md` because the packet changes shared
-  command/state/transaction semantics and Executor effects. D-087 keeps the
-  Store at schema v4; stop before DDL or before adding a new operation,
-  scheduler policy, recovery model or product owner and re-scope that expansion.
-- **Included:** immutable command fingerprint and exact scope/target/expected
-  state; atomic admission plus outbox/replay facts; accepted/applied/rejected/
-  unsupported/conflict/timeout/unknown separation; operation-specific legal
-  states and terminal races; ordered adjustments/inputs; capability-truthful
-  pause/resume/priority; idempotent successor Task creation with immutable
-  predecessor/result preservation.
-- **Excluded:** the deferred P1/P2 post-TTS/Exit continuation repair; P3-3
-  Executor capability/admission expansion; P3-4 D1/D2 implementation; P3-5
-  unread/presentation ACK; generalized Voice targeting/UI work; Production,
-  `develop` integration and remote updates.
-- **Next action:** write failing Python/TypeScript closed-contract tests for the
-  frozen payload/disposition matrix, then implement the schema-v4 Core/Store
-  transaction paths in this order: pre-dispatch `task.update`, narrowed
-  `task.adjust`/`task.retry` compatibility, zero-effect unsupported controls,
-  and one-winner `task.create_successor`.
-- **Deliverables:** versioned command/disposition schema and durable transaction
-  path; current proven `task.adjust` checkpoint compatibility plus truthful
-  unsupported results for controls awaiting P3-3; explicit successor creation;
-  positive, negative, boundary, concurrency, restart/idempotency, unsupported
-  and zero-effect evidence; complete-diff and independent Tier-3 review;
-  synchronized STATUS/evidence.
-- **Acceptance:** every declared operation has exact state, target,
-  duplicate/conflict, concurrent-terminal, restart and unsupported-capability
-  evidence; ordered supported effects apply once; unsupported controls never
-  appear successful; successor creation preserves predecessor and result
-  byte-for-byte; text and Voice observe the same authoritative result and
-  TaskEvent truth.
+- **Packet:** strict-review remediation — 88 unique current defects.
+- **Authority:** the user's 2026-08-20 repair instruction activates a bounded
+  D-060/D-062 parallel packet. The exact baseline, counting rule, worker
+  ownership and closure contract are in the
+  [repair execution contract](reviews/LIVE_VOICE_STRICT_REVIEW_REPAIR_EXECUTION_2026-08-20.md).
+- **Objective:** reproduce each canonical defect, freeze correct behavior,
+  implement the minimum owner-scoped fix, execute applicable D-032 evidence and
+  independent Tier-2/3 review, and mark it fixed only after reviewed integration.
+- **Capability/modules:** Wave 1 owns Task Store observation binding, Gateway
+  Agent-client privacy, frontend development WebSocket privacy, Voice–Task
+  resolver field binding and static-bearer fail-closed authentication. Later
+  waves remain queued until their smaller owner-specific packets are frozen.
+- **Risk:** Wave 1 contains five independent Tier-3 authority/privacy/durability
+  boundaries. Later child repairs are tiered individually; this umbrella does
+  not automatically propagate Tier 3.
+- **Included:** C5, A21, B41, B9 and B10 in Wave 1; their exact positive,
+  negative, boundary, concurrency/recovery where applicable, identity and zero-
+  effect evidence; independent module review and Main-only integration.
+- **Excluded:** new product policy/classifier, schema migration, unrecorded
+  module expansion, physical product acceptance, Production, `develop`
+  integration and all remote updates. P3-2 implementation is paused, not
+  credited or discarded; D-087 remains its frozen contract.
+- **Next action:** commit this activation contract, create three isolated worker
+  worktrees from the same commit, write failing Wave 1 regressions and implement
+  only the assigned non-overlapping repairs.
+- **Deliverables:** reviewed commits per coherent module, exact commands/results,
+  synchronized progress numerator and a cumulative integration-seam review.
+- **Acceptance:** a finding advances the numerator only after its original
+  mechanism is reproduced, the minimum fix passes all applicable D-032 evidence,
+  forbidden effects are zero, an independent reviewer passes the complete
+  module diff and Main reruns affected checks after integration.
 
 ## Dependency route to feature complete
 
