@@ -9,10 +9,13 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     EffectDispatchReceipt,
     EffectObservationKind,
     EffectReconciliationKind,
+    EffectSettlementKind,
     ExternalEffectBinding,
     ExternalEffectContractViolation,
+    ExternalEffectDispatch,
     ExternalEffectIntent,
     ExternalEffectObservation,
+    ExternalEffectSettlement,
     decide_effect_reconciliation,
     effect_fact_bytes,
     effect_fact_from_bytes,
@@ -38,6 +41,7 @@ def _profile(*, profile_id: str = "direct-profile") -> DurabilityProfileBinding:
         profile_id=profile_id,
         profile_version="profile.v1",
         profile_digest="1" * 64,
+        durability_level="D2",
         durability_capability_version="d2.v1",
     )
 
@@ -46,7 +50,7 @@ def _binding(*, task_id: str = "task-1") -> ExternalEffectBinding:
     return ExternalEffectBinding(
         scope=_scope(),
         task_id=task_id,
-        attempt_id="attempt-1",
+        origin_attempt_id="attempt-1",
         profile=_profile(),
         effect_id="effect-1",
         operation_kind="tool.write",
@@ -63,6 +67,7 @@ def _intent(*, replay_safe: bool = False) -> ExternalEffectIntent:
 def _receipt() -> EffectDispatchReceipt:
     return EffectDispatchReceipt(
         binding=_binding(),
+        actor_attempt_id="attempt-1",
         dispatch_ordinal=1,
         recovery_generation=0,
         provider_operation_key="provider-effect-1",
@@ -74,7 +79,9 @@ def _receipt() -> EffectDispatchReceipt:
 def _observation(kind: EffectObservationKind) -> ExternalEffectObservation:
     return ExternalEffectObservation(
         binding=_binding(),
+        actor_attempt_id="attempt-1",
         observation_ordinal=1,
+        dispatch_ordinal=1,
         recovery_generation=0,
         kind=kind,
         evidence_digest="5" * 64,
@@ -129,8 +136,24 @@ def test_reconciliation_is_a_pure_closed_decision(
 def test_effect_facts_roundtrip_with_canonical_parity() -> None:
     facts = (
         _intent(replay_safe=True),
+        ExternalEffectDispatch(
+            binding=_binding(),
+            actor_attempt_id="attempt-1",
+            dispatch_ordinal=1,
+            recovery_generation=0,
+            provider_operation_key="provider-effect-1",
+        ),
         _receipt(),
         _observation(EffectObservationKind.APPLIED),
+        ExternalEffectSettlement(
+            binding=_binding(),
+            actor_attempt_id="attempt-1",
+            settlement_ordinal=1,
+            recovery_generation=0,
+            kind=EffectSettlementKind.RESOLVED,
+            evidence_head=1,
+            evidence_digest="6" * 64,
+        ),
     )
 
     for fact in facts:

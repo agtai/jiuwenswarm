@@ -17,6 +17,7 @@ DURABILITY_PROFILE_BINDING_VERSION: Final = "live-voice.durability-profile-bindi
 
 _MAX_DURABILITY_TEXT_BYTES = 512
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_DURABILITY_LEVELS = frozenset({"D0", "D1", "D2"})
 
 
 class DurabilityIdentityViolation(ValueError):
@@ -64,6 +65,7 @@ class DurabilityProfileBinding:
     profile_id: str
     profile_version: str
     profile_digest: str
+    durability_level: str
     durability_capability_version: str
     contract_version: str = DURABILITY_PROFILE_BINDING_VERSION
 
@@ -78,6 +80,11 @@ class DurabilityProfileBinding:
         _text(self.profile_id, "profile.profile_id")
         _text(self.profile_version, "profile.profile_version")
         _digest(self.profile_digest, "profile.profile_digest")
+        if self.durability_level not in _DURABILITY_LEVELS:
+            raise DurabilityIdentityViolation(
+                "INVALID_DURABILITY_PROFILE",
+                "profile.durability_level must be D0, D1, or D2",
+            )
         _text(
             self.durability_capability_version,
             "profile.durability_capability_version",
@@ -92,6 +99,7 @@ class DurabilityProfileBinding:
             "profile_id",
             "profile_version",
             "profile_digest",
+            "durability_level",
             "durability_capability_version",
         }:
             raise DurabilityIdentityViolation(
@@ -109,6 +117,9 @@ class DurabilityProfileBinding:
                 payload["profile_version"], "profile.profile_version"
             ),
             profile_digest=_digest(payload["profile_digest"], "profile.profile_digest"),
+            durability_level=_text(
+                payload["durability_level"], "profile.durability_level"
+            ),
             durability_capability_version=_text(
                 payload["durability_capability_version"],
                 "profile.durability_capability_version",
@@ -123,6 +134,7 @@ class DurabilityProfileBinding:
             "profile_id": self.profile_id,
             "profile_version": self.profile_version,
             "profile_digest": self.profile_digest,
+            "durability_level": self.durability_level,
             "durability_capability_version": self.durability_capability_version,
         }
 

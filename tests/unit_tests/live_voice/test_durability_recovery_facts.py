@@ -30,6 +30,7 @@ def _profile() -> DurabilityProfileBinding:
         profile_id="direct-profile",
         profile_version="profile.v1",
         profile_digest="1" * 64,
+        durability_level="D1",
         durability_capability_version="recovery-facts.v1",
     )
 

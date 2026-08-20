@@ -172,12 +172,17 @@ class D1Checkpoint:
     task_id: str
     producer_attempt_id: str
     checkpoint_sequence: int
+    recovery_generation: int
     profile: DurabilityProfileBinding
+    complete: bool
+    task_spec_digest: str
     context_version: str
     context_digest: str
     input_digest: str
     state_schema_id: str
     state_schema_version: int
+    effect_head: int
+    effect_prefix_digest: str
     state_bytes: bytes = field(repr=False)
     state_digest: str
     integrity_digest: str
@@ -194,12 +199,26 @@ class D1Checkpoint:
         _text(self.task_id, "task_id")
         _text(self.producer_attempt_id, "producer_attempt_id")
         _nonnegative(self.checkpoint_sequence, "checkpoint_sequence")
+        _nonnegative(self.recovery_generation, "recovery_generation")
         _profile(self.profile)
+        if self.profile.durability_level not in {"D1", "D2"}:
+            raise DurabilityCheckpointViolation(
+                "CHECKPOINT_PROFILE_UNSUPPORTED",
+                "checkpoint profile must declare D1 or D2 durability",
+            )
+        if self.complete is not True:
+            raise DurabilityCheckpointViolation(
+                "CHECKPOINT_INCOMPLETE",
+                "checkpoint must be an explicitly complete immutable snapshot",
+            )
+        _digest(self.task_spec_digest, "task_spec_digest")
         _text(self.context_version, "context_version")
         _digest(self.context_digest, "context_digest")
         _digest(self.input_digest, "input_digest")
         _text(self.state_schema_id, "state_schema_id")
         _positive(self.state_schema_version, "state_schema_version")
+        _nonnegative(self.effect_head, "effect_head")
+        _digest(self.effect_prefix_digest, "effect_prefix_digest")
         if (
             type(self.state_bytes) is not bytes
             or not self.state_bytes
@@ -231,13 +250,18 @@ class D1Checkpoint:
         task_id: str,
         producer_attempt_id: str,
         checkpoint_sequence: int,
+        recovery_generation: int,
         profile: DurabilityProfileBinding,
+        complete: bool,
+        task_spec_digest: str,
         context_version: str,
         context_digest: str,
         input_digest: str,
         state_schema_id: str,
         state_schema_version: int,
         state_bytes: bytes,
+        effect_head: int,
+        effect_prefix_digest: str,
     ) -> D1Checkpoint:
         checked_scope = _scope(scope)
         checked_profile = _profile(profile)
@@ -245,11 +269,25 @@ class D1Checkpoint:
         _text(task_id, "task_id")
         _text(producer_attempt_id, "producer_attempt_id")
         _nonnegative(checkpoint_sequence, "checkpoint_sequence")
+        _nonnegative(recovery_generation, "recovery_generation")
+        if checked_profile.durability_level not in {"D1", "D2"}:
+            raise DurabilityCheckpointViolation(
+                "CHECKPOINT_PROFILE_UNSUPPORTED",
+                "checkpoint profile must declare D1 or D2 durability",
+            )
+        if complete is not True:
+            raise DurabilityCheckpointViolation(
+                "CHECKPOINT_INCOMPLETE",
+                "checkpoint must be an explicitly complete immutable snapshot",
+            )
+        _digest(task_spec_digest, "task_spec_digest")
         _text(context_version, "context_version")
         _digest(context_digest, "context_digest")
         _digest(input_digest, "input_digest")
         _text(state_schema_id, "state_schema_id")
         _positive(state_schema_version, "state_schema_version")
+        _nonnegative(effect_head, "effect_head")
+        _digest(effect_prefix_digest, "effect_prefix_digest")
         if (
             type(state_bytes) is not bytes
             or not state_bytes
@@ -267,7 +305,10 @@ class D1Checkpoint:
             "task_id": task_id,
             "producer_attempt_id": producer_attempt_id,
             "checkpoint_sequence": checkpoint_sequence,
+            "recovery_generation": recovery_generation,
             "profile": checked_profile.to_dict(),
+            "complete": complete,
+            "task_spec_digest": task_spec_digest,
             "context_version": context_version,
             "context_digest": context_digest,
             "input_digest": input_digest,
@@ -275,6 +316,8 @@ class D1Checkpoint:
             "state_schema_version": state_schema_version,
             "state_bytes_base64": base64.b64encode(state_bytes).decode("ascii"),
             "state_digest": state_digest,
+            "effect_head": effect_head,
+            "effect_prefix_digest": effect_prefix_digest,
         }
         return cls(
             checkpoint_id=checkpoint_id,
@@ -282,7 +325,10 @@ class D1Checkpoint:
             task_id=task_id,
             producer_attempt_id=producer_attempt_id,
             checkpoint_sequence=checkpoint_sequence,
+            recovery_generation=recovery_generation,
             profile=checked_profile,
+            complete=complete,
+            task_spec_digest=task_spec_digest,
             context_version=context_version,
             context_digest=context_digest,
             input_digest=input_digest,
@@ -290,6 +336,8 @@ class D1Checkpoint:
             state_schema_version=state_schema_version,
             state_bytes=state_bytes,
             state_digest=state_digest,
+            effect_head=effect_head,
+            effect_prefix_digest=effect_prefix_digest,
             integrity_digest=_sha256(canonical_json_bytes(unsigned)),
         )
 
@@ -302,7 +350,10 @@ class D1Checkpoint:
             "task_id",
             "producer_attempt_id",
             "checkpoint_sequence",
+            "recovery_generation",
             "profile",
+            "complete",
+            "task_spec_digest",
             "context_version",
             "context_digest",
             "input_digest",
@@ -310,6 +361,8 @@ class D1Checkpoint:
             "state_schema_version",
             "state_bytes_base64",
             "state_digest",
+            "effect_head",
+            "effect_prefix_digest",
             "integrity_digest",
         }
         if type(payload) is not dict or set(payload) != keys:
@@ -336,7 +389,12 @@ class D1Checkpoint:
             checkpoint_sequence=_nonnegative(
                 payload["checkpoint_sequence"], "checkpoint_sequence"
             ),
+            recovery_generation=_nonnegative(
+                payload["recovery_generation"], "recovery_generation"
+            ),
             profile=profile,
+            complete=payload["complete"],
+            task_spec_digest=_digest(payload["task_spec_digest"], "task_spec_digest"),
             context_version=_text(payload["context_version"], "context_version"),
             context_digest=_digest(payload["context_digest"], "context_digest"),
             input_digest=_digest(payload["input_digest"], "input_digest"),
@@ -346,6 +404,10 @@ class D1Checkpoint:
             ),
             state_bytes=_decode_base64(payload["state_bytes_base64"]),
             state_digest=_digest(payload["state_digest"], "state_digest"),
+            effect_head=_nonnegative(payload["effect_head"], "effect_head"),
+            effect_prefix_digest=_digest(
+                payload["effect_prefix_digest"], "effect_prefix_digest"
+            ),
             integrity_digest=_digest(payload["integrity_digest"], "integrity_digest"),
         )
 
@@ -394,7 +456,10 @@ class D1Checkpoint:
             "task_id": self.task_id,
             "producer_attempt_id": self.producer_attempt_id,
             "checkpoint_sequence": self.checkpoint_sequence,
+            "recovery_generation": self.recovery_generation,
             "profile": self.profile.to_dict(),
+            "complete": self.complete,
+            "task_spec_digest": self.task_spec_digest,
             "context_version": self.context_version,
             "context_digest": self.context_digest,
             "input_digest": self.input_digest,
@@ -402,6 +467,8 @@ class D1Checkpoint:
             "state_schema_version": self.state_schema_version,
             "state_bytes_base64": base64.b64encode(self.state_bytes).decode("ascii"),
             "state_digest": self.state_digest,
+            "effect_head": self.effect_head,
+            "effect_prefix_digest": self.effect_prefix_digest,
         }
 
     def to_dict(self) -> dict[str, object]:

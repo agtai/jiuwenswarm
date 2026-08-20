@@ -280,7 +280,11 @@ class PersistedExecutorSelection:
                 decoded = encoded.decode("utf-8")
                 value = json.loads(decoded)
                 canonical = canonical_json_bytes(value)
-            except (UnicodeDecodeError, json.JSONDecodeError, ContractViolation) as error:
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                ContractViolation,
+            ) as error:
                 raise FormalTaskViolation(
                     "INVALID_EXECUTOR_SELECTION",
                     f"executor selection {field_name} is not canonical JSON",
@@ -371,9 +375,7 @@ class PersistentAdmissionRecord:
                 "persisted admission reason must exactly prove deferred deliveries",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        next_eligible = _parse_utc(
-            self.next_eligible_at, "admission.next_eligible_at"
-        )
+        next_eligible = _parse_utc(self.next_eligible_at, "admission.next_eligible_at")
         deadline = _parse_utc(self.deadline_at, "admission.deadline_at")
         enqueued = _parse_utc(self.enqueued_at, "admission.enqueued_at")
         if next_eligible < enqueued or deadline < enqueued:
@@ -389,8 +391,7 @@ class PersistentAdmissionRecord:
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         if type(self.reconciliation_required) is not bool or (
-            self.reconciliation_required
-            != (self.reconciliation_reason is not None)
+            self.reconciliation_required != (self.reconciliation_reason is not None)
         ):
             raise FormalTaskViolation(
                 "INVALID_ADMISSION_PROJECTION",
@@ -885,12 +886,9 @@ class FormalTaskSpec:
             "required_capabilities",
             tuple(sorted(self.required_capabilities)),
         )
-        if (
-            type(self.constraints) is not tuple
-            or any(
-                type(constraint) is not str or not constraint.strip()
-                for constraint in self.constraints
-            )
+        if type(self.constraints) is not tuple or any(
+            type(constraint) is not str or not constraint.strip()
+            for constraint in self.constraints
         ):
             raise FormalTaskViolation(
                 "INVALID_TASK_CONSTRAINTS",
@@ -904,8 +902,7 @@ class FormalTaskSpec:
                 ErrorCode.INVALID_ARGUMENT,
             )
         constraint_sizes = tuple(
-            _utf8_size(constraint, "task.constraint")
-            for constraint in self.constraints
+            _utf8_size(constraint, "task.constraint") for constraint in self.constraints
         )
         if (
             len(self.constraints) > 16
@@ -1149,9 +1146,7 @@ class PersistentAttemptRecord:
                 "capability_profile": json.loads(
                     self.selection.capability_profile_json
                 ),
-                "capability_profile_digest": (
-                    self.selection.capability_profile_digest
-                ),
+                "capability_profile_digest": (self.selection.capability_profile_digest),
                 "execution_requirements": json.loads(
                     self.selection.execution_requirements_json
                 ),
@@ -1413,6 +1408,35 @@ class TaskRetryAuthoritySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableRecoveryAuthoritySnapshot:
+    """Store-read authority facts for D1/D2; never a user retry request."""
+
+    task: PersistentTaskRecord
+    producer_attempt: PersistentAttemptRecord
+    recovery_generation: int
+    recovery_budget_remaining: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.task.task_id != self.producer_attempt.task_id
+            or self.task.attempt_id != self.producer_attempt.attempt_id
+            or self.task.state is not FormalTaskState.TERMINAL
+            or self.producer_attempt.state is not FormalAttemptState.TERMINAL
+            or self.task.outcome is not TerminalOutcome.INTERRUPTED
+            or self.producer_attempt.outcome is not TerminalOutcome.INTERRUPTED
+            or self.recovery_generation != self.producer_attempt.attempt_number
+            or self.recovery_budget_remaining
+            != 3 - self.producer_attempt.attempt_number
+            or self.recovery_budget_remaining <= 0
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_PRECONDITION_STALE",
+                "recovery snapshot does not bind one interrupted producer and budget",
+                ErrorCode.STALE,
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class AppliedTaskRetryReplay:
     """Read-only durable proof of one previously applied ``task.retry``."""
 
@@ -1611,10 +1635,10 @@ class TaskUnreadPage:
 
     def __post_init__(self) -> None:
         _require_text(self.task_id, "task_unread.task_id")
-        if (
-            type(self.presentation_class) is not str
-            or self.presentation_class not in {"text", "voice"}
-        ):
+        if type(self.presentation_class) is not str or self.presentation_class not in {
+            "text",
+            "voice",
+        }:
             raise FormalTaskViolation(
                 "INVALID_PRESENTATION_CLASS",
                 "task unread presentation class must be text or voice",
@@ -1663,9 +1687,11 @@ class TaskUnreadPage:
                     "truncated task unread page lacks its next prefix position",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
-        elif self.next_after_seq is not None or (
-            self.events and self.events[-1].seq != self.head_seq
-        ) or (not self.events and self.watermark != self.head_seq):
+        elif (
+            self.next_after_seq is not None
+            or (self.events and self.events[-1].seq != self.head_seq)
+            or (not self.events and self.watermark != self.head_seq)
+        ):
             raise FormalTaskViolation(
                 "INVALID_TASK_UNREAD_PAGE",
                 "complete task unread page does not reach its frozen head",
@@ -1780,12 +1806,12 @@ class TaskEventAuthoritySnapshot:
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
         boundary = self.events[0]
-        expected_boundary = (
-            "task.accepted"
+        expected_boundaries = (
+            {"task.accepted"}
             if self.attempt.attempt_number == 1
-            else "task.retry_accepted"
+            else {"task.retry_accepted", "task.recovery_accepted"}
         )
-        if boundary.event_type != expected_boundary:
+        if boundary.event_type not in expected_boundaries:
             raise FormalTaskViolation(
                 "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
                 "TaskEvent authority segment lacks its canonical attempt boundary",
@@ -1800,29 +1826,52 @@ class TaskEventAuthoritySnapshot:
                 )
         else:
             details = boundary.details
-            retry_of_attempt_id = details.get("retry_of_attempt_id")
+            is_recovery = boundary.event_type == "task.recovery_accepted"
+            predecessor_key = (
+                "producer_attempt_id" if is_recovery else "retry_of_attempt_id"
+            )
+            outcome_key = "producer_outcome" if is_recovery else "previous_outcome"
+            authority_key = "recovery_id" if is_recovery else "command_id"
+            predecessor_attempt_id = details.get(predecessor_key)
+            expected_keys = {
+                authority_key,
+                predecessor_key,
+                outcome_key,
+                "attempt_number",
+            }
+            if is_recovery:
+                expected_keys.update(
+                    {"recovery_generation", "recovery_budget_remaining"}
+                )
             if (
-                set(details)
-                != {
-                    "command_id",
-                    "retry_of_attempt_id",
-                    "previous_outcome",
-                    "attempt_number",
-                }
-                or details.get("command_id") != boundary.causation_id
+                set(details) != expected_keys
+                or details.get(authority_key) != boundary.causation_id
                 or details.get("attempt_number") != self.attempt.attempt_number
-                or type(retry_of_attempt_id) is not str
-                or not retry_of_attempt_id.strip()
-                or retry_of_attempt_id == self.attempt.attempt_id
-                or details.get("previous_outcome")
-                not in {
-                    TerminalOutcome.CANCELLED.value,
-                    TerminalOutcome.COMPLETED.value,
-                }
+                or type(predecessor_attempt_id) is not str
+                or not predecessor_attempt_id.strip()
+                or predecessor_attempt_id == self.attempt.attempt_id
+                or details.get(outcome_key)
+                not in (
+                    {TerminalOutcome.INTERRUPTED.value}
+                    if is_recovery
+                    else {
+                        TerminalOutcome.CANCELLED.value,
+                        TerminalOutcome.COMPLETED.value,
+                    }
+                )
+                or (
+                    is_recovery
+                    and (
+                        details.get("recovery_generation")
+                        != self.attempt.attempt_number - 1
+                        or details.get("recovery_budget_remaining")
+                        != 3 - self.attempt.attempt_number
+                    )
+                )
             ):
                 raise FormalTaskViolation(
                     "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
-                    "retry segment boundary does not bind exact predecessor lineage",
+                    "successor segment boundary does not bind exact predecessor lineage",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
 
@@ -2218,6 +2267,7 @@ __all__ = [
     "AdmissionPolicy",
     "AdmissionPriority",
     "AppliedTaskRetryReplay",
+    "DurableRecoveryAuthoritySnapshot",
     "ExecutorDeliveryResult",
     "ExecutorObservation",
     "ExecutorResolution",

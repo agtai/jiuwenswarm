@@ -52,6 +52,8 @@ from .formal_task_models import (
     require_exact_payload,
     utc_now,
 )
+from .durability_identity import DurabilityProfileBinding
+from .durability_recovery_facts import ExecutorRecoveryFacts
 from .task_store import SqliteTaskStore
 
 _PROJECTABLE_TASK_EVENTS = frozenset(
@@ -95,6 +97,19 @@ class FormalExecutor(Protocol):
         self, task: PersistentTaskRecord, attempt: PersistentAttemptRecord
     ) -> ExecutorRetryReadiness:
         """Prove exact predecessor cleanup before a bounded retry is admitted."""
+
+    def recovery_facts(
+        self,
+        task: PersistentTaskRecord,
+        producer_attempt: PersistentAttemptRecord,
+        *,
+        candidate_recovery_attempt_id: str,
+        profile: DurabilityProfileBinding,
+        recovery_generation: int,
+        observed_at: str,
+        expires_at: str,
+    ) -> ExecutorRecoveryFacts:
+        """Prove exact Executor/runtime/OS quiescence for linked recovery."""
 
 
 def _contract_error(error: FormalTaskViolation) -> ContractViolation:
@@ -259,6 +274,116 @@ class PersistentTaskCore:
         """Expose Store-derived retry lineage without accepting client payload."""
 
         return self.store.read_current_retry_authority(scope=scope, task_id=task_id)
+
+    async def recover_durable_attempt(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        operator_id: str,
+        observed_at: str | None = None,
+    ) -> PersistentAttemptRecord:
+        """Operator-only, unregistered linked recovery orchestration."""
+
+        if (
+            type(operator_id) is not str
+            or not operator_id.strip()
+            or len(operator_id.encode("utf-8")) > 512
+        ):
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_OPERATOR",
+                "durable recovery requires one bounded operator identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        now = observed_at or utc_now()
+        try:
+            parsed_now = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            if parsed_now.tzinfo is None:
+                raise ValueError
+        except (TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_TIME",
+                "durable recovery time must be canonical UTC",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        expires_at = (
+            (parsed_now + _OUTBOX_CLAIM_LEASE)
+            .astimezone(UTC)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+        authority = self.store.read_durable_recovery_authority(
+            scope=scope, task_id=task_id
+        )
+        binding = self.store.read_durability_binding(
+            scope=scope,
+            task_id=task_id,
+            origin_attempt_id=authority.producer_attempt.attempt_id,
+        )
+        owner_id = f"durability-recovery:{operator_id}:{uuid.uuid4().hex}"
+        claim = self.store.claim_durability_mutator(
+            scope=scope,
+            task_id=task_id,
+            owner_id=owner_id,
+            observed_at=now,
+            expires_at=expires_at,
+        )
+        if claim is None:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_MUTATOR_BUSY",
+                "another durability mutator owns the Task",
+                ErrorCode.UNAVAILABLE,
+            )
+        candidate_attempt_id = f"attempt-{uuid.uuid4().hex}"
+        recovery_id = f"recovery-{uuid.uuid4().hex}"
+        try:
+            checkpoints = self.store.read_durability_checkpoints(binding)
+            effects = self.store.read_durability_effects(binding)
+            facts_method = getattr(self.executor, "recovery_facts", None)
+            if not callable(facts_method):
+                raise FormalTaskViolation(
+                    "EXECUTOR_DURABILITY_UNAVAILABLE",
+                    "Executor recovery facts are unavailable",
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                )
+            facts = facts_method(
+                authority.task,
+                authority.producer_attempt,
+                candidate_recovery_attempt_id=candidate_attempt_id,
+                profile=binding.profile,
+                recovery_generation=authority.recovery_generation,
+                observed_at=now,
+                expires_at=expires_at,
+            )
+            if type(facts) is not ExecutorRecoveryFacts:
+                raise FormalTaskViolation(
+                    "EXECUTOR_RECOVERY_FACTS_INVALID",
+                    "Executor recovery facts are not exact",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            return self.store.recover_durable_attempt(
+                authority,
+                recovery_id=recovery_id,
+                recovery_facts=facts,
+                checkpoint_head=checkpoints.head,
+                checkpoint_prefix_digest=checkpoints.prefix_digest,
+                effect_head=effects.head,
+                effect_prefix_digest=effects.prefix_digest,
+                claim_owner_id=owner_id,
+                claim_token=claim[0],
+                claim_generation=claim[1],
+                observed_at=now,
+                admission_policy=self._admission_policy,
+            )
+        except BaseException:
+            self.store.release_durability_mutator(
+                scope=scope,
+                task_id=task_id,
+                owner_id=owner_id,
+                claim_token=claim[0],
+                claim_generation=claim[1],
+            )
+            raise
 
     def read_current_retry_admission(
         self,
@@ -474,17 +599,14 @@ class PersistentTaskCore:
                     )
                 context.require_usable(
                     scope=command.scope,
-                    required_permissions=frozenset(
-                        {"task.execute", "project.write"}
-                    ),
+                    required_permissions=frozenset({"task.execute", "project.write"}),
                     destructive=True,
                     now=observed_at,
                 )
                 attributes = command.payload["attributes"]
                 if (
                     type(attributes) is not dict
-                    or set(attributes)
-                    != {"model_identity", "model_config_version"}
+                    or set(attributes) != {"model_identity", "model_config_version"}
                     or any(
                         type(key) is not str or type(value) is not str
                         for key, value in attributes.items()
@@ -1081,10 +1203,7 @@ class PersistentTaskCore:
                             attempt.attempt_id,
                             "EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED",
                         )
-                        if (
-                            receipt.disposition
-                            is TaskMutationDisposition.SUPERSEDED
-                        ):
+                        if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
                             superseded += 1
                             continue
                         unavailable += 1

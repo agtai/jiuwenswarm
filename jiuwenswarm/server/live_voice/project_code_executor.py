@@ -10,6 +10,7 @@ neither adapter owns formal command, task, event, or retry identity.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import inspect
@@ -44,12 +45,28 @@ from jiuwenswarm.common.coding_memory_paths import (
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
+    ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 from .demo_fixture_contract import DEMO_ITINERARY_TASK_NAME
+from .durability_checkpoint import D1Checkpoint
+from .durability_effects import (
+    EffectDispatchReceipt,
+    EffectContinuationAuthorization,
+    EffectObservationKind,
+    EffectSettlementKind,
+    ExternalEffectBinding,
+    ExternalEffectDispatch,
+    ExternalEffectIntent,
+    ExternalEffectObservation,
+    ExternalEffectSettlement,
+)
+from .durability_identity import DurabilityProfileBinding
+from .durability_readers import DurabilityReadBinding, VerifiedEffectPrefix
+from .durability_recovery_facts import ExecutorRecoveryFacts
 from .executor_capabilities import (
     EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
@@ -78,6 +95,7 @@ from .formal_task_models import (
     TaskResultArtifact,
     utc_now,
 )
+from .task_store import SqliteTaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +128,7 @@ _MAX_DIRECT_CLEANUP_TIMEOUT_SECONDS = 5.0
 _DEFAULT_DIRECT_ATTEMPT_TIMEOUT_SECONDS = 30.0 * 60.0
 _MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 _MAX_DIRECT_RUNNING_WORKERS = 32
-_DIRECT_CAPABILITY_PROFILE = ExecutorCapabilityProfile(
+_DIRECT_D0_CAPABILITY_PROFILE = ExecutorCapabilityProfile(
     schema_version=EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     profile_id="live-voice.direct-project-code.d0.v1",
     executor_id=FORMAL_PROJECT_EXECUTOR_ID,
@@ -134,6 +152,41 @@ _DIRECT_CAPABILITY_PROFILE = ExecutorCapabilityProfile(
         "os-ownership-lock.cross-process",
         "side-effect.project-mutation",
     ),
+)
+_DIRECT_CAPABILITY_PROFILE = ExecutorCapabilityProfile(
+    schema_version=EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
+    profile_id="live-voice.direct-project-code.d2.v1",
+    executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+    adapter_id="live-voice.direct-project-code",
+    adapter_protocol_version="live-voice.direct-project-code.v1",
+    operation_versions=(
+        ("dispatch", "v1"),
+        ("status", "v1"),
+        ("cancel", "v1"),
+        ("adjust.demo-itinerary-checkpoint", "v1"),
+        ("reconcile.d0", "v1"),
+        ("checkpoint.d1", "v1"),
+        ("recover.d1", "v1"),
+        ("effect.d2", "v1"),
+        ("reconcile.d2", "v1"),
+    ),
+    durability_level="D2",
+    durability_version="live-voice.direct-d2.v1",
+    project_serialization="exclusive",
+    max_live_attempts=_MAX_DIRECT_RUNNING_WORKERS,
+    enforcement_facts=(
+        "direct-journal.d0",
+        "direct-lease.generation",
+        "direct-runtime-deadline.absolute",
+        "os-ownership-lock.cross-process",
+        "store-checkpoint.d1",
+        "store-effect-ledger.d2",
+        "side-effect.project-mutation",
+    ),
+)
+_DIRECT_KNOWN_CAPABILITY_PROFILES = (
+    _DIRECT_D0_CAPABILITY_PROFILE,
+    _DIRECT_CAPABILITY_PROFILE,
 )
 _PROTECTED_TARGET_SUPPORT_PATHS = tuple(FORMAL_RUNTIME_SUPPORT_POLICY)
 _EXECUTION_TARGET_FIELDS = {
@@ -647,6 +700,94 @@ def _expected_project_state_matches(root: Path, expected_state: str) -> bool:
     if _project_content_fingerprint(root) == parts[1]:
         return True
     return hashlib.sha256(_git_visible_patch(root)).hexdigest() == parts[2]
+
+
+_D2_CHECKPOINT_STATE_SCHEMA = "live-voice.direct-project-apply"
+_D2_CHECKPOINT_STATE_VERSION = 1
+
+
+def _d2_checkpoint_state(
+    *,
+    patch: bytes,
+    expected_tree: str,
+    before_tree: str,
+    before_content: str,
+    before_head: str,
+    protected_support: Mapping[str, str],
+    result_text: str | None,
+    result_artifacts: tuple[TaskResultArtifact, ...],
+) -> bytes:
+    return canonical_json_bytes(
+        {
+            "patch_base64": base64.b64encode(patch).decode("ascii"),
+            "expected_tree": expected_tree,
+            "before_tree": before_tree,
+            "before_content": before_content,
+            "before_head": before_head,
+            "protected_support": dict(sorted(protected_support.items())),
+            "result_text": result_text,
+            "result_artifacts": [item.to_dict() for item in result_artifacts],
+        }
+    )
+
+
+def _decode_d2_checkpoint_state(payload: bytes) -> dict[str, object]:
+    try:
+        value = json.loads(payload.decode("utf-8"))
+        if type(value) is not dict or set(value) != {
+            "patch_base64",
+            "expected_tree",
+            "before_tree",
+            "before_content",
+            "before_head",
+            "protected_support",
+            "result_text",
+            "result_artifacts",
+        }:
+            raise ValueError
+        patch_text = value["patch_base64"]
+        if type(patch_text) is not str:
+            raise ValueError
+        patch = base64.b64decode(patch_text, validate=True)
+        if not patch or base64.b64encode(patch).decode("ascii") != patch_text:
+            raise ValueError
+        for field in (
+            "expected_tree",
+            "before_tree",
+            "before_content",
+            "before_head",
+        ):
+            if type(value[field]) is not str or not value[field]:
+                raise ValueError
+        protected = value["protected_support"]
+        if type(protected) is not dict or any(
+            type(key) is not str or type(item) is not str
+            for key, item in protected.items()
+        ):
+            raise ValueError
+        result_text = value["result_text"]
+        if result_text is not None and type(result_text) is not str:
+            raise ValueError
+        raw_artifacts = value["result_artifacts"]
+        if type(raw_artifacts) is not list:
+            raise ValueError
+        artifacts = tuple(
+            TaskResultArtifact(
+                relative_path=item["relative_path"],
+                sha256=item["sha256"],
+            )
+            for item in raw_artifacts
+            if type(item) is dict and set(item) == {"relative_path", "sha256"}
+        )
+        if len(artifacts) != len(raw_artifacts):
+            raise ValueError
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise FormalTaskViolation(
+            "DURABILITY_CHECKPOINT_CORRUPT",
+            "Direct checkpoint state is invalid",
+            ErrorCode.PROTOCOL_VIOLATION,
+        ) from error
+    return {**value, "patch": patch, "result_artifacts": artifacts}
 
 
 def _path_fingerprint(path: Path) -> str:
@@ -2417,9 +2558,7 @@ def _closed_direct_stream_observation(
         return None
     tool_name = carrier.get("tool_name") or carrier.get("name")
     call_id = (
-        carrier.get("tool_call_id")
-        or carrier.get("toolCallId")
-        or carrier.get("id")
+        carrier.get("tool_call_id") or carrier.get("toolCallId") or carrier.get("id")
     )
     closed_name = _closed_stream_text(tool_name, maximum=64)
     file_tool_kind = (
@@ -2491,7 +2630,7 @@ class _AdjustmentCheckpoint:
 
 
 class DirectProjectCodeExecutorAdapter:
-    """Durable D0 Executor that calls the project Code Agent without schedule.*.
+    """Durable D2 Executor that calls the project Code Agent without schedule.*.
 
     The formal Task Core remains the command/event/outbox authority.  This
     adapter owns only one exact attempt journal plus the direct Agent worker.
@@ -2503,7 +2642,7 @@ class DirectProjectCodeExecutorAdapter:
 
     @classmethod
     def capability_profile(cls) -> ExecutorCapabilityProfile:
-        """Return the immutable protocol/build declaration for Direct D0."""
+        """Return the immutable protocol/build declaration for Direct D2."""
 
         return _DIRECT_CAPABILITY_PROFILE
 
@@ -2521,6 +2660,7 @@ class DirectProjectCodeExecutorAdapter:
         demo_itinerary_adjustment_checkpoint_enabled: bool = False,
         adjustment_checkpoint_barrier: (Callable[[str], Awaitable[None]] | None) = None,
         stream_observer: DirectStreamObserver | None = None,
+        durability_store: SqliteTaskStore | None = None,
     ) -> None:
         if (
             isinstance(heartbeat_interval, bool)
@@ -2574,8 +2714,17 @@ class DirectProjectCodeExecutorAdapter:
             raise ValueError("adjustment_checkpoint_barrier must be callable")
         if stream_observer is not None and not callable(stream_observer):
             raise ValueError("stream_observer must be callable")
+        if durability_store is not None and not isinstance(
+            durability_store, SqliteTaskStore
+        ):
+            raise TypeError("durability_store must be a SqliteTaskStore")
+        if durability_store is not None and Path(
+            durability_store.database_path
+        ).resolve(strict=False) != Path(database).resolve(strict=False):
+            raise ValueError("durability_store must use the Direct journal database")
         self._resolver = resolver
         self._journal = _DirectProjectAttemptJournal(database)
+        self._durability_store = durability_store
         self._clock = clock
         self._heartbeat_interval = float(heartbeat_interval)
         self._attempt_timeout = float(attempt_timeout)
@@ -2589,7 +2738,7 @@ class DirectProjectCodeExecutorAdapter:
         self._stream_observer = stream_observer
         self._stream_observer_lock = RLock() if stream_observer is not None else None
         self._stream_observer_failure_count = 0
-        self._owner_id = f"d0-project-executor-{uuid.uuid4().hex}"
+        self._owner_id = f"direct-project-executor-{uuid.uuid4().hex}"
         self._running: dict[str, asyncio.Task[None]] = {}
         self._applying: set[str] = set()
         self._interruptions: dict[str, tuple[str, str]] = {}
@@ -2670,6 +2819,862 @@ class DirectProjectCodeExecutorAdapter:
         """Report whether an attempt can still touch its isolated checkout."""
 
         return any(not worker.done() for worker in self._running.values())
+
+    @classmethod
+    def durability_profile_binding(
+        cls, selection: PersistedExecutorSelection
+    ) -> DurabilityProfileBinding:
+        """Translate one exact persisted Direct selection without upgrading it."""
+
+        parsed = cls._parsed_selection(selection)
+        if parsed is None or parsed.profile.durability_level not in {"D1", "D2"}:
+            raise FormalTaskViolation(
+                "EXECUTOR_DURABILITY_UNSUPPORTED",
+                "persisted Direct profile does not declare recoverable durability",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        return DurabilityProfileBinding(
+            executor_id=parsed.profile.executor_id,
+            adapter_id=parsed.profile.adapter_id,
+            profile_id=parsed.profile.profile_id,
+            profile_version=parsed.profile.adapter_protocol_version,
+            profile_digest=selection.capability_profile_digest,
+            durability_level=parsed.profile.durability_level,
+            durability_capability_version=parsed.profile.durability_version,
+        )
+
+    def recovery_facts(
+        self,
+        task: PersistentTaskRecord,
+        producer_attempt: PersistentAttemptRecord,
+        *,
+        candidate_recovery_attempt_id: str,
+        profile: DurabilityProfileBinding,
+        recovery_generation: int,
+        observed_at: str,
+        expires_at: str,
+    ) -> ExecutorRecoveryFacts:
+        """Prove journal lease, runtime generation and OS ownership quiescence."""
+
+        if (
+            type(task) is not PersistentTaskRecord
+            or type(producer_attempt) is not PersistentAttemptRecord
+            or task.task_id != producer_attempt.task_id
+            or task.attempt_id != producer_attempt.attempt_id
+            or task.outcome is not TerminalOutcome.INTERRUPTED
+            or producer_attempt.outcome is not TerminalOutcome.INTERRUPTED
+            or producer_attempt.selection is None
+            or self.durability_profile_binding(producer_attempt.selection) != profile
+            or profile.durability_level not in {"D1", "D2"}
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_RECOVERY_BINDING_MISMATCH",
+                "Direct recovery facts do not bind the interrupted producer",
+                ErrorCode.CONFLICT,
+            )
+        record = self._journal.get(producer_attempt.attempt_id)
+        context_path = task.spec.context.file_path
+        if context_path is None:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_NOT_BOUND",
+                "Direct recovery requires an exact file context",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            root = Path(context_path).resolve(strict=True)
+            exact_record = (
+                record is not None
+                and record.task_id == task.task_id
+                and record.spec_fingerprint == task.spec.fingerprint_bytes()
+                and _path_key(record.project_root) == _path_key(root)
+                and record.state is FormalAttemptState.TERMINAL
+                and record.outcome is TerminalOutcome.INTERRUPTED
+                and record.owner_id is None
+                and record.lease_expires_at is None
+            )
+        except (OSError, RuntimeError, ValueError):
+            exact_record = False
+        if (
+            not exact_record
+            or producer_attempt.attempt_id in self._running
+            or producer_attempt.attempt_id in self._applying
+            or producer_attempt.attempt_id in self._interruptions
+            or producer_attempt.attempt_id in self._retained_worktree_cleanups
+            or producer_attempt.attempt_id in self._adjustment_checkpoints
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_RECOVERY_NOT_QUIESCENT",
+                "Direct producer still owns runtime or lease state",
+                ErrorCode.UNAVAILABLE,
+            )
+        ownership = _AttemptOwnershipLock.try_acquire(root, producer_attempt.attempt_id)
+        if ownership is None:
+            raise FormalTaskViolation(
+                "EXECUTOR_ATTEMPT_OWNERSHIP_UNAVAILABLE",
+                "another process still owns the producer Attempt",
+                ErrorCode.UNAVAILABLE,
+            )
+        ownership.release()
+        evidence_digest = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "task_id": task.task_id,
+                    "producer_attempt_id": producer_attempt.attempt_id,
+                    "recovery_generation": recovery_generation,
+                    "quiescent": True,
+                }
+            )
+        ).hexdigest()
+        assert record is not None
+        return ExecutorRecoveryFacts.create(
+            scope=task.scope,
+            task_id=task.task_id,
+            producer_attempt_id=producer_attempt.attempt_id,
+            candidate_recovery_attempt_id=candidate_recovery_attempt_id,
+            profile=profile,
+            recovery_generation=recovery_generation,
+            executor_epoch_id=self._owner_id,
+            executor_owner_generation=max(record.source_seq, 0),
+            observed_at=observed_at,
+            expires_at=expires_at,
+            evidence_digest=evidence_digest,
+        )
+
+    def _d2_binding_for_item(
+        self, item: PersistentOutboxItem
+    ) -> DurabilityReadBinding | None:
+        if item.selection is None:
+            return None
+        parsed = self._parsed_selection(item.selection)
+        assert parsed is not None
+        if parsed.profile.durability_level == "D0":
+            return None
+        profile = self.durability_profile_binding(item.selection)
+        if profile.durability_level != "D2":
+            return None
+        store = self._durability_store
+        if store is None:
+            raise FormalTaskViolation(
+                "EXECUTOR_DURABILITY_UNAVAILABLE",
+                "Direct D2 requires its authoritative Task Store",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        recovery = store.read_durable_recovery_dispatch(
+            scope=item.scope,
+            task_id=item.task_id,
+            recovery_attempt_id=item.attempt_id,
+        )
+        origin_attempt_id = item.attempt_id if recovery is None else recovery[0]
+        binding = store.read_durability_binding(
+            scope=item.scope,
+            task_id=item.task_id,
+            origin_attempt_id=origin_attempt_id,
+        )
+        if binding.profile != profile:
+            raise FormalTaskViolation(
+                "DURABILITY_BINDING_MISMATCH",
+                "Direct D2 item does not match its persisted profile",
+                ErrorCode.CONFLICT,
+            )
+        return binding
+
+    async def _resume_d2_recovery(
+        self,
+        item: PersistentOutboxItem,
+        recovery: tuple[str, int, int, str, int, str],
+    ) -> ExecutorDeliveryResult:
+        """Resume an immutable Direct checkpoint without invoking the Agent again."""
+
+        assert self._durability_store is not None
+        (
+            origin_attempt_id,
+            generation,
+            checkpoint_head,
+            checkpoint_digest,
+            effect_head,
+            effect_digest,
+        ) = recovery
+        binding = self._d2_binding_for_item(item)
+        assert binding is not None
+        checkpoints = await asyncio.to_thread(
+            self._durability_store.read_durability_checkpoints,
+            binding,
+            expected_head=checkpoint_head,
+            expected_prefix_digest=checkpoint_digest,
+        )
+        effects = await asyncio.to_thread(
+            self._durability_store.read_durability_effects,
+            binding,
+            expected_head=effect_head,
+            expected_prefix_digest=effect_digest,
+        )
+        if not checkpoints.records:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CHECKPOINT_REQUIRED",
+                "linked Direct Attempt has no complete checkpoint",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        checkpoint = checkpoints.records[-1]
+        state = _decode_d2_checkpoint_state(checkpoint.state_bytes)
+        if (
+            checkpoint.profile != binding.profile
+            or checkpoint.task_spec_digest
+            != hashlib.sha256(item.spec.fingerprint_bytes()).hexdigest()
+            or checkpoint.context_digest
+            != hashlib.sha256(
+                canonical_json_bytes(item.spec.context.to_dict())
+            ).hexdigest()
+            or str(item.spec.context.revision_value) != checkpoint.context_version
+            or checkpoint.effect_head != effect_head
+            or checkpoint.effect_prefix_digest != effect_digest
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CHECKPOINT_STALE",
+                "linked Direct checkpoint does not match Task/context/effects",
+                ErrorCode.STALE,
+            )
+        intent = next(
+            (
+                record
+                for record in effects.records
+                if isinstance(record, ExternalEffectIntent)
+            ),
+            None,
+        )
+        previous_dispatch = next(
+            (
+                record
+                for record in reversed(effects.records)
+                if isinstance(record, ExternalEffectDispatch)
+            ),
+            None,
+        )
+        previous_observation = next(
+            (
+                record
+                for record in reversed(effects.records)
+                if isinstance(record, ExternalEffectObservation)
+            ),
+            None,
+        )
+        if (
+            intent is None
+            or previous_dispatch is None
+            or previous_observation is None
+            or previous_observation.kind is not EffectObservationKind.NO_EFFECT
+            or previous_observation.dispatch_ordinal
+            != previous_dispatch.dispatch_ordinal
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_EFFECT_UNKNOWN",
+                "linked Direct effect is not safely replayable",
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        context_path = item.spec.context.file_path
+        if context_path is None:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_NOT_BOUND",
+                "linked Direct recovery requires an exact file context",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        root = Path(context_path).resolve(strict=True)
+        protected_support = state["protected_support"]
+        if (
+            _git_head(root) != state["before_head"]
+            or _project_tree_fingerprint(root) != state["before_tree"]
+            or _project_content_fingerprint(root) != state["before_content"]
+            or _target_support_fingerprints(root) != protected_support
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CONTEXT_STALE",
+                "linked Direct target changed after no-effect observation",
+                ErrorCode.STALE,
+            )
+        governance = await asyncio.to_thread(_runtime_support_governance, root)
+        created, record = await asyncio.to_thread(
+            self._journal.create,
+            item=item,
+            project_root=str(root),
+            before_tree=str(state["before_tree"]),
+            before_content=str(state["before_content"]),
+            before_head=str(state["before_head"]),
+            protected_support=protected_support,
+            governance=governance,
+            owner_id=self._owner_id,
+            now=self._clock(),
+            runtime_deadline_at=_runtime_deadline(self._clock(), self._attempt_timeout),
+        )
+        if not created:
+            self._require_attempt_binding(record, item, root)
+            return self._delivery(
+                record, after_seq=item.source_seq, selection=item.selection
+            )
+        record = await asyncio.to_thread(
+            self._journal.start,
+            item.attempt_id,
+            owner_id=self._owner_id,
+            now=self._clock(),
+        )
+        ownership = await asyncio.to_thread(
+            _AttemptOwnershipLock.try_acquire, root, item.attempt_id
+        )
+        if ownership is None:
+            raise FormalTaskViolation(
+                "EXECUTOR_ATTEMPT_OWNERSHIP_UNAVAILABLE",
+                "another process owns the linked Direct Attempt",
+                ErrorCode.UNAVAILABLE,
+            )
+        try:
+            continuation = EffectContinuationAuthorization(
+                binding=intent.binding,
+                actor_attempt_id=item.attempt_id,
+                recovery_generation=generation,
+                checkpoint_head=checkpoint_head,
+                checkpoint_prefix_digest=checkpoint_digest,
+                effect_head=effect_head,
+                effect_prefix_digest=effect_digest,
+            )
+            prefix = await asyncio.to_thread(
+                self._durability_store.append_durability_effect_fact,
+                continuation,
+                row_sequence=effect_head + 1,
+                observed_at=self._clock(),
+            )
+            dispatch_ordinal = previous_dispatch.dispatch_ordinal + 1
+            dispatch = ExternalEffectDispatch(
+                binding=intent.binding,
+                actor_attempt_id=item.attempt_id,
+                dispatch_ordinal=dispatch_ordinal,
+                recovery_generation=generation,
+                provider_operation_key=intent.binding.effect_id,
+            )
+            prefix = await asyncio.to_thread(
+                self._durability_store.append_durability_effect_fact,
+                dispatch,
+                row_sequence=prefix.head + 1,
+                observed_at=self._clock(),
+            )
+            await asyncio.to_thread(
+                self._journal.reserve_completion,
+                item.attempt_id,
+                owner_id=self._owner_id,
+                expected_tree=str(state["expected_tree"]),
+                now=self._clock(),
+                result_text=state["result_text"],
+                result_artifacts=state["result_artifacts"],
+            )
+            await asyncio.to_thread(
+                _apply_attempt_patch,
+                root,
+                state["patch"],
+                expected_tree=str(state["expected_tree"]),
+                before_tree=str(state["before_tree"]),
+                before_head=str(state["before_head"]),
+                protected_support=protected_support,
+            )
+            receipt = EffectDispatchReceipt(
+                binding=intent.binding,
+                actor_attempt_id=item.attempt_id,
+                dispatch_ordinal=dispatch_ordinal,
+                recovery_generation=generation,
+                provider_operation_key=intent.binding.effect_id,
+                accepted=True,
+                receipt_digest=hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "provider_operation_key": intent.binding.effect_id,
+                            "accepted": True,
+                        }
+                    )
+                ).hexdigest(),
+            )
+            prefix = await asyncio.to_thread(
+                self._durability_store.append_durability_effect_fact,
+                receipt,
+                row_sequence=prefix.head + 1,
+                observed_at=self._clock(),
+            )
+            observation = ExternalEffectObservation(
+                binding=intent.binding,
+                actor_attempt_id=item.attempt_id,
+                observation_ordinal=previous_observation.observation_ordinal + 1,
+                dispatch_ordinal=dispatch_ordinal,
+                recovery_generation=generation,
+                kind=EffectObservationKind.APPLIED,
+                evidence_digest=hashlib.sha256(
+                    str(state["expected_tree"]).encode("utf-8")
+                ).hexdigest(),
+            )
+            prefix = await asyncio.to_thread(
+                self._durability_store.append_durability_effect_fact,
+                observation,
+                row_sequence=prefix.head + 1,
+                observed_at=self._clock(),
+            )
+            settlement = ExternalEffectSettlement(
+                binding=intent.binding,
+                actor_attempt_id=item.attempt_id,
+                settlement_ordinal=1,
+                recovery_generation=generation,
+                kind=EffectSettlementKind.RESOLVED,
+                evidence_head=prefix.head,
+                evidence_digest=prefix.prefix_digest,
+            )
+            await asyncio.to_thread(
+                self._durability_store.append_durability_effect_fact,
+                settlement,
+                row_sequence=prefix.head + 1,
+                observed_at=self._clock(),
+            )
+            result_artifacts = state["result_artifacts"]
+            if result_artifacts:
+                applied = await asyncio.to_thread(
+                    _applied_result_artifacts, root, result_artifacts
+                )
+                await asyncio.to_thread(
+                    self._journal.seal_applied_result,
+                    item.attempt_id,
+                    owner_id=self._owner_id,
+                    result_artifacts=applied,
+                    now=self._clock(),
+                )
+            record = await asyncio.to_thread(
+                self._journal.finish,
+                item.attempt_id,
+                owner_id=self._owner_id,
+                outcome=TerminalOutcome.COMPLETED,
+                raw_status="completed",
+                summary="project change completed from durable checkpoint",
+                error=None,
+                now=self._clock(),
+            )
+            return self._delivery(
+                record, after_seq=item.source_seq, selection=item.selection
+            )
+        except BaseException:
+            await asyncio.to_thread(
+                self._journal.finish,
+                item.attempt_id,
+                owner_id=self._owner_id,
+                outcome=TerminalOutcome.UNKNOWN,
+                raw_status="recovery_effect_unknown",
+                summary=None,
+                error="EXECUTOR_RECOVERY_EFFECT_UNKNOWN",
+                now=self._clock(),
+            )
+            raise
+        finally:
+            ownership.release()
+
+    async def _prepare_d2_project_effect(
+        self,
+        *,
+        item: PersistentOutboxItem,
+        record: _DirectAttempt,
+        patch: bytes,
+        expected_tree: str,
+        before_support: Mapping[str, str],
+        result_text: str | None,
+        result_artifacts: tuple[TaskResultArtifact, ...],
+    ) -> ExternalEffectBinding | None:
+        binding = self._d2_binding_for_item(item)
+        if binding is None:
+            return None
+        assert self._durability_store is not None
+        effects = await asyncio.to_thread(
+            self._durability_store.read_durability_effects, binding
+        )
+        state = _d2_checkpoint_state(
+            patch=patch,
+            expected_tree=expected_tree,
+            before_tree=record.before_tree,
+            before_content=record.before_content or record.before_tree,
+            before_head=record.before_head,
+            protected_support=before_support,
+            result_text=result_text,
+            result_artifacts=result_artifacts,
+        )
+        checkpoint = D1Checkpoint.create(
+            checkpoint_id=f"checkpoint-{item.attempt_id}-1",
+            scope=item.scope,
+            task_id=item.task_id,
+            producer_attempt_id=item.attempt_id,
+            checkpoint_sequence=1,
+            recovery_generation=0,
+            profile=binding.profile,
+            complete=True,
+            task_spec_digest=hashlib.sha256(item.spec.fingerprint_bytes()).hexdigest(),
+            context_version=str(item.spec.context.revision_value),
+            context_digest=hashlib.sha256(
+                canonical_json_bytes(item.spec.context.to_dict())
+            ).hexdigest(),
+            input_digest=hashlib.sha256(
+                item.spec.instruction.encode("utf-8")
+            ).hexdigest(),
+            state_schema_id=_D2_CHECKPOINT_STATE_SCHEMA,
+            state_schema_version=_D2_CHECKPOINT_STATE_VERSION,
+            state_bytes=state,
+            effect_head=effects.head,
+            effect_prefix_digest=effects.prefix_digest,
+        )
+        await asyncio.to_thread(
+            self._durability_store.append_durability_checkpoint,
+            checkpoint,
+            observed_at=self._clock(),
+        )
+        target_digest = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "source": item.spec.context.source,
+                    "stable_id": item.spec.context.stable_id,
+                    "uri": item.spec.context.uri,
+                    "scope": item.spec.context.scope.to_dict(),
+                }
+            )
+        ).hexdigest()
+        intended_digest = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "expected_tree": expected_tree,
+                    "patch_digest": hashlib.sha256(patch).hexdigest(),
+                }
+            )
+        ).hexdigest()
+        operation_key = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "task_id": item.task_id,
+                    "origin_attempt_id": item.attempt_id,
+                    "operation_kind": "project.apply_patch",
+                    "operation_ordinal": 1,
+                    "target_digest": target_digest,
+                    "intended_effect_digest": intended_digest,
+                    "profile": binding.profile.to_dict(),
+                }
+            )
+        ).hexdigest()
+        effect_binding = ExternalEffectBinding(
+            scope=item.scope,
+            task_id=item.task_id,
+            origin_attempt_id=item.attempt_id,
+            profile=binding.profile,
+            effect_id=f"effect-{operation_key}",
+            operation_kind="project.apply_patch",
+            operation_ordinal=1,
+            target_digest=target_digest,
+            intended_effect_digest=intended_digest,
+        )
+        intent = ExternalEffectIntent(binding=effect_binding, replay_safe=False)
+        await asyncio.to_thread(
+            self._durability_store.append_durability_effect_fact,
+            intent,
+            row_sequence=effects.head + 1,
+            observed_at=self._clock(),
+        )
+        dispatch = ExternalEffectDispatch(
+            binding=effect_binding,
+            actor_attempt_id=item.attempt_id,
+            dispatch_ordinal=1,
+            recovery_generation=0,
+            provider_operation_key=effect_binding.effect_id,
+        )
+        await asyncio.to_thread(
+            self._durability_store.append_durability_effect_fact,
+            dispatch,
+            row_sequence=effects.head + 2,
+            observed_at=self._clock(),
+        )
+        return effect_binding
+
+    async def _settle_d2_project_effect(
+        self,
+        *,
+        item: PersistentOutboxItem,
+        binding: ExternalEffectBinding | None,
+        expected_tree: str,
+    ) -> None:
+        if binding is None:
+            return
+        assert self._durability_store is not None
+        provider_key = binding.effect_id
+        receipt = EffectDispatchReceipt(
+            binding=binding,
+            actor_attempt_id=item.attempt_id,
+            dispatch_ordinal=1,
+            recovery_generation=0,
+            provider_operation_key=provider_key,
+            accepted=True,
+            receipt_digest=hashlib.sha256(
+                canonical_json_bytes(
+                    {"provider_operation_key": provider_key, "accepted": True}
+                )
+            ).hexdigest(),
+        )
+        prefix = await asyncio.to_thread(
+            self._durability_store.append_durability_effect_fact,
+            receipt,
+            row_sequence=3,
+            observed_at=self._clock(),
+        )
+        observation = ExternalEffectObservation(
+            binding=binding,
+            actor_attempt_id=item.attempt_id,
+            observation_ordinal=1,
+            dispatch_ordinal=1,
+            recovery_generation=0,
+            kind=EffectObservationKind.APPLIED,
+            evidence_digest=hashlib.sha256(expected_tree.encode("utf-8")).hexdigest(),
+        )
+        prefix = await asyncio.to_thread(
+            self._durability_store.append_durability_effect_fact,
+            observation,
+            row_sequence=prefix.head + 1,
+            observed_at=self._clock(),
+        )
+        settlement = ExternalEffectSettlement(
+            binding=binding,
+            actor_attempt_id=item.attempt_id,
+            settlement_ordinal=1,
+            recovery_generation=0,
+            kind=EffectSettlementKind.RESOLVED,
+            evidence_head=prefix.head,
+            evidence_digest=prefix.prefix_digest,
+        )
+        prefix = await asyncio.to_thread(
+            self._durability_store.append_durability_effect_fact,
+            settlement,
+            row_sequence=prefix.head + 1,
+            observed_at=self._clock(),
+        )
+        await self._append_effect_bound_checkpoint(binding, prefix)
+
+    async def _append_effect_bound_checkpoint(
+        self,
+        binding: ExternalEffectBinding,
+        effect_prefix: VerifiedEffectPrefix,
+    ) -> None:
+        assert self._durability_store is not None
+        read_binding = DurabilityReadBinding(
+            scope=binding.scope,
+            task_id=binding.task_id,
+            origin_attempt_id=binding.origin_attempt_id,
+            profile=binding.profile,
+        )
+        checkpoints = await asyncio.to_thread(
+            self._durability_store.read_durability_checkpoints, read_binding
+        )
+        if not checkpoints.records:
+            raise FormalTaskViolation(
+                "DURABILITY_PREFIX_PARTIAL",
+                "Direct effect has no immutable checkpoint",
+                ErrorCode.STALE,
+            )
+        prior = checkpoints.records[-1]
+        checkpoint = D1Checkpoint.create(
+            checkpoint_id=(
+                f"checkpoint-{binding.origin_attempt_id}-"
+                f"{prior.checkpoint_sequence + 1}"
+            ),
+            scope=prior.scope,
+            task_id=prior.task_id,
+            producer_attempt_id=prior.producer_attempt_id,
+            checkpoint_sequence=prior.checkpoint_sequence + 1,
+            recovery_generation=prior.recovery_generation,
+            profile=prior.profile,
+            complete=True,
+            task_spec_digest=prior.task_spec_digest,
+            context_version=prior.context_version,
+            context_digest=prior.context_digest,
+            input_digest=prior.input_digest,
+            state_schema_id=prior.state_schema_id,
+            state_schema_version=prior.state_schema_version,
+            state_bytes=prior.state_bytes,
+            effect_head=effect_prefix.head,
+            effect_prefix_digest=effect_prefix.prefix_digest,
+        )
+        await asyncio.to_thread(
+            self._durability_store.append_durability_checkpoint,
+            checkpoint,
+            observed_at=self._clock(),
+        )
+
+    async def reconcile_durable_effects(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        origin_attempt_id: str,
+        observed_at: str,
+    ) -> str:
+        """Converge one unacknowledged D2 project call from authoritative state."""
+
+        store = self._durability_store
+        if store is None:
+            raise FormalTaskViolation(
+                "EXECUTOR_DURABILITY_UNAVAILABLE",
+                "Direct D2 requires its authoritative Task Store",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        binding = await asyncio.to_thread(
+            store.read_durability_binding,
+            scope=scope,
+            task_id=task_id,
+            origin_attempt_id=origin_attempt_id,
+        )
+        if binding.profile.durability_level != "D2":
+            raise FormalTaskViolation(
+                "EXECUTOR_DURABILITY_UNSUPPORTED",
+                "persisted Direct profile does not declare D2 effects",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        checkpoints = await asyncio.to_thread(
+            store.read_durability_checkpoints, binding
+        )
+        effects = await asyncio.to_thread(store.read_durability_effects, binding)
+        if not checkpoints.records or len(effects.records) < 2:
+            raise FormalTaskViolation(
+                "DURABILITY_PREFIX_PARTIAL",
+                "Direct durability prefixes are incomplete",
+                ErrorCode.STALE,
+            )
+        latest = effects.records[-1]
+        if isinstance(latest, ExternalEffectSettlement):
+            return latest.kind.value
+        intent = next(
+            (
+                record
+                for record in effects.records
+                if isinstance(record, ExternalEffectIntent)
+            ),
+            None,
+        )
+        dispatch = next(
+            (
+                record
+                for record in reversed(effects.records)
+                if isinstance(record, ExternalEffectDispatch)
+            ),
+            None,
+        )
+        if intent is None or dispatch is None or intent.binding != dispatch.binding:
+            raise FormalTaskViolation(
+                "DURABILITY_PREFIX_PARTIAL",
+                "Direct effect dispatch is incomplete",
+                ErrorCode.STALE,
+            )
+        checkpoint = checkpoints.records[-1]
+        if (
+            checkpoint.profile != binding.profile
+            or checkpoint.effect_prefix_digest
+            != store.read_durability_effects(
+                binding, expected_head=checkpoint.effect_head
+            ).prefix_digest
+            or checkpoint.state_schema_id != _D2_CHECKPOINT_STATE_SCHEMA
+            or checkpoint.state_schema_version != _D2_CHECKPOINT_STATE_VERSION
+        ):
+            raise FormalTaskViolation(
+                "DURABILITY_CHECKPOINT_STALE",
+                "Direct checkpoint does not bind the exact effect prefix",
+                ErrorCode.STALE,
+            )
+        state = _decode_d2_checkpoint_state(checkpoint.state_bytes)
+        task = await asyncio.to_thread(store.get_task, task_id, scope)
+        if (
+            hashlib.sha256(task.spec.fingerprint_bytes()).hexdigest()
+            != checkpoint.task_spec_digest
+            or hashlib.sha256(
+                canonical_json_bytes(task.spec.context.to_dict())
+            ).hexdigest()
+            != checkpoint.context_digest
+            or str(task.spec.context.revision_value) != checkpoint.context_version
+        ):
+            raise FormalTaskViolation(
+                "DURABILITY_CHECKPOINT_STALE",
+                "Direct checkpoint no longer matches Task context",
+                ErrorCode.STALE,
+            )
+        context_path = task.spec.context.file_path
+        if context_path is None:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_NOT_BOUND",
+                "Direct recovery requires an exact file context",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            root = Path(context_path).resolve(strict=True)
+            unchanged_authority = (
+                _git_head(root) == state["before_head"]
+                and _target_support_fingerprints(root) == state["protected_support"]
+            )
+            if unchanged_authority and _expected_project_state_matches(
+                root, str(state["expected_tree"])
+            ):
+                kind = EffectObservationKind.APPLIED
+            elif (
+                unchanged_authority
+                and _project_content_fingerprint(root) == state["before_content"]
+            ):
+                kind = EffectObservationKind.NO_EFFECT
+            else:
+                kind = EffectObservationKind.UNKNOWN
+        except Exception:  # noqa: BLE001 -- observation fails closed
+            kind = EffectObservationKind.UNKNOWN
+        observation_count = sum(
+            isinstance(record, ExternalEffectObservation) for record in effects.records
+        )
+        observation = ExternalEffectObservation(
+            binding=intent.binding,
+            actor_attempt_id=dispatch.actor_attempt_id,
+            observation_ordinal=observation_count + 1,
+            dispatch_ordinal=dispatch.dispatch_ordinal,
+            recovery_generation=dispatch.recovery_generation,
+            kind=kind,
+            evidence_digest=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "kind": kind.value,
+                        "expected_tree": state["expected_tree"],
+                        "before_content": state["before_content"],
+                    }
+                )
+            ).hexdigest(),
+        )
+        prefix = await asyncio.to_thread(
+            store.append_durability_effect_fact,
+            observation,
+            row_sequence=effects.head + 1,
+            observed_at=observed_at,
+        )
+        if kind is EffectObservationKind.NO_EFFECT:
+            await self._append_effect_bound_checkpoint(intent.binding, prefix)
+            return kind.value
+        settlement_kind = (
+            EffectSettlementKind.RESOLVED
+            if kind is EffectObservationKind.APPLIED
+            else EffectSettlementKind.MANUAL_REQUIRED
+        )
+        settlement_count = sum(
+            isinstance(record, ExternalEffectSettlement) for record in effects.records
+        )
+        settlement = ExternalEffectSettlement(
+            binding=intent.binding,
+            actor_attempt_id=dispatch.actor_attempt_id,
+            settlement_ordinal=settlement_count + 1,
+            recovery_generation=dispatch.recovery_generation,
+            kind=settlement_kind,
+            evidence_head=prefix.head,
+            evidence_digest=prefix.prefix_digest,
+        )
+        final_prefix = await asyncio.to_thread(
+            store.append_durability_effect_fact,
+            settlement,
+            row_sequence=prefix.head + 1,
+            observed_at=observed_at,
+        )
+        await self._append_effect_bound_checkpoint(intent.binding, final_prefix)
+        return (
+            kind.value if kind is EffectObservationKind.APPLIED else "manual_required"
+        )
 
     def retry_readiness(
         self,
@@ -2870,12 +3875,24 @@ class DirectProjectCodeExecutorAdapter:
     async def _dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_DISPATCH)
         self._selection_binding(item.selection, require_current_profile=True)
+        self._d2_binding_for_item(item)
         if self._closed:
             raise FormalTaskViolation(
                 "EXECUTOR_CAPABILITY_UNAVAILABLE",
                 "direct project Executor is closed",
                 ErrorCode.UNAVAILABLE,
             )
+        recovery = (
+            None
+            if self._durability_store is None
+            else self._durability_store.read_durable_recovery_dispatch(
+                scope=item.scope,
+                task_id=item.task_id,
+                recovery_attempt_id=item.attempt_id,
+            )
+        )
+        if recovery is not None:
+            return await self._resume_d2_recovery(item, recovery)
         context_path = item.spec.context.file_path
         if context_path is None:
             raise FormalTaskViolation(
@@ -3539,6 +4556,15 @@ class DirectProjectCodeExecutorAdapter:
                 expected_content,
                 patch=patch if not target_status else None,
             )
+            durable_effect = await self._prepare_d2_project_effect(
+                item=item,
+                record=record,
+                patch=patch,
+                expected_tree=expected_tree,
+                before_support=before_support,
+                result_text=(chat_final if result_artifacts else None),
+                result_artifacts=(result_artifacts if chat_final is not None else ()),
+            )
             reserved, completion_record = await asyncio.to_thread(
                 self._journal.reserve_completion,
                 item.attempt_id,
@@ -3586,6 +4612,11 @@ class DirectProjectCodeExecutorAdapter:
                         result_artifacts=applied_artifacts,
                         now=self._clock(),
                     )
+                await self._settle_d2_project_effect(
+                    item=item,
+                    binding=durable_effect,
+                    expected_tree=expected_tree,
+                )
             finally:
                 self._applying.discard(item.attempt_id)
             completion_pending = True
@@ -3956,16 +4987,7 @@ class DirectProjectCodeExecutorAdapter:
                 "reconciliation must query the exact original formal attempt",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        selected = self._parsed_selection(attempt.selection)
-        if selected is not None and selected.profile != self.capability_profile():
-            return self._resolution_observation(
-                task.task_id,
-                attempt.attempt_id,
-                attempt.executor_ref,
-                ExecutorResolution.UNAVAILABLE,
-                "EXECUTOR_SELECTION_PROFILE_DRIFT",
-                selection=attempt.selection,
-            )
+        self._parsed_selection(attempt.selection)
         record = await asyncio.to_thread(self._journal.get, attempt.attempt_id)
         if record is None:
             return self._resolution_observation(
@@ -4200,25 +5222,23 @@ class DirectProjectCodeExecutorAdapter:
                 "persisted Executor selection is not a compatible canonical binding",
                 ErrorCode.PROTOCOL_VIOLATION,
             ) from error
-        direct = _DIRECT_CAPABILITY_PROFILE
+        direct = next(
+            (
+                known
+                for known in _DIRECT_KNOWN_CAPABILITY_PROFILES
+                if parsed.profile == known
+            ),
+            None,
+        )
         if (
-            parsed.profile_digest != selection.capability_profile_digest
+            direct is None
+            or parsed.profile_digest != selection.capability_profile_digest
             or selection.adapter_id != parsed.profile.adapter_id
-            or parsed.profile.adapter_id != direct.adapter_id
             or parsed.profile.executor_id != cls.executor_id
-            or parsed.profile.adapter_protocol_version
-            != direct.adapter_protocol_version
-            or parsed.profile.operation_versions != direct.operation_versions
-            or parsed.profile.durability_version != direct.durability_version
-            or parsed.profile.project_serialization != direct.project_serialization
-            or parsed.profile.max_live_attempts != direct.max_live_attempts
-            or parsed.profile.enforcement_facts != direct.enforcement_facts
             or parsed.requirements.executor_id != cls.executor_id
-            or parsed.requirements.operation_versions != direct.operation_versions
-            or parsed.requirements.durability_level != direct.durability_level
             or parsed.requirements.side_effect_class != "project_mutation"
             or parsed.requirements.project_serialization
-            != direct.project_serialization
+            != parsed.profile.project_serialization
         ):
             raise FormalTaskViolation(
                 "EXECUTOR_SELECTION_ADAPTER_MISMATCH",
@@ -4237,7 +5257,10 @@ class DirectProjectCodeExecutorAdapter:
         parsed = cls._parsed_selection(selection)
         if parsed is None:
             return None, None
-        if require_current_profile and parsed.profile != cls.capability_profile():
+        if require_current_profile and parsed.profile not in (
+            _DIRECT_D0_CAPABILITY_PROFILE,
+            cls.capability_profile(),
+        ):
             raise FormalTaskViolation(
                 "EXECUTOR_SELECTION_PROFILE_MISMATCH",
                 "new dispatch does not match the frozen Direct capability profile",

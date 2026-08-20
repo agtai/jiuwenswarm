@@ -16,6 +16,7 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     EffectFact,
     EffectObservationKind,
     ExternalEffectBinding,
+    ExternalEffectDispatch,
     ExternalEffectIntent,
     ExternalEffectObservation,
     effect_fact_bytes,
@@ -51,6 +52,7 @@ def _profile(*, profile_id: str = "direct-profile") -> DurabilityProfileBinding:
         profile_id=profile_id,
         profile_version="profile.v1",
         profile_digest="1" * 64,
+        durability_level="D2",
         durability_capability_version="d1-d2.v1",
     )
 
@@ -65,7 +67,7 @@ def _read_binding(
     return DurabilityReadBinding(
         scope=scope or _scope(),
         task_id=task_id,
-        attempt_id=attempt_id,
+        origin_attempt_id=attempt_id,
         profile=profile or _profile(),
     )
 
@@ -82,13 +84,18 @@ def _checkpoint(
         task_id=task_id,
         producer_attempt_id="attempt-1",
         checkpoint_sequence=checkpoint_sequence,
+        recovery_generation=0,
         profile=_profile(),
+        complete=True,
+        task_spec_digest="4" * 64,
         context_version="context.v1",
         context_digest="2" * 64,
         input_digest="3" * 64,
         state_schema_id="agent-state",
         state_schema_version=1,
         state_bytes=b"state",
+        effect_head=0,
+        effect_prefix_digest="5" * 64,
     )
 
 
@@ -116,7 +123,7 @@ def _effect_binding(
     return ExternalEffectBinding(
         scope=_scope(),
         task_id=task_id,
-        attempt_id="attempt-1",
+        origin_attempt_id="attempt-1",
         profile=_profile(),
         effect_id=effect_id,
         operation_kind="tool.write",
@@ -196,13 +203,18 @@ def test_readers_deduplicate_exact_semantic_replay_and_reject_changed_fact() -> 
         task_id="task-1",
         producer_attempt_id="attempt-1",
         checkpoint_sequence=1,
+        recovery_generation=0,
         profile=_profile(),
+        complete=True,
+        task_spec_digest="4" * 64,
         context_version="context.v1",
         context_digest="2" * 64,
         input_digest="3" * 64,
         state_schema_id="agent-state",
         state_schema_version=1,
         state_bytes=b"state",
+        effect_head=0,
+        effect_prefix_digest="5" * 64,
     )
     with pytest.raises(DurabilityPrefixViolation) as checkpoint_conflict:
         verify_checkpoint_prefix(
@@ -274,8 +286,16 @@ def test_effect_reader_requires_intent_and_scopes_ordinals_to_effect_identity() 
     first_binding = _effect_binding(effect_id="effect-1", operation_ordinal=1)
     second_binding = _effect_binding(effect_id="effect-2", operation_ordinal=2)
     first_intent = ExternalEffectIntent(binding=first_binding, replay_safe=False)
+    first_dispatch = ExternalEffectDispatch(
+        binding=first_binding,
+        actor_attempt_id="attempt-1",
+        dispatch_ordinal=1,
+        recovery_generation=0,
+        provider_operation_key="provider-key-1",
+    )
     first_receipt = EffectDispatchReceipt(
         binding=first_binding,
+        actor_attempt_id="attempt-1",
         dispatch_ordinal=1,
         recovery_generation=0,
         provider_operation_key="provider-key-1",
@@ -284,14 +304,24 @@ def test_effect_reader_requires_intent_and_scopes_ordinals_to_effect_identity() 
     )
     first_observation = ExternalEffectObservation(
         binding=_effect_binding(),
+        actor_attempt_id="attempt-1",
         observation_ordinal=1,
+        dispatch_ordinal=1,
         recovery_generation=0,
         kind=EffectObservationKind.APPLIED,
         evidence_digest="7" * 64,
     )
     second_intent = ExternalEffectIntent(binding=second_binding, replay_safe=True)
+    second_dispatch = ExternalEffectDispatch(
+        binding=second_binding,
+        actor_attempt_id="attempt-1",
+        dispatch_ordinal=1,
+        recovery_generation=0,
+        provider_operation_key="provider-key-2",
+    )
     second_receipt = EffectDispatchReceipt(
         binding=second_binding,
+        actor_attempt_id="attempt-1",
         dispatch_ordinal=1,
         recovery_generation=0,
         provider_operation_key="provider-key-2",
@@ -300,7 +330,9 @@ def test_effect_reader_requires_intent_and_scopes_ordinals_to_effect_identity() 
     )
     second_observation = ExternalEffectObservation(
         binding=second_binding,
+        actor_attempt_id="attempt-1",
         observation_ordinal=1,
+        dispatch_ordinal=1,
         recovery_generation=0,
         kind=EffectObservationKind.NO_EFFECT,
         evidence_digest="9" * 64,
@@ -308,16 +340,18 @@ def test_effect_reader_requires_intent_and_scopes_ordinals_to_effect_identity() 
     effect_prefix = verify_effect_prefix(
         (
             _effect_row(row_sequence=1, fact=first_intent),
-            _effect_row(row_sequence=2, fact=first_receipt),
-            _effect_row(row_sequence=3, fact=first_observation),
-            _effect_row(row_sequence=4, fact=second_intent),
-            _effect_row(row_sequence=5, fact=second_receipt),
-            _effect_row(row_sequence=6, fact=second_observation),
+            _effect_row(row_sequence=2, fact=first_dispatch),
+            _effect_row(row_sequence=3, fact=first_receipt),
+            _effect_row(row_sequence=4, fact=first_observation),
+            _effect_row(row_sequence=5, fact=second_intent),
+            _effect_row(row_sequence=6, fact=second_dispatch),
+            _effect_row(row_sequence=7, fact=second_receipt),
+            _effect_row(row_sequence=8, fact=second_observation),
         ),
         expected_binding=_read_binding(),
-        expected_head=6,
+        expected_head=8,
     )
-    assert len(effect_prefix.records) == 6
+    assert len(effect_prefix.records) == 8
 
     with pytest.raises(DurabilityPrefixViolation) as missing_intent:
         verify_effect_prefix(

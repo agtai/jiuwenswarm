@@ -38,6 +38,7 @@ def _profile(*, profile_id: str = "direct-profile") -> DurabilityProfileBinding:
         profile_id=profile_id,
         profile_version="profile.v1",
         profile_digest="1" * 64,
+        durability_level="D1",
         durability_capability_version="d1.v1",
     )
 
@@ -49,13 +50,18 @@ def _checkpoint(*, state_bytes: bytes = "{状态:继续}".encode()) -> D1Checkpo
         task_id="task-1",
         producer_attempt_id="attempt-1",
         checkpoint_sequence=7,
+        recovery_generation=0,
         profile=_profile(),
+        complete=True,
+        task_spec_digest="4" * 64,
         context_version="context.v3",
         context_digest="2" * 64,
         input_digest="3" * 64,
         state_schema_id="agent-state",
         state_schema_version=4,
         state_bytes=state_bytes,
+        effect_head=0,
+        effect_prefix_digest="5" * 64,
     )
 
 
@@ -112,13 +118,18 @@ def test_checkpoint_enforces_unicode_and_state_bounds() -> None:
             task_id="task-1",
             producer_attempt_id="attempt-1",
             checkpoint_sequence=1,
+            recovery_generation=0,
             profile=_profile(),
+            complete=True,
+            task_spec_digest="4" * 64,
             context_version="context.v1",
             context_digest="2" * 64,
             input_digest="3" * 64,
             state_schema_id="agent-state",
             state_schema_version=1,
             state_bytes=b"state",
+            effect_head=0,
+            effect_prefix_digest="5" * 64,
         )
     assert invalid_unicode.value.reason == "INVALID_DURABILITY_TEXT"
 

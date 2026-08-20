@@ -114,7 +114,8 @@ def test_profile_is_frozen_canonical_and_has_a_stable_lowercase_digest() -> None
     ("overrides", "match"),
     [
         ({"schema_version": "live-voice.executor-capability-profile.v2"}, "schema"),
-        ({"durability_level": "D1"}, "durability"),
+        ({"durability_level": "d1"}, "durability"),
+        ({"durability_level": "D3"}, "durability"),
         ({"project_serialization": "shared"}, "serialization"),
         ({"max_live_attempts": True}, "max_live_attempts"),
         ({"max_live_attempts": 0}, "max_live_attempts"),
@@ -189,7 +190,9 @@ def test_requirements_are_frozen_canonical_and_strict() -> None:
     with pytest.raises(ValueError, match="schema"):
         _requirements(schema_version="live-voice.task-execution-requirements.v2")
     with pytest.raises(ValueError, match="durability"):
-        _requirements(durability_level="D1")
+        _requirements(durability_level="d1")
+    with pytest.raises(ValueError, match="durability"):
+        _requirements(durability_level="D3")
     with pytest.raises(ValueError, match="serialization"):
         _requirements(project_serialization="shared")
 
@@ -232,6 +235,38 @@ def test_selector_filters_exact_compatibility_before_stable_ranking() -> None:
 
 
 @pytest.mark.parametrize(
+    ("profile_level", "requirement_level", "supported"),
+    [
+        ("D0", "D0", True),
+        ("D1", "D0", True),
+        ("D1", "D1", True),
+        ("D2", "D0", True),
+        ("D2", "D1", True),
+        ("D2", "D2", True),
+        ("D0", "D1", False),
+        ("D0", "D2", False),
+        ("D1", "D2", False),
+    ],
+)
+def test_selector_uses_closed_cumulative_durability_order(
+    profile_level: str,
+    requirement_level: str,
+    supported: bool,
+) -> None:
+    profile = _profile(durability_level=profile_level)
+    requirements = _requirements(durability_level=requirement_level)
+
+    if supported:
+        selection = select_executor((profile,), requirements)
+        assert selection.profile.durability_level == profile_level
+        assert selection.requirements.durability_level == requirement_level
+    else:
+        with pytest.raises(FormalTaskViolation) as rejected:
+            select_executor((profile,), requirements)
+        assert rejected.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
     ("profile", "requirements"),
     [
         (_profile(executor_id="another.executor"), _requirements()),
@@ -257,7 +292,9 @@ def test_selector_returns_one_stable_unsupported_violation_for_mismatch(
     )
 
 
-def test_selection_rejects_wrong_digest_incompatible_profile_and_fallback_fields() -> None:
+def test_selection_rejects_wrong_digest_incompatible_profile_and_fallback_fields() -> (
+    None
+):
     profile = _profile()
     requirements = _requirements()
 
@@ -277,7 +314,9 @@ def test_selection_rejects_wrong_digest_incompatible_profile_and_fallback_fields
         ExecutorSelection.from_dict(payload)
 
 
-def test_selector_rejects_duplicate_rank_identity_instead_of_using_input_order() -> None:
+def test_selector_rejects_duplicate_rank_identity_instead_of_using_input_order() -> (
+    None
+):
     first = _profile(max_live_attempts=31)
     second = _profile(max_live_attempts=32)
 

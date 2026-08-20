@@ -25,11 +25,14 @@ from jiuwenswarm.server.live_voice.durability_checkpoint import (
     D1Checkpoint,
 )
 from jiuwenswarm.server.live_voice.durability_effects import (
+    EffectContinuationAuthorization,
     EffectDispatchReceipt,
     EffectFact,
+    ExternalEffectDispatch,
     ExternalEffectIntent,
     ExternalEffectBinding,
     ExternalEffectObservation,
+    ExternalEffectSettlement,
     effect_fact_from_bytes,
 )
 from jiuwenswarm.server.live_voice.durability_identity import (
@@ -127,20 +130,20 @@ def _sha256(value: bytes) -> str:
 class DurabilityReadBinding:
     scope: ScopeRef
     task_id: str
-    attempt_id: str
+    origin_attempt_id: str
     profile: DurabilityProfileBinding
 
     def __post_init__(self) -> None:
         _scope(self.scope)
         _text(self.task_id, "read_binding.task_id")
-        _text(self.attempt_id, "read_binding.attempt_id")
+        _text(self.origin_attempt_id, "read_binding.origin_attempt_id")
         _profile(self.profile)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "scope": self.scope.to_dict(),
             "task_id": self.task_id,
-            "attempt_id": self.attempt_id,
+            "origin_attempt_id": self.origin_attempt_id,
             "profile": self.profile.to_dict(),
         }
 
@@ -209,7 +212,9 @@ def _normalize_binding(value: object) -> DurabilityReadBinding:
     return DurabilityReadBinding(
         scope=_scope(value.scope),
         task_id=_text(value.task_id, "read_binding.task_id"),
-        attempt_id=_text(value.attempt_id, "read_binding.attempt_id"),
+        origin_attempt_id=_text(
+            value.origin_attempt_id, "read_binding.origin_attempt_id"
+        ),
         profile=_profile(value.profile),
     )
 
@@ -372,7 +377,7 @@ def verify_checkpoint_prefix(
             if (
                 checkpoint.scope != binding.scope
                 or checkpoint.task_id != binding.task_id
-                or checkpoint.producer_attempt_id != binding.attempt_id
+                or checkpoint.producer_attempt_id != binding.origin_attempt_id
                 or checkpoint.profile != binding.profile
             ):
                 raise DurabilityPrefixViolation(
@@ -437,10 +442,13 @@ def verify_effect_prefix(
     records_by_identity: dict[tuple[str, str, int], EffectFact] = {}
     intents_by_effect: dict[str, ExternalEffectIntent] = {}
     effects_by_operation: dict[int, str] = {}
-    receipt_generations: dict[str, set[int]] = {}
     latest_operation_ordinal = 0
+    continuations: set[tuple[str, str, int]] = set()
+    dispatches: dict[tuple[str, int], ExternalEffectDispatch] = {}
+    latest_observations: dict[tuple[str, int], ExternalEffectObservation] = {}
     latest_dispatch_ordinal: dict[str, int] = {}
     latest_observation_ordinal: dict[str, int] = {}
+    latest_settlement_ordinal: dict[str, int] = {}
     try:
         for row in checked_rows:
             fact = effect_fact_from_bytes(row.canonical_bytes)
@@ -448,7 +456,7 @@ def verify_effect_prefix(
             if type(fact_binding) is not ExternalEffectBinding or (
                 fact_binding.scope != binding.scope
                 or fact_binding.task_id != binding.task_id
-                or fact_binding.attempt_id != binding.attempt_id
+                or fact_binding.origin_attempt_id != binding.origin_attempt_id
                 or fact_binding.profile != binding.profile
             ):
                 raise DurabilityPrefixViolation(
@@ -457,6 +465,14 @@ def verify_effect_prefix(
                 )
             if type(fact) is ExternalEffectIntent:
                 identity = ("intent", fact.binding.effect_id, 0)
+            elif type(fact) is EffectContinuationAuthorization:
+                identity = (
+                    "continuation",
+                    fact.binding.effect_id,
+                    fact.recovery_generation,
+                )
+            elif type(fact) is ExternalEffectDispatch:
+                identity = ("dispatch", fact.binding.effect_id, fact.dispatch_ordinal)
             elif type(fact) is EffectDispatchReceipt:
                 identity = ("receipt", fact.binding.effect_id, fact.dispatch_ordinal)
             elif type(fact) is ExternalEffectObservation:
@@ -464,6 +480,12 @@ def verify_effect_prefix(
                     "observation",
                     fact.binding.effect_id,
                     fact.observation_ordinal,
+                )
+            elif type(fact) is ExternalEffectSettlement:
+                identity = (
+                    "settlement",
+                    fact.binding.effect_id,
+                    fact.settlement_ordinal,
                 )
             else:
                 raise DurabilityPrefixViolation(
@@ -508,7 +530,35 @@ def verify_effect_prefix(
                         "effect fact changes its intent binding",
                     )
 
-                if type(fact) is EffectDispatchReceipt:
+                actor_id = getattr(
+                    fact, "actor_attempt_id", fact.binding.origin_attempt_id
+                )
+                recovery_generation = getattr(fact, "recovery_generation", 0)
+                if actor_id == fact.binding.origin_attempt_id:
+                    if recovery_generation != 0:
+                        raise DurabilityPrefixViolation(
+                            "DURABILITY_PREFIX_CORRUPT",
+                            "origin effect actor must use recovery generation zero",
+                        )
+                elif (
+                    type(fact) is not EffectContinuationAuthorization
+                    and (
+                        effect_id,
+                        actor_id,
+                        recovery_generation,
+                    )
+                    not in continuations
+                ):
+                    raise DurabilityPrefixViolation(
+                        "DURABILITY_BINDING_MISMATCH",
+                        "linked effect actor lacks Store continuation authorization",
+                    )
+
+                if type(fact) is EffectContinuationAuthorization:
+                    continuations.add(
+                        (effect_id, fact.actor_attempt_id, fact.recovery_generation)
+                    )
+                elif type(fact) is ExternalEffectDispatch:
                     if fact.dispatch_ordinal <= latest_dispatch_ordinal.get(
                         effect_id, 0
                     ):
@@ -516,17 +566,50 @@ def verify_effect_prefix(
                             "DURABILITY_PREFIX_CORRUPT",
                             "effect dispatch ordinal descends within the verified prefix",
                         )
-                    latest_dispatch_ordinal[effect_id] = fact.dispatch_ordinal
-                    receipt_generations.setdefault(effect_id, set()).add(
-                        fact.recovery_generation
+                    previous = dispatches.get(
+                        (effect_id, latest_dispatch_ordinal.get(effect_id, 0))
                     )
-                elif type(fact) is ExternalEffectObservation:
-                    if fact.recovery_generation not in receipt_generations.get(
-                        effect_id, set()
+                    if previous is not None:
+                        previous_observation = latest_observations.get(
+                            (effect_id, previous.dispatch_ordinal)
+                        )
+                        stable_key_replay = (
+                            intent.replay_safe
+                            and previous.provider_operation_key
+                            == fact.provider_operation_key
+                        )
+                        observed_no_effect = (
+                            previous_observation is not None
+                            and previous_observation.kind.value == "no_effect"
+                        )
+                        if not (stable_key_replay or observed_no_effect):
+                            raise DurabilityPrefixViolation(
+                                "DURABILITY_PREFIX_CONFLICT",
+                                "effect dispatch cannot be retried from unknown truth",
+                            )
+                    latest_dispatch_ordinal[effect_id] = fact.dispatch_ordinal
+                    dispatches[(effect_id, fact.dispatch_ordinal)] = fact
+                elif type(fact) is EffectDispatchReceipt:
+                    dispatch = dispatches.get((effect_id, fact.dispatch_ordinal))
+                    if dispatch is None or (
+                        dispatch.actor_attempt_id != fact.actor_attempt_id
+                        or dispatch.recovery_generation != fact.recovery_generation
+                        or dispatch.provider_operation_key
+                        != fact.provider_operation_key
                     ):
                         raise DurabilityPrefixViolation(
                             "DURABILITY_PREFIX_CORRUPT",
-                            "effect observation has no preceding dispatch receipt",
+                            "effect receipt has no exact preceding dispatch",
+                        )
+                elif type(fact) is ExternalEffectObservation:
+                    dispatch = dispatches.get((effect_id, fact.dispatch_ordinal))
+                    if dispatch is None or (
+                        dispatch.actor_attempt_id != fact.actor_attempt_id
+                        or dispatch.recovery_generation != fact.recovery_generation
+                    ):
+                        raise DurabilityPrefixViolation(
+                            "DURABILITY_PREFIX_CORRUPT",
+                            "effect observation has no exact preceding dispatch",
                         )
                     if fact.observation_ordinal <= latest_observation_ordinal.get(
                         effect_id, 0
@@ -536,6 +619,25 @@ def verify_effect_prefix(
                             "effect observation ordinal descends within the verified prefix",
                         )
                     latest_observation_ordinal[effect_id] = fact.observation_ordinal
+                    latest_observations[(effect_id, fact.dispatch_ordinal)] = fact
+                elif type(fact) is ExternalEffectSettlement:
+                    if (
+                        fact.settlement_ordinal
+                        <= latest_settlement_ordinal.get(effect_id, 0)
+                        or fact.evidence_head >= row.row_sequence
+                    ):
+                        raise DurabilityPrefixViolation(
+                            "DURABILITY_PREFIX_CORRUPT",
+                            "effect settlement order or evidence head is invalid",
+                        )
+                    if fact.kind.value != "manual_required" and not any(
+                        key[0] == effect_id for key in latest_observations
+                    ):
+                        raise DurabilityPrefixViolation(
+                            "DURABILITY_PREFIX_CORRUPT",
+                            "resolved effect settlement lacks authoritative observation",
+                        )
+                    latest_settlement_ordinal[effect_id] = fact.settlement_ordinal
             records_by_identity[identity] = fact
             records.append(fact)
     except DurabilityPrefixViolation:

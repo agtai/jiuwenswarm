@@ -64,6 +64,7 @@ _SELECTION_FIELDS = {"profile", "profile_digest", "requirements"}
 _SIDE_EFFECT_FACTS: Final = {
     "project_mutation": PROJECT_MUTATION_SIDE_EFFECT_FACT,
 }
+_DURABILITY_RANK: Final = {"D0": 0, "D1": 1, "D2": 2}
 
 
 def _identifier(value: object, field_name: str) -> str:
@@ -135,8 +136,10 @@ class ExecutorCapabilityProfile:
         _identifier(self.executor_id, "executor_id")
         _identifier(self.adapter_id, "adapter_id")
         _identifier(self.adapter_protocol_version, "adapter_protocol_version")
-        if self.durability_level != "D0":
-            raise ValueError("Executor capability durability level must be D0")
+        if self.durability_level not in _DURABILITY_RANK:
+            raise ValueError(
+                "Executor capability durability level must be D0, D1, or D2"
+            )
         _identifier(self.durability_version, "durability_version")
         if self.project_serialization != "exclusive":
             raise ValueError("Executor project serialization must be exclusive")
@@ -145,9 +148,7 @@ class ExecutorCapabilityProfile:
             or self.max_live_attempts < 1
             or self.max_live_attempts > MAX_SAFE_INTEGER
         ):
-            raise ValueError(
-                "max_live_attempts must be a positive JSON-safe integer"
-            )
+            raise ValueError("max_live_attempts must be a positive JSON-safe integer")
         object.__setattr__(
             self,
             "operation_versions",
@@ -177,7 +178,9 @@ class ExecutorCapabilityProfile:
     @classmethod
     def from_dict(cls, payload: object) -> ExecutorCapabilityProfile:
         if type(payload) is not dict or set(payload) != _PROFILE_FIELDS:
-            raise ValueError("Executor capability profile fields are incomplete or unknown")
+            raise ValueError(
+                "Executor capability profile fields are incomplete or unknown"
+            )
         facts = payload["enforcement_facts"]
         if type(facts) is not list:
             raise ValueError("enforcement_facts must be a JSON array")
@@ -217,8 +220,10 @@ class TaskExecutionRequirements:
         if self.schema_version != TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION:
             raise ValueError("unsupported Task execution requirements schema version")
         _identifier(self.executor_id, "executor_id")
-        if self.durability_level != "D0":
-            raise ValueError("Task execution requirements durability level must be D0")
+        if self.durability_level not in _DURABILITY_RANK:
+            raise ValueError(
+                "Task execution requirements durability level must be D0, D1, or D2"
+            )
         _identifier(self.side_effect_class, "side_effect_class")
         if self.project_serialization != "exclusive":
             raise ValueError("Task project serialization must be exclusive")
@@ -269,7 +274,8 @@ def _compatible(
     supported_operations = dict(profile.operation_versions)
     return (
         profile.executor_id == requirements.executor_id
-        and profile.durability_level == requirements.durability_level
+        and _DURABILITY_RANK[profile.durability_level]
+        >= _DURABILITY_RANK[requirements.durability_level]
         and profile.project_serialization == requirements.project_serialization
         and side_effect_fact in profile.enforcement_facts
         and all(
@@ -313,9 +319,7 @@ class ExecutorSelection:
         return cls(
             profile=ExecutorCapabilityProfile.from_dict(payload["profile"]),
             profile_digest=payload["profile_digest"],
-            requirements=TaskExecutionRequirements.from_dict(
-                payload["requirements"]
-            ),
+            requirements=TaskExecutionRequirements.from_dict(payload["requirements"]),
         )
 
     def canonical_bytes(self) -> bytes:
@@ -348,7 +352,9 @@ def select_executor(
             "no Executor capability profile satisfies the exact task requirements",
             ErrorCode.CAPABILITY_UNAVAILABLE,
         )
-    selected = min(compatible, key=lambda profile: (profile.profile_id, profile.adapter_id))
+    selected = min(
+        compatible, key=lambda profile: (profile.profile_id, profile.adapter_id)
+    )
     return ExecutorSelection(
         profile=selected,
         profile_digest=selected.digest_sha256(),

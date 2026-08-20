@@ -37,6 +37,7 @@ from .formal_task_models import (
     AdmissionPolicy,
     AdmissionPriority,
     AppliedTaskRetryReplay,
+    DurableRecoveryAuthoritySnapshot,
     ExecutorObservation,
     ExecutorResolution,
     FormalAttemptState,
@@ -70,8 +71,30 @@ from .formal_task_models import (
     command_result_extensions,
     utc_now,
 )
+from .durability_checkpoint import D1Checkpoint
+from .durability_effects import (
+    EffectContinuationAuthorization,
+    EffectFact,
+    ExternalEffectDispatch,
+    ExternalEffectObservation,
+    ExternalEffectSettlement,
+    effect_fact_bytes,
+)
+from .durability_identity import DurabilityProfileBinding
+from .durability_readers import (
+    CheckpointPrefixRow,
+    DurabilityPrefixViolation,
+    DurabilityReadBinding,
+    EffectPrefixRow,
+    VerifiedCheckpointPrefix,
+    VerifiedEffectPrefix,
+    verify_checkpoint_prefix,
+    verify_effect_prefix,
+)
+from .durability_recovery_facts import ExecutorRecoveryFacts
+from .executor_capabilities import ExecutorCapabilityProfile
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _DEFAULT_TASK_PAGE_LIMIT = 50
 _MAX_TASK_PAGE_LIMIT = 100
 _DEFAULT_EVENT_PAGE_LIMIT = 100
@@ -173,8 +196,15 @@ _TASK_STORE_TABLES_V2 = frozenset(
 _TASK_STORE_TABLES_V4 = _TASK_STORE_TABLES_V2 | frozenset(
     {"current_background_tasks", "task_results"}
 )
-_TASK_STORE_TABLES = _TASK_STORE_TABLES_V4 | frozenset(
-    {"task_event_consumption"}
+_TASK_STORE_TABLES_V5 = _TASK_STORE_TABLES_V4 | frozenset({"task_event_consumption"})
+_TASK_STORE_TABLES = _TASK_STORE_TABLES_V5 | frozenset(
+    {
+        "durability_checkpoints",
+        "durability_effect_facts",
+        "durability_recoveries",
+        "durability_mutator_leases",
+        "durability_recovery_fences",
+    }
 )
 _TASK_STORE_COLUMNS = {
     "metadata": ("key", "value"),
@@ -288,6 +318,50 @@ _TASK_STORE_COLUMNS = {
         "acked_event_id",
         "updated_at",
     ),
+    "durability_checkpoints": (
+        "task_id",
+        "producer_attempt_id",
+        "row_sequence",
+        "canonical",
+        "payload_digest",
+        "created_at",
+    ),
+    "durability_effect_facts": (
+        "task_id",
+        "origin_attempt_id",
+        "row_sequence",
+        "canonical",
+        "payload_digest",
+        "created_at",
+    ),
+    "durability_recoveries": (
+        "recovery_id",
+        "task_id",
+        "producer_attempt_id",
+        "recovery_attempt_id",
+        "recovery_generation",
+        "profile_json",
+        "checkpoint_head",
+        "checkpoint_prefix_digest",
+        "effect_head",
+        "effect_prefix_digest",
+        "recovery_facts",
+        "created_at",
+    ),
+    "durability_mutator_leases": (
+        "task_id",
+        "owner_id",
+        "claim_token",
+        "claim_generation",
+        "claimed_at",
+        "expires_at",
+    ),
+    "durability_recovery_fences": (
+        "task_id",
+        "producer_attempt_id",
+        "cancel_command_id",
+        "created_at",
+    ),
 }
 _TASK_STORE_NOT_NULL = {
     "metadata": frozenset({"value"}),
@@ -362,8 +436,17 @@ _TASK_STORE_NOT_NULL = {
             "completed_at",
         }
     ),
-    "task_event_consumption": frozenset(
-        _TASK_STORE_COLUMNS["task_event_consumption"]
+    "task_event_consumption": frozenset(_TASK_STORE_COLUMNS["task_event_consumption"]),
+    "durability_checkpoints": frozenset(_TASK_STORE_COLUMNS["durability_checkpoints"]),
+    "durability_effect_facts": frozenset(
+        _TASK_STORE_COLUMNS["durability_effect_facts"]
+    ),
+    "durability_recoveries": frozenset(_TASK_STORE_COLUMNS["durability_recoveries"]),
+    "durability_mutator_leases": frozenset(
+        _TASK_STORE_COLUMNS["durability_mutator_leases"]
+    ),
+    "durability_recovery_fences": frozenset(
+        _TASK_STORE_COLUMNS["durability_recovery_fences"]
     ),
 }
 _TASK_STORE_PRIMARY_KEYS = {
@@ -382,6 +465,19 @@ _TASK_STORE_PRIMARY_KEYS = {
         "task_id",
         "presentation_class",
     ),
+    "durability_checkpoints": (
+        "task_id",
+        "producer_attempt_id",
+        "row_sequence",
+    ),
+    "durability_effect_facts": (
+        "task_id",
+        "origin_attempt_id",
+        "row_sequence",
+    ),
+    "durability_recoveries": ("recovery_id",),
+    "durability_mutator_leases": ("task_id",),
+    "durability_recovery_fences": ("task_id",),
 }
 _TASK_STORE_INTEGER_COLUMNS = frozenset(
     {
@@ -396,10 +492,22 @@ _TASK_STORE_INTEGER_COLUMNS = frozenset(
         ("executor_events", "source_seq"),
         ("outbox", "delivery_count"),
         ("task_event_consumption", "acked_through_seq"),
+        ("durability_checkpoints", "row_sequence"),
+        ("durability_effect_facts", "row_sequence"),
+        ("durability_recoveries", "recovery_generation"),
+        ("durability_recoveries", "checkpoint_head"),
+        ("durability_recoveries", "effect_head"),
+        ("durability_mutator_leases", "claim_generation"),
     }
 )
 _TASK_STORE_BLOB_COLUMNS = frozenset(
-    {("commands", "fingerprint"), ("executor_events", "canonical")}
+    {
+        ("commands", "fingerprint"),
+        ("executor_events", "canonical"),
+        ("durability_checkpoints", "canonical"),
+        ("durability_effect_facts", "canonical"),
+        ("durability_recoveries", "recovery_facts"),
+    }
 )
 _TASK_STORE_DEFAULTS = {
     ("tasks", "cancel_requested"): "0",
@@ -440,6 +548,17 @@ _TASK_STORE_NAMED_INDEXES_V5 = {
         ("task_id", "acked_through_seq", "acked_event_id"),
     ),
 }
+_TASK_STORE_NAMED_INDEXES_V6 = {
+    **_TASK_STORE_NAMED_INDEXES_V5,
+    "idx_durability_recoveries_producer": (
+        "durability_recoveries",
+        ("task_id", "producer_attempt_id", "recovery_generation"),
+    ),
+    "idx_durability_effect_facts_origin": (
+        "durability_effect_facts",
+        ("task_id", "origin_attempt_id", "row_sequence"),
+    ),
+}
 _TASK_STORE_UNIQUE_KEYS_V3 = {
     "metadata": frozenset({("key",)}),
     "commands": frozenset({("scope_key", "command_id")}),
@@ -470,6 +589,18 @@ _TASK_STORE_UNIQUE_KEYS_V5 = {
             )
         }
     ),
+}
+_TASK_STORE_UNIQUE_KEYS_V6 = {
+    **_TASK_STORE_UNIQUE_KEYS_V5,
+    "durability_checkpoints": frozenset(
+        {("task_id", "producer_attempt_id", "row_sequence")}
+    ),
+    "durability_effect_facts": frozenset(
+        {("task_id", "origin_attempt_id", "row_sequence")}
+    ),
+    "durability_recoveries": frozenset({("recovery_id",), ("recovery_attempt_id",)}),
+    "durability_mutator_leases": frozenset({("task_id",)}),
+    "durability_recovery_fences": frozenset({("task_id",), ("cancel_command_id",)}),
 }
 _TASK_STORE_FOREIGN_KEYS_V3 = {
     "metadata": frozenset(),
@@ -503,6 +634,37 @@ _TASK_STORE_FOREIGN_KEYS_V3 = {
 _TASK_STORE_FOREIGN_KEYS_V4 = {
     **_TASK_STORE_FOREIGN_KEYS_V3,
     "tasks": frozenset({("predecessor_task_id", "tasks", "task_id", "RESTRICT")}),
+}
+_TASK_STORE_FOREIGN_KEYS_V6 = {
+    **_TASK_STORE_FOREIGN_KEYS_V4,
+    "durability_checkpoints": frozenset(
+        {
+            ("task_id", "tasks", "task_id", "CASCADE"),
+            ("producer_attempt_id", "attempts", "attempt_id", "CASCADE"),
+        }
+    ),
+    "durability_effect_facts": frozenset(
+        {
+            ("task_id", "tasks", "task_id", "CASCADE"),
+            ("origin_attempt_id", "attempts", "attempt_id", "CASCADE"),
+        }
+    ),
+    "durability_recoveries": frozenset(
+        {
+            ("task_id", "tasks", "task_id", "CASCADE"),
+            ("producer_attempt_id", "attempts", "attempt_id", "CASCADE"),
+            ("recovery_attempt_id", "attempts", "attempt_id", "CASCADE"),
+        }
+    ),
+    "durability_mutator_leases": frozenset(
+        {("task_id", "tasks", "task_id", "CASCADE")}
+    ),
+    "durability_recovery_fences": frozenset(
+        {
+            ("task_id", "tasks", "task_id", "CASCADE"),
+            ("producer_attempt_id", "attempts", "attempt_id", "CASCADE"),
+        }
+    ),
 }
 _TASK_EVENT_CONSUMPTION_FOREIGN_KEYS = frozenset(
     {
@@ -680,9 +842,7 @@ def _selection_fingerprint_payload(
         "adapter_id": selection.adapter_id,
         "capability_profile": json.loads(selection.capability_profile_json),
         "capability_profile_digest": selection.capability_profile_digest,
-        "execution_requirements": json.loads(
-            selection.execution_requirements_json
-        ),
+        "execution_requirements": json.loads(selection.execution_requirements_json),
         "admission_priority": selection.admission_priority.value,
     }
 
@@ -824,9 +984,7 @@ def _selection_from_attempt_row(
         adapter_id=row["adapter_id"],
         capability_profile_json=row["capability_profile_json"].encode("utf-8"),
         capability_profile_digest=row["capability_profile_digest"],
-        execution_requirements_json=row["execution_requirements_json"].encode(
-            "utf-8"
-        ),
+        execution_requirements_json=row["execution_requirements_json"].encode("utf-8"),
         admission_priority=AdmissionPriority(row["admission_priority"]),
     )
 
@@ -964,6 +1122,516 @@ class SqliteTaskStore:
         finally:
             connection.close()
 
+    @staticmethod
+    def _profile_binding_from_selection(
+        *,
+        executor_id: str,
+        selection: PersistedExecutorSelection | None,
+    ) -> DurabilityProfileBinding:
+        if selection is None:
+            raise FormalTaskViolation(
+                "DURABILITY_PROFILE_UNAVAILABLE",
+                "persisted Executor selection is required for durability",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        try:
+            profile = ExecutorCapabilityProfile.from_dict(
+                json.loads(selection.capability_profile_json)
+            )
+            binding = DurabilityProfileBinding(
+                executor_id=profile.executor_id,
+                adapter_id=profile.adapter_id,
+                profile_id=profile.profile_id,
+                profile_version=profile.adapter_protocol_version,
+                profile_digest=selection.capability_profile_digest,
+                durability_level=profile.durability_level,
+                durability_capability_version=profile.durability_version,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise FormalTaskViolation(
+                "TASK_STORE_CORRUPT",
+                "persisted durability profile is invalid",
+                ErrorCode.INTERNAL,
+            ) from error
+        if (
+            selection.adapter_id != profile.adapter_id
+            or executor_id != profile.executor_id
+            or profile.digest_sha256() != selection.capability_profile_digest
+        ):
+            raise FormalTaskViolation(
+                "TASK_STORE_CORRUPT",
+                "persisted durability profile binding is inconsistent",
+                ErrorCode.INTERNAL,
+            )
+        return binding
+
+    @classmethod
+    def _durability_binding_from_connection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        origin_attempt_id: str,
+    ) -> DurabilityReadBinding:
+        task_row = cls._require_task_row(connection, task_id, scope)
+        attempt_row = connection.execute(
+            "SELECT * FROM attempts WHERE task_id=? AND attempt_id=?",
+            (task_id, origin_attempt_id),
+        ).fetchone()
+        if attempt_row is None:
+            raise FormalTaskViolation(
+                "DURABILITY_BINDING_MISMATCH",
+                "durability origin Attempt does not belong to the Task",
+                ErrorCode.CONFLICT,
+            )
+        profile = cls._profile_binding_from_selection(
+            executor_id=attempt_row["executor_id"],
+            selection=_selection_from_attempt_row(attempt_row),
+        )
+        return DurabilityReadBinding(
+            scope=scope,
+            task_id=task_row["task_id"],
+            origin_attempt_id=origin_attempt_id,
+            profile=profile,
+        )
+
+    @staticmethod
+    def _checkpoint_rows(
+        connection: sqlite3.Connection,
+        binding: DurabilityReadBinding,
+    ) -> tuple[CheckpointPrefixRow, ...]:
+        rows = connection.execute(
+            """SELECT row_sequence, canonical, payload_digest
+               FROM durability_checkpoints
+               WHERE task_id=? AND producer_attempt_id=?
+               ORDER BY row_sequence""",
+            (binding.task_id, binding.origin_attempt_id),
+        ).fetchall()
+        return tuple(
+            CheckpointPrefixRow(
+                row_sequence=row["row_sequence"],
+                binding=binding,
+                canonical_bytes=bytes(row["canonical"]),
+                payload_digest=row["payload_digest"],
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _effect_rows(
+        connection: sqlite3.Connection,
+        binding: DurabilityReadBinding,
+    ) -> tuple[EffectPrefixRow, ...]:
+        rows = connection.execute(
+            """SELECT row_sequence, canonical, payload_digest
+               FROM durability_effect_facts
+               WHERE task_id=? AND origin_attempt_id=?
+               ORDER BY row_sequence""",
+            (binding.task_id, binding.origin_attempt_id),
+        ).fetchall()
+        return tuple(
+            EffectPrefixRow(
+                row_sequence=row["row_sequence"],
+                binding=binding,
+                canonical_bytes=bytes(row["canonical"]),
+                payload_digest=row["payload_digest"],
+            )
+            for row in rows
+        )
+
+    @classmethod
+    def _verified_checkpoint_prefix(
+        cls,
+        connection: sqlite3.Connection,
+        binding: DurabilityReadBinding,
+        *,
+        expected_head: int | None = None,
+        expected_prefix_digest: str | None = None,
+    ) -> VerifiedCheckpointPrefix:
+        rows = cls._checkpoint_rows(connection, binding)
+        if expected_head is not None:
+            rows = tuple(row for row in rows if row.row_sequence <= expected_head)
+        return verify_checkpoint_prefix(
+            rows,
+            expected_binding=binding,
+            expected_head=len(rows) if expected_head is None else expected_head,
+            expected_prefix_digest=expected_prefix_digest,
+        )
+
+    @classmethod
+    def _verified_effect_prefix(
+        cls,
+        connection: sqlite3.Connection,
+        binding: DurabilityReadBinding,
+        *,
+        expected_head: int | None = None,
+        expected_prefix_digest: str | None = None,
+    ) -> VerifiedEffectPrefix:
+        rows = cls._effect_rows(connection, binding)
+        if expected_head is not None:
+            rows = tuple(row for row in rows if row.row_sequence <= expected_head)
+        return verify_effect_prefix(
+            rows,
+            expected_binding=binding,
+            expected_head=len(rows) if expected_head is None else expected_head,
+            expected_prefix_digest=expected_prefix_digest,
+        )
+
+    def append_durability_checkpoint(
+        self,
+        checkpoint: D1Checkpoint,
+        *,
+        observed_at: str,
+    ) -> VerifiedCheckpointPrefix:
+        """Atomically append one canonical immutable checkpoint fact."""
+
+        if type(checkpoint) is not D1Checkpoint:
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_CHECKPOINT",
+                "durability checkpoint must use the exact contract",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        canonical = checkpoint.canonical_bytes()
+        digest = hashlib.sha256(canonical).hexdigest()
+        with self._transaction() as connection:
+            binding = self._durability_binding_from_connection(
+                connection,
+                scope=checkpoint.scope,
+                task_id=checkpoint.task_id,
+                origin_attempt_id=checkpoint.producer_attempt_id,
+            )
+            if checkpoint.profile != binding.profile:
+                raise FormalTaskViolation(
+                    "DURABILITY_BINDING_MISMATCH",
+                    "checkpoint profile does not match persisted selection",
+                    ErrorCode.CONFLICT,
+                )
+            rows = self._checkpoint_rows(connection, binding)
+            row_sequence = checkpoint.checkpoint_sequence
+            if row_sequence <= 0:
+                raise FormalTaskViolation(
+                    "DURABILITY_PREFIX_CONFLICT",
+                    "persisted checkpoint sequence must start at one",
+                    ErrorCode.CONFLICT,
+                )
+            existing = next(
+                (row for row in rows if row.row_sequence == row_sequence), None
+            )
+            if existing is not None:
+                if existing.canonical_bytes != canonical:
+                    raise FormalTaskViolation(
+                        "DURABILITY_PREFIX_CONFLICT",
+                        "changed checkpoint reuses an immutable sequence",
+                        ErrorCode.CONFLICT,
+                    )
+                return self._verified_checkpoint_prefix(connection, binding)
+            if row_sequence != len(rows) + 1:
+                raise FormalTaskViolation(
+                    "DURABILITY_PREFIX_PARTIAL",
+                    "checkpoint append would create a partial prefix",
+                    ErrorCode.STALE,
+                )
+            self._hit("durability.checkpoint.before_insert")
+            connection.execute(
+                """INSERT INTO durability_checkpoints(
+                       task_id, producer_attempt_id, row_sequence, canonical,
+                       payload_digest, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?)""",
+                (
+                    binding.task_id,
+                    binding.origin_attempt_id,
+                    row_sequence,
+                    canonical,
+                    digest,
+                    observed_at,
+                ),
+            )
+            self._hit("durability.checkpoint.after_insert")
+            return self._verified_checkpoint_prefix(connection, binding)
+
+    def read_durability_binding(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        origin_attempt_id: str,
+    ) -> DurabilityReadBinding:
+        """Return the exact persisted origin/profile binding for a durability read."""
+
+        with self._snapshot_reader() as connection:
+            return self._durability_binding_from_connection(
+                connection,
+                scope=scope,
+                task_id=task_id,
+                origin_attempt_id=origin_attempt_id,
+            )
+
+    def read_durability_checkpoints(
+        self,
+        binding: DurabilityReadBinding,
+        *,
+        expected_head: int | None = None,
+        expected_prefix_digest: str | None = None,
+    ) -> VerifiedCheckpointPrefix:
+        with self._snapshot_reader() as connection:
+            stored = self._durability_binding_from_connection(
+                connection,
+                scope=binding.scope,
+                task_id=binding.task_id,
+                origin_attempt_id=binding.origin_attempt_id,
+            )
+            if stored != binding:
+                raise FormalTaskViolation(
+                    "DURABILITY_BINDING_MISMATCH",
+                    "checkpoint reader binding does not match persisted selection",
+                    ErrorCode.CONFLICT,
+                )
+            return self._verified_checkpoint_prefix(
+                connection,
+                binding,
+                expected_head=expected_head,
+                expected_prefix_digest=expected_prefix_digest,
+            )
+
+    @staticmethod
+    def _effect_actor(fact: EffectFact) -> tuple[str, int]:
+        if hasattr(fact, "actor_attempt_id"):
+            return fact.actor_attempt_id, fact.recovery_generation
+        return fact.binding.origin_attempt_id, 0
+
+    @classmethod
+    def _require_effect_continuation(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        binding: DurabilityReadBinding,
+        fact: EffectFact,
+        current_effect_head: int,
+        current_effect_digest: str,
+    ) -> None:
+        actor_attempt_id, generation = cls._effect_actor(fact)
+        if actor_attempt_id == binding.origin_attempt_id:
+            if generation != 0:
+                raise FormalTaskViolation(
+                    "DURABILITY_BINDING_MISMATCH",
+                    "origin effect actor cannot claim a recovery generation",
+                    ErrorCode.CONFLICT,
+                )
+            return
+        row = connection.execute(
+            """SELECT * FROM durability_recoveries
+               WHERE task_id=? AND producer_attempt_id=?
+                 AND recovery_attempt_id=? AND recovery_generation=?""",
+            (
+                binding.task_id,
+                binding.origin_attempt_id,
+                actor_attempt_id,
+                generation,
+            ),
+        ).fetchone()
+        if row is None or row["profile_json"] != _json_dump(binding.profile.to_dict()):
+            raise FormalTaskViolation(
+                "DURABILITY_CONTINUATION_UNAUTHORIZED",
+                "linked effect actor lacks Store continuation authorization",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if type(fact) is EffectContinuationAuthorization and (
+            fact.checkpoint_head != row["checkpoint_head"]
+            or fact.checkpoint_prefix_digest != row["checkpoint_prefix_digest"]
+            or fact.effect_head != current_effect_head
+            or fact.effect_prefix_digest != current_effect_digest
+        ):
+            raise FormalTaskViolation(
+                "DURABILITY_CONTINUATION_STALE",
+                "effect continuation does not bind the authorized prefixes",
+                ErrorCode.STALE,
+            )
+
+    def append_durability_effect_fact(
+        self,
+        fact: EffectFact,
+        *,
+        row_sequence: int,
+        observed_at: str,
+    ) -> VerifiedEffectPrefix:
+        """Commit intent/facts before any caller-owned external dispatch."""
+
+        canonical = effect_fact_bytes(fact)
+        digest = hashlib.sha256(canonical).hexdigest()
+        binding = DurabilityReadBinding(
+            scope=fact.binding.scope,
+            task_id=fact.binding.task_id,
+            origin_attempt_id=fact.binding.origin_attempt_id,
+            profile=fact.binding.profile,
+        )
+        with self._transaction() as connection:
+            stored = self._durability_binding_from_connection(
+                connection,
+                scope=binding.scope,
+                task_id=binding.task_id,
+                origin_attempt_id=binding.origin_attempt_id,
+            )
+            if stored != binding or binding.profile.durability_level != "D2":
+                raise FormalTaskViolation(
+                    "DURABILITY_BINDING_MISMATCH",
+                    "effect fact does not match one persisted D2 selection",
+                    ErrorCode.CONFLICT,
+                )
+            rows = self._effect_rows(connection, binding)
+            existing = next(
+                (row for row in rows if row.row_sequence == row_sequence), None
+            )
+            if existing is not None:
+                if existing.canonical_bytes != canonical:
+                    raise FormalTaskViolation(
+                        "DURABILITY_PREFIX_CONFLICT",
+                        "changed effect fact reuses an immutable sequence",
+                        ErrorCode.CONFLICT,
+                    )
+                return self._verified_effect_prefix(connection, binding)
+            if type(row_sequence) is not int or row_sequence != len(rows) + 1:
+                raise FormalTaskViolation(
+                    "DURABILITY_PREFIX_PARTIAL",
+                    "effect append would create a partial prefix",
+                    ErrorCode.STALE,
+                )
+            current = self._verified_effect_prefix(connection, binding)
+            self._require_effect_continuation(
+                connection,
+                binding=binding,
+                fact=fact,
+                current_effect_head=current.head,
+                current_effect_digest=current.prefix_digest,
+            )
+            candidate = rows + (
+                EffectPrefixRow(
+                    row_sequence=row_sequence,
+                    binding=binding,
+                    canonical_bytes=canonical,
+                    payload_digest=digest,
+                ),
+            )
+            verified = verify_effect_prefix(
+                candidate,
+                expected_binding=binding,
+                expected_head=row_sequence,
+            )
+            self._hit("durability.effect.before_insert")
+            connection.execute(
+                """INSERT INTO durability_effect_facts(
+                       task_id, origin_attempt_id, row_sequence, canonical,
+                       payload_digest, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?)""",
+                (
+                    binding.task_id,
+                    binding.origin_attempt_id,
+                    row_sequence,
+                    canonical,
+                    digest,
+                    observed_at,
+                ),
+            )
+            self._hit("durability.effect.after_insert")
+            return verified
+
+    def read_durability_effects(
+        self,
+        binding: DurabilityReadBinding,
+        *,
+        expected_head: int | None = None,
+        expected_prefix_digest: str | None = None,
+    ) -> VerifiedEffectPrefix:
+        with self._snapshot_reader() as connection:
+            stored = self._durability_binding_from_connection(
+                connection,
+                scope=binding.scope,
+                task_id=binding.task_id,
+                origin_attempt_id=binding.origin_attempt_id,
+            )
+            if stored != binding:
+                raise FormalTaskViolation(
+                    "DURABILITY_BINDING_MISMATCH",
+                    "effect reader binding does not match persisted selection",
+                    ErrorCode.CONFLICT,
+                )
+            return self._verified_effect_prefix(
+                connection,
+                binding,
+                expected_head=expected_head,
+                expected_prefix_digest=expected_prefix_digest,
+            )
+
+    def claim_durability_mutator(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        owner_id: str,
+        observed_at: str,
+        expires_at: str,
+    ) -> tuple[str, int] | None:
+        """Claim the Store fence; Direct runtime and OS fences remain separate."""
+
+        if (
+            type(owner_id) is not str
+            or not owner_id.strip()
+            or len(owner_id.encode("utf-8")) > 512
+            or _utc_datetime(expires_at) <= _utc_datetime(observed_at)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_LEASE",
+                "durability lease facts are invalid",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._transaction() as connection:
+            self._require_task_row(connection, task_id, scope)
+            row = connection.execute(
+                "SELECT * FROM durability_mutator_leases WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is not None and _utc_datetime(row["expires_at"]) > _utc_datetime(
+                observed_at
+            ):
+                return None
+            generation = 1 if row is None else row["claim_generation"] + 1
+            token = f"durability-claim-{uuid.uuid4().hex}"
+            self._hit("durability.lease.before_claim")
+            connection.execute(
+                """INSERT INTO durability_mutator_leases(
+                       task_id, owner_id, claim_token, claim_generation,
+                       claimed_at, expires_at)
+                   VALUES(?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                       owner_id=excluded.owner_id,
+                       claim_token=excluded.claim_token,
+                       claim_generation=excluded.claim_generation,
+                       claimed_at=excluded.claimed_at,
+                       expires_at=excluded.expires_at""",
+                (task_id, owner_id, token, generation, observed_at, expires_at),
+            )
+            self._hit("durability.lease.after_claim")
+            return token, generation
+
+    def release_durability_mutator(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        owner_id: str,
+        claim_token: str,
+        claim_generation: int,
+    ) -> bool:
+        with self._transaction() as connection:
+            self._require_task_row(connection, task_id, scope)
+            changed = connection.execute(
+                """DELETE FROM durability_mutator_leases
+                   WHERE task_id=? AND owner_id=? AND claim_token=?
+                     AND claim_generation=?""",
+                (task_id, owner_id, claim_token, claim_generation),
+            ).rowcount
+            return changed == 1
+
     def _initialize(self) -> None:
         connection = self._connect(foreign_keys=False)
         try:
@@ -979,12 +1647,13 @@ class SqliteTaskStore:
             }
             task_store_tables = tables & _TASK_STORE_TABLES
             if not task_store_tables:
-                self._create_schema_v5(connection)
-                self._verify_schema_structure(connection, version=5)
+                self._create_schema_v6(connection)
+                self._verify_schema_structure(connection, version=6)
                 self._verify_database(connection)
                 self._verify_v4_lineage(connection)
                 self._verify_v4_semantics(connection)
                 self._verify_v5_semantics(connection)
+                self._verify_v6_semantics(connection)
                 self._hit("initialize.bootstrap.before_metadata")
                 connection.execute(
                     "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -1021,29 +1690,41 @@ class SqliteTaskStore:
                     self._migrate_v2_to_v3(connection)
                     self._migrate_v3_to_v4(connection)
                     self._migrate_v4_to_v5(connection)
+                    self._migrate_v5_to_v6(connection)
                 elif version == 2:
                     self._verify_schema_structure(connection, version=2)
                     self._verify_database(connection)
                     self._migrate_v2_to_v3(connection)
                     self._migrate_v3_to_v4(connection)
                     self._migrate_v4_to_v5(connection)
+                    self._migrate_v5_to_v6(connection)
                 elif version == 3:
                     self._verify_schema_structure(connection, version=3)
                     self._verify_database(connection)
                     self._migrate_v3_to_v4(connection)
                     self._migrate_v4_to_v5(connection)
+                    self._migrate_v5_to_v6(connection)
                 elif version == 4:
                     self._verify_schema_structure(connection, version=4)
                     self._verify_database(connection)
                     self._verify_v4_lineage(connection)
                     self._verify_v4_semantics(connection)
                     self._migrate_v4_to_v5(connection)
-                elif version == _SCHEMA_VERSION:
+                    self._migrate_v5_to_v6(connection)
+                elif version == 5:
                     self._verify_schema_structure(connection, version=5)
                     self._verify_database(connection)
                     self._verify_v4_lineage(connection)
                     self._verify_v4_semantics(connection)
                     self._verify_v5_semantics(connection)
+                    self._migrate_v5_to_v6(connection)
+                elif version == _SCHEMA_VERSION:
+                    self._verify_schema_structure(connection, version=6)
+                    self._verify_database(connection)
+                    self._verify_v4_lineage(connection)
+                    self._verify_v4_semantics(connection)
+                    self._verify_v5_semantics(connection)
+                    self._verify_v6_semantics(connection)
                 else:
                     raise FormalTaskViolation(
                         "TASK_STORE_SCHEMA_UNSUPPORTED",
@@ -1149,6 +1830,8 @@ class SqliteTaskStore:
         }
         expected_tables = (
             _TASK_STORE_TABLES
+            if version >= 6
+            else _TASK_STORE_TABLES_V5
             if version >= 5
             else _TASK_STORE_TABLES_V4
             if version >= 3
@@ -1160,17 +1843,25 @@ class SqliteTaskStore:
             )
 
         unique_keys = dict(
-            _TASK_STORE_UNIQUE_KEYS_V5
+            _TASK_STORE_UNIQUE_KEYS_V6
+            if version >= 6
+            else _TASK_STORE_UNIQUE_KEYS_V5
             if version >= 5
             else _TASK_STORE_UNIQUE_KEYS_V4
             if version >= 4
             else _TASK_STORE_UNIQUE_KEYS_V3
         )
         foreign_keys = (
-            _TASK_STORE_FOREIGN_KEYS_V4 if version >= 4 else _TASK_STORE_FOREIGN_KEYS_V3
+            _TASK_STORE_FOREIGN_KEYS_V6
+            if version >= 6
+            else _TASK_STORE_FOREIGN_KEYS_V4
+            if version >= 4
+            else _TASK_STORE_FOREIGN_KEYS_V3
         )
         named_indexes = (
-            _TASK_STORE_NAMED_INDEXES_V5
+            _TASK_STORE_NAMED_INDEXES_V6
+            if version >= 6
+            else _TASK_STORE_NAMED_INDEXES_V5
             if version >= 5
             else _TASK_STORE_NAMED_INDEXES_V4
             if version >= 4
@@ -1333,10 +2024,7 @@ class SqliteTaskStore:
                 raise cls._schema_unsupported(
                     "formal task Store attempt bounds are unsupported"
                 )
-            if (
-                version >= 5
-                and "CHECK(ADMISSION_ATTEMPT_COUNT>=0)" not in normalized
-            ):
+            if version >= 5 and "CHECK(ADMISSION_ATTEMPT_COUNT>=0)" not in normalized:
                 raise cls._schema_unsupported(
                     "formal task Store admission bounds are unsupported"
                 )
@@ -1371,7 +2059,7 @@ class SqliteTaskStore:
                 )
 
     @staticmethod
-    def _create_schema_v5(connection: sqlite3.Connection) -> None:
+    def _create_schema_v6(connection: sqlite3.Connection) -> None:
         statements = (
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             """CREATE TABLE commands (
@@ -1473,6 +2161,56 @@ class SqliteTaskStore:
             """CREATE INDEX idx_task_event_consumption_event
                 ON task_event_consumption(
                     task_id, acked_through_seq, acked_event_id)""",
+            """CREATE TABLE durability_checkpoints (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                row_sequence INTEGER NOT NULL CHECK(row_sequence > 0),
+                canonical BLOB NOT NULL, payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, producer_attempt_id, row_sequence))""",
+            """CREATE TABLE durability_effect_facts (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                origin_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                row_sequence INTEGER NOT NULL CHECK(row_sequence > 0),
+                canonical BLOB NOT NULL, payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, origin_attempt_id, row_sequence))""",
+            """CREATE TABLE durability_recoveries (
+                recovery_id TEXT NOT NULL PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                recovery_attempt_id TEXT NOT NULL UNIQUE
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                recovery_generation INTEGER NOT NULL
+                    CHECK(recovery_generation > 0),
+                profile_json TEXT NOT NULL,
+                checkpoint_head INTEGER NOT NULL CHECK(checkpoint_head > 0),
+                checkpoint_prefix_digest TEXT NOT NULL,
+                effect_head INTEGER NOT NULL CHECK(effect_head >= 0),
+                effect_prefix_digest TEXT NOT NULL,
+                recovery_facts BLOB NOT NULL, created_at TEXT NOT NULL)""",
+            """CREATE INDEX idx_durability_recoveries_producer
+                ON durability_recoveries(
+                    task_id, producer_attempt_id, recovery_generation)""",
+            """CREATE INDEX idx_durability_effect_facts_origin
+                ON durability_effect_facts(
+                    task_id, origin_attempt_id, row_sequence)""",
+            """CREATE TABLE durability_mutator_leases (
+                task_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                owner_id TEXT NOT NULL, claim_token TEXT NOT NULL,
+                claim_generation INTEGER NOT NULL CHECK(claim_generation > 0),
+                claimed_at TEXT NOT NULL, expires_at TEXT NOT NULL)""",
+            """CREATE TABLE durability_recovery_fences (
+                task_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                cancel_command_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL)""",
         )
         for statement in statements:
             connection.execute(statement)
@@ -1706,6 +2444,82 @@ class SqliteTaskStore:
                 ErrorCode.UNSUPPORTED,
             )
 
+    def _migrate_v5_to_v6(self, connection: sqlite3.Connection) -> None:
+        """Add the sole Store-owned durability ledger and recovery fence."""
+
+        self._hit("migration.v5_to_v6.before_create")
+        statements = (
+            """CREATE TABLE durability_checkpoints (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                row_sequence INTEGER NOT NULL CHECK(row_sequence > 0),
+                canonical BLOB NOT NULL, payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, producer_attempt_id, row_sequence))""",
+            """CREATE TABLE durability_effect_facts (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                origin_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                row_sequence INTEGER NOT NULL CHECK(row_sequence > 0),
+                canonical BLOB NOT NULL, payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, origin_attempt_id, row_sequence))""",
+            """CREATE TABLE durability_recoveries (
+                recovery_id TEXT NOT NULL PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                recovery_attempt_id TEXT NOT NULL UNIQUE
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                recovery_generation INTEGER NOT NULL
+                    CHECK(recovery_generation > 0),
+                profile_json TEXT NOT NULL,
+                checkpoint_head INTEGER NOT NULL CHECK(checkpoint_head > 0),
+                checkpoint_prefix_digest TEXT NOT NULL,
+                effect_head INTEGER NOT NULL CHECK(effect_head >= 0),
+                effect_prefix_digest TEXT NOT NULL,
+                recovery_facts BLOB NOT NULL, created_at TEXT NOT NULL)""",
+            """CREATE TABLE durability_mutator_leases (
+                task_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                owner_id TEXT NOT NULL, claim_token TEXT NOT NULL,
+                claim_generation INTEGER NOT NULL CHECK(claim_generation > 0),
+                claimed_at TEXT NOT NULL, expires_at TEXT NOT NULL)""",
+            """CREATE TABLE durability_recovery_fences (
+                task_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                cancel_command_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL)""",
+            """CREATE INDEX idx_durability_recoveries_producer
+                ON durability_recoveries(
+                    task_id, producer_attempt_id, recovery_generation)""",
+            """CREATE INDEX idx_durability_effect_facts_origin
+                ON durability_effect_facts(
+                    task_id, origin_attempt_id, row_sequence)""",
+        )
+        for statement in statements:
+            connection.execute(statement)
+        self._hit("migration.v5_to_v6.after_create")
+        self._verify_schema_structure(connection, version=6)
+        self._verify_database(connection)
+        self._verify_v4_lineage(connection)
+        self._verify_v4_semantics(connection)
+        self._verify_v5_semantics(connection)
+        self._verify_v6_semantics(connection)
+        self._hit("migration.v5_to_v6.before_metadata")
+        changed = connection.execute(
+            "UPDATE metadata SET value='6' WHERE key='schema_version' AND value='5'"
+        ).rowcount
+        if changed != 1:
+            raise FormalTaskViolation(
+                "TASK_STORE_SCHEMA_UNSUPPORTED",
+                "formal task Store changed during v6 migration",
+                ErrorCode.UNSUPPORTED,
+            )
+
     @staticmethod
     def _verify_database(connection: sqlite3.Connection) -> None:
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
@@ -1774,9 +2588,7 @@ class SqliteTaskStore:
                 or row["accepted_state"] != FormalTaskState.ACCEPTED.value
                 or row["accepted_outcome"] is not None
                 or row["accepted_producer"] != "task_core"
-                or (
-                    base_revision and row["command_type"] != "task.create"
-                )
+                or (base_revision and row["command_type"] != "task.create")
                 or (
                     successor_revision
                     and row["command_type"] != "task.create_successor"
@@ -1826,7 +2638,7 @@ class SqliteTaskStore:
                 if owner_count != 1 or command.target_ref.id != f"create:{command_id}":
                     raise cls._corrupt(
                         "task.create command lacks one exact durable Task"
-                )
+                    )
                 continue
             if command_type == "task.create_successor":
                 try:
@@ -1958,10 +2770,8 @@ class SqliteTaskStore:
                     value = result.result
                     if (
                         len(event_rows) != 2
-                        or event_rows[0]["event_type"]
-                        != "task.reprioritize_requested"
-                        or event_rows[1]["event_type"]
-                        != "task.reprioritize_applied"
+                        or event_rows[0]["event_type"] != "task.reprioritize_requested"
+                        or event_rows[1]["event_type"] != "task.reprioritize_applied"
                         or event_rows[1]["seq"] != event_rows[0]["seq"] + 1
                         or command.target_ref.kind.value != "task"
                         or type(value) is not dict
@@ -1989,14 +2799,11 @@ class SqliteTaskStore:
                     "SELECT task_id FROM attempts WHERE attempt_id=?",
                     (payload_authority.get("attempt_id"),),
                 ).fetchone()
-                if (
-                    value is None
-                    or (
-                        value.reason != "TASK_CONTROL_PRECONDITION_STALE"
-                        and (
-                            attempt_row is None
-                            or attempt_row["task_id"] != binding["target_task_id"]
-                        )
+                if value is None or (
+                    value.reason != "TASK_CONTROL_PRECONDITION_STALE"
+                    and (
+                        attempt_row is None
+                        or attempt_row["task_id"] != binding["target_task_id"]
                     )
                 ):
                     raise cls._corrupt(
@@ -2114,14 +2921,8 @@ class SqliteTaskStore:
             current_result_valid = (
                 repeat_value_valid
                 and value["applied"] is settled_repeat
-                and (
-                    not settled_repeat
-                    or repeated_state is FormalTaskState.TERMINAL
-                )
-                and (
-                    settled_repeat
-                    or repeated_state is not FormalTaskState.TERMINAL
-                )
+                and (not settled_repeat or repeated_state is FormalTaskState.TERMINAL)
+                and (settled_repeat or repeated_state is not FormalTaskState.TERMINAL)
                 and result.observed_at
                 == (
                     terminal_event["occurred_at"]
@@ -2263,7 +3064,7 @@ class SqliteTaskStore:
                        o.delivery_count, o.claimed_by, o.claimed_at,
                        o.claim_token, o.last_error
                 FROM outbox AS o
-                JOIN commands AS c
+                LEFT JOIN commands AS c
                   ON c.command_id=o.command_id
                  AND c.scope_key=(
                      SELECT scope_key FROM tasks WHERE task_id=o.task_id
@@ -2277,7 +3078,91 @@ class SqliteTaskStore:
                     "formal Task Attempt lacks one immutable dispatch authority"
                 )
             dispatch_binding = binding_rows[0]
-            fingerprint = _json_load(dispatch_binding["fingerprint"])
+            has_recovery_table = connection.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='durability_recoveries'"""
+            ).fetchone()
+            recovery_row = (
+                None
+                if has_recovery_table is None
+                else connection.execute(
+                    """SELECT * FROM durability_recoveries
+                       WHERE recovery_attempt_id=?""",
+                    (row["attempt_id"],),
+                ).fetchone()
+            )
+            fingerprint = (
+                None
+                if dispatch_binding["fingerprint"] is None
+                else _json_load(dispatch_binding["fingerprint"])
+            )
+            if recovery_row is not None:
+                if any(row[column] is None for column in required_selection_columns):
+                    raise cls._corrupt(
+                        "durability recovery lost its persisted selection"
+                    )
+                producer_row = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=?",
+                    (recovery_row["producer_attempt_id"],),
+                ).fetchone()
+                boundary_rows = connection.execute(
+                    """SELECT occurred_at FROM task_events
+                       WHERE task_id=? AND attempt_id=? AND causation_id=?
+                         AND event_type='task.recovery_accepted'""",
+                    (
+                        row["task_id"],
+                        row["attempt_id"],
+                        dispatch_binding["dispatch_command_id"],
+                    ),
+                ).fetchall()
+                selection = _selection_from_attempt_row(row)
+                producer_selection = (
+                    None
+                    if producer_row is None
+                    else _selection_from_attempt_row(producer_row)
+                )
+                if (
+                    dispatch_binding["command_created_at"] is not None
+                    or dispatch_binding["command_result_json"] is not None
+                    or dispatch_binding["dispatch_command_id"]
+                    != recovery_row["recovery_id"]
+                    or len(boundary_rows) != 1
+                    or selection is None
+                    or selection != producer_selection
+                    or reprioritize_rows
+                    or any(
+                        timestamp != row["admission_enqueued_at"]
+                        for timestamp in (
+                            dispatch_binding["dispatch_created_at"],
+                            recovery_row["created_at"],
+                            boundary_rows[0]["occurred_at"],
+                        )
+                    )
+                ):
+                    raise cls._corrupt(
+                        "durability recovery selection authority is not canonical"
+                    )
+                callback_rows = connection.execute(
+                    "SELECT * FROM executor_events WHERE attempt_id=? ORDER BY source_seq",
+                    (row["attempt_id"],),
+                ).fetchall()
+                expected_callback_binding = (
+                    selection.adapter_id,
+                    selection.capability_profile_digest,
+                )
+                if any(
+                    (
+                        observation.adapter_id,
+                        observation.capability_profile_digest,
+                    )
+                    != expected_callback_binding
+                    for observation in (
+                        cls._executor_observation_from_row(callback_row)
+                        for callback_row in callback_rows
+                    )
+                ):
+                    raise cls._corrupt("durability recovery callback binding changed")
+                continue
             if all(value is None for value in values):
                 if type(fingerprint) is dict and "executor_selection" in fingerprint:
                     raise cls._corrupt(
@@ -2324,24 +3209,27 @@ class SqliteTaskStore:
                     enqueued_at=row["admission_enqueued_at"],
                     queued=False,
                 )
-                if row["state"] == FormalAttemptState.ACCEPTED.value and (
-                    dispatch_binding["dispatch_state"]
-                    == OutboxState.PENDING.value
-                ) and (
-                    type(dispatch_binding["delivery_count"]) is not int
-                    or dispatch_binding["delivery_count"]
-                    != row["admission_attempt_count"]
-                    or dispatch_binding["claimed_by"] is not None
-                    or dispatch_binding["claimed_at"] is not None
-                    or dispatch_binding["claim_token"] is not None
-                    or (
-                        row["admission_attempt_count"] == 0
-                        and dispatch_binding["last_error"] is not None
+                if (
+                    row["state"] == FormalAttemptState.ACCEPTED.value
+                    and (
+                        dispatch_binding["dispatch_state"] == OutboxState.PENDING.value
                     )
-                    or (
-                        row["admission_attempt_count"] > 0
-                        and dispatch_binding["last_error"]
-                        != row["admission_reason"]
+                    and (
+                        type(dispatch_binding["delivery_count"]) is not int
+                        or dispatch_binding["delivery_count"]
+                        != row["admission_attempt_count"]
+                        or dispatch_binding["claimed_by"] is not None
+                        or dispatch_binding["claimed_at"] is not None
+                        or dispatch_binding["claim_token"] is not None
+                        or (
+                            row["admission_attempt_count"] == 0
+                            and dispatch_binding["last_error"] is not None
+                        )
+                        or (
+                            row["admission_attempt_count"] > 0
+                            and dispatch_binding["last_error"]
+                            != row["admission_reason"]
+                        )
                     )
                 ):
                     raise ValueError(
@@ -2359,9 +3247,7 @@ class SqliteTaskStore:
                         dispatch_binding["dispatch_command_id"],
                     ),
                 ).fetchall()
-                command_result = _json_load(
-                    dispatch_binding["command_result_json"]
-                )
+                command_result = _json_load(dispatch_binding["command_result_json"])
                 if (
                     len(boundary_rows) != 1
                     or type(command_result) is not dict
@@ -2378,7 +3264,10 @@ class SqliteTaskStore:
                     raise ValueError(
                         "selected Attempt enqueue time changed from creation authority"
                     )
-                if type(fingerprint) is not dict or "executor_selection" not in fingerprint:
+                if (
+                    type(fingerprint) is not dict
+                    or "executor_selection" not in fingerprint
+                ):
                     raise ValueError("selected Attempt fingerprint changed")
                 initial_selection = _selection_from_fingerprint_payload(
                     fingerprint["executor_selection"]
@@ -2421,6 +3310,145 @@ class SqliteTaskStore:
         cls._verify_v5_ack_semantics(connection, consumer_rows)
 
     @classmethod
+    def _verify_v6_semantics(cls, connection: sqlite3.Connection) -> None:
+        """Fail closed before accepting any v6 durability authority."""
+
+        bindings = connection.execute(
+            """SELECT task_id, producer_attempt_id AS origin_attempt_id
+               FROM durability_checkpoints
+               UNION
+               SELECT task_id, origin_attempt_id
+               FROM durability_effect_facts
+               UNION
+               SELECT task_id, producer_attempt_id AS origin_attempt_id
+               FROM durability_recoveries
+               ORDER BY task_id, origin_attempt_id"""
+        ).fetchall()
+        try:
+            for row in bindings:
+                task_row = cls._require_task_row_by_id(connection, row["task_id"])
+                scope, _spec = _task_binding_from_row(task_row)
+                binding = cls._durability_binding_from_connection(
+                    connection,
+                    scope=scope,
+                    task_id=row["task_id"],
+                    origin_attempt_id=row["origin_attempt_id"],
+                )
+                cls._verified_checkpoint_prefix(connection, binding)
+                cls._verified_effect_prefix(connection, binding)
+
+            recovery_rows = connection.execute(
+                """SELECT * FROM durability_recoveries
+                   ORDER BY task_id, producer_attempt_id, recovery_generation"""
+            ).fetchall()
+            seen_generations: dict[str, int] = {}
+            for row in recovery_rows:
+                task_row = cls._require_task_row_by_id(connection, row["task_id"])
+                scope, _spec = _task_binding_from_row(task_row)
+                binding = cls._durability_binding_from_connection(
+                    connection,
+                    scope=scope,
+                    task_id=row["task_id"],
+                    origin_attempt_id=row["producer_attempt_id"],
+                )
+                facts = ExecutorRecoveryFacts.from_bytes(bytes(row["recovery_facts"]))
+                profile_json = _json_dump(binding.profile.to_dict())
+                key = binding.task_id
+                prior_generation = seen_generations.get(key, 0)
+                producer = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=? AND task_id=?",
+                    (binding.origin_attempt_id, binding.task_id),
+                ).fetchone()
+                recovery = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=? AND task_id=?",
+                    (row["recovery_attempt_id"], binding.task_id),
+                ).fetchone()
+                if (
+                    row["profile_json"] != profile_json
+                    or facts.scope != binding.scope
+                    or facts.task_id != binding.task_id
+                    or facts.producer_attempt_id != binding.origin_attempt_id
+                    or facts.candidate_recovery_attempt_id != row["recovery_attempt_id"]
+                    or facts.profile != binding.profile
+                    or facts.recovery_generation != row["recovery_generation"]
+                    or row["recovery_generation"] != prior_generation + 1
+                    or producer is None
+                    or recovery is None
+                    or producer["state"] != FormalAttemptState.TERMINAL.value
+                    or recovery["attempt_number"] != producer["attempt_number"] + 1
+                    or producer["attempt_number"] != row["recovery_generation"]
+                ):
+                    raise ValueError("durable recovery lineage is inconsistent")
+                cls._verified_checkpoint_prefix(
+                    connection,
+                    binding,
+                    expected_head=row["checkpoint_head"],
+                    expected_prefix_digest=row["checkpoint_prefix_digest"],
+                )
+                cls._verified_effect_prefix(
+                    connection,
+                    binding,
+                    expected_head=row["effect_head"],
+                    expected_prefix_digest=row["effect_prefix_digest"],
+                )
+                seen_generations[key] = row["recovery_generation"]
+
+            lease_rows = connection.execute(
+                "SELECT * FROM durability_mutator_leases ORDER BY task_id"
+            ).fetchall()
+            for row in lease_rows:
+                if (
+                    type(row["owner_id"]) is not str
+                    or not row["owner_id"].strip()
+                    or type(row["claim_token"]) is not str
+                    or not row["claim_token"].strip()
+                    or _utc_datetime(row["expires_at"])
+                    <= _utc_datetime(row["claimed_at"])
+                ):
+                    raise ValueError("durability mutator lease is invalid")
+            fence_rows = connection.execute(
+                "SELECT * FROM durability_recovery_fences ORDER BY task_id"
+            ).fetchall()
+            for row in fence_rows:
+                task_row = cls._require_task_row_by_id(connection, row["task_id"])
+                command_row = connection.execute(
+                    """SELECT command_type, result_json FROM commands
+                       WHERE scope_key=? AND command_id=?""",
+                    (task_row["scope_key"], row["cancel_command_id"]),
+                ).fetchone()
+                producer = connection.execute(
+                    "SELECT task_id, state, outcome FROM attempts WHERE attempt_id=?",
+                    (row["producer_attempt_id"],),
+                ).fetchone()
+                if (
+                    command_row is None
+                    or command_row["command_type"] != "task.cancel"
+                    or producer is None
+                    or producer["task_id"] != row["task_id"]
+                    or producer["state"] != FormalAttemptState.TERMINAL.value
+                    or producer["outcome"] != TerminalOutcome.INTERRUPTED.value
+                ):
+                    raise ValueError("durability cancel fence is invalid")
+                result = ResultEnvelope.from_dict(
+                    _json_load(command_row["result_json"])
+                )
+                if (
+                    result.ok
+                    or result.error is None
+                    or result.error.reason != "TASK_ALREADY_TERMINAL"
+                ):
+                    raise ValueError("durability cancel fence lacks exact decision")
+        except (DurabilityPrefixViolation, FormalTaskViolation, ValueError) as error:
+            if (
+                isinstance(error, FormalTaskViolation)
+                and error.reason == "TASK_STORE_CORRUPT"
+            ):
+                raise
+            raise cls._corrupt(
+                "formal Task Store durability authority is corrupt"
+            ) from error
+
+    @classmethod
     def _v5_consumer_rows(
         cls,
         connection: sqlite3.Connection,
@@ -2446,9 +3474,7 @@ class SqliteTaskStore:
                 or row["project_id"] != scope.project_id
                 or row["presentation_class"] not in {"text", "voice"}
             ):
-                raise cls._corrupt(
-                    "formal Task consumer crosses its exact Task scope"
-                )
+                raise cls._corrupt("formal Task consumer crosses its exact Task scope")
         return consumer_rows
 
     @classmethod
@@ -2469,9 +3495,7 @@ class SqliteTaskStore:
         previous_seq, previous_event_id, previous_at, previous_sha256 = previous
         advanced = acknowledged_seq > previous_seq
         current_seq = acknowledged_seq if advanced else previous_seq
-        current_event_id = (
-            acknowledged_event_id if advanced else previous_event_id
-        )
+        current_event_id = acknowledged_event_id if advanced else previous_event_id
         if current_event_id is None:
             raise cls._corrupt("formal Task ACK history lost its current event")
         if origin == _LEGACY_CONSUMPTION_SEED_TYPE:
@@ -2593,9 +3617,7 @@ class SqliteTaskStore:
                 continue
             seed_type, seed_seq, seed_event_id, seed_time, parsed_seed_time = anchor
             if seed_type != _LEGACY_CONSUMPTION_SEED_TYPE:
-                raise cls._corrupt(
-                    "formal Task consumer seed version is not canonical"
-                )
+                raise cls._corrupt("formal Task consumer seed version is not canonical")
             key = (
                 row["subject_id"],
                 row["project_id"],
@@ -2624,9 +3646,7 @@ class SqliteTaskStore:
         ).fetchall()
         for row in command_rows:
             try:
-                stored_result = ResultEnvelope.from_dict(
-                    _json_load(row["result_json"])
-                )
+                stored_result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
             except (ContractViolation, FormalTaskViolation) as error:
                 raise cls._corrupt(
                     "formal Task ACK command result is not canonical"
@@ -2659,8 +3679,7 @@ class SqliteTaskStore:
             expected_event_head = payload.get("expected_event_head")
             event_row = (
                 None
-                if type(acked_through_seq) is not int
-                or type(acked_event_id) is not str
+                if type(acked_through_seq) is not int or type(acked_event_id) is not str
                 else connection.execute(
                     """SELECT event_id, occurred_at FROM task_events
                        WHERE task_id=? AND seq=? AND event_id=?""",
@@ -2749,9 +3768,7 @@ class SqliteTaskStore:
                     value
                 ) == canonical_json_bytes(expected_value)
             except (ContractViolation, UnicodeError) as error:
-                raise cls._corrupt(
-                    "formal Task ACK result is not canonical"
-                ) from error
+                raise cls._corrupt("formal Task ACK result is not canonical") from error
             if (
                 not result.ok
                 or type(value) is not dict
@@ -2761,15 +3778,10 @@ class SqliteTaskStore:
                 or dict(result.extensions)
                 != command_result_extensions(TaskCommandDisposition.APPLIED)
             ):
-                raise cls._corrupt(
-                    "formal Task ACK result is not canonical"
-                )
+                raise cls._corrupt("formal Task ACK result is not canonical")
             reconstructed[key] = current_chain
 
-        expected = {
-            key: seed[:3]
-            for key, seed in legacy_seeds.items()
-        }
+        expected = {key: seed[:3] for key, seed in legacy_seeds.items()}
         expected.update(
             {
                 key: (chain[1], chain[2], chain[3])
@@ -2873,9 +3885,7 @@ class SqliteTaskStore:
                     "selected Attempt requires the strict persisted carrier",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-            policy = (
-                AdmissionPolicy() if admission_policy is None else admission_policy
-            )
+            policy = AdmissionPolicy() if admission_policy is None else admission_policy
             if not isinstance(policy, AdmissionPolicy):
                 raise FormalTaskViolation(
                     "INVALID_ADMISSION_POLICY",
@@ -3159,11 +4169,7 @@ class SqliteTaskStore:
                 or attempt_row["task_id"] != predecessor_id
                 or attempt_row["state"] != FormalAttemptState.TERMINAL.value
                 or attempt_row["outcome"]
-                != (
-                    None
-                    if predecessor.outcome is None
-                    else predecessor.outcome.value
-                )
+                != (None if predecessor.outcome is None else predecessor.outcome.value)
                 or terminal_event is None
                 or terminal_event["event_type"] != "task.terminal"
                 or terminal_event["event_id"]
@@ -3212,7 +4218,10 @@ class SqliteTaskStore:
                 "side_effect_class": spec.side_effect_class,
                 "attributes": dict(spec.attributes),
             }
-            if any(payload.get(key) != value for key, value in expected_spec_payload.items()):
+            if any(
+                payload.get(key) != value
+                for key, value in expected_spec_payload.items()
+            ):
                 raise FormalTaskViolation(
                     "TASK_SUCCESSOR_SPEC_MISMATCH",
                     "successor resolved specification disagrees with command facts",
@@ -3389,7 +4398,13 @@ class SqliteTaskStore:
                 or event_head > MAX_SAFE_INTEGER
             ):
                 raise ValueError("successor command authority is not canonical")
-        except (ContractViolation, KeyError, TypeError, ValueError, UnicodeError) as error:
+        except (
+            ContractViolation,
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+        ) as error:
             raise FormalTaskViolation(
                 "TASK_SUCCESSOR_INVALID",
                 "task.create_successor command is not canonical",
@@ -3566,9 +4581,12 @@ class SqliteTaskStore:
         """Atomically change the priority of one provably pre-effect dispatch."""
 
         payload = command.payload
-        if command.command_type != "task.reprioritize" or type(payload) is not dict or set(
-            payload
-        ) != {"attempt_id", "expected_event_head", "priority", "reason"}:
+        if (
+            command.command_type != "task.reprioritize"
+            or type(payload) is not dict
+            or set(payload)
+            != {"attempt_id", "expected_event_head", "priority", "reason"}
+        ):
             raise FormalTaskViolation(
                 "TASK_CONTROL_INVALID",
                 "task.reprioritize payload must contain the exact queue authority",
@@ -3781,8 +4799,7 @@ class SqliteTaskStore:
                 state_conflict = state_conflict or (
                     task["state"] != FormalTaskState.DECISION_REQUIRED.value
                     or current_event["event_type"] != "task.decision_required"
-                    or payload.get("responds_to_event_id")
-                    != current_event["event_id"]
+                    or payload.get("responds_to_event_id") != current_event["event_id"]
                 )
             if stale:
                 disposition = TaskCommandDisposition.CONFLICT
@@ -3936,6 +4953,21 @@ class SqliteTaskStore:
             task = self._require_task_row(connection, task_id, command.scope)
             self._verify_durable_lineage(connection, task)
             if task["state"] == FormalTaskState.TERMINAL.value:
+                if task["outcome"] == TerminalOutcome.INTERRUPTED.value:
+                    connection.execute(
+                        """INSERT INTO durability_recovery_fences(
+                               task_id, producer_attempt_id, cancel_command_id,
+                               created_at)
+                           VALUES(?, ?, ?, ?)
+                           ON CONFLICT(task_id) DO NOTHING""",
+                        (
+                            task_id,
+                            task["attempt_id"],
+                            command.command_id,
+                            observed_at,
+                        ),
+                    )
+                    self._hit("durability.recovery_fence.after_insert")
                 return self._persist_business_decision(
                     connection,
                     command,
@@ -4115,9 +5147,7 @@ class SqliteTaskStore:
                     ),
                     admission_event_id=requested_event.event_id,
                     settlement_event_id=(
-                        None
-                        if settlement_event is None
-                        else settlement_event.event_id
+                        None if settlement_event is None else settlement_event.event_id
                     ),
                 ),
             )
@@ -4271,13 +5301,9 @@ class SqliteTaskStore:
             if row is None:
                 return None
             try:
-                stored_result = ResultEnvelope.from_dict(
-                    _json_load(row["result_json"])
-                )
+                stored_result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
             except ContractViolation as error:
-                raise self._corrupt(
-                    "retry command result is not canonical"
-                ) from error
+                raise self._corrupt("retry command result is not canonical") from error
             if not stored_result.ok:
                 binding, _original_result = self._verify_business_decision(
                     connection,
@@ -4383,6 +5409,257 @@ class SqliteTaskStore:
                 precondition=precondition,
                 resulting_spec=payload[1],
             )
+
+    def read_durable_recovery_authority(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> DurableRecoveryAuthoritySnapshot:
+        """Read an interrupted-producer snapshot without granting mutation."""
+
+        with self._snapshot_reader() as connection:
+            task, attempt = self._retry_state_from_connection(
+                connection,
+                scope=scope,
+                task_id=task_id,
+            )
+            return self._current_durable_recovery_authority(
+                connection,
+                task=task,
+                attempt=attempt,
+            )
+
+    def read_durable_recovery_dispatch(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        recovery_attempt_id: str,
+    ) -> tuple[str, int, int, str, int, str] | None:
+        """Read exact Store continuation facts for one linked dispatch Attempt."""
+
+        with self._snapshot_reader() as connection:
+            self._require_task_row(connection, task_id, scope)
+            row = connection.execute(
+                """SELECT producer_attempt_id, recovery_generation,
+                          checkpoint_head, checkpoint_prefix_digest,
+                          effect_head, effect_prefix_digest
+                   FROM durability_recoveries
+                   WHERE task_id=? AND recovery_attempt_id=?""",
+                (task_id, recovery_attempt_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return (
+                row["producer_attempt_id"],
+                row["recovery_generation"],
+                row["checkpoint_head"],
+                row["checkpoint_prefix_digest"],
+                row["effect_head"],
+                row["effect_prefix_digest"],
+            )
+
+    def recover_durable_attempt(
+        self,
+        authority: DurableRecoveryAuthoritySnapshot,
+        *,
+        recovery_id: str,
+        recovery_facts: ExecutorRecoveryFacts,
+        checkpoint_head: int,
+        checkpoint_prefix_digest: str,
+        effect_head: int,
+        effect_prefix_digest: str,
+        claim_owner_id: str,
+        claim_token: str,
+        claim_generation: int,
+        observed_at: str,
+        admission_policy: AdmissionPolicy | None = None,
+    ) -> PersistentAttemptRecord:
+        """Operator/Core-only linked recovery; no transport command is registered."""
+
+        if type(recovery_id) is not str or not recovery_id.strip():
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_RECOVERY_ID",
+                "durable recovery id must be one exact non-empty string",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._transaction() as connection:
+            replay = connection.execute(
+                "SELECT * FROM durability_recoveries WHERE recovery_id=?",
+                (recovery_id,),
+            ).fetchone()
+            if replay is not None:
+                if (
+                    replay["recovery_attempt_id"]
+                    != recovery_facts.candidate_recovery_attempt_id
+                    or bytes(replay["recovery_facts"])
+                    != recovery_facts.canonical_bytes()
+                    or replay["checkpoint_head"] != checkpoint_head
+                    or replay["checkpoint_prefix_digest"] != checkpoint_prefix_digest
+                    or replay["effect_head"] != effect_head
+                    or replay["effect_prefix_digest"] != effect_prefix_digest
+                ):
+                    raise FormalTaskViolation(
+                        "IDEMPOTENCY_CONFLICT",
+                        "recovery id is already bound to different durability facts",
+                        ErrorCode.CONFLICT,
+                    )
+                attempt_row = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=?",
+                    (replay["recovery_attempt_id"],),
+                ).fetchone()
+                if attempt_row is None:
+                    raise self._corrupt("durable recovery lost its linked Attempt")
+                return self._attempt_from_row(attempt_row)
+
+            task, attempt = self._retry_state_from_connection(
+                connection,
+                scope=authority.task.scope,
+                task_id=authority.task.task_id,
+            )
+            current = self._current_durable_recovery_authority(
+                connection,
+                task=task,
+                attempt=attempt,
+            )
+            if current != authority:
+                raise FormalTaskViolation(
+                    "TASK_RECOVERY_PRECONDITION_STALE",
+                    "durable recovery predecessor changed before commit",
+                    ErrorCode.STALE,
+                )
+            self._validate_durable_recovery(
+                connection,
+                authority=current,
+                selection=attempt.selection,
+                recovery_facts=recovery_facts,
+                checkpoint_head=checkpoint_head,
+                checkpoint_prefix_digest=checkpoint_prefix_digest,
+                effect_head=effect_head,
+                effect_prefix_digest=effect_prefix_digest,
+                claim_owner_id=claim_owner_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                observed_at=observed_at,
+            )
+            attempt_id = recovery_facts.candidate_recovery_attempt_id
+            outbox_id = f"outbox-{uuid.uuid4().hex}"
+            event_id = f"event-{uuid.uuid4().hex}"
+            next_seq = task.event_head + 1
+            self._insert_attempt(
+                connection,
+                attempt_id=attempt_id,
+                task_id=task.task_id,
+                attempt_number=attempt.attempt_number + 1,
+                executor_id=task.spec.executor_id,
+                state=FormalAttemptState.ACCEPTED,
+                observed_at=observed_at,
+                selection=attempt.selection,
+                admission_policy=admission_policy,
+            )
+            connection.execute(
+                """INSERT INTO durability_recoveries(
+                       recovery_id, task_id, producer_attempt_id,
+                       recovery_attempt_id, recovery_generation, profile_json,
+                       checkpoint_head, checkpoint_prefix_digest,
+                       effect_head, effect_prefix_digest, recovery_facts, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    recovery_id,
+                    task.task_id,
+                    attempt.attempt_id,
+                    attempt_id,
+                    recovery_facts.recovery_generation,
+                    _json_dump(recovery_facts.profile.to_dict()),
+                    checkpoint_head,
+                    checkpoint_prefix_digest,
+                    effect_head,
+                    effect_prefix_digest,
+                    recovery_facts.canonical_bytes(),
+                    observed_at,
+                ),
+            )
+            self._insert_event(
+                connection,
+                event_id=event_id,
+                task_id=task.task_id,
+                attempt_id=attempt_id,
+                scope=task.scope,
+                seq=next_seq,
+                event_type="task.recovery_accepted",
+                state=FormalTaskState.ACCEPTED.value,
+                outcome=None,
+                producer="task_core",
+                source_event_id=None,
+                causation_id=recovery_id,
+                correlation_id=task.correlation_id,
+                occurred_at=observed_at,
+                details={
+                    "recovery_id": recovery_id,
+                    "producer_attempt_id": attempt.attempt_id,
+                    "producer_outcome": TerminalOutcome.INTERRUPTED.value,
+                    "recovery_generation": recovery_facts.recovery_generation,
+                    "recovery_budget_remaining": (
+                        authority.recovery_budget_remaining - 1
+                    ),
+                    "attempt_number": attempt.attempt_number + 1,
+                },
+            )
+            self._insert_outbox(
+                connection,
+                outbox_id=outbox_id,
+                kind=OutboxKind.ATTEMPT_DISPATCH,
+                task_id=task.task_id,
+                attempt_id=attempt_id,
+                command_id=recovery_id,
+                scope=task.scope,
+                spec=task.spec,
+                now=observed_at,
+            )
+            changed = connection.execute(
+                """UPDATE tasks SET state=?, outcome=NULL, attempt_id=?,
+                       cancel_requested=0, dispatch_fenced=0, event_head=?,
+                       reconciliation_state=NULL, reconciliation_reason=NULL,
+                       updated_at=?
+                   WHERE task_id=? AND attempt_id=? AND state=? AND outcome=?
+                     AND event_head=? AND cancel_requested=0
+                     AND dispatch_fenced=0""",
+                (
+                    FormalTaskState.ACCEPTED.value,
+                    attempt_id,
+                    next_seq,
+                    observed_at,
+                    task.task_id,
+                    attempt.attempt_id,
+                    FormalTaskState.TERMINAL.value,
+                    TerminalOutcome.INTERRUPTED.value,
+                    task.event_head,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise FormalTaskViolation(
+                    "TASK_RECOVERY_PRECONDITION_STALE",
+                    "durable recovery lost its Task CAS",
+                    ErrorCode.STALE,
+                )
+            released = connection.execute(
+                """DELETE FROM durability_mutator_leases
+                   WHERE task_id=? AND owner_id=? AND claim_token=?
+                     AND claim_generation=?""",
+                (task.task_id, claim_owner_id, claim_token, claim_generation),
+            ).rowcount
+            if released != 1:
+                raise FormalTaskViolation(
+                    "TASK_RECOVERY_PRECONDITION_STALE",
+                    "durable recovery lost its Store claim",
+                    ErrorCode.STALE,
+                )
+            row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            assert row is not None
+            return self._attempt_from_row(row)
 
     def retry(
         self,
@@ -4738,6 +6015,211 @@ class SqliteTaskStore:
             )
         return TaskRetryAuthoritySnapshot(task, attempt, expected)
 
+    def _current_durable_recovery_authority(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+    ) -> DurableRecoveryAuthoritySnapshot:
+        if (
+            task.state is not FormalTaskState.TERMINAL
+            or attempt.state is not FormalAttemptState.TERMINAL
+            or task.outcome is not TerminalOutcome.INTERRUPTED
+            or attempt.outcome is not TerminalOutcome.INTERRUPTED
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_REQUIRES_INTERRUPTED_PRODUCER",
+                "durable recovery requires one terminal interrupted producer",
+                ErrorCode.CONFLICT,
+            )
+        if attempt.attempt_number >= 3:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_LIMIT_EXCEEDED",
+                "durable recovery permits at most three total Attempts",
+                ErrorCode.CONFLICT,
+            )
+        if task.cancel_requested or task.dispatch_fenced:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CANCELLED",
+                "cancelled or fenced Task cannot admit recovery",
+                ErrorCode.CONFLICT,
+            )
+        unsettled = connection.execute(
+            """SELECT 1 FROM outbox
+               WHERE task_id=? AND attempt_id=? AND state IN (?, ?)
+               LIMIT 1""",
+            (
+                task.task_id,
+                attempt.attempt_id,
+                OutboxState.PENDING.value,
+                OutboxState.CLAIMED.value,
+            ),
+        ).fetchone()
+        if unsettled is not None:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_PRODUCER_NOT_QUIESCENT",
+                "producer delivery ownership is not settled",
+                ErrorCode.UNAVAILABLE,
+            )
+        return DurableRecoveryAuthoritySnapshot(
+            task=task,
+            producer_attempt=attempt,
+            recovery_generation=attempt.attempt_number,
+            recovery_budget_remaining=3 - attempt.attempt_number,
+        )
+
+    @staticmethod
+    def _require_recovery_effect_safety(prefix: VerifiedEffectPrefix) -> None:
+        dispatches: dict[str, ExternalEffectDispatch] = {}
+        observations: dict[str, ExternalEffectObservation] = {}
+        settlements: dict[str, ExternalEffectSettlement] = {}
+        for fact in prefix.records:
+            effect_id = fact.binding.effect_id
+            if type(fact) is ExternalEffectDispatch:
+                dispatches[effect_id] = fact
+            elif type(fact) is ExternalEffectObservation:
+                observations[effect_id] = fact
+            elif type(fact) is ExternalEffectSettlement:
+                settlements[effect_id] = fact
+        for effect_id, dispatch in dispatches.items():
+            observation = observations.get(effect_id)
+            settlement = settlements.get(effect_id)
+            if (
+                observation is None
+                or observation.dispatch_ordinal != dispatch.dispatch_ordinal
+                or observation.kind.value == "unknown"
+                or (
+                    observation.kind.value == "applied"
+                    and (
+                        settlement is None
+                        or settlement.kind.value not in {"resolved", "compensated"}
+                    )
+                )
+                or (
+                    settlement is not None
+                    and settlement.kind.value == "manual_required"
+                )
+            ):
+                raise FormalTaskViolation(
+                    "TASK_RECOVERY_EFFECT_UNKNOWN",
+                    "external effect truth is not safe for automatic recovery",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+
+    @classmethod
+    def _validate_durable_recovery(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        authority: DurableRecoveryAuthoritySnapshot,
+        selection: PersistedExecutorSelection | None,
+        recovery_facts: ExecutorRecoveryFacts,
+        checkpoint_head: int | None,
+        checkpoint_prefix_digest: str | None,
+        effect_head: int | None,
+        effect_prefix_digest: str | None,
+        claim_owner_id: str | None,
+        claim_token: str | None,
+        claim_generation: int | None,
+        observed_at: str,
+    ) -> None:
+        producer = authority.producer_attempt
+        task = authority.task
+        binding = cls._durability_binding_from_connection(
+            connection,
+            scope=task.scope,
+            task_id=task.task_id,
+            origin_attempt_id=producer.attempt_id,
+        )
+        generation_row = connection.execute(
+            """SELECT COALESCE(MAX(recovery_generation), 0) AS generation
+               FROM durability_recoveries
+               WHERE task_id=?""",
+            (task.task_id,),
+        ).fetchone()
+        lease = connection.execute(
+            "SELECT * FROM durability_mutator_leases WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()
+        cancel_fence = connection.execute(
+            "SELECT 1 FROM durability_recovery_fences WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()
+        if (
+            selection is None
+            or selection != producer.selection
+            or binding.profile.durability_level not in {"D1", "D2"}
+            or recovery_facts.scope != task.scope
+            or recovery_facts.task_id != task.task_id
+            or recovery_facts.producer_attempt_id != producer.attempt_id
+            or recovery_facts.profile != binding.profile
+            or recovery_facts.recovery_generation != generation_row["generation"] + 1
+            or recovery_facts.recovery_generation != authority.recovery_generation
+            or recovery_facts.is_expired(at=observed_at)
+            or cancel_fence is not None
+            or lease is None
+            or lease["owner_id"] != claim_owner_id
+            or lease["claim_token"] != claim_token
+            or lease["claim_generation"] != claim_generation
+            or _utc_datetime(lease["expires_at"]) <= _utc_datetime(observed_at)
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_FACTS_STALE",
+                "durable recovery facts or Store claim do not bind current truth",
+                ErrorCode.STALE,
+            )
+        if (
+            checkpoint_head is None
+            or checkpoint_head <= 0
+            or checkpoint_prefix_digest is None
+            or effect_head is None
+            or effect_prefix_digest is None
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CHECKPOINT_REQUIRED",
+                "durable recovery requires complete checkpoint and effect prefixes",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        checkpoints = cls._verified_checkpoint_prefix(
+            connection,
+            binding,
+            expected_head=checkpoint_head,
+            expected_prefix_digest=checkpoint_prefix_digest,
+        )
+        effects = cls._verified_effect_prefix(
+            connection,
+            binding,
+            expected_head=effect_head,
+            expected_prefix_digest=effect_prefix_digest,
+        )
+        if not checkpoints.records:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CHECKPOINT_REQUIRED",
+                "durable recovery requires one complete immutable checkpoint",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        checkpoint = checkpoints.records[-1]
+        expected_context_version = str(task.spec.context.revision_value)
+        if (
+            checkpoint.recovery_generation != recovery_facts.recovery_generation - 1
+            or checkpoint.task_spec_digest
+            != hashlib.sha256(task.spec.fingerprint_bytes()).hexdigest()
+            or checkpoint.context_version != expected_context_version
+            or checkpoint.context_digest
+            != hashlib.sha256(
+                canonical_json_bytes(task.spec.context.to_dict())
+            ).hexdigest()
+            or checkpoint.effect_head != effects.head
+            or checkpoint.effect_prefix_digest != effects.prefix_digest
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_CHECKPOINT_STALE",
+                "checkpoint does not match exact Task/context/effect truth",
+                ErrorCode.STALE,
+            )
+        cls._require_recovery_effect_safety(effects)
+
     @staticmethod
     def _corrupt(message: str) -> FormalTaskViolation:
         return FormalTaskViolation(
@@ -4752,9 +6234,8 @@ class SqliteTaskStore:
     ) -> tuple[CommandEnvelope, ResultEnvelope, FormalTaskSpec | None]:
         def load() -> tuple[CommandEnvelope, ResultEnvelope, FormalTaskSpec | None]:
             result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
-            if (
-                result.command_id != row["command_id"]
-                or (not result.ok and row["command_type"] != "task.create_successor")
+            if result.command_id != row["command_id"] or (
+                not result.ok and row["command_type"] != "task.create_successor"
             ):
                 raise cls._corrupt(
                     "formal Task command ledger contains a non-canonical result"
@@ -4765,9 +6246,7 @@ class SqliteTaskStore:
             if row["command_type"] in {"task.create", "task.create_successor"}:
                 allowed_keys = {
                     frozenset({"command", "resolved_spec"}),
-                    frozenset(
-                        {"command", "resolved_spec", "executor_selection"}
-                    ),
+                    frozenset({"command", "resolved_spec", "executor_selection"}),
                 }
                 if (
                     type(fingerprint_payload) is not dict
@@ -4785,11 +6264,10 @@ class SqliteTaskStore:
                         fingerprint_payload["executor_selection"]
                     )
             elif row["command_type"] == "task.retry":
-                if (
-                    type(fingerprint_payload) is dict
-                    and set(fingerprint_payload)
-                    == {"command", "executor_selection"}
-                ):
+                if type(fingerprint_payload) is dict and set(fingerprint_payload) == {
+                    "command",
+                    "executor_selection",
+                }:
                     command_payload = fingerprint_payload["command"]
                     selection = _selection_from_fingerprint_payload(
                         fingerprint_payload["executor_selection"]
@@ -4901,9 +6379,7 @@ class SqliteTaskStore:
         return cls._sha256_hex(canonical_json_bytes(value))
 
     @classmethod
-    def _decision_payload_authority(
-        cls, command: CommandEnvelope
-    ) -> dict[str, object]:
+    def _decision_payload_authority(cls, command: CommandEnvelope) -> dict[str, object]:
         """Reduce a canonical command payload to closed non-content authority."""
 
         payload = command.payload
@@ -5054,9 +6530,7 @@ class SqliteTaskStore:
                 command.scope.subject_id != task_scope.subject_id
                 or command.scope.project_id != task_scope.project_id
             ):
-                raise cls._corrupt(
-                    "formal Task ACK decision crosses consumer scope"
-                )
+                raise cls._corrupt("formal Task ACK decision crosses consumer scope")
             head_row = connection.execute(
                 "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
                 (task_row["task_id"], task_row["event_head"]),
@@ -5085,9 +6559,7 @@ class SqliteTaskStore:
                     "head_event_id": head_row["event_id"],
                 },
                 "event_at_ack_seq_id": (
-                    None
-                    if acknowledged_row is None
-                    else acknowledged_row["event_id"]
+                    None if acknowledged_row is None else acknowledged_row["event_id"]
                 ),
             }
 
@@ -5180,9 +6652,7 @@ class SqliteTaskStore:
         if command.command_type == "task.reprioritize":
             dispatch_row = dispatch_rows[0] if len(dispatch_rows) == 1 else None
             admission_count = (
-                None
-                if attempt_row is None
-                else attempt_row["admission_attempt_count"]
+                None if attempt_row is None else attempt_row["admission_attempt_count"]
             )
             admission_reason = (
                 None if attempt_row is None else attempt_row["admission_reason"]
@@ -5322,9 +6792,7 @@ class SqliteTaskStore:
                     }
                 )
             ):
-                raise cls._corrupt(
-                    "formal Task decision binding is not canonical"
-                )
+                raise cls._corrupt("formal Task decision binding is not canonical")
             authority = binding["authority"]
             base_authority_fields = {
                 "reason",
@@ -5381,9 +6849,7 @@ class SqliteTaskStore:
                     )
                 )
             ):
-                raise cls._corrupt(
-                    "formal Task decision authority is not canonical"
-                )
+                raise cls._corrupt("formal Task decision authority is not canonical")
             return binding, result
 
         return _stored_record("decision command ledger", load)
@@ -5394,9 +6860,7 @@ class SqliteTaskStore:
         connection: sqlite3.Connection,
         row: sqlite3.Row,
         *,
-        expected: Mapping[
-            str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]
-        ],
+        expected: Mapping[str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]],
     ) -> tuple[dict[str, object], ResultEnvelope]:
         """Verify one negative row against closed immutable decision evidence."""
 
@@ -5447,8 +6911,8 @@ class SqliteTaskStore:
             raise cls._corrupt("formal Task business decision is not canonical")
         payload = binding["authority"]["payload"]
         cls._verify_decision_payload_authority(row["command_type"], payload)
-        task, attempt, head, dispatch, successor_ids = (
-            cls._verify_decision_history(connection, row, binding, task_row)
+        task, attempt, head, dispatch, successor_ids = cls._verify_decision_history(
+            connection, row, binding, task_row
         )
         cls._verify_business_decision_reason(
             connection,
@@ -5472,9 +6936,7 @@ class SqliteTaskStore:
         binding: dict[str, object],
         result: ResultEnvelope,
         *,
-        expected: Mapping[
-            str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]
-        ],
+        expected: Mapping[str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]],
     ) -> tuple[dict[str, object], ResultEnvelope]:
         """Verify one sanitized ACK conflict against its frozen Task head."""
 
@@ -5530,9 +6992,7 @@ class SqliteTaskStore:
                 (binding["target_task_id"], acked_through_seq),
             ).fetchone()
         )
-        actual_event_id = (
-            None if actual_event is None else actual_event["event_id"]
-        )
+        actual_event_id = None if actual_event is None else actual_event["event_id"]
         decision_time = _canonical_utc_order_key(row["created_at"])
         actual_event_time = (
             None
@@ -5745,11 +7205,12 @@ class SqliteTaskStore:
         }.get(command_type)
         if type(payload) is not dict or expected_fields is None:
             raise cls._corrupt("formal Task decision payload authority is invalid")
-        unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
-        if (
-            set(payload) != expected_fields
-            or payload["payload_sha256"] != cls._json_value_sha256(unsigned)
-        ):
+        unsigned = {
+            key: value for key, value in payload.items() if key != "payload_sha256"
+        }
+        if set(payload) != expected_fields or payload[
+            "payload_sha256"
+        ] != cls._json_value_sha256(unsigned):
             raise cls._corrupt("formal Task decision payload authority is invalid")
 
         def text(field: str) -> bool:
@@ -5997,7 +7458,9 @@ class SqliteTaskStore:
             bound_delivery = dispatch["delivery_count"]
             current_delivery = dispatch_row["delivery_count"]
         except (TypeError, ValueError) as error:
-            raise cls._corrupt("formal Task decision dispatch evidence is invalid") from error
+            raise cls._corrupt(
+                "formal Task decision dispatch evidence is invalid"
+            ) from error
         allowed_current = {
             OutboxState.PENDING: set(OutboxState),
             OutboxState.CLAIMED: set(OutboxState),
@@ -6017,7 +7480,10 @@ class SqliteTaskStore:
                 and bound_delivery != 0
                 and "reprioritize" not in binding["authority"]
             )
-            or (bound_state in {OutboxState.CLAIMED, OutboxState.DELIVERED} and bound_delivery < 1)
+            or (
+                bound_state in {OutboxState.CLAIMED, OutboxState.DELIVERED}
+                and bound_delivery < 1
+            )
         ):
             raise cls._corrupt("formal Task decision dispatch history changed")
 
@@ -6131,9 +7597,7 @@ class SqliteTaskStore:
                 expected_reason = (
                     "TASK_CONTROL_PRECONDITION_STALE"
                     if stale
-                    else (
-                        None if eligible else "TASK_CONTROL_STATE_CONFLICT"
-                    )
+                    else (None if eligible else "TASK_CONTROL_STATE_CONFLICT")
                 )
             valid_reason = reason == expected_reason
         elif command_type == "task.adjust":
@@ -6211,8 +7675,7 @@ class SqliteTaskStore:
                     task["outcome"] == TerminalOutcome.COMPLETED.value
                     and (
                         len(result_digests) != 1
-                        or payload["predecessor_result_sha256"]
-                        != result_digests[0]
+                        or payload["predecessor_result_sha256"] != result_digests[0]
                     )
                 )
                 or (
@@ -6226,9 +7689,7 @@ class SqliteTaskStore:
             expected_reason = (
                 "TASK_SUCCESSOR_PRECONDITION_CONFLICT"
                 if precondition_conflict
-                else (
-                    "TASK_SUCCESSOR_RESULT_CONFLICT" if result_conflict else None
-                )
+                else ("TASK_SUCCESSOR_RESULT_CONFLICT" if result_conflict else None)
             )
             valid_reason = reason == expected_reason
         if not valid_reason:
@@ -6475,8 +7936,7 @@ class SqliteTaskStore:
             or command.target_ref.id != predecessor_id
             or payload.get("expected_predecessor_revision_number")
             != predecessor.revision_number
-            or payload.get("expected_predecessor_event_head")
-            != predecessor.event_head
+            or payload.get("expected_predecessor_event_head") != predecessor.event_head
             or payload.get("predecessor_terminal_event_id")
             != terminal_event["event_id"]
             or payload.get("predecessor_outcome") != predecessor.outcome.value
@@ -6538,7 +7998,9 @@ class SqliteTaskStore:
             if len(result_rows) != 1:
                 raise cls._corrupt("completed successor predecessor lost its result")
             expected_digest = hashlib.sha256(
-                canonical_json_bytes(cls._task_result_from_row(result_rows[0]).to_dict())
+                canonical_json_bytes(
+                    cls._task_result_from_row(result_rows[0]).to_dict()
+                )
             ).hexdigest()
             if digest != expected_digest:
                 raise cls._corrupt("successor predecessor result digest changed")
@@ -6802,15 +8264,9 @@ class SqliteTaskStore:
             current_result_valid = (
                 value["applied"] is settled
                 and value["state"]
-                == (
-                    FormalTaskState.TERMINAL.value if settled else request.state
-                )
+                == (FormalTaskState.TERMINAL.value if settled else request.state)
                 and result.observed_at
-                == (
-                    task_terminal.occurred_at
-                    if settled
-                    else request.occurred_at
-                )
+                == (task_terminal.occurred_at if settled else request.occurred_at)
                 and dict(result.extensions)
                 == command_result_extensions(
                     (
@@ -6819,9 +8275,7 @@ class SqliteTaskStore:
                         else TaskCommandDisposition.ACCEPTED
                     ),
                     admission_event_id=request.event_id,
-                    settlement_event_id=(
-                        task_terminal.event_id if settled else None
-                    ),
+                    settlement_event_id=(task_terminal.event_id if settled else None),
                 )
             )
             legacy_result_valid = (
@@ -7099,7 +8553,15 @@ class SqliteTaskStore:
             retry_events = tuple(
                 event for event in events if event.event_type == "task.retry_accepted"
             )
-            if len(accepted_events) != 1 or len(retry_events) != len(attempts) - 1:
+            recovery_events = tuple(
+                event
+                for event in events
+                if event.event_type == "task.recovery_accepted"
+            )
+            if (
+                len(accepted_events) != 1
+                or len(retry_events) + len(recovery_events) != len(attempts) - 1
+            ):
                 raise cls._corrupt(
                     "formal Task admission boundaries are incomplete or duplicated"
                 )
@@ -7115,21 +8577,48 @@ class SqliteTaskStore:
                         "formal Task attempt has no durable event segment"
                     )
                 boundary = segment[0]
+                has_recovery_table = connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                       WHERE type='table' AND name='durability_recoveries'"""
+                ).fetchone()
+                recovery_boundary_row = (
+                    None
+                    if has_recovery_table is None
+                    else connection.execute(
+                        """SELECT * FROM durability_recoveries
+                           WHERE task_id=? AND recovery_attempt_id=?""",
+                        (task.task_id, attempt.attempt_id),
+                    ).fetchone()
+                )
                 expected_boundary = (
-                    "task.accepted" if ordinal == 1 else "task.retry_accepted"
+                    "task.accepted"
+                    if ordinal == 1
+                    else (
+                        "task.recovery_accepted"
+                        if recovery_boundary_row is not None
+                        else "task.retry_accepted"
+                    )
                 )
                 if boundary.event_type != expected_boundary:
                     raise cls._corrupt(
                         "formal Task attempt segment lacks its admission boundary"
                     )
                 if any(
-                    event.event_type in {"task.accepted", "task.retry_accepted"}
+                    event.event_type
+                    in {
+                        "task.accepted",
+                        "task.retry_accepted",
+                        "task.recovery_accepted",
+                    }
                     for event in segment[1:]
                 ):
                     raise cls._corrupt(
                         "formal Task attempt segment has duplicate admission boundaries"
                     )
-                command_id = boundary.details.get("command_id")
+                authority_id_key = (
+                    "recovery_id" if recovery_boundary_row is not None else "command_id"
+                )
+                command_id = boundary.details.get(authority_id_key)
                 if (
                     type(command_id) is not str
                     or boundary.causation_id != command_id
@@ -7411,7 +8900,8 @@ class SqliteTaskStore:
                             or command_id_value != event.causation_id
                             or (
                                 event.event_type.startswith("task.reprioritize_")
-                                and priority not in {item.value for item in AdmissionPriority}
+                                and priority
+                                not in {item.value for item in AdmissionPriority}
                             )
                             or (
                                 event.event_type == "task.adjust_rejected"
@@ -7439,8 +8929,7 @@ class SqliteTaskStore:
                             cancel_request = event
                         elif event.event_type == "task.update_requested":
                             if (
-                                task_segment_state
-                                != FormalTaskState.ACCEPTED.value
+                                task_segment_state != FormalTaskState.ACCEPTED.value
                                 or attempt_segment_state
                                 != FormalAttemptState.ACCEPTED.value
                                 or command_id_value in update_requests
@@ -7461,8 +8950,7 @@ class SqliteTaskStore:
                             update_settlements[command_id_value] = event
                         elif event.event_type == "task.reprioritize_requested":
                             if (
-                                task_segment_state
-                                != FormalTaskState.ACCEPTED.value
+                                task_segment_state != FormalTaskState.ACCEPTED.value
                                 or attempt_segment_state
                                 != FormalAttemptState.ACCEPTED.value
                                 or command_id_value in reprioritize_requests
@@ -7787,6 +9275,80 @@ class SqliteTaskStore:
                     raise cls._corrupt(
                         "formal Task attempt row disagrees with its event history"
                     )
+                recovery_row = recovery_boundary_row
+                if recovery_row is not None:
+                    if ordinal == 1:
+                        raise cls._corrupt(
+                            "initial formal Task Attempt cannot be a recovery"
+                        )
+                    predecessor = attempts[ordinal - 2]
+                    prior_spec = dispatch_specs.get(ordinal - 1)
+                    scope, dispatch_spec, executor_ref, adjustment = (
+                        cls._outbox_payload(dispatch_row["payload_json"])
+                    )
+                    command_count = connection.execute(
+                        """SELECT COUNT(*) FROM commands
+                           WHERE scope_key=? AND command_id=?""",
+                        (_scope_key(task.scope), command_id),
+                    ).fetchone()[0]
+                    predecessor_terminal = tuple(
+                        event
+                        for event in events
+                        if event.attempt_id == predecessor.attempt_id
+                        and event.event_type in {"attempt.terminal", "task.terminal"}
+                    )
+                    if (
+                        recovery_row["recovery_id"] != command_id
+                        or recovery_row["producer_attempt_id"] != predecessor.attempt_id
+                        or recovery_row["recovery_generation"] != ordinal - 1
+                        or command_count != 0
+                        or boundary.producer != "task_core"
+                        or set(boundary.details)
+                        != {
+                            "recovery_id",
+                            "producer_attempt_id",
+                            "producer_outcome",
+                            "recovery_generation",
+                            "recovery_budget_remaining",
+                            "attempt_number",
+                        }
+                        or boundary.details.get("producer_attempt_id")
+                        != predecessor.attempt_id
+                        or boundary.details.get("producer_outcome")
+                        != TerminalOutcome.INTERRUPTED.value
+                        or boundary.details.get("recovery_generation") != ordinal - 1
+                        or boundary.details.get("recovery_budget_remaining")
+                        != 3 - ordinal
+                        or boundary.details.get("attempt_number") != ordinal
+                        or predecessor.state is not FormalAttemptState.TERMINAL
+                        or predecessor.outcome is not TerminalOutcome.INTERRUPTED
+                        or len(predecessor_terminal) != 2
+                        or any(
+                            event.outcome != TerminalOutcome.INTERRUPTED.value
+                            for event in predecessor_terminal
+                        )
+                        or attempt.selection != predecessor.selection
+                        or prior_spec is None
+                        or dispatch_spec != prior_spec
+                        or scope != task.scope
+                        or executor_ref is not None
+                        or adjustment is not None
+                        or dispatch_row["command_id"] != command_id
+                    ):
+                        raise cls._corrupt(
+                            "formal Task durability recovery admission is not canonical"
+                        )
+                    dispatch_specs[ordinal] = dispatch_spec
+                    if ordinal == len(attempts) and (
+                        task_segment_state != task.state.value
+                        or task_segment_outcome
+                        != (None if task.outcome is None else task.outcome.value)
+                        or dispatch_spec != task.spec
+                    ):
+                        raise cls._corrupt(
+                            "formal Task recovery pointer disagrees with durable lineage"
+                        )
+                    continue
                 command_rows = connection.execute(
                     """
                     SELECT * FROM commands WHERE scope_key=? AND command_id=?
@@ -7960,29 +9522,35 @@ class SqliteTaskStore:
                         settlements=update_settlements,
                     )
                     if (
-                        dispatch_spec.name,
-                        dispatch_spec.origin,
-                        dispatch_spec.executor_id,
-                        dispatch_spec.required_capabilities,
-                        dispatch_spec.side_effect_class,
-                        dispatch_spec.attributes,
-                    ) != (
-                        prior_spec.name,
-                        prior_spec.origin,
-                        prior_spec.executor_id,
-                        prior_spec.required_capabilities,
-                        prior_spec.side_effect_class,
-                        prior_spec.attributes,
-                    ) or verified_spec != dispatch_spec or (
-                        dispatch_spec.context.source,
-                        dispatch_spec.context.stable_id,
-                        dispatch_spec.context.uri,
-                        dispatch_spec.context.scope,
-                    ) != (
-                        prior_spec.context.source,
-                        prior_spec.context.stable_id,
-                        prior_spec.context.uri,
-                        prior_spec.context.scope,
+                        (
+                            dispatch_spec.name,
+                            dispatch_spec.origin,
+                            dispatch_spec.executor_id,
+                            dispatch_spec.required_capabilities,
+                            dispatch_spec.side_effect_class,
+                            dispatch_spec.attributes,
+                        )
+                        != (
+                            prior_spec.name,
+                            prior_spec.origin,
+                            prior_spec.executor_id,
+                            prior_spec.required_capabilities,
+                            prior_spec.side_effect_class,
+                            prior_spec.attributes,
+                        )
+                        or verified_spec != dispatch_spec
+                        or (
+                            dispatch_spec.context.source,
+                            dispatch_spec.context.stable_id,
+                            dispatch_spec.context.uri,
+                            dispatch_spec.context.scope,
+                        )
+                        != (
+                            prior_spec.context.source,
+                            prior_spec.context.stable_id,
+                            prior_spec.context.uri,
+                            prior_spec.context.scope,
+                        )
                     ):
                         raise cls._corrupt(
                             "formal Task retry changed stable specification identity"
@@ -8096,6 +9664,7 @@ class SqliteTaskStore:
                 in {
                     "task.accepted",
                     "task.retry_accepted",
+                    "task.recovery_accepted",
                     "task.running",
                     "task.blocked",
                     "task.decision_required",
@@ -8179,8 +9748,7 @@ class SqliteTaskStore:
                 or binding["command_type"] != command.command_type
                 or binding["target_task_id"] != command.target_ref.id
                 or binding["correlation_id"] != command.correlation_id
-                or authority["payload"]
-                != self._decision_payload_authority(command)
+                or authority["payload"] != self._decision_payload_authority(command)
             ):
                 raise self._corrupt(
                     "formal Task decision binding disagrees with its command digest"
@@ -8532,13 +10100,11 @@ class SqliteTaskStore:
             or row["attempt_state"] != FormalAttemptState.ACCEPTED.value
             or row["attempt_executor_ref"] is not None
             or int(row["attempt_source_seq"]) != -1
-            or int(row["delivery_count"])
-            != int(row["admission_attempt_count"])
+            or int(row["delivery_count"]) != int(row["admission_attempt_count"])
             or (
                 int(row["admission_attempt_count"]) == 0
                 and (
-                    row["admission_reason"] is not None
-                    or row["last_error"] is not None
+                    row["admission_reason"] is not None or row["last_error"] is not None
                 )
             )
             or (
@@ -8821,9 +10387,7 @@ class SqliteTaskStore:
                 ErrorCode.CONFLICT,
             )
         with self._transaction() as connection:
-            row = self._require_admission_row(
-                connection, outbox_id=item.outbox_id
-            )
+            row = self._require_admission_row(connection, outbox_id=item.outbox_id)
             stored_selection = _selection_from_attempt_row(row)
             if (
                 row["state"] != OutboxState.CLAIMED.value
@@ -9986,17 +11550,17 @@ class SqliteTaskStore:
                 observed_at=observation.occurred_at,
             )
             terminal_task_event = self._append_event(
-                    connection,
-                    self._require_task_row_by_id(connection, observation.task_id),
-                    event_type="task.terminal",
-                    state=FormalTaskState.TERMINAL.value,
-                    outcome=observation.attempt_outcome.value,
-                    producer="task_core",
-                    source_event_id=observation.source_event_id,
-                    causation_id=observation.source_event_id,
-                    occurred_at=observation.occurred_at,
-                    details=details,
-                    update_task=True,
+                connection,
+                self._require_task_row_by_id(connection, observation.task_id),
+                event_type="task.terminal",
+                state=FormalTaskState.TERMINAL.value,
+                outcome=observation.attempt_outcome.value,
+                producer="task_core",
+                source_event_id=observation.source_event_id,
+                causation_id=observation.source_event_id,
+                occurred_at=observation.occurred_at,
+                details=details,
+                update_task=True,
             )
             appended.append(terminal_task_event)
             self._hit("executor_terminal.after_task_terminal")
@@ -10323,10 +11887,7 @@ class SqliteTaskStore:
                 return self._mutation_result(
                     connection, attempt, TaskMutationDisposition.NOOP
                 )
-            if (
-                task["reconciliation_state"]
-                == ReconciliationState.REQUIRED.value
-            ):
+            if task["reconciliation_state"] == ReconciliationState.REQUIRED.value:
                 return self._mutation_result(
                     connection, attempt, TaskMutationDisposition.NOOP
                 )
@@ -10372,10 +11933,7 @@ class SqliteTaskStore:
                 return self._mutation_result(
                     connection, attempt, TaskMutationDisposition.NOOP
                 )
-            if (
-                task["reconciliation_state"]
-                == ReconciliationState.REQUIRED.value
-            ):
+            if task["reconciliation_state"] == ReconciliationState.REQUIRED.value:
                 return self._mutation_result(
                     connection, attempt, TaskMutationDisposition.NOOP
                 )
@@ -10573,9 +12131,7 @@ class SqliteTaskStore:
             raise self._corrupt("Task read snapshot lost its current Attempt")
         return row
 
-    def task_read_snapshot(
-        self, task_id: str, scope: ScopeRef
-    ) -> _TaskReadSnapshot:
+    def task_read_snapshot(self, task_id: str, scope: ScopeRef) -> _TaskReadSnapshot:
         """Read Task, current Attempt, and admission from one SQLite snapshot."""
 
         with self._snapshot_reader() as connection:
@@ -10719,9 +12275,7 @@ class SqliteTaskStore:
                 )
                 for task in page_rows
             )
-            next_cursor = (
-                snapshots[-1][0].task_id if has_more and snapshots else None
-            )
+            next_cursor = snapshots[-1][0].task_id if has_more and snapshots else None
             return snapshots, next_cursor, has_more
 
     def get_attempt(self, attempt_id: str) -> PersistentAttemptRecord:
@@ -10849,10 +12403,10 @@ class SqliteTaskStore:
     ) -> TaskUnreadPage:
         """Read one class watermark and retained event prefix without mutation."""
 
-        if (
-            type(presentation_class) is not str
-            or presentation_class not in {"text", "voice"}
-        ):
+        if type(presentation_class) is not str or presentation_class not in {
+            "text",
+            "voice",
+        }:
             raise FormalTaskViolation(
                 "INVALID_PRESENTATION_CLASS",
                 "task unread presentation class must be text or voice",
@@ -10946,18 +12500,14 @@ class SqliteTaskStore:
                     ErrorCode.INVALID_ARGUMENT,
                 )
             task_id = reparsed.target_ref.id
-            task = self._require_consumer_task_row(
-                connection, task_id, reparsed.scope
-            )
+            task = self._require_consumer_task_row(connection, task_id, reparsed.scope)
             acked_through_seq = payload["acked_through_seq"]
             expected_event_head = payload["expected_event_head"]
             current_event_head = int(task["event_head"])
             if not (
                 type(acked_through_seq) is int
                 and type(expected_event_head) is int
-                and 0 <= acked_through_seq
-                <= expected_event_head
-                <= current_event_head
+                and 0 <= acked_through_seq <= expected_event_head <= current_event_head
             ):
                 result = self._persist_business_decision(
                     connection,
@@ -10966,9 +12516,7 @@ class SqliteTaskStore:
                     disposition=TaskCommandDisposition.CONFLICT,
                     code=ErrorCode.STALE,
                     reason="TASK_ACK_PRECONDITION_STALE",
-                    message=(
-                        "task ACK is beyond its observed or current event head"
-                    ),
+                    message=("task ACK is beyond its observed or current event head"),
                     observed_at=observed_at,
                 )
                 self._hit("ack_events.before_commit")
@@ -11004,9 +12552,7 @@ class SqliteTaskStore:
                     ErrorCode.INVALID_ARGUMENT,
                 )
             if event_time is None:
-                raise self._corrupt(
-                    "formal Task ACK event timestamp is not canonical"
-                )
+                raise self._corrupt("formal Task ACK event timestamp is not canonical")
             if observed_time <= event_time:
                 result = self._persist_business_decision(
                     connection,
@@ -11203,19 +12749,36 @@ class SqliteTaskStore:
             ).fetchall()
             events = tuple(self._event_from_row(row) for row in event_rows)
             if attempt.attempt_number > 1:
-                if not events or events[0].event_type != "task.retry_accepted":
+                if not events or events[0].event_type not in {
+                    "task.retry_accepted",
+                    "task.recovery_accepted",
+                }:
                     raise FormalTaskViolation(
                         "TASK_STORE_CORRUPT",
-                        "current retry segment lacks its durable authority boundary",
+                        "current successor segment lacks its durable authority boundary",
                         ErrorCode.INTERNAL,
                     )
                 boundary = events[0]
-                retry_of_attempt_id = boundary.details.get("retry_of_attempt_id")
-                previous_outcome = boundary.details.get("previous_outcome")
+                is_recovery = boundary.event_type == "task.recovery_accepted"
+                predecessor_attempt_id = boundary.details.get(
+                    "producer_attempt_id" if is_recovery else "retry_of_attempt_id"
+                )
+                previous_outcome = boundary.details.get(
+                    "producer_outcome" if is_recovery else "previous_outcome"
+                )
                 predecessor_row = connection.execute(
                     "SELECT * FROM attempts WHERE attempt_id=?",
-                    (retry_of_attempt_id,),
+                    (predecessor_attempt_id,),
                 ).fetchone()
+                recovery_row = (
+                    connection.execute(
+                        """SELECT * FROM durability_recoveries
+                           WHERE recovery_attempt_id=? AND task_id=?""",
+                        (attempt.attempt_id, task.task_id),
+                    ).fetchone()
+                    if is_recovery
+                    else None
+                )
                 if (
                     predecessor_row is None
                     or predecessor_row["task_id"] != task.task_id
@@ -11224,14 +12787,34 @@ class SqliteTaskStore:
                     or predecessor_row["state"] != FormalAttemptState.TERMINAL.value
                     or predecessor_row["outcome"] != previous_outcome
                     or previous_outcome
-                    not in {
-                        TerminalOutcome.CANCELLED.value,
-                        TerminalOutcome.COMPLETED.value,
-                    }
+                    not in (
+                        {TerminalOutcome.INTERRUPTED.value}
+                        if is_recovery
+                        else {
+                            TerminalOutcome.CANCELLED.value,
+                            TerminalOutcome.COMPLETED.value,
+                        }
+                    )
+                    or (
+                        is_recovery
+                        and (
+                            recovery_row is None
+                            or recovery_row["producer_attempt_id"]
+                            != predecessor_attempt_id
+                            or recovery_row["recovery_id"]
+                            != boundary.details.get("recovery_id")
+                            or recovery_row["recovery_generation"]
+                            != attempt.attempt_number - 1
+                            or boundary.details.get("recovery_generation")
+                            != attempt.attempt_number - 1
+                            or boundary.details.get("recovery_budget_remaining")
+                            != 3 - attempt.attempt_number
+                        )
+                    )
                 ):
                     raise FormalTaskViolation(
                         "TASK_STORE_CORRUPT",
-                        "retry authority boundary does not match its durable predecessor",
+                        "successor authority boundary does not match its durable predecessor",
                         ErrorCode.INTERNAL,
                     )
             return TaskEventAuthoritySnapshot(
@@ -11397,9 +12980,7 @@ class SqliteTaskStore:
                 executor_ref=row["executor_ref"],
                 state=FormalAttemptState(row["state"]),
                 outcome=(
-                    None
-                    if row["outcome"] is None
-                    else TerminalOutcome(row["outcome"])
+                    None if row["outcome"] is None else TerminalOutcome(row["outcome"])
                 ),
                 source_seq=int(row["source_seq"]),
                 attempt_number=int(row["attempt_number"]),
@@ -11543,10 +13124,22 @@ class SqliteTaskStore:
                 "adjust_event_seq",
                 "adjust_event_count",
             }.issubset(row_keys):
+                recovery_row = connection.execute(
+                    """SELECT * FROM durability_recoveries
+                       WHERE task_id=? AND recovery_attempt_id=?""",
+                    (row["task_id"], row["attempt_id"]),
+                ).fetchone()
+                is_recovery_dispatch = (
+                    kind is OutboxKind.ATTEMPT_DISPATCH
+                    and recovery_row is not None
+                    and recovery_row["recovery_id"] == row["command_id"]
+                )
                 if (
                     row["canonical_attempt_id"] is None
                     or row["canonical_task_id"] is None
-                    or row["canonical_command_id"] is None
+                    or (
+                        row["canonical_command_id"] is None and not is_recovery_dispatch
+                    )
                     or row["attempt_task_id"] != row["task_id"]
                     or row["task_attempt_id"] != row["attempt_id"]
                 ):
@@ -11580,18 +13173,72 @@ class SqliteTaskStore:
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
                 attempt_selection = _selection_from_attempt_row(attempt_row)
+                if is_recovery_dispatch:
+                    producer_row = connection.execute(
+                        "SELECT * FROM attempts WHERE attempt_id=? AND task_id=?",
+                        (
+                            recovery_row["producer_attempt_id"],
+                            row["task_id"],
+                        ),
+                    ).fetchone()
+                    if (
+                        producer_row is None
+                        or row["canonical_command_id"] is not None
+                        or row["bound_command_type"] is not None
+                        or row["command_scope_key"] is not None
+                        or row["command_fingerprint"] is not None
+                        or row["command_result_json"] is not None
+                        or _selection_from_attempt_row(producer_row)
+                        != attempt_selection
+                        or FormalTaskState(row["bound_task_state"])
+                        is not FormalTaskState.ACCEPTED
+                        or FormalAttemptState(row["bound_attempt_state"])
+                        is not FormalAttemptState.ACCEPTED
+                        or row["bound_task_outcome"] is not None
+                        or row["bound_attempt_outcome"] is not None
+                        or row["bound_executor_ref"] is not None
+                        or bool(row["task_cancel_requested"])
+                        or bool(row["task_dispatch_fenced"])
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "recovery dispatch does not match Store continuation facts",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    return PersistentOutboxItem(
+                        outbox_id=row["outbox_id"],
+                        kind=kind,
+                        task_id=row["task_id"],
+                        attempt_id=row["attempt_id"],
+                        command_id=row["command_id"],
+                        scope=scope,
+                        spec=spec,
+                        executor_ref=payload["executor_ref"],
+                        source_seq=int(row["bound_source_seq"]),
+                        state=OutboxState(row["state"]),
+                        delivery_count=int(row["delivery_count"]),
+                        claim_token=row["claim_token"],
+                        selection=attempt_selection,
+                        admission=PersistentAdmissionRecord(
+                            task_id=row["task_id"],
+                            attempt_id=row["attempt_id"],
+                            priority=attempt_selection.admission_priority,
+                            reason=attempt_row["admission_reason"],
+                            attempt_count=int(attempt_row["admission_attempt_count"]),
+                            next_eligible_at=attempt_row["admission_next_eligible_at"],
+                            deadline_at=attempt_row["admission_deadline_at"],
+                            enqueued_at=attempt_row["admission_enqueued_at"],
+                            queued=row["state"] == OutboxState.PENDING.value,
+                        ),
+                    )
                 stored_fingerprint = _json_load(row["command_fingerprint"])
                 fingerprint_selection: PersistedExecutorSelection | None = None
-                if (
-                    kind is OutboxKind.ATTEMPT_DISPATCH
-                    and row["bound_command_type"]
-                    in {"task.create", "task.create_successor"}
-                ):
+                if kind is OutboxKind.ATTEMPT_DISPATCH and row[
+                    "bound_command_type"
+                ] in {"task.create", "task.create_successor"}:
                     allowed_keys = {
                         frozenset({"command", "resolved_spec"}),
-                        frozenset(
-                            {"command", "resolved_spec", "executor_selection"}
-                        ),
+                        frozenset({"command", "resolved_spec", "executor_selection"}),
                     }
                     if (
                         type(stored_fingerprint) is not dict
@@ -11626,8 +13273,7 @@ class SqliteTaskStore:
                     kind is OutboxKind.ATTEMPT_DISPATCH
                     and row["bound_command_type"] == "task.retry"
                     and type(stored_fingerprint) is dict
-                    and set(stored_fingerprint)
-                    == {"command", "executor_selection"}
+                    and set(stored_fingerprint) == {"command", "executor_selection"}
                 ):
                     command_payload = stored_fingerprint["command"]
                     fingerprint_selection = _selection_from_fingerprint_payload(
@@ -11770,8 +13416,7 @@ class SqliteTaskStore:
                         }
                         or command_result["task_id"] != row["task_id"]
                         or command_result["attempt_id"] != row["attempt_id"]
-                        or command_result["state"]
-                        != FormalTaskState.ACCEPTED.value
+                        or command_result["state"] != FormalTaskState.ACCEPTED.value
                         or command_result["outbox_id"] != row["outbox_id"]
                     ):
                         raise FormalTaskViolation(

@@ -55,6 +55,12 @@ class EffectReconciliationKind(StrEnum):
     MANUAL_REQUIRED = "manual_required"
 
 
+class EffectSettlementKind(StrEnum):
+    RESOLVED = "resolved"
+    COMPENSATED = "compensated"
+    MANUAL_REQUIRED = "manual_required"
+
+
 def _text(value: object, field_name: str) -> str:
     if type(value) is not str or not value.strip():
         raise ExternalEffectContractViolation(
@@ -190,7 +196,7 @@ class _AuthorityFreeEffectFact:
 class ExternalEffectBinding(_AuthorityFreeEffectFact):
     scope: ScopeRef
     task_id: str
-    attempt_id: str
+    origin_attempt_id: str
     profile: DurabilityProfileBinding
     effect_id: str
     operation_kind: str
@@ -201,8 +207,13 @@ class ExternalEffectBinding(_AuthorityFreeEffectFact):
     def __post_init__(self) -> None:
         _scope(self.scope)
         _text(self.task_id, "effect.task_id")
-        _text(self.attempt_id, "effect.attempt_id")
+        _text(self.origin_attempt_id, "effect.origin_attempt_id")
         _profile(self.profile)
+        if self.profile.durability_level != "D2":
+            raise ExternalEffectContractViolation(
+                "EFFECT_PROFILE_UNSUPPORTED",
+                "external effects require an exact D2 profile",
+            )
         _text(self.effect_id, "effect.effect_id")
         _text(self.operation_kind, "effect.operation_kind")
         _positive(self.operation_ordinal, "effect.operation_ordinal")
@@ -216,7 +227,7 @@ class ExternalEffectBinding(_AuthorityFreeEffectFact):
             {
                 "scope",
                 "task_id",
-                "attempt_id",
+                "origin_attempt_id",
                 "profile",
                 "effect_id",
                 "operation_kind",
@@ -237,7 +248,9 @@ class ExternalEffectBinding(_AuthorityFreeEffectFact):
         return cls(
             scope=scope,
             task_id=_text(data["task_id"], "effect.task_id"),
-            attempt_id=_text(data["attempt_id"], "effect.attempt_id"),
+            origin_attempt_id=_text(
+                data["origin_attempt_id"], "effect.origin_attempt_id"
+            ),
             profile=profile,
             effect_id=_text(data["effect_id"], "effect.effect_id"),
             operation_kind=_text(data["operation_kind"], "effect.operation_kind"),
@@ -254,7 +267,7 @@ class ExternalEffectBinding(_AuthorityFreeEffectFact):
         return {
             "scope": self.scope.to_dict(),
             "task_id": self.task_id,
-            "attempt_id": self.attempt_id,
+            "origin_attempt_id": self.origin_attempt_id,
             "profile": self.profile.to_dict(),
             "effect_id": self.effect_id,
             "operation_kind": self.operation_kind,
@@ -300,8 +313,148 @@ class ExternalEffectIntent(_AuthorityFreeEffectFact):
 
 
 @dataclass(frozen=True, slots=True)
+class EffectContinuationAuthorization(_AuthorityFreeEffectFact):
+    binding: ExternalEffectBinding
+    actor_attempt_id: str
+    recovery_generation: int
+    checkpoint_head: int
+    checkpoint_prefix_digest: str
+    effect_head: int
+    effect_prefix_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.binding) is not ExternalEffectBinding:
+            raise ExternalEffectContractViolation(
+                "INVALID_EFFECT_FACT",
+                "continuation binding must be exact",
+            )
+        ExternalEffectBinding.from_dict(self.binding.to_dict())
+        _text(self.actor_attempt_id, "continuation.actor_attempt_id")
+        if self.actor_attempt_id == self.binding.origin_attempt_id:
+            raise ExternalEffectContractViolation(
+                "EFFECT_ACTOR_BINDING_INVALID",
+                "continuation actor must be a linked Attempt",
+            )
+        _positive(self.recovery_generation, "continuation.recovery_generation")
+        _nonnegative(self.checkpoint_head, "continuation.checkpoint_head")
+        _digest(
+            self.checkpoint_prefix_digest,
+            "continuation.checkpoint_prefix_digest",
+        )
+        _nonnegative(self.effect_head, "continuation.effect_head")
+        _digest(self.effect_prefix_digest, "continuation.effect_prefix_digest")
+
+    @classmethod
+    def from_dict(cls, payload: object) -> EffectContinuationAuthorization:
+        data = _strict(
+            payload,
+            {
+                "binding",
+                "actor_attempt_id",
+                "recovery_generation",
+                "checkpoint_head",
+                "checkpoint_prefix_digest",
+                "effect_head",
+                "effect_prefix_digest",
+            },
+            "effect continuation authorization",
+        )
+        return cls(
+            binding=ExternalEffectBinding.from_dict(data["binding"]),
+            actor_attempt_id=_text(
+                data["actor_attempt_id"], "continuation.actor_attempt_id"
+            ),
+            recovery_generation=_positive(
+                data["recovery_generation"], "continuation.recovery_generation"
+            ),
+            checkpoint_head=_nonnegative(
+                data["checkpoint_head"], "continuation.checkpoint_head"
+            ),
+            checkpoint_prefix_digest=_digest(
+                data["checkpoint_prefix_digest"],
+                "continuation.checkpoint_prefix_digest",
+            ),
+            effect_head=_nonnegative(data["effect_head"], "continuation.effect_head"),
+            effect_prefix_digest=_digest(
+                data["effect_prefix_digest"], "continuation.effect_prefix_digest"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "binding": self.binding.to_dict(),
+            "actor_attempt_id": self.actor_attempt_id,
+            "recovery_generation": self.recovery_generation,
+            "checkpoint_head": self.checkpoint_head,
+            "checkpoint_prefix_digest": self.checkpoint_prefix_digest,
+            "effect_head": self.effect_head,
+            "effect_prefix_digest": self.effect_prefix_digest,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalEffectDispatch(_AuthorityFreeEffectFact):
+    binding: ExternalEffectBinding
+    actor_attempt_id: str
+    dispatch_ordinal: int
+    recovery_generation: int
+    provider_operation_key: str
+
+    def __post_init__(self) -> None:
+        if type(self.binding) is not ExternalEffectBinding:
+            raise ExternalEffectContractViolation(
+                "INVALID_EFFECT_FACT",
+                "effect dispatch binding must be exact",
+            )
+        ExternalEffectBinding.from_dict(self.binding.to_dict())
+        _text(self.actor_attempt_id, "dispatch.actor_attempt_id")
+        _positive(self.dispatch_ordinal, "dispatch.dispatch_ordinal")
+        _nonnegative(self.recovery_generation, "dispatch.recovery_generation")
+        _text(self.provider_operation_key, "dispatch.provider_operation_key")
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ExternalEffectDispatch:
+        data = _strict(
+            payload,
+            {
+                "binding",
+                "actor_attempt_id",
+                "dispatch_ordinal",
+                "recovery_generation",
+                "provider_operation_key",
+            },
+            "effect dispatch",
+        )
+        return cls(
+            binding=ExternalEffectBinding.from_dict(data["binding"]),
+            actor_attempt_id=_text(
+                data["actor_attempt_id"], "dispatch.actor_attempt_id"
+            ),
+            dispatch_ordinal=_positive(
+                data["dispatch_ordinal"], "dispatch.dispatch_ordinal"
+            ),
+            recovery_generation=_nonnegative(
+                data["recovery_generation"], "dispatch.recovery_generation"
+            ),
+            provider_operation_key=_text(
+                data["provider_operation_key"], "dispatch.provider_operation_key"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "binding": self.binding.to_dict(),
+            "actor_attempt_id": self.actor_attempt_id,
+            "dispatch_ordinal": self.dispatch_ordinal,
+            "recovery_generation": self.recovery_generation,
+            "provider_operation_key": self.provider_operation_key,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EffectDispatchReceipt(_AuthorityFreeEffectFact):
     binding: ExternalEffectBinding
+    actor_attempt_id: str
     dispatch_ordinal: int
     recovery_generation: int
     provider_operation_key: str
@@ -315,6 +468,7 @@ class EffectDispatchReceipt(_AuthorityFreeEffectFact):
                 "effect dispatch binding must be exact",
             )
         ExternalEffectBinding.from_dict(self.binding.to_dict())
+        _text(self.actor_attempt_id, "receipt.actor_attempt_id")
         _positive(self.dispatch_ordinal, "dispatch.dispatch_ordinal")
         _nonnegative(self.recovery_generation, "dispatch.recovery_generation")
         _text(self.provider_operation_key, "dispatch.provider_operation_key")
@@ -331,6 +485,7 @@ class EffectDispatchReceipt(_AuthorityFreeEffectFact):
             payload,
             {
                 "binding",
+                "actor_attempt_id",
                 "dispatch_ordinal",
                 "recovery_generation",
                 "provider_operation_key",
@@ -346,6 +501,9 @@ class EffectDispatchReceipt(_AuthorityFreeEffectFact):
             )
         return cls(
             binding=ExternalEffectBinding.from_dict(data["binding"]),
+            actor_attempt_id=_text(
+                data["actor_attempt_id"], "receipt.actor_attempt_id"
+            ),
             dispatch_ordinal=_positive(
                 data["dispatch_ordinal"], "dispatch.dispatch_ordinal"
             ),
@@ -362,6 +520,7 @@ class EffectDispatchReceipt(_AuthorityFreeEffectFact):
     def to_dict(self) -> dict[str, object]:
         return {
             "binding": self.binding.to_dict(),
+            "actor_attempt_id": self.actor_attempt_id,
             "dispatch_ordinal": self.dispatch_ordinal,
             "recovery_generation": self.recovery_generation,
             "provider_operation_key": self.provider_operation_key,
@@ -373,7 +532,9 @@ class EffectDispatchReceipt(_AuthorityFreeEffectFact):
 @dataclass(frozen=True, slots=True)
 class ExternalEffectObservation(_AuthorityFreeEffectFact):
     binding: ExternalEffectBinding
+    actor_attempt_id: str
     observation_ordinal: int
+    dispatch_ordinal: int
     recovery_generation: int
     kind: EffectObservationKind
     evidence_digest: str
@@ -385,7 +546,9 @@ class ExternalEffectObservation(_AuthorityFreeEffectFact):
                 "effect observation binding must be exact",
             )
         ExternalEffectBinding.from_dict(self.binding.to_dict())
+        _text(self.actor_attempt_id, "observation.actor_attempt_id")
         _positive(self.observation_ordinal, "observation.observation_ordinal")
+        _positive(self.dispatch_ordinal, "observation.dispatch_ordinal")
         _nonnegative(self.recovery_generation, "observation.recovery_generation")
         if type(self.kind) is not EffectObservationKind:
             raise ExternalEffectContractViolation(
@@ -400,7 +563,9 @@ class ExternalEffectObservation(_AuthorityFreeEffectFact):
             payload,
             {
                 "binding",
+                "actor_attempt_id",
                 "observation_ordinal",
+                "dispatch_ordinal",
                 "recovery_generation",
                 "kind",
                 "evidence_digest",
@@ -416,8 +581,14 @@ class ExternalEffectObservation(_AuthorityFreeEffectFact):
             ) from error
         return cls(
             binding=ExternalEffectBinding.from_dict(data["binding"]),
+            actor_attempt_id=_text(
+                data["actor_attempt_id"], "observation.actor_attempt_id"
+            ),
             observation_ordinal=_positive(
                 data["observation_ordinal"], "observation.observation_ordinal"
+            ),
+            dispatch_ordinal=_positive(
+                data["dispatch_ordinal"], "observation.dispatch_ordinal"
             ),
             recovery_generation=_nonnegative(
                 data["recovery_generation"], "observation.recovery_generation"
@@ -431,31 +602,127 @@ class ExternalEffectObservation(_AuthorityFreeEffectFact):
     def to_dict(self) -> dict[str, object]:
         return {
             "binding": self.binding.to_dict(),
+            "actor_attempt_id": self.actor_attempt_id,
             "observation_ordinal": self.observation_ordinal,
+            "dispatch_ordinal": self.dispatch_ordinal,
             "recovery_generation": self.recovery_generation,
             "kind": self.kind.value,
             "evidence_digest": self.evidence_digest,
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ExternalEffectSettlement(_AuthorityFreeEffectFact):
+    binding: ExternalEffectBinding
+    actor_attempt_id: str
+    settlement_ordinal: int
+    recovery_generation: int
+    kind: EffectSettlementKind
+    evidence_head: int
+    evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.binding) is not ExternalEffectBinding:
+            raise ExternalEffectContractViolation(
+                "INVALID_EFFECT_FACT",
+                "effect settlement binding must be exact",
+            )
+        ExternalEffectBinding.from_dict(self.binding.to_dict())
+        _text(self.actor_attempt_id, "settlement.actor_attempt_id")
+        _positive(self.settlement_ordinal, "settlement.settlement_ordinal")
+        _nonnegative(self.recovery_generation, "settlement.recovery_generation")
+        if type(self.kind) is not EffectSettlementKind:
+            raise ExternalEffectContractViolation(
+                "INVALID_EFFECT_FACT",
+                "effect settlement kind must use the closed vocabulary",
+            )
+        _positive(self.evidence_head, "settlement.evidence_head")
+        _digest(self.evidence_digest, "settlement.evidence_digest")
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ExternalEffectSettlement:
+        data = _strict(
+            payload,
+            {
+                "binding",
+                "actor_attempt_id",
+                "settlement_ordinal",
+                "recovery_generation",
+                "kind",
+                "evidence_head",
+                "evidence_digest",
+            },
+            "effect settlement",
+        )
+        try:
+            kind = EffectSettlementKind(data["kind"])
+        except (TypeError, ValueError) as error:
+            raise ExternalEffectContractViolation(
+                "INVALID_EFFECT_FACT",
+                "effect settlement kind is invalid",
+            ) from error
+        return cls(
+            binding=ExternalEffectBinding.from_dict(data["binding"]),
+            actor_attempt_id=_text(
+                data["actor_attempt_id"], "settlement.actor_attempt_id"
+            ),
+            settlement_ordinal=_positive(
+                data["settlement_ordinal"], "settlement.settlement_ordinal"
+            ),
+            recovery_generation=_nonnegative(
+                data["recovery_generation"], "settlement.recovery_generation"
+            ),
+            kind=kind,
+            evidence_head=_positive(data["evidence_head"], "settlement.evidence_head"),
+            evidence_digest=_digest(
+                data["evidence_digest"], "settlement.evidence_digest"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "binding": self.binding.to_dict(),
+            "actor_attempt_id": self.actor_attempt_id,
+            "settlement_ordinal": self.settlement_ordinal,
+            "recovery_generation": self.recovery_generation,
+            "kind": self.kind.value,
+            "evidence_head": self.evidence_head,
+            "evidence_digest": self.evidence_digest,
+        }
+
+
 EffectFact: TypeAlias = (
-    ExternalEffectIntent | EffectDispatchReceipt | ExternalEffectObservation
+    ExternalEffectIntent
+    | EffectContinuationAuthorization
+    | ExternalEffectDispatch
+    | EffectDispatchReceipt
+    | ExternalEffectObservation
+    | ExternalEffectSettlement
 )
 
 _FACT_TYPES: Final = {
     "intent": ExternalEffectIntent,
+    "continuation": EffectContinuationAuthorization,
+    "dispatch": ExternalEffectDispatch,
     "receipt": EffectDispatchReceipt,
     "observation": ExternalEffectObservation,
+    "settlement": ExternalEffectSettlement,
 }
 
 
 def _fact_kind(value: EffectFact) -> str:
     if type(value) is ExternalEffectIntent:
         return "intent"
+    if type(value) is EffectContinuationAuthorization:
+        return "continuation"
+    if type(value) is ExternalEffectDispatch:
+        return "dispatch"
     if type(value) is EffectDispatchReceipt:
         return "receipt"
     if type(value) is ExternalEffectObservation:
         return "observation"
+    if type(value) is ExternalEffectSettlement:
+        return "settlement"
     raise ExternalEffectContractViolation(
         "INVALID_EFFECT_FACT",
         "effect fact must use one exact supported value type",
@@ -634,15 +901,19 @@ def decide_effect_reconciliation(
 __all__ = [
     "EXTERNAL_EFFECT_FACT_CONTRACT_VERSION",
     "MAX_EXTERNAL_EFFECT_FACT_BYTES",
+    "EffectContinuationAuthorization",
     "EffectDispatchReceipt",
     "EffectFact",
     "EffectObservationKind",
     "EffectReconciliationDecision",
     "EffectReconciliationKind",
+    "EffectSettlementKind",
     "ExternalEffectBinding",
     "ExternalEffectContractViolation",
     "ExternalEffectIntent",
+    "ExternalEffectDispatch",
     "ExternalEffectObservation",
+    "ExternalEffectSettlement",
     "decide_effect_reconciliation",
     "effect_fact_bytes",
     "effect_fact_from_bytes",
