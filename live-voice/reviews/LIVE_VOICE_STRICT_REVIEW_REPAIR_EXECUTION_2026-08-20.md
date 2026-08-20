@@ -800,6 +800,15 @@ and risk checkpoint before activation.
 - **`npm run lint` is unusable package-wide.** No ESLint configuration exists
   in `jiuwenswarm/channels/web/frontend` or any ancestor directory, so the
   script fails for reasons unrelated to any packet. Infrastructure gap.
+- **Uncontained background-task exception in the progress return bridge (from
+  SRR-20).** With a delivered subscription event and a generation above
+  `MAX_SAFE_INTEGER`, `TaskProgressReturnBridge._run`
+  (`jiuwenswarm/server/live_voice/task_progress_return.py:468,1101,1125`) leaves
+  an unretrieved `ContractViolation`, surfacing as `Task exception was never
+  retrieved` on stderr. The handler's own fail-closed is correct and
+  unaffected; the bridge simply does not contain its own background-task
+  exception. Outside SRR-20's owned surface, so the packet used an event-free
+  subscription to sidestep the noise rather than touching that file.
 
 The queue excludes the already fixed A10, A24, B31 and L23; superseded B26;
 and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared
