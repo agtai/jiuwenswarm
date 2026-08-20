@@ -1627,6 +1627,14 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             "FORMAL_TASK_AUTHENTICATION_REQUIRED",
         ),
         (
+            "non-ascii-bearer",
+            {**_create_params(), "auth_token": "令牌" * 16},
+            "session-1",
+            None,
+            EXPIRY,
+            "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+        ),
+        (
             "session-mismatch",
             _create_params(),
             "session-other",
@@ -1685,6 +1693,13 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
         assert harness.executor.cancels == []
     finally:
         await harness.composition.stop()
+
+
+def test_static_bearer_rejects_non_ascii_configuration() -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        StaticBearerAuthenticator(token="令" * 32, principal=_principal())
+
+    assert raised.value.reason == "INVALID_P3_AUTH_CONFIGURATION"
 
 
 @pytest.mark.asyncio

@@ -222,10 +222,10 @@ class StaticBearerAuthenticator:
     """Constant-time verifier for the initial single-principal Web Alpha gate."""
 
     def __init__(self, *, token: str, principal: AuthenticatedPrincipal) -> None:
-        if len(token) < 32:
+        if type(token) is not str or len(token) < 32 or not token.isascii():
             raise FormalTaskViolation(
                 "INVALID_P3_AUTH_CONFIGURATION",
-                "P3 bearer token must contain at least 32 characters",
+                "P3 bearer token must contain at least 32 ASCII characters",
                 ErrorCode.INVALID_ARGUMENT,
             )
         self._token = token
@@ -235,7 +235,11 @@ class StaticBearerAuthenticator:
         self, bearer_token: object, *, operation: str, now: str
     ) -> AuthenticatedPrincipal:
         candidate = bearer_token if type(bearer_token) is str else ""
-        if not candidate or not hmac.compare_digest(candidate, self._token):
+        if (
+            not candidate
+            or not candidate.isascii()
+            or not hmac.compare_digest(candidate, self._token)
+        ):
             raise FormalTaskViolation(
                 "FORMAL_TASK_AUTHENTICATION_REQUIRED",
                 "formal task authentication is required",
