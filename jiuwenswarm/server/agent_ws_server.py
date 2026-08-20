@@ -9535,7 +9535,11 @@ class AgentWebSocketServer:
                 if agent is None:
                     raise ValueError("Failed to get agent for schedule request")
                 if action in ("create", "run"):
-                    execution_agent = agent.get_instance()
+                    execution_agent = await agent.ensure_instance()
+                    if execution_agent is None:
+                        raise ValueError(
+                            "Failed to initialize agent for schedule request"
+                        )
                     execution_target = _build_schedule_execution_target(
                         request,
                         resolved_project_dir,
