@@ -6495,8 +6495,15 @@ async def test_cancelled_blocking_claim_settles_and_releases_exact_outbox_owner(
         draining.cancel("caller stopped waiting")
         await asyncio.sleep(0)
         assert not draining.done()
-        with pytest.raises(asyncio.CancelledError, match="caller stopped waiting"):
+        draining.cancel("duplicate caller cancellation")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        with pytest.raises(
+            asyncio.CancelledError, match="caller stopped waiting"
+        ) as raised:
             await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
     finally:
         release.set()
         timer.join(timeout=2)
@@ -6551,7 +6558,7 @@ async def test_cancelled_adjustment_store_wait_retains_exact_settlement_owner(
         return original_complete(*args, **kwargs)
 
     monkeypatch.setattr(store, "complete_adjustment_outbox", blocked_complete)
-    timer = threading.Timer(1, release.set)
+    timer = threading.Timer(0.2, release.set)
     timer.start()
     draining = asyncio.create_task(core.drain_outbox_once(worker_id="adjustment-owner"))
     try:
@@ -6559,11 +6566,16 @@ async def test_cancelled_adjustment_store_wait_retains_exact_settlement_owner(
         draining.cancel("caller stopped adjustment wait")
         await asyncio.sleep(0)
         assert not draining.done()
+        draining.cancel("duplicate adjustment cancellation")
+        await asyncio.sleep(0)
+        assert not draining.done()
         release.set()
         with pytest.raises(
             asyncio.CancelledError, match="caller stopped adjustment wait"
-        ):
+        ) as raised:
             await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
     finally:
         release.set()
         timer.join(timeout=2)
@@ -6589,3 +6601,70 @@ async def test_cancelled_adjustment_store_wait_retains_exact_settlement_owner(
     assert replay.result["adjustment_state"] == "applied"
     assert await core.drain_outbox_once(worker_id="later-owner") is False
     assert executor.adjustments == [command.command_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_failure_kind", ["ordinary", "process_control"])
+async def test_cancelled_claim_release_failure_has_explicit_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_failure_kind: str,
+) -> None:
+    database = tmp_path / "cancelled-claim-release-failure.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    original_claim = store.claim_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_claim(worker_id: str):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_claim(worker_id)
+
+    release_failure: BaseException
+    if release_failure_kind == "ordinary":
+        release_failure = RuntimeError("ordinary exact release failure")
+    else:
+        release_failure = GeneratorExit("process-control exact release failure")
+
+    def failing_release(*_args, **_kwargs) -> None:
+        raise release_failure
+
+    monkeypatch.setattr(store, "claim_outbox", blocked_claim)
+    monkeypatch.setattr(store, "release_outbox", failing_release)
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="failed-release"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        draining.cancel("caller cancellation remains authoritative")
+        release.set()
+        if release_failure_kind == "ordinary":
+            with pytest.raises(
+                asyncio.CancelledError,
+                match="caller cancellation remains authoritative",
+            ) as raised:
+                await draining
+            assert raised.value.__cause__ is None
+            assert raised.value.__context__ is None
+        else:
+            with pytest.raises(GeneratorExit) as raised:
+                await draining
+            assert raised.value is release_failure
+    finally:
+        release.set()
+
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, claimed_by, delivery_count FROM outbox"
+        ).fetchone()
+    assert outbox == ("claimed", "failed-release", 1)
+    assert executor.dispatches == []

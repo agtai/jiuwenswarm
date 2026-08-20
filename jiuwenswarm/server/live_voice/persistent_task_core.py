@@ -273,40 +273,76 @@ class PersistentTaskCore:
                 continue
 
     @staticmethod
+    async def _await_retained(task: asyncio.Task[Any]) -> Any:
+        """Join one owner through repeated cancellation before propagating it."""
+
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+        ordinary_failure: Exception | None = None
+        try:
+            result = task.result()
+        except Exception as error:
+            ordinary_failure = error
+            result = None
+        if ordinary_failure is not None:
+            if cancellation is not None:
+                raise cancellation from None
+            raise ordinary_failure
+        if cancellation is not None:
+            raise cancellation from None
+        return result
+
+    @staticmethod
     async def _run_store(
         callable_: Callable[..., Any], /, *args: Any, **kwargs: Any
     ) -> Any:
         """Keep SQLite off-loop and retain ownership until its call settles."""
 
         task = asyncio.create_task(asyncio.to_thread(callable_, *args, **kwargs))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            try:
-                await task
-            except Exception:  # noqa: BLE001 -- preserve caller cancellation
-                pass
-            raise
+        return await PersistentTaskCore._await_retained(task)
 
     async def _claim_outbox(self, worker: str) -> PersistentOutboxItem | None:
         """Release an exact claim if its caller is cancelled during SQLite work."""
 
         task = asyncio.create_task(asyncio.to_thread(self.store.claim_outbox, worker))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            item: PersistentOutboxItem | None = None
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
             try:
-                item = await task
-            except Exception:  # noqa: BLE001 -- preserve caller cancellation
-                pass
-            if item is not None:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+        ordinary_failure: Exception | None = None
+        try:
+            item = task.result()
+        except Exception as error:
+            ordinary_failure = error
+            item = None
+        if ordinary_failure is not None:
+            if cancellation is not None:
+                raise cancellation from None
+            raise ordinary_failure
+        if cancellation is None:
+            return item
+        if item is not None:
+            try:
                 await self._run_store(
                     self.store.release_outbox,
                     item,
                     "outbox claim owner cancelled before Executor delivery",
                 )
-            raise
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The durable claim remains visible for lease recovery; an
+                # ordinary cleanup failure cannot replace caller cancellation.
+                pass
+        raise cancellation from None
 
     async def _complete_adjustment_delivery(
         self,
@@ -747,13 +783,18 @@ class PersistentTaskCore:
             else:
                 await self._run_store(self.store.reject_outbox, item, error)
                 return True
-        except asyncio.CancelledError:
-            await self._run_store(
-                self.store.release_outbox,
-                item,
-                "outbox Executor delivery owner cancelled",
-            )
-            raise
+        except asyncio.CancelledError as cancellation:
+            try:
+                await self._run_store(
+                    self.store.release_outbox,
+                    item,
+                    "outbox Executor delivery owner cancelled",
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            raise cancellation from None
         except Exception as error:
             await self._run_store(self.store.release_outbox, item, str(error))
             raise
@@ -761,14 +802,7 @@ class PersistentTaskCore:
             owner = asyncio.create_task(
                 self._complete_adjustment_delivery(item, adjustment_delivery)
             )
-            try:
-                await asyncio.shield(owner)
-            except asyncio.CancelledError:
-                try:
-                    await owner
-                except Exception:  # noqa: BLE001 -- preserve caller cancellation
-                    pass
-                raise
+            await self._await_retained(owner)
             return True
         if item.kind is OutboxKind.ATTEMPT_DISPATCH and not delivery.observations:
             await self._run_store(
