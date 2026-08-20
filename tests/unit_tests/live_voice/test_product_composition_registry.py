@@ -8086,6 +8086,114 @@ def _voice_intent_params(
     return params
 
 
+def _assert_rejected_intent_manifest_has_no_formal_facts(
+    payload: Mapping[str, object],
+) -> None:
+    forbidden_evidence = {
+        "TRUSTED_AUTHORITY_RESOLVED",
+        "FORMAL_ACTIVATION_LEASE_OPEN",
+        "RUNTIME_PATH_OBSERVED",
+    }
+    authority = _route(payload, "authority")
+    control = _route(payload, "p3.control")
+    assert authority == {
+        "segment": "authority",
+        "truth": "unavailable",
+        "reason_id": "TRUSTED_AUTHORITY_UNAVAILABLE",
+        "evidence_ids": ["PACKAGE_CONTRACT_ONLY", "NO_RUNTIME_EVIDENCE"],
+        "formal_runtime_observed": False,
+    }
+    assert control == {
+        "segment": "p3.control",
+        "truth": "unavailable",
+        "reason_id": "FORMAL_ACTIVATION_EVIDENCE_MISSING",
+        "evidence_ids": ["PACKAGE_CONTRACT_ONLY", "NO_RUNTIME_EVIDENCE"],
+        "formal_runtime_observed": False,
+    }
+    for route in cast(dict[str, object], payload["product_composition"])["routes"]:
+        fact = cast(dict[str, object], route)
+        assert not forbidden_evidence.intersection(
+            cast(list[str], fact["evidence_ids"])
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejected_task_intents_never_fabricate_formal_manifest(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    denied_params = _text_intent_params(
+        stem="manifest-denied",
+        text="create task: denied manifest request",
+        operation="task.create",
+    )
+    denied_params["auth_token"] = "invalid-token"
+    denied = await registry.handle_p3_intent(
+        params=denied_params,
+        request_id="request-manifest-denied",
+        session_id="session-product",
+    )
+    invalid = await registry.handle_p3_intent(
+        params={
+            **_text_intent_params(
+                stem="manifest-invalid",
+                text="create task: invalid manifest request",
+                operation="task.create",
+            ),
+            "model_intent": "client-selected-provider",
+        },
+        request_id="request-manifest-invalid",
+        session_id="session-product",
+    )
+    missing = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="manifest-missing",
+            text="confirm task request 0123456789abcdef0123456789abcdef",
+            operation="task.create",
+        ),
+        request_id="request-manifest-missing",
+        session_id="session-product",
+    )
+
+    assert denied.ok is False
+    assert cast(dict, denied.payload["error"])["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert invalid.ok is False
+    assert cast(dict, invalid.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert missing.ok is False
+    assert cast(dict, missing.payload["error"])["reason"] == (
+        "TASK_CONFIRMATION_BINDING_MISMATCH"
+    )
+    for rejected in (denied, invalid, missing):
+        _assert_rejected_intent_manifest_has_no_formal_facts(rejected.payload)
+
+    assert composition.prepare_calls == []
+    assert composition.mutation_calls == []
+    assert registry._pending_task_intents == {}
+    assert registry._agent_manager.pins == 0
+    assert registry._agent_manager.unpins == 0
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM p3_confirmations"
+        ).fetchone() == (0,)
+
+    successful = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="manifest-success",
+            text="create task: successful manifest request",
+            operation="task.create",
+        ),
+        request_id="request-manifest-success",
+        session_id="session-product",
+    )
+    assert successful.ok is True
+    assert _route(successful.payload, "authority")["truth"] == "formal"
+    assert _route(successful.payload, "p3.control")["truth"] == "formal"
+
+
 @pytest.mark.asyncio
 async def test_voice_intent_create_uses_two_exact_p2_commits_and_retains_live_progress_origin(
     tmp_path: Path,
@@ -8648,6 +8756,7 @@ async def test_resolver_exception_is_content_free_on_wire_and_in_logs(
         "reason": "TASK_INTENT_RESOLUTION_REJECTED",
         "message": "task intent resolution was rejected",
     }
+    _assert_rejected_intent_manifest_has_no_formal_facts(result.payload)
     rendered = repr(result.payload) + repr(logged)
     assert sentinel not in rendered
     assert "SENTINEL_PROVIDER_REASON" not in rendered

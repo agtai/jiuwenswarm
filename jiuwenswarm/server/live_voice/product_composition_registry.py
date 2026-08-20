@@ -5903,6 +5903,22 @@ class AgentServerProductCompositionRegistry:
         )
 
     @staticmethod
+    def _p3_control_unavailable_manifest() -> ProductCompositionManifest:
+        return create_product_composition_manifest(
+            enabled=True,
+            route_facts=(
+                _unavailable_fact(
+                    ProductSegment.AUTHORITY,
+                    ProductRouteReason.TRUSTED_AUTHORITY_UNAVAILABLE,
+                ),
+                _unavailable_fact(
+                    ProductSegment.P3_CONTROL,
+                    ProductRouteReason.FORMAL_ACTIVATION_EVIDENCE_MISSING,
+                ),
+            ),
+        )
+
+    @staticmethod
     def _validate_product_p3_mutation_params(
         params: Mapping[str, object],
         *,
@@ -6609,7 +6625,9 @@ class AgentServerProductCompositionRegistry:
                     "reason": reason,
                     "message": message,
                 },
-                "product_composition": _serialize_manifest(self._p3_control_manifest()),
+                "product_composition": _serialize_manifest(
+                    self._p3_control_unavailable_manifest()
+                ),
             },
         )
 
