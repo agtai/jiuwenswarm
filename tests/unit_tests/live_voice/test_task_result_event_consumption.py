@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -52,6 +53,24 @@ def _create_task(store: SqliteTaskStore, tmp_path: Path, *, suffix: str) -> str:
     return str(created.result["task_id"])
 
 
+def _create_task_at(
+    store: SqliteTaskStore,
+    tmp_path: Path,
+    *,
+    suffix: str,
+    now: str,
+) -> str:
+    invocation = _create(tmp_path, identity_suffix=suffix)
+    created = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=now,
+    )
+    assert created.ok and created.result is not None
+    return str(created.result["task_id"])
+
+
 def _consumer_rows(database: Path) -> list[tuple[object, ...]]:
     with sqlite3.connect(database) as connection:
         return connection.execute(
@@ -74,6 +93,41 @@ def _schema_identity(database: Path) -> tuple[object, ...]:
                    ORDER BY type, name"""
             ).fetchall(),
         )
+
+
+def _command_result_json(database: Path, command_id: str) -> dict[str, object]:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT result_json FROM commands WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+    assert row is not None
+    value = json.loads(row[0])
+    assert type(value) is dict
+    return value
+
+
+def _replace_command_result_json(
+    database: Path,
+    command_id: str,
+    value: dict[str, object],
+) -> None:
+    with sqlite3.connect(database) as connection:
+        updated = connection.execute(
+            "UPDATE commands SET result_json=? WHERE command_id=?",
+            (
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                command_id,
+            ),
+        ).rowcount
+        assert updated == 1
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 def _nonconsumption_authority(database: Path) -> dict[str, list[tuple[object, ...]]]:
@@ -337,7 +391,17 @@ def test_first_ack_persists_only_command_and_exact_class_watermark(
 
     result = store.ack_events(command, observed_at=ack_time)
 
-    assert result.ok and result.result == {
+    assert result.ok and result.result is not None
+    assert {
+        field: result.result[field]
+        for field in (
+            "task_id",
+            "presentation_class",
+            "acked_through_seq",
+            "acked_event_id",
+            "advanced",
+        )
+    } == {
         "task_id": task_id,
         "presentation_class": "text",
         "acked_through_seq": 1,
@@ -433,7 +497,17 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
     )
     lower = _command_in_scope(lower_base, new_session)
     lower_result = store.ack_events(lower, observed_at=lower_time)
-    assert lower_result.ok and lower_result.result == {
+    assert lower_result.ok and lower_result.result is not None
+    assert {
+        field: lower_result.result[field]
+        for field in (
+            "task_id",
+            "presentation_class",
+            "acked_through_seq",
+            "acked_event_id",
+            "advanced",
+        )
+    } == {
         "task_id": task_id,
         "presentation_class": "text",
         "acked_through_seq": 1,
@@ -507,6 +581,98 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
     assert conflict.value.reason == "IDEMPOTENCY_CONFLICT"
     assert database.read_bytes() == before_conflict_bytes
     assert _consumer_rows(database)[0][4:6] == (3, events[3].event_id)
+
+
+def test_runtime_ack_results_form_a_closed_history_chain_across_noops(
+    tmp_path: Path,
+) -> None:
+    """Catches a successful ACK omitting or skipping its predecessor digest."""
+
+    database = tmp_path / "ack-history-chain.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-history-chain")
+    item = store.claim_outbox("ack-history-chain-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    observed = _after(events[-1].occurred_at)
+    first, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-history-first",
+    )
+    lower, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=events[0].event_id,
+        expected_event_head=3,
+        command_id="command-ack-history-lower",
+    )
+    equal, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-history-equal",
+    )
+
+    first_result = store.ack_events(first, observed_at=observed)
+    lower_result = store.ack_events(lower, observed_at=_after(observed))
+    equal_result = store.ack_events(equal, observed_at=_after(observed, seconds=2))
+
+    assert first_result.result is not None
+    first_history = first_result.result["consumption_history"]
+    assert first_history["version"] == 1
+    assert first_history["origin"] == "runtime_v1"
+    assert first_history["previous"] == {
+        "acked_through_seq": -1,
+        "acked_event_id": None,
+        "updated_at": None,
+        "history_sha256": None,
+    }
+    assert first_history["current"] == {
+        "acked_through_seq": 1,
+        "acked_event_id": events[1].event_id,
+        "updated_at": observed,
+        "history_sha256": first_history["current"]["history_sha256"],
+    }
+    first_digest = first_history["current"]["history_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", first_digest) is not None
+
+    assert lower_result.result is not None
+    lower_history = lower_result.result["consumption_history"]
+    assert lower_history["origin"] == "runtime_v1"
+    assert lower_history["previous"] == first_history["current"]
+    assert lower_history["current"]["acked_through_seq"] == 1
+    assert lower_history["current"]["acked_event_id"] == events[1].event_id
+    assert lower_history["current"]["updated_at"] == observed
+    lower_digest = lower_history["current"]["history_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", lower_digest) is not None
+    assert lower_digest != first_digest
+
+    assert equal_result.result is not None
+    equal_history = equal_result.result["consumption_history"]
+    assert equal_history["origin"] == "runtime_v1"
+    assert equal_history["previous"] == lower_history["current"]
+    assert equal_history["current"]["acked_through_seq"] == 1
+    assert equal_history["current"]["acked_event_id"] == events[1].event_id
+    assert equal_history["current"]["updated_at"] == observed
+    assert equal_history["current"]["history_sha256"] != lower_digest
+    assert SqliteTaskStore(database).unread_events_page(
+        task_id,
+        _scope(),
+        presentation_class="text",
+        limit=500,
+    ).watermark == 1
 
 
 def test_committed_ack_reopens_with_exact_consumer_and_command_authority(
@@ -592,7 +758,17 @@ def test_task4_consumer_seed_accepts_a_first_noop_ack_and_reopens(
         observed_at="2026-08-05T12:00:01Z",
     )
 
-    assert result.ok and result.result == {
+    assert result.ok and result.result is not None
+    assert {
+        field: result.result[field]
+        for field in (
+            "task_id",
+            "presentation_class",
+            "acked_through_seq",
+            "acked_event_id",
+            "advanced",
+        )
+    } == {
         "task_id": task_id,
         "presentation_class": "text",
         "acked_through_seq": 0,
@@ -647,6 +823,298 @@ def test_unowned_consumer_outside_legacy_seed_v1_shape_is_corrupt(
             ),
         )
         connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+def test_runtime_first_seq_one_cannot_be_relabelled_by_seed_timestamp(
+    tmp_path: Path,
+) -> None:
+    """Catches a runtime ACK being relabelled by changing only its timestamp."""
+
+    database = tmp_path / "ack-runtime-seq-one-seed-time.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-runtime-seq-one-seed-time")
+    accepted = store.events(task_id, _scope())[0]
+    item = store.claim_outbox("ack-runtime-seq-one-seed-time-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    first, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-runtime-seq-one-seed-time",
+    )
+    assert store.ack_events(
+        first,
+        observed_at=_after(events[-1].occurred_at),
+    ).ok
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE task_event_consumption SET updated_at=?",
+            (accepted.occurred_at,),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+def test_deleted_superseded_runtime_ack_breaks_history_and_id_stays_owned(
+    tmp_path: Path,
+) -> None:
+    """Catches deleting an earlier ACK and reusing its ID in another class."""
+
+    database = tmp_path / "ack-runtime-superseded-deleted.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-runtime-superseded-deleted")
+    item = store.claim_outbox("ack-runtime-superseded-deleted-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    first, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-runtime-superseded-deleted",
+    )
+    higher, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=3,
+        acked_event_id=events[3].event_id,
+        expected_event_head=3,
+        command_id="command-ack-runtime-superseded-higher",
+    )
+    assert store.ack_events(
+        first,
+        observed_at=_after(events[-1].occurred_at),
+    ).ok
+    assert store.ack_events(
+        higher,
+        observed_at=_after(events[-1].occurred_at, seconds=2),
+    ).ok
+    with sqlite3.connect(database) as connection:
+        deleted = connection.execute(
+            "DELETE FROM commands WHERE command_id=?",
+            (first.command_id,),
+        ).rowcount
+        assert deleted == 1
+        connection.commit()
+    changed, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id=first.command_id,
+    )
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database).ack_events(
+            changed,
+            observed_at=_after(events[-1].occurred_at, seconds=3),
+        )
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+    assert _consumer_rows(database)[0][3:6] == (
+        "text",
+        3,
+        events[3].event_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "deleted_label",
+    ("lower", "equal"),
+)
+def test_deleting_applied_noop_ack_breaks_the_history_chain(
+    tmp_path: Path,
+    deleted_label: str,
+) -> None:
+    """Catches deletion of an applied ACK whose watermark was a no-op."""
+
+    database = tmp_path / f"ack-history-delete-{deleted_label}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix=f"-ack-history-delete-{deleted_label}")
+    item = store.claim_outbox(f"ack-history-delete-{deleted_label}-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    observed = _after(events[-1].occurred_at)
+    commands: dict[str, CommandEnvelope] = {}
+    for label, seq in (("first", 1), ("lower", 0), ("equal", 1), ("higher", 3)):
+        command, _grant_unused = _ack_command(
+            task_id,
+            presentation_class="text",
+            acked_through_seq=seq,
+            acked_event_id=events[seq].event_id,
+            expected_event_head=3,
+            command_id=f"command-ack-history-delete-{deleted_label}-{label}",
+        )
+        commands[label] = command
+    for index, label in enumerate(("first", "lower", "equal", "higher")):
+        assert store.ack_events(
+            commands[label],
+            observed_at=_after(observed, seconds=index),
+        ).ok
+    with sqlite3.connect(database) as connection:
+        deleted = connection.execute(
+            "DELETE FROM commands WHERE command_id=?",
+            (commands[deleted_label].command_id,),
+        ).rowcount
+        assert deleted == 1
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+def test_reordering_two_applied_noop_acks_breaks_the_history_chain(
+    tmp_path: Path,
+) -> None:
+    """Catches command-row order changes that preserve the final watermark."""
+
+    database = tmp_path / "ack-history-reorder-noops.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-history-reorder-noops")
+    item = store.claim_outbox("ack-history-reorder-noops-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    observed = _after(events[-1].occurred_at)
+    commands: list[CommandEnvelope] = []
+    for label, seq in (("first", 1), ("lower", 0), ("equal", 1)):
+        command, _grant_unused = _ack_command(
+            task_id,
+            presentation_class="text",
+            acked_through_seq=seq,
+            acked_event_id=events[seq].event_id,
+            expected_event_head=3,
+            command_id=f"command-ack-history-reorder-{label}",
+        )
+        commands.append(command)
+    for index, command in enumerate(commands):
+        assert store.ack_events(
+            command,
+            observed_at=_after(observed, seconds=index),
+        ).ok
+    with sqlite3.connect(database) as connection:
+        max_rowid = connection.execute(
+            "SELECT MAX(rowid) FROM commands"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE commands SET rowid=? WHERE command_id=?",
+            (max_rowid + 1, commands[1].command_id),
+        )
+        connection.commit()
+    before_reopen_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert database.read_bytes() == before_reopen_bytes
+
+
+@pytest.mark.parametrize(
+    ("field_path", "replacement"),
+    (
+        (("version",), 2),
+        (("origin",), "legacy_seed_v1"),
+        (("previous", "acked_through_seq"), 99),
+        (("previous", "acked_event_id"), "event-forged"),
+        (("previous", "updated_at"), NOW),
+        (("previous", "history_sha256"), "0" * 64),
+        (("current", "acked_through_seq"), 99),
+        (("current", "acked_event_id"), "event-forged"),
+        (("current", "updated_at"), NOW),
+        (("current", "history_sha256"), "f" * 64),
+    ),
+)
+def test_ack_history_result_tamper_is_corrupt(
+    tmp_path: Path,
+    field_path: tuple[str, ...],
+    replacement: object,
+) -> None:
+    """Catches any stored predecessor, origin, state, or digest substitution."""
+
+    label = "-".join(field_path)
+    database = tmp_path / f"ack-history-result-tamper-{label}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix=f"-ack-history-tamper-{label}")
+    event = store.events(task_id, _scope())[0]
+    first, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-history-tamper-{label}-first",
+    )
+    second, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-history-tamper-{label}-second",
+    )
+    assert store.ack_events(
+        first,
+        observed_at=_after(event.occurred_at),
+    ).ok
+    assert store.ack_events(
+        second,
+        observed_at=_after(event.occurred_at, seconds=2),
+    ).ok
+    result_json = _command_result_json(database, second.command_id)
+    result = result_json["result"]
+    assert type(result) is dict
+    history = result["consumption_history"]
+    assert type(history) is dict
+    target = history
+    for field in field_path[:-1]:
+        target = target[field]
+        assert type(target) is dict
+    target[field_path[-1]] = replacement
+    _replace_command_result_json(database, second.command_id, result_json)
     before_reopen_bytes = database.read_bytes()
 
     with pytest.raises(FormalTaskViolation) as corrupt:
@@ -772,10 +1240,135 @@ def test_legacy_seed_anchor_survives_noop_and_multiple_higher_acks(
     assert database.read_bytes() == before_replay_bytes
 
 
-def test_legacy_seed_direct_two_store_higher_race_keeps_anchor(
+def test_legacy_seed_direct_higher_is_replayable_stale_without_advancing(
     tmp_path: Path,
 ) -> None:
-    """Catches direct advancement or its losing ACK replacing seed provenance."""
+    """Catches a raw seed advancing before its exact adoption handshake."""
+
+    database = tmp_path / "ack-seed-direct-higher-stale.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task(store, tmp_path, suffix="-ack-seed-direct-higher-stale")
+    accepted = store.events(task_id, _scope())[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'text', 0, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                accepted.event_id,
+                accepted.occurred_at,
+            ),
+        )
+        connection.commit()
+    store = SqliteTaskStore(database)
+    item = store.claim_outbox("ack-seed-direct-higher-stale-worker")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item),
+    )
+    events = store.events(task_id, _scope())
+    direct, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-direct-higher-stale",
+    )
+    before_consumer = _consumer_rows(database)
+    before_authority = _nonconsumption_authority(database)
+    rejected = store.ack_events(
+        direct,
+        observed_at=_after(events[-1].occurred_at),
+    )
+    after_rejection_bytes = database.read_bytes()
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_ACK_PRECONDITION_STALE"
+    assert rejected.error.code is ErrorCode.STALE
+    assert _consumer_rows(database) == before_consumer
+    assert _nonconsumption_authority(database) == before_authority
+    reopened = SqliteTaskStore(database)
+    replay = reopened.ack_events(
+        replace(direct, request_id="request-ack-seed-direct-higher-replay"),
+        observed_at=_after(events[-1].occurred_at, seconds=2),
+    )
+    assert replay == rejected.for_request("request-ack-seed-direct-higher-replay")
+    assert database.read_bytes() == after_rejection_bytes
+
+    changed, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=1,
+        acked_event_id=events[1].event_id,
+        expected_event_head=3,
+        command_id=direct.command_id,
+    )
+    with pytest.raises(FormalTaskViolation) as conflict:
+        reopened.ack_events(
+            changed,
+            observed_at=_after(events[-1].occurred_at, seconds=3),
+        )
+    assert conflict.value.reason == "IDEMPOTENCY_CONFLICT"
+    assert database.read_bytes() == after_rejection_bytes
+
+    adoption, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=accepted.event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-after-direct-stale-adoption",
+    )
+    adopted = reopened.ack_events(
+        adoption,
+        observed_at=_after(events[-1].occurred_at, seconds=4),
+    )
+    assert adopted.ok and adopted.result is not None
+    assert adopted.result["advanced"] is False
+    assert adopted.result["consumption_history"]["origin"] == "legacy_seed_v1"
+    higher, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=3,
+        acked_event_id=events[3].event_id,
+        expected_event_head=3,
+        command_id="command-ack-seed-after-direct-stale-higher",
+    )
+    advanced = reopened.ack_events(
+        higher,
+        observed_at=_after(events[-1].occurred_at, seconds=5),
+    )
+    assert advanced.ok and advanced.result is not None
+    assert advanced.result["advanced"] is True
+    assert _consumer_rows(database)[0][4:] == (
+        3,
+        events[3].event_id,
+        accepted.occurred_at,
+    )
+    after_higher = SqliteTaskStore(database)
+    before_replays = database.read_bytes()
+    assert after_higher.ack_events(
+        replace(direct, request_id="request-ack-seed-direct-stale-late-replay"),
+        observed_at=_after(events[-1].occurred_at, seconds=6),
+    ) == rejected.for_request("request-ack-seed-direct-stale-late-replay")
+    assert after_higher.ack_events(
+        replace(higher, request_id="request-ack-seed-higher-replay"),
+        observed_at=_after(events[-1].occurred_at, seconds=7),
+    ) == advanced.for_request("request-ack-seed-higher-replay")
+    assert database.read_bytes() == before_replays
+
+
+def test_adopted_legacy_seed_two_store_higher_race_keeps_anchor(
+    tmp_path: Path,
+) -> None:
+    """Catches concurrent advancement replacing an adopted seed's anchor."""
 
     database = tmp_path / "ack-seed-direct-higher-race.sqlite"
     setup = SqliteTaskStore(database)
@@ -797,6 +1390,20 @@ def test_legacy_seed_direct_two_store_higher_race_keeps_anchor(
         )
         connection.commit()
     setup = SqliteTaskStore(database)
+    adoption, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=accepted.event_id,
+        expected_event_head=0,
+        command_id="command-ack-seed-race-adoption",
+    )
+    adopted = setup.ack_events(
+        adoption,
+        observed_at=_after(accepted.occurred_at),
+    )
+    assert adopted.ok and adopted.result is not None
+    assert adopted.result["advanced"] is False
     item = setup.claim_outbox("ack-seed-direct-higher-race-worker")
     assert item is not None
     setup.complete_outbox(
@@ -1141,6 +1748,225 @@ def test_adopted_legacy_seed_timestamp_is_immutable(
 
     assert corrupt.value.reason == "TASK_STORE_CORRUPT"
     assert database.read_bytes() == before_reopen_bytes
+
+
+@pytest.mark.parametrize(
+    ("event_at", "observed_at"),
+    (
+        (
+            "2026-08-05T12:00:00.000000001Z",
+            "2026-08-05T12:00:00.000000002Z",
+        ),
+        (
+            "2026-08-05T12:00:00.1234567Z",
+            "2026-08-05T12:00:00.1234568Z",
+        ),
+        (
+            "2026-08-05T12:00:00.12345678Z",
+            "2026-08-05T12:00:00.12345679Z",
+        ),
+        (
+            "2026-08-05T12:00:00.123456789Z",
+            "2026-08-05T12:00:00.123456790Z",
+        ),
+        (
+            "2026-08-05T12:00:00.999999999Z",
+            "2026-08-05T12:00:01Z",
+        ),
+    ),
+)
+def test_runtime_ack_preserves_contract_nanoseconds_when_ordering_event_time(
+    tmp_path: Path,
+    event_at: str,
+    observed_at: str,
+) -> None:
+    """Catches seventh-to-ninth fractional digits collapsing to microseconds."""
+
+    label = event_at.split(".")[-1].removesuffix("Z")
+    database = tmp_path / f"ack-nanosecond-positive-{label}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task_at(
+        store,
+        tmp_path,
+        suffix=f"-ack-nanosecond-positive-{label}",
+        now=event_at,
+    )
+    event = store.events(task_id, _scope())[0]
+    assert event.occurred_at == event_at
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-nanosecond-positive-{label}",
+    )
+
+    applied = store.ack_events(command, observed_at=observed_at)
+
+    assert applied.ok and applied.result is not None
+    assert applied.result["advanced"] is True
+    assert applied.result["consumption_history"]["current"]["updated_at"] == (
+        observed_at
+    )
+    assert _consumer_rows(database)[0][4:] == (
+        0,
+        event.event_id,
+        observed_at,
+    )
+    assert SqliteTaskStore(database).unread_events_page(
+        task_id,
+        _scope(),
+        presentation_class="text",
+        limit=500,
+    ).watermark == 0
+
+
+def test_legacy_seed_adoption_preserves_nanosecond_ordering(tmp_path: Path) -> None:
+    """Catches a +1ns seed adoption being collapsed into an equal timestamp."""
+
+    event_at = "2026-08-05T12:00:00.000000001Z"
+    observed_at = "2026-08-05T12:00:00.000000002Z"
+    database = tmp_path / "ack-seed-nanosecond-adoption.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task_at(
+        store,
+        tmp_path,
+        suffix="-ack-seed-nanosecond-adoption",
+        now=event_at,
+    )
+    event = store.events(task_id, _scope())[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO task_event_consumption(
+                   subject_id, project_id, task_id, presentation_class,
+                   acked_through_seq, acked_event_id, updated_at)
+               VALUES(?, ?, ?, 'voice', 0, ?, ?)""",
+            (
+                _scope().subject_id,
+                _scope().project_id,
+                task_id,
+                event.event_id,
+                event_at,
+            ),
+        )
+        connection.commit()
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="voice",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id="command-ack-seed-nanosecond-adoption",
+    )
+
+    adopted = SqliteTaskStore(database).ack_events(
+        command,
+        observed_at=observed_at,
+    )
+
+    assert adopted.ok and adopted.result is not None
+    history = adopted.result["consumption_history"]
+    assert history["origin"] == "legacy_seed_v1"
+    assert history["previous"]["updated_at"] == event_at
+    assert history["current"]["updated_at"] == event_at
+    assert history["previous"]["history_sha256"] is None
+    assert SqliteTaskStore(database).unread_events_page(
+        task_id,
+        _scope(),
+        presentation_class="voice",
+        limit=500,
+    ).watermark == 0
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    (
+        "2026-08-05T12:00:00.000000001Z",
+        "2026-08-05T12:00:00.000000000Z",
+    ),
+)
+def test_nanosecond_equal_or_earlier_ack_is_durable_stale_and_zero_consumer(
+    tmp_path: Path,
+    observed_at: str,
+) -> None:
+    """Catches equal or pre-event nanoseconds escaping the stale boundary."""
+
+    event_at = "2026-08-05T12:00:00.000000001Z"
+    database = tmp_path / f"ack-nanosecond-stale-{observed_at[-4:-1]}.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task_at(
+        store,
+        tmp_path,
+        suffix=f"-ack-nanosecond-stale-{observed_at[-4:-1]}",
+        now=event_at,
+    )
+    event = store.events(task_id, _scope())[0]
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-nanosecond-stale-{observed_at}",
+    )
+    before_authority = _nonconsumption_authority(database)
+
+    rejected = store.ack_events(command, observed_at=observed_at)
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_ACK_PRECONDITION_STALE"
+    assert rejected.error.code is ErrorCode.STALE
+    assert _consumer_rows(database) == []
+    assert _nonconsumption_authority(database) == before_authority
+    assert SqliteTaskStore(database).ack_events(
+        replace(command, request_id=f"request-replay-{observed_at}"),
+        observed_at="2026-08-05T12:00:01Z",
+    ) == rejected.for_request(f"request-replay-{observed_at}")
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    (
+        "2026-08-05T12:00:00.1234567890Z",
+        "2026-08-05T12:00:00.Z",
+        "2026-08-05T14:00:00.000000002+02:00",
+        "2026-02-30T12:00:00.000000002Z",
+    ),
+)
+def test_ack_rejects_noncanonical_nanosecond_observation_before_writes(
+    tmp_path: Path,
+    observed_at: str,
+) -> None:
+    """Catches the local order parser broadening the global timestamp wire."""
+
+    database = tmp_path / "ack-nanosecond-noncanonical.sqlite"
+    store = SqliteTaskStore(database)
+    task_id = _create_task_at(
+        store,
+        tmp_path,
+        suffix=f"-ack-nanosecond-noncanonical-{len(observed_at)}",
+        now="2026-08-05T12:00:00.000000001Z",
+    )
+    event = store.events(task_id, _scope())[0]
+    command, _grant_unused = _ack_command(
+        task_id,
+        presentation_class="text",
+        acked_through_seq=0,
+        acked_event_id=event.event_id,
+        expected_event_head=0,
+        command_id=f"command-ack-nanosecond-noncanonical-{observed_at}",
+    )
+    before_counts = store.counts()
+    before_authority = _nonconsumption_authority(database)
+
+    with pytest.raises(FormalTaskViolation) as invalid:
+        store.ack_events(command, observed_at=observed_at)
+
+    assert invalid.value.reason == "TASK_ACK_INVALID"
+    assert store.counts() == before_counts
+    assert _consumer_rows(database) == []
+    assert _nonconsumption_authority(database) == before_authority
 
 
 @pytest.mark.parametrize(
