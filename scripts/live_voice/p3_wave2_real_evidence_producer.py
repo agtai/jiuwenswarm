@@ -1596,7 +1596,13 @@ def _worker_command(arguments: list[str], remaining: float) -> list[str]:
     return [sys.executable, "-c", bootstrap, *arguments, f"{remaining:.9f}"]
 
 
+def _producer_platform_name() -> str:
+    return os.name
+
+
 def _worker_entry(arguments: list[str], remaining: float) -> int:
+    if _producer_platform_name() != "nt":
+        return 2
     if (
         not math.isfinite(remaining)
         or remaining <= 0
@@ -1618,9 +1624,7 @@ def _worker_entry(arguments: list[str], remaining: float) -> int:
     return 0
 
 
-def _create_windows_kill_job(process: subprocess.Popen[bytes]) -> object | None:
-    if os.name != "nt":
-        return None
+def _create_windows_kill_job(process: subprocess.Popen[bytes]) -> object:
     import ctypes
     from ctypes import wintypes
 
@@ -1697,8 +1701,6 @@ def _create_windows_kill_job(process: subprocess.Popen[bytes]) -> object | None:
 
 
 def _resume_windows_worker(process: subprocess.Popen[bytes]) -> None:
-    if os.name != "nt":
-        return
     import ctypes
     from ctypes import wintypes
 
@@ -1725,7 +1727,7 @@ def _terminate_windows_job(job: object) -> None:
 
 
 def _close_windows_job(job: object | None) -> None:
-    if os.name != "nt" or job is None:
+    if job is None:
         return
     import ctypes
     from ctypes import wintypes
@@ -1741,84 +1743,19 @@ def _terminate_owned_worker(
     process: subprocess.Popen[bytes],
     *,
     windows_job: object | None,
-    posix_group_owned: bool = False,
     deadline: float,
 ) -> int:
-    if os.name == "nt":
-        if windows_job is None:
-            with contextlib.suppress(OSError):
-                process.kill()
-        else:
-            _terminate_windows_job(windows_job)
-    else:
-        if posix_group_owned:
-            return _terminate_posix_process_group(process, deadline=deadline)
-        else:
-            with contextlib.suppress(OSError):
-                process.kill()
-    try:
-        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
-
-
-def _terminate_posix_process_group(
-    process: subprocess.Popen[bytes],
-    *,
-    deadline: float,
-) -> int:
-    import signal
-
-    try:
-        os.killpg(process.pid, getattr(signal, "SIGKILL", 9))
-    except OSError as exc:
-        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
-    try:
-        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
-
-
-def _require_posix_process_group(process: subprocess.Popen[bytes]) -> None:
-    try:
-        group_id = os.getpgid(process.pid)
-    except (AttributeError, OSError) as exc:
-        raise ClosedEvidenceFailure(
-            "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
-        ) from exc
-    if group_id != process.pid:
+    if _producer_platform_name() != "nt":
         raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
-
-
-def _posix_leader_exited_without_reaping(
-    process: subprocess.Popen[bytes],
-) -> bool:
+    if windows_job is None:
+        with contextlib.suppress(OSError):
+            process.kill()
+    else:
+        _terminate_windows_job(windows_job)
     try:
-        result = os.waitid(
-            os.P_PID,
-            process.pid,
-            os.WEXITED | os.WNOHANG | os.WNOWAIT,
-        )
-    except (AttributeError, ChildProcessError, OSError) as exc:
-        raise ClosedEvidenceFailure(
-            "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
-        ) from exc
-    return result is not None
-
-
-def _wait_posix_leader_without_reaping(
-    process: subprocess.Popen[bytes],
-    *,
-    deadline: float,
-) -> bool:
-    while True:
-        if _posix_leader_exited_without_reaping(process):
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(0.01, remaining))
-
+        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_TERMINATION_FAILED") from exc
 
 def _validate_worker_output(
     private_root: Path,
@@ -1850,6 +1787,8 @@ def _supervise_production_worker(
     *,
     deadline: float,
 ) -> dict[str, object]:
+    if _producer_platform_name() != "nt":
+        raise ClosedEvidenceFailure("REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE")
     remaining = deadline - time.monotonic()
     termination_reserve = min(
         _MAX_PROCESS_TERMINATION_SECONDS,
@@ -1859,11 +1798,7 @@ def _supervise_production_worker(
     if worker_remaining <= 0:
         raise ClosedEvidenceFailure("REAL_SCENARIO_DEADLINE_EXCEEDED")
     worker_deadline = deadline - termination_reserve
-    creationflags = (
-        subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004
-        if os.name == "nt"
-        else 0
-    )
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004
     try:
         process = subprocess.Popen(
             _worker_command(arguments, worker_remaining),
@@ -1872,56 +1807,35 @@ def _supervise_production_worker(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
-            start_new_session=os.name != "nt",
+            start_new_session=False,
         )
     except OSError as exc:
         raise ClosedEvidenceFailure("REAL_PRODUCER_FAILED") from exc
     windows_job: object | None = None
-    posix_group_owned = False
     terminated = False
     try:
-        if os.name == "nt":
-            windows_job = _create_windows_kill_job(process)
-            _resume_windows_worker(process)
-            try:
-                return_code = process.wait(
-                    timeout=max(0.0, worker_deadline - time.monotonic())
-                )
-            except subprocess.TimeoutExpired:
-                terminated = True
-                _terminate_owned_worker(
-                    process,
-                    windows_job=windows_job,
-                    deadline=deadline,
-                )
-                raise ClosedEvidenceFailure(
-                    "REAL_SCENARIO_DEADLINE_EXCEEDED"
-                ) from None
-        else:
-            _require_posix_process_group(process)
-            posix_group_owned = True
-            leader_exited = _wait_posix_leader_without_reaping(
-                process,
-                deadline=worker_deadline,
+        windows_job = _create_windows_kill_job(process)
+        _resume_windows_worker(process)
+        try:
+            return_code = process.wait(
+                timeout=max(0.0, worker_deadline - time.monotonic())
             )
+        except subprocess.TimeoutExpired:
             terminated = True
-            return_code = _terminate_owned_worker(
+            _terminate_owned_worker(
                 process,
-                windows_job=None,
-                posix_group_owned=True,
+                windows_job=windows_job,
                 deadline=deadline,
             )
-            if not leader_exited:
-                raise ClosedEvidenceFailure(
-                    "REAL_SCENARIO_DEADLINE_EXCEEDED"
-                )
+            raise ClosedEvidenceFailure(
+                "REAL_SCENARIO_DEADLINE_EXCEEDED"
+            ) from None
     except BaseException:
         if not terminated:
             terminated = True
             _terminate_owned_worker(
                 process,
                 windows_job=windows_job,
-                posix_group_owned=posix_group_owned,
                 deadline=deadline,
             )
         raise

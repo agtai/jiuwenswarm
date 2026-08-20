@@ -768,181 +768,75 @@ def test_normal_worker_close_kills_owned_descendant_without_taskkill(
     assert taskkill_calls == []
 
 
-def test_posix_group_identity_must_equal_the_unreaped_leader(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    process = SimpleNamespace(pid=4100)
-    group_signals: list[tuple[int, int]] = []
-    monkeypatch.setattr(producer.os, "getpgid", lambda _pid: 4101, raising=False)
-    monkeypatch.setattr(
-        producer.os,
-        "killpg",
-        lambda pgid, signal_number: group_signals.append((pgid, signal_number)),
-        raising=False,
-    )
-
-    with pytest.raises(ClosedEvidenceFailure) as raised:
-        producer._require_posix_process_group(process)
-
-    assert raised.value.reason == "REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"
-    assert group_signals == []
-
-
-def test_posix_leader_probe_uses_wnowait_and_does_not_reap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    process = SimpleNamespace(pid=4100)
-    calls: list[tuple[int, int, int]] = []
-    monkeypatch.setattr(producer.os, "P_PID", 1, raising=False)
-    monkeypatch.setattr(producer.os, "WEXITED", 2, raising=False)
-    monkeypatch.setattr(producer.os, "WNOHANG", 4, raising=False)
-    monkeypatch.setattr(producer.os, "WNOWAIT", 8, raising=False)
-    monkeypatch.setattr(
-        producer.os,
-        "waitid",
-        lambda id_type, pid, flags: calls.append((id_type, pid, flags)) or object(),
-        raising=False,
-    )
-
-    assert producer._posix_leader_exited_without_reaping(process) is True
-    assert calls == [(1, 4100, 2 | 4 | 8)]
-
-
-def test_posix_group_signal_precedes_leader_reap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[str] = []
-
-    class UnreapedLeader:
-        pid = 4100
-
-        def wait(self, *, timeout: float) -> int:
-            assert timeout > 0
-            events.append("reap-leader")
-            return 0
-
-    monkeypatch.setattr(
-        producer.os,
-        "killpg",
-        lambda _pgid, _signal: events.append("signal-owned-group"),
-        raising=False,
-    )
-
-    return_code = producer._terminate_posix_process_group(
-        UnreapedLeader(),
-        deadline=time.monotonic() + 1,
-    )
-
-    assert return_code == 0
-    assert events == ["signal-owned-group", "reap-leader"]
-
-
-@pytest.mark.skipif(os.name == "nt", reason="real POSIX process-group boundary")
-def test_posix_normal_exit_kills_owned_descendant_before_leader_reap(
+def test_simulated_posix_cli_fails_closed_before_spawn_with_zero_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
-    private_root, output = _private_cli_paths(tmp_path, "posix-normal-tree")
-    escaped = private_root / "posix-normal-escaped.txt"
+    private_root, output = _private_cli_paths(tmp_path, "simulated-posix")
+    config = private_root / "config" / "config.yaml"
+    dotenv = private_root / ".env"
+    config_before = config.read_bytes()
+    dotenv_before = dotenv.read_bytes()
+    spawn_calls: list[object] = []
+
+    def forbidden_spawn(*args, **_kwargs):
+        spawn_calls.append(args)
+        raise AssertionError("POSIX producer must fail before spawn")
+
     monkeypatch.setattr(
         producer,
-        "_worker_command",
-        lambda _arguments, _remaining: [
-            sys.executable,
-            "-c",
-            "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
-            "'import pathlib,sys,time; time.sleep(0.5); '"
-            "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[1]])",
-            str(escaped),
-        ],
+        "_producer_platform_name",
+        lambda: "posix",
+        raising=False,
     )
-    monkeypatch.setattr(
-        producer,
-        "_validate_worker_output",
-        lambda _root, _output: {
-            "ok": True,
-            "observation_count": 4,
-            "paired_file_tool_count": 2,
-            "write_edit_pair_count": 1,
-        },
+    monkeypatch.setattr(producer.subprocess, "Popen", forbidden_spawn)
+
+    exit_code = main(
+        ["--private-root", str(private_root), "--output", str(output)]
     )
 
-    aggregate = producer._supervise_production_worker(
-        ["--private-root", str(private_root), "--output", str(output)],
-        private_root,
-        output,
-        deadline=time.monotonic() + 3,
+    assert exit_code == 2
+    assert spawn_calls == []
+    assert not output.exists()
+    assert config.read_bytes() == config_before
+    assert dotenv.read_bytes() == dotenv_before
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"}\n',
+        "",
     )
 
-    assert aggregate["ok"] is True
-    time.sleep(0.8)
-    assert not escaped.exists()
 
-
-@pytest.mark.skipif(os.name == "nt", reason="real POSIX process-group boundary")
-def test_posix_timeout_kills_owned_descendant_before_leader_reap(
+@pytest.mark.skipif(os.name == "nt", reason="real POSIX fail-closed boundary")
+def test_real_posix_cli_fails_closed_before_spawn_with_zero_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
-    private_root, output = _private_cli_paths(tmp_path, "posix-timeout-tree")
-    escaped = private_root / "posix-timeout-escaped.txt"
-    monkeypatch.setattr(
-        producer,
-        "_worker_command",
-        lambda _arguments, _remaining: [
-            sys.executable,
-            "-c",
-            "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',"
-            "'import pathlib,sys,time; time.sleep(0.5); '"
-            "+'pathlib.Path(sys.argv[1]).write_text(\"escaped\")',sys.argv[1]]); "
-            "time.sleep(5)",
-            str(escaped),
-        ],
+    private_root, output = _private_cli_paths(tmp_path, "real-posix")
+    marker = private_root / "caller-marker.bin"
+    marker.write_bytes(b"CALLER_POSIX_SENTINEL")
+    marker.chmod(0o600)
+    spawn_calls: list[object] = []
+
+    def forbidden_spawn(*args, **_kwargs):
+        spawn_calls.append(args)
+        raise AssertionError("POSIX producer must fail before spawn")
+
+    monkeypatch.setattr(producer.subprocess, "Popen", forbidden_spawn)
+
+    exit_code = main(
+        ["--private-root", str(private_root), "--output", str(output)]
     )
 
-    with pytest.raises(ClosedEvidenceFailure) as raised:
-        producer._supervise_production_worker(
-            ["--private-root", str(private_root), "--output", str(output)],
-            private_root,
-            output,
-            deadline=time.monotonic() + 0.15,
-        )
-
-    assert raised.value.reason == "REAL_SCENARIO_DEADLINE_EXCEEDED"
-    time.sleep(0.8)
-    assert not escaped.exists()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="real POSIX process-group boundary")
-def test_posix_normal_exit_without_descendant_is_reaped_cleanly(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    private_root, output = _private_cli_paths(tmp_path, "posix-no-descendant")
-    monkeypatch.setattr(
-        producer,
-        "_worker_command",
-        lambda _arguments, _remaining: [sys.executable, "-c", "pass"],
+    assert exit_code == 2
+    assert spawn_calls == []
+    assert not output.exists()
+    assert marker.read_bytes() == b"CALLER_POSIX_SENTINEL"
+    assert capsys.readouterr() == (
+        '{"ok":false,"reason":"REAL_PROCESS_TREE_ISOLATION_UNAVAILABLE"}\n',
+        "",
     )
-    monkeypatch.setattr(
-        producer,
-        "_validate_worker_output",
-        lambda _root, _output: {
-            "ok": True,
-            "observation_count": 4,
-            "paired_file_tool_count": 2,
-            "write_edit_pair_count": 1,
-        },
-    )
-
-    aggregate = producer._supervise_production_worker(
-        ["--private-root", str(private_root), "--output", str(output)],
-        private_root,
-        output,
-        deadline=time.monotonic() + 3,
-    )
-
-    assert aggregate["ok"] is True
 
 
 def test_invalid_worker_evidence_is_retained_for_cleanup_pending(
