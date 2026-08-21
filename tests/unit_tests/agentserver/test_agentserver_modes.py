@@ -53,7 +53,9 @@ def _is_regular_skill_evolution_rail(rail):
         ("agent.fast", ("agent", None, "agent")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
-        ("team.plan", ("code", "team", "team.plan")),
+        ("team.plan", ("team", "plan", "team.plan.normal")),
+        ("team.plan.normal", ("team", "plan", "team.plan.normal")),
+        ("team.plan.code", ("code", "team", "team.plan.code")),
         (None, ("agent", None, "agent")),
     ],
 )
@@ -2113,11 +2115,11 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     assert {
         "create_instance_mode": "code",
         "sub_mode": "team",
-        "config": {},
+        "config": {"channel_id": "tui"},
     } in calls
 
 
-def test_agent_manager_creates_code_adapter_for_team_plan(monkeypatch):
+def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatch):
     from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
@@ -2162,12 +2164,12 @@ def test_agent_manager_creates_code_adapter_for_team_plan(monkeypatch):
 
     canonical_mode = asyncio.run(run_case())
 
-    assert canonical_mode == "team.plan"
-    assert {"adapter_mode": "code"} in calls
+    assert canonical_mode == "team.plan.normal"
+    assert {"adapter_mode": "team"} in calls
     assert {
-        "create_instance_mode": "code",
-        "sub_mode": "team",
-        "config": {},
+        "create_instance_mode": "team",
+        "sub_mode": "plan",
+        "config": {"channel_id": "tui"},
     } in calls
 
 

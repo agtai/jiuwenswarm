@@ -138,6 +138,9 @@ python -m jiuwenswarm.app
 完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
+---
+
+## 返回导航
 
 ---
 
@@ -195,3 +198,5 @@ require("codecompanion").setup({
 
 先启动主进程（`python -m jiuwenswarm.app`），再打开 CodeCompanion 对话。不同版本插件的配置键可能不同（旧版本使用 `strategies` 而非 `interactions`），请以插件文档为准。
 
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

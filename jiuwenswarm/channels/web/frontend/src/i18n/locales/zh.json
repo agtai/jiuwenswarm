@@ -305,7 +305,6 @@
     "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型",
-      "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
@@ -465,6 +464,9 @@
   "plan": {
     "toolbarTag": "计划",
     "closeTag": "退出计划模式",
+    "closeTagDisabled": "回答完成或取消后才能退出计划模式",
+    "toolbarUnavailableGoal": "当前已有进行中的目标，暂不可选择计划",
+    "toolbarUnavailableProcessing": "对话进行中，暂不可选择计划",
     "approvalPrompt": "计划已生成，请选择下一步。",
     "executePrompt": "计划已批准，请按计划开始执行。",
     "approvalExecute": "执行",
@@ -472,12 +474,16 @@
     "approvalNext": "下一步",
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
+  "persistSession": {
+    "textRequired": "请在 /persist 后输入任务内容"
+  },
   "goal": {
     "formSubmit": "确定",
     "formCancel": "取消",
     "editTitle": "编辑目标",
     "toolbarTag": "目标",
     "toolbarUnavailable": "当前已有进行中的目标，请先完成或清除",
+    "toolbarUnavailablePlan": "计划模式进行中，暂不可选择目标",
     "closeTag": "取消目标",
     "badge": "目标",
     "status": {
@@ -1462,7 +1468,7 @@
     }
   },
   "skills": {
-    "title": "技能管理",
+    "title": "技能",
     "subtitle": "管理并安装智能体可用的技能。",
     "tabs": {
       "mySkills": "我的技能",
@@ -1475,7 +1481,29 @@
       "enabled": "启用",
       "disabled": "禁用"
     },
+    "publishFilter": {
+      "all": "全部",
+      "published": "已发布",
+      "unpublished": "未发布"
+    },
+    "skillTypes": {
+      "skill": "技能包",
+      "team": "团队技能",
+      "multimodal": "多模态"
+    },
+    "marketplaceCategories": {
+      "all": "全部",
+      "software-development": "软件开发",
+      "office-productivity": "办公效率",
+      "content-creation": "内容创作",
+      "multimodal-media": "多模态媒体",
+      "data-science-research": "数据与科研",
+      "compliance-legal": "合规与法律",
+      "lifestyle-health": "生活与健康",
+      "finance-wealth": "金融与理财"
+    },
     "enable": "启用",
+    "disable": "禁用",
     "noDisabledSkills": "暂无禁用的技能",
     "noEnabledSkills": "暂无启用的技能",
     "setEnabledError": "设置技能启用状态失败",
@@ -1512,10 +1540,76 @@
       "uninstall": "卸载",
       "importLocal": "导入本地技能",
       "sourceManager": "源管理",
+      "create": "创建",
+      "uploadLocalSkill": "上传技能",
+      "documentToSkill": "知识转技能",
+      "createViaChat": "通过聊天创建",
       "backToList": "返回列表",
       "viewEvolution": "查看技能经验",
+      "evolutionTooltip": "该技能有新技能经验，可合成新版本",
       "enabling": "启用中...",
-      "disabling": "禁用中..."
+      "disabling": "禁用中...",
+      "pinSkill": "置顶技能",
+      "pinSkillPackage": "置顶技能包",
+      "unpinSkill": "取消置顶技能",
+      "unpinSkillPackage": "取消置顶技能包",
+      "edit": "编辑",
+      "refresh": "刷新",
+      "goToChat": "去聊天",
+      "goTry": "去试试",
+      "publish": "发布",
+      "rebuild": "重建",
+      "synthesizeNewVersion": "重建技能",
+      "synthesizeTooltip": "将积累的技能经验与原技能合成，生成新的版本"
+    },
+    "publishForm": {
+      "title": "发布技能",
+      "name": "名称",
+      "skillName": "技能名",
+      "version": "版本号",
+      "displayName": "显示名",
+      "description": "描述",
+      "descriptionOptional": "描述（可选）",
+      "tags": "标签",
+      "tagsOptional": "标签（可选）",
+      "skillIcon": "Skill图标",
+      "skillIconOptional": "Skill图标（可选）",
+      "skillIconHint": "PNG文件，不能超过5MB",
+      "sha256": "SHA-256 校验",
+      "versionNote": "版本说明",
+      "versionNoteOptional": "版本说明（Swarm Skill，可选）",
+      "confirm": "确认发布",
+      "cancel": "取消",
+      "publish": "发布",
+      "placeholderSelect": "请选择",
+      "placeholderSha256": "打包完成后显示 64 位小写十六进制",
+      "noticeText": "技能将会被发布到 JiuwenHub。",
+      "noticeView": "去查看",
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+    },
+    "uploadSkillModal": {
+      "title": "上传技能",
+      "pathLabel": "本地技能路径",
+      "pathPlaceholder": "请输入技能文件/目录路径",
+      "notice": "文件夹或者.zip需要包含SKILL.md文件，.md 文件需包含 YAML 格式的技能名称和描述。",
+      "dropHint": "点击或拖动压缩包或文件到此处",
+      "confirm": "导入",
+      "cancel": "取消"
+    },
+    "docToSkillModal": {
+      "title": "知识转技能",
+      "subtitle": "提炼知识，生成技能",
+      "sourceLabel": "来源",
+      "sourceLocal": "本地上传",
+      "sourceLink": "链接",
+      "dropHint": "点击或拖动文档到此处\n上传压缩包",
+      "linkLabel": "链接",
+      "linkTooltip": "支持网页链接、视频链接",
+      "linkPlaceholder": "请输入",
+      "descLabel": "技能描述（可选）",
+      "descPlaceholder": "请输入",
+      "confirm": "确认",
+      "cancel": "取消"
     },
     "builtIn": "内置",
     "status": {
@@ -1544,6 +1638,8 @@
     "searchPlaceholder": "搜索技能名称、描述或标签",
     "totalCount": "共 {{count}} 个",
     "listError": "获取技能失败，请检查后端服务",
+    "featuredTeamSkills": "精选团队技能",
+    "featuredSkills": "精选技能",
     "noMatches": "暂无匹配的技能",
     "viewMode": {
       "list": "列表模式",
@@ -1551,6 +1647,34 @@
     },
     "detailLoading": "加载详情中...",
     "detailError": "加载详情失败",
+    "detail": {
+      "basicInfo": "基本信息",
+      "versionManage": "版本管理",
+      "versionsLoadFailed": "版本加载失败",
+      "noVersions": "暂无版本记录",
+      "fileTree": "文件列表",
+      "filesLoadFailed": "文件列表加载失败",
+      "noFiles": "暂无文件",
+      "binaryFileDownload": "此文件无法文本预览，请点击下载",
+      "noPreview": "无法预览此文件",
+      "contentPreview": "内容预览",
+      "selectFileToPreview": "请选择左侧文件进行预览",
+      "tabs": {
+        "contentDetail": "内容详情",
+        "filePreview": "文件预览",
+        "skillExperience": "技能经验"
+      }
+    },
+    "hubDetail": {
+      "loadFailed": "加载技能详情失败",
+      "installs": "{{count}} 次安装",
+      "views": "{{count}} 次浏览",
+      "likes": "{{count}} 个赞",
+      "rating": "评分 {{rating}}",
+      "publisher": "发布者",
+      "description": "内容详情",
+      "changelog": "更新日志"
+    },
     "retrieval": {
       "title": "本地技能检索",
       "disabled": "检索已关闭",
@@ -1652,7 +1776,7 @@
       "searchPlaceholder": "搜索技能",
       "minConfidence": "最小置信度 {{percent}}%",
       "buildLogFallback": "构建日志",
-      "tokenUsage": "{{prompt}} 输入 / {{completion}} 输出 / {{total}} 总计",
+      "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "必需",
       "skillList": "技能列表",
       "noVisibleSkills": "没有可显示的技能。",
@@ -2366,12 +2490,10 @@
     "image": "图片",
     "code": "代码",
     "moreActions": "更多图表操作",
-    "downloadSource": "下载到本地",
     "downloadImage": "下载为图片",
     "copyCode": "复制代码",
     "copied": "已复制",
     "copyFailed": "复制失败",
-    "downloadSourceFailed": "源文件保存失败",
     "preparingImage": "正在生成图片…",
     "downloadImageFailed": "图片保存失败"
   },

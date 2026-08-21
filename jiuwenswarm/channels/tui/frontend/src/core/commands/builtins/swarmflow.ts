@@ -1,5 +1,5 @@
 import { addInfo, addError } from "../helpers.js";
-import { isTeamMode, type ClientMode } from "../../modes.js";
+import { formatModeForDisplay, isTeamMode, type ClientMode } from "../../modes.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
 export type SwarmflowToggleTarget = "on" | "off";
@@ -149,7 +149,7 @@ export function createSwarmflowCommand(): SlashCommand {
 
       // Status query: /swarmflow (no subcommand).
       if (!sub) {
-        const modeLabel = ctx.mode ?? "unknown";
+        const modeLabel = formatModeForDisplay(ctx.mode ?? "unknown");
         const payload = await ctx
           .request<Record<string, unknown>>("config.get", {})
           .catch(() => null);
@@ -234,7 +234,7 @@ export function createSwarmflowCommand(): SlashCommand {
 
       // --- Switch mode (best-effort) ---
       if (plan.switchToTeam && !isTeamMode(ctx.mode)) {
-        const nextMode = "team";
+        const nextMode: ClientMode = "team.work.normal";
         ctx.setMode(nextMode);
         try {
           await ctx.request("mode.set", { mode: nextMode });
