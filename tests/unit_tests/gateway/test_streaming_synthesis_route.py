@@ -1151,18 +1151,30 @@ async def test_identity_capacity_preflight_has_zero_response_or_provider_effect(
         interaction_id="capacity-preflight-interaction",
         response_id="capacity-preflight-response",
     )
-    with pytest.raises(StreamingSynthesisRouteViolation) as exhausted:
-        await owner.begin(request)
-    assert exhausted.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
+    handle, outcome = await owner.begin(request)
+
+    # Exhausting the identity budget is a bounded product fallback, not a
+    # handler failure, and it reuses the route's existing capacity vocabulary.
+    assert handle is None and outcome is not None
+    assert outcome.reason is StreamingSynthesisReason.CAPACITY_EXHAUSTED
+    assert outcome.batch_eligible is True
+    assert outcome.completed is False
+    assert outcome.first_audio_emitted is False
+    assert outcome.fact is not None
+    assert (
+        outcome.fact.fallback_action is StreamingSynthesisFallbackAction.BATCH_ELIGIBLE
+    )
+    assert outcome.fact.reason is StreamingSynthesisReason.CAPACITY_EXHAUSTED
     assert provider.open_count == opened_before
     assert provider.cancelled == cancelled_before
     assert provider.conformance._active_responses == responses_before
     assert owner._retained_bindings == retained_before
     assert owner._current_responses == current_before
+    assert owner._known_handles.keys() == retained_before.keys()
     assert owner._opening == {}
     assert owner._opening_responses == {}
-    for handle in live:
-        await owner.cancel(handle)
+    for live_handle in live:
+        await owner.cancel(live_handle)
     await owner.close()
 
 
@@ -1400,17 +1412,26 @@ async def test_post_validation_failures_capture_no_request_text(
     monkeypatch.setattr(route_module, "_MAX_ROUTE_IDENTITIES", 1)
     capacity_owner = StreamingSynthesisRouteOwner(capacity_selector)
     capacity_live = await _fill_live_identities(capacity_owner, 1)
-    await assert_private_failure(
-        capacity_owner,
+    # Identity exhaustion now returns a typed fallback instead of raising, so
+    # the same canary oracle moves to the returned result and its X-OBS fact.
+    capacity_handle, capacity_outcome = await capacity_owner.begin(
         _request(
             stream_id="private-capacity",
             interaction_id="private-capacity-interaction",
             response_id="private-capacity-response",
             display_text=canary_display,
             spoken_text=canary_spoken,
-        ),
-        "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
+        )
     )
+    assert capacity_handle is None and capacity_outcome is not None
+    assert capacity_outcome.reason is StreamingSynthesisReason.CAPACITY_EXHAUSTED
+    assert capacity_outcome.fact is not None
+    rendered_capacity = repr(capacity_outcome) + json.dumps(
+        capacity_outcome.fact.safe_dict()
+    )
+    assert canary_display not in rendered_capacity
+    assert canary_spoken not in rendered_capacity
+    assert "SynthesisStreamRequest(" not in rendered_capacity
     for handle in capacity_live:
         await capacity_owner.cancel(handle)
     await capacity_owner.close()
@@ -1973,6 +1994,67 @@ async def test_retired_binding_fence_is_isolated_by_trusted_scope(
     assert cross_outcome.reason is StreamingSynthesisReason.PROVIDER_PROTOCOL
     assert provider.open_count == opened_before + 1
     assert (other_scope, retired.ref.stream_id, 0) in owner._retained_bindings
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_begin_losing_the_last_identity_slot_falls_back_to_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight open owns its identity, so the loser falls back, not fails."""
+
+    monkeypatch.setattr(route_module, "_MAX_ROUTE_IDENTITIES", 2)
+    legacy_scope = route_module._LEGACY_SYNTHESIS_SCOPE
+    provider = _FakeProvider()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    active_handle, active_outcome = await owner.begin(
+        _request(
+            stream_id="race-active",
+            interaction_id="race-active-interaction",
+            response_id="race-active-response",
+        )
+    )
+    assert active_handle is not None and active_outcome is None
+
+    provider.open_gate = asyncio.Event()
+    provider.open_started.clear()
+    winner_request = _request(
+        stream_id="race-winner",
+        interaction_id="race-winner-interaction",
+        response_id="race-winner-response",
+    )
+    winner_task = asyncio.create_task(owner.begin(winner_request))
+    # Deterministic barrier: the Provider open only starts once `begin` has
+    # published its identity into `_opening` and released `_begin_lock`.
+    await provider.open_started.wait()
+    assert (legacy_scope, winner_request.ref.stream_id, 0) in owner._opening
+
+    opened_before = provider.open_count
+    retained_before = dict(owner._retained_bindings)
+    loser_handle, loser_outcome = await owner.begin(
+        _request(
+            stream_id="race-loser",
+            interaction_id="race-loser-interaction",
+            response_id="race-loser-response",
+        )
+    )
+    assert loser_handle is None and loser_outcome is not None
+    assert loser_outcome.reason is StreamingSynthesisReason.CAPACITY_EXHAUSTED
+    assert loser_outcome.batch_eligible is True
+    # The in-flight open kept its identity: nothing was retired to make room.
+    assert provider.open_count == opened_before
+    assert owner._retained_bindings == retained_before
+    assert owner._retired_binding((legacy_scope, "race-winner", 0)) is False
+
+    provider.open_gate.set()
+    winner_handle, winner_outcome = await winner_task
+    assert winner_handle is not None and winner_outcome is None
+    await owner.cancel(winner_handle)
+    await owner.cancel(active_handle)
     await owner.close()
 
 

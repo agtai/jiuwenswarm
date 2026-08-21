@@ -762,9 +762,17 @@ class StreamingSynthesisRouteOwner:
                     )
                 self._preflight_response(ref.response, scope_identity)
                 if not self._binding_capacity_available(key):
-                    raise StreamingSynthesisRouteViolation(
-                        "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
-                        "synthesis route identity ledger is exhausted",
+                    # Every retained identity still owns a live stream.  That is
+                    # the same bounded-capacity refusal as the active-stream and
+                    # task-slot walls below, so it reuses their existing typed
+                    # fallback instead of failing the caller's handler.
+                    return None, self._failure_outcome(
+                        binding_ref,
+                        StreamingSynthesisReason.CAPACITY_EXHAUSTED,
+                        ref=ref,
+                        first_audio_emitted=False,
+                        allow_batch=True,
+                        capability=capability,
                     )
                 if len(self._active) + len(self._opening) >= self._max_active_streams:
                     return None, self._failure_outcome(
