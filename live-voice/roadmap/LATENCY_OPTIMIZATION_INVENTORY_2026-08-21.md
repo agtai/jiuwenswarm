@@ -19,6 +19,12 @@ sequential A reference is `1b0802cae9a6718c0d3326c1292f7475fdefe08c`. The
 checkpoint evidence documentation referenced here was recorded at
 `def1dc06bf93eaf9a35a2d6af0e8a7fcd9273c36`.
 
+The later EOT/STT materiality screen is bound separately to clean source
+`8e5dab8b8c6651b2be784cf103df9239a93814a0`; its reviewed documentation closure
+is `4222d522f92951bfbdf2c1a694c696cf782f51a0`. Its deterministic no-Chrome
+numbers must not be pooled with the real-Provider VAD/TTS experiments or the
+combined checkpoint.
+
 Status terms used here:
 
 - **Accepted — causal component scope:** the named owner and boundary passed
@@ -40,6 +46,7 @@ Status terms used here:
 | Fixed VAD reduction from 1200 to 900/800 ms | **REJECTED** | P1 input; `streaming_speech.py`, `openai_streaming_speech.py` | Successful turns exposed **285–412 ms** of potential endpointing headroom | Both candidates preserved only 15/20 turns; every 1000 ms natural-pause case failed 0/5 | The headroom is real, but a global fixed threshold cannot safely recover it. Keep 1200 ms. |
 | Application-level TTS HTTPX client reuse | **REJECTED AND REVERTED** | P1 TTS Provider; `openai_streaming_speech.py` | No gain; warm first-PCM regressed **57.8 ms / 7.0%** | B produced **0/3 warm TCP/TLS reuse**; 832.0→889.9 ms warm p50 | Do not reintroduce this implementation unchanged. |
 | Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves the composed controlled-owner gain. It remains non-physical: real Provider/network, Chrome/WebAudio, Agent/model execution and human-perceived first audio were out of scope. |
+| EOT/STT early result waiter | **REJECTED — NO MATERIAL SERIAL GAP** | P1/P2 Speech settlement; real `ProductP1VoiceRouteOwner` and registry result seam under deterministic dependencies | Largest removable-gap p50 **0.885 ms**; largest fraction p50 **0.015** | Complete A1 at `8e5dab8b8`: 20/20 exact, cleanup-complete attempts; ten marks/eight segments; zero forbidden effects | The 450.782 ms provider-slow diagnostic is legitimate remaining Provider wait. It cannot authorize an early-wait RPC, B or A2. |
 
 ## Combined checkpoint result
 
@@ -191,6 +198,34 @@ connection-establishment stage and was reverted. A bounded post-`audio.done`
 EOF drain is only a separate hypothesis; it receives no headroom credit from
 this failed candidate.
 
+### Rejected EOT/STT early-wait experiment
+
+This deterministic no-Chrome A1 measures the real Product P1 owner and real
+registry result seam with controlled local-settlement and Provider-final
+readiness. A product candidate required both removable-gap p50 at least 80 ms
+and removable-gap-fraction p50 at least 0.10. All 20 attempts were exact and
+cleanup-complete, with one result RPC each and zero forbidden effects.
+
+The eligible tail begins only after both independent facts are ready:
+
+```text
+removable serial gap = result returned - max(route settled, Provider final ready)
+```
+
+| Fixture | EOT→capture | stopped→ACK | ACK→settled | EOT→Provider | settled→request | request→return | diagnostic settled→return | EOT→final | removable | fraction |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| local-fast/provider-fast | 0.194 ms | 0.091 ms | 52.219 ms | 51.594 ms | 0.008 ms | 0.770 ms | 0.779 ms | 53.479 ms | **0.779 ms** | **0.015** |
+| local-slow/provider-fast | 0.120 ms | 0.025 ms | 502.165 ms | 51.490 ms | 0.011 ms | 0.869 ms | 0.880 ms | 503.173 ms | **0.880 ms** | **0.002** |
+| local-fast/provider-slow | 0.077 ms | 0.012 ms | 51.872 ms | 501.883 ms | 0.007 ms | 450.775 ms | 450.782 ms | 502.774 ms | **0.885 ms** | **0.002** |
+| both-slow | 0.089 ms | 0.012 ms | 502.442 ms | 501.635 ms | 0.006 ms | 0.796 ms | 0.802 ms | 503.564 ms | **0.802 ms** | **0.002** |
+
+Values are p50; complete p50/nearest-rank-p95 tables are in the
+[EOT/STT materiality evidence](../evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md).
+The provider-slow fixture demonstrates why the diagnostic route wait is not
+headroom: almost all 450.782 ms elapsed before Provider final readiness, leaving
+only 0.885 ms after both join inputs were ready. The closed decision is
+`NO_MATERIAL_SERIAL_GAP`; no product/wire change was implemented.
+
 ## Recommended next optimization candidates
 
 The reference numbers below are stable inventory labels, not execution
@@ -275,8 +310,10 @@ listed as branch-bound paths rather than current-tree links.
   `live-voice/roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md`
 - `latency/eot-stt-settlement-overlap`:
   `live-voice/roadmap/EOT_STT_SETTLEMENT_OVERLAP_SPEC_2026-08-21.md`
-- `latency_checkpoint_accepted_optimizations`:
+- `latency/eot-stt-settlement-overlap`:
   `live-voice/roadmap/EOT_STT_SETTLEMENT_OVERLAP_IMPLEMENTATION_PLAN_2026-08-21.md`
+- `latency/eot-stt-settlement-overlap`:
+  `live-voice/evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:
   `live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:
