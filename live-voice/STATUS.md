@@ -147,30 +147,31 @@ exact-source Alpha result.
   and [P3-5B/P3-6 preparation](reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
   The scoped P3-5B source and affected-automation verdict is recorded in the
   [P3-5B implementation review](reviews/P3_5B_PRESENTATION_CONSUMPTION_IMPLEMENTATION_REVIEW_2026-08-21.md).
+  The scoped P3-4 source and affected-automation verdict is recorded in the
+  [P3-4 implementation review](reviews/P3_4_DURABILITY_RECOVERY_IMPLEMENTATION_REVIEW_2026-08-21.md).
   Minimum-intervention mode is active for task-scoped local work; every
   remote-ref update remains separately excluded until exact user approval.
 - **Source state:** D-088 Wave-2 P3-2/P3-3/P3-5A source and physical evidence
   remain accepted on their exact sources. The W3 branch now contains the local
-  P3-4 schema-v6/Direct recovery integration, the review-clean scoped P3-5B
+  review-clean P3-4 schema-v6/Direct recovery source at
+  `b2366e293e1f039140d6a84bc9383a8589d39bfb`, the review-clean scoped P3-5B
   presentation-consumption source at
   `d6d3eafefef13a3aaaece289db4c95835b65cd30`, and P3-6 resolver-policy
-  commits. P3-4 still needs legacy candidate-v6 normalization and P3-6 still
-  lacks its real classifier/authenticated Core invocation. No child source,
-  test harness, corpus or pure asset currently grants final Wave-3 product
-  credit.
+  commits. P3-6 still lacks its real classifier/authenticated Core invocation.
+  No child source, test harness, corpus or pure asset currently grants final
+  Wave-3 product credit.
 - **Execution:** worker branches `codex/w3-p3-4`, `codex/w3-p3-5b` and
-  `codex/w3-p3-6` preserve their isolated returns; P3-5B is now integrated and
-  review-clean. Main is serializing the remaining P3-4 migration repair before
-  opening the overlapping P3-6 shared-composition write set. Main remains the
+  `codex/w3-p3-6` preserve their isolated returns; P3-4 and P3-5B are now
+  integrated and review-clean. Main is opening the P3-6 shared-composition
+  write set. Main remains the
   sole schema-semantic, integration-history, Tier-3-verdict and evidence owner.
   D-090 reactivates only the existing P3-5A/Core Task-wide consumer cursor read
   Port for restart, rollover and bounded replay; it adds no schema or second
   consumer authority.
-- **Next action:** close P3-4 legacy candidate-v6 migration compatibility and
-  its independent re-review, then implement P3-6 real classification,
-  single-consume confirmation and authenticated Core invocation. After those
-  child Gates, run one final broad Gate and the minimum honest ACL-private
-  physical scenarios.
+- **Next action:** implement P3-6 real classification, single-consume
+  confirmation and authenticated Core invocation, then complete its independent
+  review. After that child Gate, run one final broad Gate and the minimum honest
+  ACL-private physical scenarios.
 - **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; unsupported
   controls without real primitives; P3-7 UI; P3-8B retirement; P3-9 cumulative
   acceptance; complete P3, feature complete, controlled-candidate PASS,
