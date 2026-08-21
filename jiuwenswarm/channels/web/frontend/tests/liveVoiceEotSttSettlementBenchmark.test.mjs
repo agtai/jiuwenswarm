@@ -21,6 +21,28 @@ const FIXTURES = Object.freeze([
   Object.freeze({ id: 'local-fast-provider-slow', localSettlementMs: 50, providerFinalMs: 500 }),
   Object.freeze({ id: 'both-slow', localSettlementMs: 500, providerFinalMs: 500 }),
 ]);
+const ATTEMPT_MARKS = Object.freeze([
+  'browser.eot_received',
+  'browser.capture_stop_requested',
+  'browser.capture_stopped',
+  'browser.uplink_last_frame_sent',
+  'browser.uplink_last_ack_received',
+  'browser.uplink_closed',
+  'benchmark.provider_final_ready',
+  'browser.streaming_result_request_started',
+  'browser.streaming_result_returned',
+  'browser.stt_final_received',
+]);
+const SEGMENTS = Object.freeze([
+  'eot_to_capture_stopped',
+  'capture_stopped_to_last_ack',
+  'last_ack_to_route_settled',
+  'eot_to_provider_final_ready',
+  'route_settled_to_result_request_started',
+  'result_request_started_to_result_returned',
+  'route_settled_to_result_returned',
+  'eot_to_recognized_final',
+]);
 
 test('candidate A1 reduces the four exact fixtures into closed p50 and nearest-rank p95 summaries', async () => {
   const report = await runEotSttSettlementBenchmark({ fixtures: FIXTURES, attempts: 5, candidate: 'A1' });
@@ -31,6 +53,8 @@ test('candidate A1 reduces the four exact fixtures into closed p50 and nearest-r
   assert.equal(report.summaries[0].successful_samples, 5);
   assert.deepEqual(report.summaries[0].eot_to_recognized_final_ms, { p50_ms: 50, p95_ms: 50 });
   assert.deepEqual(report.summaries[3].eot_to_recognized_final_ms, { p50_ms: 500, p95_ms: 500 });
+  assert.deepEqual(Object.keys(report.attempts[0].marks_ms), ATTEMPT_MARKS);
+  assert.deepEqual(Object.keys(report.attempts[0].segments_ms), SEGMENTS);
   assert.deepEqual(Object.keys(report.attempts[0]), [
     'fixture_id',
     'attempt_index',
@@ -39,6 +63,7 @@ test('candidate A1 reduces the four exact fixtures into closed p50 and nearest-r
     'rpc_count',
     'exact_result',
     'cleanup_complete',
+    'segments_ms',
     'removable_serial_gap_ms',
     'removable_serial_gap_fraction',
   ]);
@@ -84,9 +109,13 @@ test('attempt reduction rejects private fields, unknown fields, and non-monotoni
     outcome: 'completed',
     marks_ms: Object.freeze({
       'browser.eot_received': 0,
+      'browser.capture_stop_requested': 1,
+      'browser.capture_stopped': 2,
+      'browser.uplink_last_frame_sent': 1,
+      'browser.uplink_last_ack_received': 50,
       'browser.uplink_closed': 50,
-      'browser.streaming_result_request_started': 50,
       'benchmark.provider_final_ready': 75,
+      'browser.streaming_result_request_started': 50,
       'browser.streaming_result_returned': 100,
       'browser.stt_final_received': 100,
     }),
@@ -142,9 +171,13 @@ function concurrentAttempt(fixture, attemptIndex, removableTailMs) {
     outcome: 'completed',
     marks_ms: Object.freeze({
       'browser.eot_received': 0,
+      'browser.capture_stop_requested': 1,
+      'browser.capture_stopped': 2,
+      'browser.uplink_last_frame_sent': 1,
+      'browser.uplink_last_ack_received': uplinkClosedMs,
       'browser.uplink_closed': uplinkClosedMs,
-      'browser.streaming_result_request_started': uplinkClosedMs,
       'benchmark.provider_final_ready': providerReadyMs,
+      'browser.streaming_result_request_started': uplinkClosedMs,
       'browser.streaming_result_returned': resultReturnedMs,
       'browser.stt_final_received': resultReturnedMs,
     }),
@@ -168,6 +201,22 @@ test('local-fast/provider-slow retains a large route wait but only the removable
   assert.deepEqual(summary.removable_serial_gap_fraction, { p50: 0.02, p95: 0.02 });
   assert.equal(attempt.removable_serial_gap_ms, 10);
   assert.equal(attempt.removable_serial_gap_fraction, 0.02);
+  assert.deepEqual(attempt.segments_ms, {
+    eot_to_capture_stopped: 2,
+    capture_stopped_to_last_ack: 48,
+    last_ack_to_route_settled: 0,
+    eot_to_provider_final_ready: 500,
+    route_settled_to_result_request_started: 0,
+    result_request_started_to_result_returned: 460,
+    route_settled_to_result_returned: 460,
+    eot_to_recognized_final: 510,
+  });
+  assert.deepEqual(summary.eot_to_capture_stopped_ms, { p50_ms: 2, p95_ms: 2 });
+  assert.deepEqual(summary.capture_stopped_to_last_ack_ms, { p50_ms: 48, p95_ms: 48 });
+  assert.deepEqual(summary.last_ack_to_route_settled_ms, { p50_ms: 0, p95_ms: 0 });
+  assert.deepEqual(summary.eot_to_provider_final_ready_ms, { p50_ms: 500, p95_ms: 500 });
+  assert.deepEqual(summary.route_settled_to_result_request_started_ms, { p50_ms: 0, p95_ms: 0 });
+  assert.deepEqual(summary.result_request_started_to_result_returned_ms, { p50_ms: 460, p95_ms: 460 });
 });
 
 test('an injected scheduling and result-RPC tail remains a material removable gap', async () => {
@@ -188,14 +237,7 @@ test('completed attempts reject a zero EOT-to-final duration before derived stat
     fixture_id: 'local-fast-provider-fast',
     attempt_index: 0,
     outcome: 'completed',
-    marks_ms: Object.freeze(Object.fromEntries([
-      'browser.eot_received',
-      'browser.uplink_closed',
-      'browser.streaming_result_request_started',
-      'benchmark.provider_final_ready',
-      'browser.streaming_result_returned',
-      'browser.stt_final_received',
-    ].map(point => [point, 0]))),
+    marks_ms: Object.freeze(Object.fromEntries(ATTEMPT_MARKS.map(point => [point, 0]))),
     rpc_count: 1,
     exact_result: true,
     cleanup_complete: true,
@@ -206,6 +248,44 @@ test('completed attempts reject a zero EOT-to-final duration before derived stat
       attempts: 1,
       candidate: 'A1',
       attempt_runner: async () => zeroDuration,
+    }),
+    /EOT_STT_BENCHMARK_ATTEMPT_INVALID/,
+  );
+});
+
+test('failed or inexact attempts retain no attractive numeric segment or removable gap', async () => {
+  const report = await runEotSttSettlementBenchmark({
+    fixtures: FIXTURES,
+    attempts: 1,
+    candidate: 'A1',
+    attempt_runner: (fixture, attemptIndex) => ({
+      ...concurrentAttempt(fixture, attemptIndex, 100),
+      outcome: 'failed',
+      exact_result: false,
+      cleanup_complete: false,
+    }),
+  });
+  assert.deepEqual(Object.values(report.attempts[0].segments_ms), Array(8).fill(null));
+  assert.equal(report.attempts[0].removable_serial_gap_ms, null);
+  assert.equal(report.attempts[0].removable_serial_gap_fraction, null);
+  assert.equal(report.summaries[0].successful_samples, 0);
+  assert.deepEqual(report.summaries[0].eot_to_recognized_final_ms, { p50_ms: null, p95_ms: null });
+});
+
+test('finite marks whose millisecond rounding scale overflows are rejected', async () => {
+  const extreme = {
+    ...concurrentAttempt(FIXTURES[0], 0, 1),
+    marks_ms: Object.fromEntries(ATTEMPT_MARKS.map((point, index) => [
+      point,
+      index === 0 ? 0 : Number.MAX_VALUE,
+    ])),
+  };
+  await assert.rejects(
+    runEotSttSettlementBenchmark({
+      fixtures: FIXTURES,
+      attempts: 1,
+      candidate: 'A1',
+      attempt_runner: (_fixture, attemptIndex) => ({ ...extreme, attempt_index: attemptIndex }),
     }),
     /EOT_STT_BENCHMARK_ATTEMPT_INVALID/,
   );

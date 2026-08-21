@@ -2273,11 +2273,14 @@ test('formal P1 consumes the streaming STT final without replaying batch audio',
 
 test('formal P1 auto and manual EOT retain one stop and recognition operation', async () => {
   const calls = [];
+  const latency = latencyProbeHarness();
   const binding = serverBinding();
   const socket = new FakeSocket();
   const environment = audioEnvironment();
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
+    latency_probe: latency.probe,
+    latency_monotonic_ms: () => 100,
     expected_origin: 'https://voice.example.test',
     audio_environment: environment,
     socket_factory: () => {
@@ -2358,6 +2361,30 @@ test('formal P1 auto and manual EOT retain one stop and recognition operation', 
   const manual = owner.stopAndRecognize();
   assert.equal(manual, automatic);
   const recognition = await manual;
+  assert.deepEqual(
+    latency.rounds[0].marks.map(mark => mark.point).filter(point => [
+      'browser.eot_received',
+      'browser.capture_stop_requested',
+      'browser.capture_stopped',
+      'browser.uplink_last_frame_sent',
+      'browser.uplink_last_ack_received',
+      'browser.uplink_closed',
+      'browser.streaming_result_request_started',
+      'browser.streaming_result_returned',
+      'browser.stt_final_received',
+    ].includes(point)),
+    [
+      'browser.eot_received',
+      'browser.capture_stop_requested',
+      'browser.capture_stopped',
+      'browser.uplink_last_frame_sent',
+      'browser.uplink_last_ack_received',
+      'browser.uplink_closed',
+      'browser.streaming_result_request_started',
+      'browser.streaming_result_returned',
+      'browser.stt_final_received',
+    ],
+  );
   assert.deepEqual(recognition, {
     text: 'automatic EOT text',
     voice_commit_receipt: 'streaming-voice-receipt-1',

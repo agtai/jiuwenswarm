@@ -22,9 +22,13 @@ const FIXTURES = Object.freeze([
 ]);
 const REQUIRED_MARKS = Object.freeze([
   'browser.eot_received',
+  'browser.capture_stop_requested',
+  'browser.capture_stopped',
+  'browser.uplink_last_frame_sent',
+  'browser.uplink_last_ack_received',
   'browser.uplink_closed',
-  'browser.streaming_result_request_started',
   'benchmark.provider_final_ready',
+  'browser.streaming_result_request_started',
   'browser.streaming_result_returned',
   'browser.stt_final_received',
 ]);
@@ -47,7 +51,12 @@ function canonicalInteger(value, minimum, maximum) {
 }
 
 function rounded(value) {
-  return Math.round(value * 1_000) / 1_000;
+  if (!Number.isFinite(value)) fail('EOT_STT_BENCHMARK_CLOCK_INVALID');
+  const scaled = value * 1_000;
+  if (!Number.isFinite(scaled)) fail('EOT_STT_BENCHMARK_CLOCK_INVALID');
+  const result = Math.round(scaled) / 1_000;
+  if (!Number.isFinite(result)) fail('EOT_STT_BENCHMARK_CLOCK_INVALID');
+  return result;
 }
 
 export function parseEotSttSettlementBenchmarkArgs(argv) {
@@ -611,7 +620,11 @@ function makeLatencyProbe(now, points, clockState) {
           round_index: roundIndex++,
         }),
         mark(point, _identity, observation) {
-          if (finished || seen.has(point)) return false;
+          if (finished) return false;
+          if (seen.has(point)) {
+            if (REQUIRED_MARKS.includes(point)) clockState.invalid = true;
+            return false;
+          }
           seen.add(point);
           if (REQUIRED_MARKS.includes(point)) {
             const observed = observation?.monotonic_ms;
@@ -675,7 +688,7 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
   let providerFinalOperation = null;
   const points = Object.fromEntries(REQUIRED_MARKS.map(point => [point, null]));
   const now = () => performance.now();
-  const clockState = { origin: null };
+  const clockState = { origin: null, invalid: false };
   try {
     const [productModule, mediaModule] = await Promise.all([import(PRODUCT_MODULE_URL.href), import(MEDIA_MODULE_URL.href)]);
     const { ProductP1VoiceRouteOwner, PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD } = productModule;
@@ -763,7 +776,11 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
     if (recognition.text !== EXPECTED_TEXT) fail('EOT_STT_BENCHMARK_RESULT_FAILED');
     await owner.close();
     owner = null;
-    if (!cleanupComplete || REQUIRED_MARKS.some(point => typeof points[point] !== 'number')) {
+    if (
+      !cleanupComplete ||
+      clockState.invalid ||
+      REQUIRED_MARKS.some(point => typeof points[point] !== 'number')
+    ) {
       fail('EOT_STT_BENCHMARK_ATTEMPT_INCOMPLETE');
     }
     return Object.freeze({

@@ -16,11 +16,26 @@ const FIXTURE_DELAYS = Object.freeze({
 
 const MARK_POINTS = Object.freeze([
   'browser.eot_received',
+  'browser.capture_stop_requested',
+  'browser.capture_stopped',
+  'browser.uplink_last_frame_sent',
+  'browser.uplink_last_ack_received',
   'browser.uplink_closed',
-  'browser.streaming_result_request_started',
   'benchmark.provider_final_ready',
+  'browser.streaming_result_request_started',
   'browser.streaming_result_returned',
   'browser.stt_final_received',
+] as const);
+
+const SEGMENT_IDS = Object.freeze([
+  'eot_to_capture_stopped',
+  'capture_stopped_to_last_ack',
+  'last_ack_to_route_settled',
+  'eot_to_provider_final_ready',
+  'route_settled_to_result_request_started',
+  'result_request_started_to_result_returned',
+  'route_settled_to_result_returned',
+  'eot_to_recognized_final',
 ] as const);
 
 const ATTEMPT_KEYS = Object.freeze([
@@ -47,6 +62,7 @@ const FORBIDDEN_EFFECTS = Object.freeze({
 
 export type EotSttFixtureId = (typeof FIXTURE_IDS)[number];
 export type EotSttMarkPoint = (typeof MARK_POINTS)[number];
+export type EotSttSegmentId = (typeof SEGMENT_IDS)[number];
 
 export interface EotSttFixture {
   readonly id: 'local-fast-provider-fast' | 'local-slow-provider-fast' | 'local-fast-provider-slow' | 'both-slow';
@@ -62,6 +78,7 @@ export interface EotSttAttempt {
   readonly rpc_count: number;
   readonly exact_result: boolean;
   readonly cleanup_complete: boolean;
+  readonly segments_ms: Readonly<Record<EotSttSegmentId, number | null>>;
   readonly removable_serial_gap_ms: number | null;
   readonly removable_serial_gap_fraction: number | null;
 }
@@ -72,10 +89,14 @@ export interface EotSttBenchmarkSummary {
   readonly provider_final_ms: 50 | 500;
   readonly attempted_samples: number;
   readonly successful_samples: number;
-  readonly eot_to_recognized_final_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
-  readonly eot_to_uplink_closed_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
-  readonly streaming_result_wait_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly eot_to_capture_stopped_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly capture_stopped_to_last_ack_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly last_ack_to_route_settled_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly eot_to_provider_final_ready_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly route_settled_to_result_request_started_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly result_request_started_to_result_returned_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
   readonly route_settled_to_result_returned_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly eot_to_recognized_final_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
   readonly removable_serial_gap_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
   readonly removable_serial_gap_fraction: Readonly<{ p50: number | null; p95: number | null }>;
 }
@@ -184,9 +205,13 @@ function defaultAttempt(fixture: Readonly<EotSttFixture>, attemptIndex: number):
     outcome: 'completed',
     marks_ms: Object.freeze({
       'browser.eot_received': 0,
+      'browser.capture_stop_requested': 0,
+      'browser.capture_stopped': 0,
+      'browser.uplink_last_frame_sent': 0,
+      'browser.uplink_last_ack_received': fixture.localSettlementMs,
       'browser.uplink_closed': fixture.localSettlementMs,
-      'browser.streaming_result_request_started': fixture.localSettlementMs,
       'benchmark.provider_final_ready': fixture.providerFinalMs,
+      'browser.streaming_result_request_started': fixture.localSettlementMs,
       'browser.streaming_result_returned': recognized,
       'browser.stt_final_received': recognized,
     }),
@@ -207,13 +232,22 @@ function validateMarks(value: unknown): Readonly<Record<EotSttMarkPoint, number>
     marks[point] = mark;
   }
   const eot = marks['browser.eot_received'];
+  const captureStopRequested = marks['browser.capture_stop_requested'];
+  const captureStopped = marks['browser.capture_stopped'];
+  const lastFrameSent = marks['browser.uplink_last_frame_sent'];
+  const lastAck = marks['browser.uplink_last_ack_received'];
   const uplink = marks['browser.uplink_closed'];
   const request = marks['browser.streaming_result_request_started'];
   const providerReady = marks['benchmark.provider_final_ready'];
   const returned = marks['browser.streaming_result_returned'];
   const final = marks['browser.stt_final_received'];
   if (
-    uplink < eot ||
+    captureStopRequested < eot ||
+    captureStopped < captureStopRequested ||
+    lastFrameSent < eot ||
+    lastAck < captureStopped ||
+    lastAck < lastFrameSent ||
+    uplink < lastAck ||
     request < uplink ||
     providerReady < eot ||
     returned < request ||
@@ -257,6 +291,30 @@ function validateAttempt(
     && ownValue(value, 'exact_result') === true
     && ownValue(value, 'cleanup_complete') === true;
   const duration = marks['browser.stt_final_received'] - marks['browser.eot_received'];
+  const derivedSegments = Object.freeze({
+    eot_to_capture_stopped: rounded(
+      marks['browser.capture_stopped'] - marks['browser.eot_received'],
+    ),
+    capture_stopped_to_last_ack: rounded(
+      marks['browser.uplink_last_ack_received'] - marks['browser.capture_stopped'],
+    ),
+    last_ack_to_route_settled: rounded(
+      marks['browser.uplink_closed'] - marks['browser.uplink_last_ack_received'],
+    ),
+    eot_to_provider_final_ready: rounded(
+      marks['benchmark.provider_final_ready'] - marks['browser.eot_received'],
+    ),
+    route_settled_to_result_request_started: rounded(
+      marks['browser.streaming_result_request_started'] - marks['browser.uplink_closed'],
+    ),
+    result_request_started_to_result_returned: rounded(
+      marks['browser.streaming_result_returned'] - marks['browser.streaming_result_request_started'],
+    ),
+    route_settled_to_result_returned: rounded(
+      marks['browser.streaming_result_returned'] - marks['browser.uplink_closed'],
+    ),
+    eot_to_recognized_final: rounded(duration),
+  });
   const removableGap = marks['browser.streaming_result_returned'] - Math.max(
     marks['browser.uplink_closed'],
     marks['benchmark.provider_final_ready'],
@@ -273,6 +331,9 @@ function validateAttempt(
   ) {
     fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
   }
+  const segments = Object.freeze(Object.fromEntries(
+    SEGMENT_IDS.map(segment => [segment, successful ? derivedSegments[segment] : null]),
+  )) as Readonly<Record<EotSttSegmentId, number | null>>;
   return Object.freeze({
     fixture_id: fixture.id,
     attempt_index: attemptIndex,
@@ -281,13 +342,19 @@ function validateAttempt(
     rpc_count: rpcCount as number,
     exact_result: ownValue(value, 'exact_result') as boolean,
     cleanup_complete: ownValue(value, 'cleanup_complete') as boolean,
+    segments_ms: segments,
     removable_serial_gap_ms: successful ? rounded(removableGap) : null,
     removable_serial_gap_fraction: removableFraction,
   });
 }
 
 function rounded(value: number): number {
-  return Math.round(value * 1_000) / 1_000;
+  if (!Number.isFinite(value)) fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
+  const scaled = value * 1_000;
+  if (!Number.isFinite(scaled)) fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
+  const result = Math.round(scaled) / 1_000;
+  if (!Number.isFinite(result)) fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
+  return result;
 }
 
 function nearestRank(values: readonly number[], percentile: 50 | 95): number | null {
@@ -312,14 +379,8 @@ function summarize(
   const successful = attempts.filter(
     attempt => attempt.outcome === 'completed' && attempt.rpc_count === 1 && attempt.exact_result && attempt.cleanup_complete,
   );
-  const durations = successful.map(attempt =>
-    attempt.marks_ms['browser.stt_final_received'] - attempt.marks_ms['browser.eot_received']);
-  const uplink = successful.map(attempt =>
-    attempt.marks_ms['browser.uplink_closed'] - attempt.marks_ms['browser.eot_received']);
-  const resultWait = successful.map(attempt =>
-    attempt.marks_ms['browser.streaming_result_returned'] - attempt.marks_ms['browser.streaming_result_request_started']);
-  const routeSettledToReturn = successful.map(attempt =>
-    attempt.marks_ms['browser.streaming_result_returned'] - attempt.marks_ms['browser.uplink_closed']);
+  const segmentSamples = (segment: EotSttSegmentId): number[] =>
+    successful.map(attempt => attempt.segments_ms[segment] as number);
   const removableGaps = successful.map(attempt => attempt.removable_serial_gap_ms as number);
   const removableFractions = successful.map(attempt => attempt.removable_serial_gap_fraction as number);
   return Object.freeze({
@@ -328,10 +389,14 @@ function summarize(
     provider_final_ms: fixture.providerFinalMs,
     attempted_samples: attempts.length,
     successful_samples: successful.length,
-    eot_to_recognized_final_ms: percentiles(durations),
-    eot_to_uplink_closed_ms: percentiles(uplink),
-    streaming_result_wait_ms: percentiles(resultWait),
-    route_settled_to_result_returned_ms: percentiles(routeSettledToReturn),
+    eot_to_capture_stopped_ms: percentiles(segmentSamples('eot_to_capture_stopped')),
+    capture_stopped_to_last_ack_ms: percentiles(segmentSamples('capture_stopped_to_last_ack')),
+    last_ack_to_route_settled_ms: percentiles(segmentSamples('last_ack_to_route_settled')),
+    eot_to_provider_final_ready_ms: percentiles(segmentSamples('eot_to_provider_final_ready')),
+    route_settled_to_result_request_started_ms: percentiles(segmentSamples('route_settled_to_result_request_started')),
+    result_request_started_to_result_returned_ms: percentiles(segmentSamples('result_request_started_to_result_returned')),
+    route_settled_to_result_returned_ms: percentiles(segmentSamples('route_settled_to_result_returned')),
+    eot_to_recognized_final_ms: percentiles(segmentSamples('eot_to_recognized_final')),
     removable_serial_gap_ms: percentiles(removableGaps),
     removable_serial_gap_fraction: fractionPercentiles(removableFractions),
   });
@@ -361,4 +426,4 @@ export async function runEotSttSettlementBenchmark(input: Readonly<EotSttBenchma
   });
 }
 
-export { FIXTURE_IDS, MARK_POINTS, SCHEMA_VERSION };
+export { FIXTURE_IDS, MARK_POINTS, SCHEMA_VERSION, SEGMENT_IDS };
