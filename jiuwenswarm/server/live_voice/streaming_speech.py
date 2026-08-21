@@ -11,9 +11,11 @@ capability.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 import time
+from array import array
 from collections import OrderedDict
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -41,6 +43,25 @@ MAX_CANCEL_REASON_CHARS = 256
 MAX_RECOGNITION_ALTERNATIVES = 8
 MAX_RECOGNITION_TEXT_CHARS = 16_000
 MAX_SYNTHESIS_TEXT_CHARS = 4_000
+# Exact identity budget a streaming owner keeps for its live working set plus
+# its most recent retirements.  The Gateway synthesis route retains at most
+# `_MAX_ROUTE_IDENTITIES` (256) stream identities and opens at most eight
+# concurrent Provider streams, so a conformance owner that keeps this many
+# exact entries is never the tighter wall for an identity the route still
+# treats as live.
+MAX_STREAMING_IDENTITY_LEDGER = 256
+# Released identities keep a compact tombstone instead of the heavyweight exact
+# entry.  Both fences can only fail closed: an admission bit and a conservative
+# generation maximum are never lowered, so a hash collision refuses a stream
+# that could have run and never admits a stale generation that must stay
+# refused.
+_IDENTITY_ADMISSION_FENCE_BYTES = 1 << 20
+_GENERATION_FENCE_ROWS = 4
+_GENERATION_FENCE_CELLS = 1 << 13
+_RECOGNITION_IDENTITY_SCOPE = "recognition.session"
+_SYNTHESIS_IDENTITY_SCOPE = "synthesis.stream"
+_RESPONSE_INTERACTION_SCOPE = "response.interaction"
+_RESPONSE_ID_SCOPE = "response.id"
 
 
 class StreamingSpeechViolation(ValueError):
@@ -472,11 +493,16 @@ class StreamingSpeechConformance:
     Provider callbacks are data passed to ``accept_*_event``; this class never
     invokes Provider or business callbacks.  Cancellation outputs are explicit
     ``ProviderCancelControl`` values and always carry ``business_cancel=False``.
-    Exact identities are retained for this instance's lifetime.  Once an
-    identity ledger reaches its configured bound, new identities fail closed;
-    an old identity is never evicted and therefore can never be reused as ABA.
-    Synthesis unit identities follow the same rule for the lifetime of their
-    exact response, which itself cannot be reactivated after supersession.
+    Exact identities are retained while they are live and for as long as the
+    configured ledger bound has room.  A retired identity is never simply
+    dropped: releasing its heavyweight exact entry records a bounded tombstone
+    that keeps the identity admitted and its generation high-water refusable
+    for this instance's lifetime, so an old identity can never be reused as
+    ABA.  The bound therefore limits the live working set, not the number of
+    streams an owner may serve.  When every retained identity is still live,
+    a new identity fails closed.  Synthesis unit identities follow the same
+    rule for the lifetime of their exact response, which itself cannot be
+    reactivated after supersession.
     """
 
     def __init__(
@@ -524,6 +550,17 @@ class StreamingSpeechConformance:
         self._active_responses: OrderedDict[str, ResponseRef] = OrderedDict()
         self._response_generations: OrderedDict[str, int] = OrderedDict()
         self._response_ids: OrderedDict[str, None] = OrderedDict()
+        # Fail-closed admission fence: a released identity stays refusable for
+        # this owner's lifetime without holding its exact ledger entry.
+        self._identity_admission_fence = bytearray(_IDENTITY_ADMISSION_FENCE_BYTES)
+        # Conservative generation maximum for released identities.  Only a
+        # reused identity (generation >= 1) needs a cell, because the admission
+        # fence alone already refuses every generation at or below zero, so the
+        # sketch stays sparse no matter how many streams the owner serves.
+        self._generation_fence = tuple(
+            array("Q", [0]) * _GENERATION_FENCE_CELLS
+            for _ in range(_GENERATION_FENCE_ROWS)
+        )
         self._next_unit_seq: dict[ResponseRef, int] = {}
         self._used_synthesis_units: dict[ResponseRef, OrderedDict[str, None]] = {}
         self._pending_controls: OrderedDict[_ControlKey, ProviderCancelControl] = (
@@ -577,7 +614,11 @@ class StreamingSpeechConformance:
                     "RECOGNITION_SESSION_CONFLICT",
                     "a recognition session id cannot overlap another generation",
                 )
-            last_generation = self._recognition_generations.get(ref.session_id)
+            last_generation = self._retained_generation(
+                self._recognition_generations,
+                ref.session_id,
+                scope=_RECOGNITION_IDENTITY_SCOPE,
+            )
             if (
                 last_generation is not None
                 and ref.session_generation <= last_generation
@@ -586,16 +627,29 @@ class StreamingSpeechConformance:
                     "STALE_RECOGNITION_GENERATION",
                     "recognition generation must increase when an id is reused",
                 )
+            live_recognition = self._live_recognition_identities()
             self._require_identity_capacity(
                 self._recognition_generations,
                 ref.session_id,
+                live=live_recognition,
                 reason="RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED",
                 message="recognition identity ledger capacity is exhausted",
+            )
+            # The deadline is taken before anything is released, so a clock
+            # fault refuses the start without spending a retired identity out
+            # of the exact ledger.  Order after the non-mutating capacity check
+            # keeps the existing capacity-before-clock rejection priority.
+            deadline = self._deadline(timeout)
+            self._make_identity_capacity(
+                self._recognition_generations,
+                ref.session_id,
+                scope=_RECOGNITION_IDENTITY_SCOPE,
+                live=live_recognition,
             )
             self._recognition[_recognition_key(ref)] = _RecognitionState(
                 ref=ref,
                 turn_detection=request.turn_detection,
-                deadline=self._deadline(timeout),
+                deadline=deadline,
             )
             self._retain_generation(
                 self._recognition_generations,
@@ -924,7 +978,11 @@ class StreamingSpeechConformance:
         with self._lock:
             self._require_start_allowed(recognition=False)
             _validate_response_ref(response)
-            prior_generation = self._response_generations.get(response.interaction_id)
+            prior_generation = self._retained_generation(
+                self._response_generations,
+                response.interaction_id,
+                scope=_RESPONSE_INTERACTION_SCOPE,
+            )
             if (
                 prior_generation is not None
                 and response.response_generation <= prior_generation
@@ -933,25 +991,45 @@ class StreamingSpeechConformance:
                     "STALE_RESPONSE_GENERATION",
                     "response generation must strictly increase per interaction",
                 )
-            if response.response_id in self._response_ids:
+            if self._retained_identity(
+                self._response_ids,
+                response.response_id,
+                scope=_RESPONSE_ID_SCOPE,
+            ):
                 raise StreamingSpeechViolation(
                     "RESPONSE_ID_REUSED", "response identifiers cannot be reused"
                 )
+            live_interactions = self._live_interaction_identities()
+            live_responses = self._live_response_identities()
             self._require_identity_capacity(
                 self._response_generations,
                 response.interaction_id,
+                live=live_interactions,
                 reason="RESPONSE_IDENTITY_CAPACITY_EXHAUSTED",
                 message="response interaction identity ledger capacity is exhausted",
             )
             self._require_identity_capacity(
                 self._response_ids,
                 response.response_id,
+                live=live_responses,
                 reason="RESPONSE_IDENTITY_CAPACITY_EXHAUSTED",
                 message="response identifier ledger capacity is exhausted",
             )
             prior = self._active_responses.get(response.interaction_id)
             if prior is None:
                 self._make_response_capacity()
+            self._make_identity_capacity(
+                self._response_generations,
+                response.interaction_id,
+                scope=_RESPONSE_INTERACTION_SCOPE,
+                live=live_interactions,
+            )
+            self._make_identity_capacity(
+                self._response_ids,
+                response.response_id,
+                scope=_RESPONSE_ID_SCOPE,
+                live=live_responses,
+            )
             if prior is not None:
                 for state in self._synthesis.values():
                     if (
@@ -1025,21 +1103,37 @@ class StreamingSpeechConformance:
                     "SYNTHESIS_STREAM_CONFLICT",
                     "a synthesis stream id cannot overlap another generation",
                 )
-            last_generation = self._synthesis_generations.get(ref.stream_id)
+            last_generation = self._retained_generation(
+                self._synthesis_generations,
+                ref.stream_id,
+                scope=_SYNTHESIS_IDENTITY_SCOPE,
+            )
             if last_generation is not None and ref.stream_generation <= last_generation:
                 raise StreamingSpeechViolation(
                     "STALE_SYNTHESIS_GENERATION",
                     "synthesis generation must increase when an id is reused",
                 )
+            live_synthesis = self._live_synthesis_identities()
             self._require_identity_capacity(
                 self._synthesis_generations,
                 ref.stream_id,
+                live=live_synthesis,
                 reason="SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
                 message="synthesis identity ledger capacity is exhausted",
             )
+            # Same rule as recognition: the clock is read before any release,
+            # so a clock fault cannot consume a retired identity for a stream
+            # that never starts.
+            event_deadline = self._deadline(request.event_timeout_seconds)
+            self._make_identity_capacity(
+                self._synthesis_generations,
+                ref.stream_id,
+                scope=_SYNTHESIS_IDENTITY_SCOPE,
+                live=live_synthesis,
+            )
             self._synthesis[_synthesis_key(ref)] = _SynthesisState(
                 request=request,
-                event_deadline=self._deadline(request.event_timeout_seconds),
+                event_deadline=event_deadline,
                 next_display_cursor=request.display_span.start,
             )
             self._next_unit_seq[ref.response] = expected_unit_seq + 1
@@ -1256,9 +1350,11 @@ class StreamingSpeechConformance:
             retained_recognition=len(self._recognition),
             retained_synthesis=len(self._synthesis),
             pending_provider_controls=len(self._pending_controls),
-            # Every never-evicted identity ledger is counted. Omitting one lets
-            # a capacity monitor under-report retention and meet
-            # RESPONSE_IDENTITY_CAPACITY_EXHAUSTED without warning.
+            # Every exact identity ledger is counted. Omitting one lets a
+            # capacity monitor under-report retention and meet
+            # RESPONSE_IDENTITY_CAPACITY_EXHAUSTED without warning. Released
+            # identities keep only their bounded fence tombstone and are
+            # deliberately absent here: they no longer hold a ledger slot.
             retained_identity_tombstones=(
                 len(self._recognition_generations)
                 + len(self._synthesis_generations)
@@ -1455,7 +1551,11 @@ class StreamingSpeechConformance:
                 ),
                 None,
             )
-            if active is not None or ref.session_id in self._recognition_generations:
+            if active is not None or self._retained_identity(
+                self._recognition_generations,
+                ref.session_id,
+                scope=_RECOGNITION_IDENTITY_SCOPE,
+            ):
                 raise StreamingSpeechViolation(
                     "STALE_RECOGNITION_SESSION",
                     "recognition callback does not match the retained generation",
@@ -1484,7 +1584,11 @@ class StreamingSpeechConformance:
                 ),
                 None,
             )
-            if active is not None or ref.stream_id in self._synthesis_generations:
+            if active is not None or self._retained_identity(
+                self._synthesis_generations,
+                ref.stream_id,
+                scope=_SYNTHESIS_IDENTITY_SCOPE,
+            ):
                 raise StreamingSpeechViolation(
                     "STALE_SYNTHESIS_STREAM",
                     "synthesis callback does not match the retained generation",
@@ -1594,16 +1698,161 @@ class StreamingSpeechConformance:
         store[identity] = generation
         store.move_to_end(identity)
 
-    def _require_identity_capacity(
+    @staticmethod
+    def _fence_digest(scope: str, identity: str) -> bytes:
+        return hashlib.sha256(f"{scope}\0{identity}".encode()).digest()
+
+    def _admission_fence_indices(self, scope: str, identity: str) -> tuple[int, ...]:
+        digest = self._fence_digest(scope, identity)
+        bit_capacity = len(self._identity_admission_fence) * 8
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % bit_capacity
+            for offset in (0, 4, 8, 12)
+        )
+
+    def _generation_fence_indices(self, scope: str, identity: str) -> tuple[int, ...]:
+        # Disjoint digest bytes keep the two fences independent, so an
+        # admission collision cannot drag a generation cell with it.
+        digest = self._fence_digest(scope, identity)
+        capacity = len(self._generation_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % capacity
+            for offset in (16, 20, 24, 28)
+        )
+
+    def _release_identity(
         self,
-        store: Collection[str],
+        store: OrderedDict[str, int] | OrderedDict[str, None],
         identity: str,
         *,
+        scope: str,
+    ) -> None:
+        """Drop one exact entry and keep its bounded refusal tombstone."""
+
+        generation = store.pop(identity, None)
+        for index in self._admission_fence_indices(scope, identity):
+            self._identity_admission_fence[index >> 3] |= 1 << (index & 7)
+        if generation is None or generation <= 0:
+            return
+        # No uint64 clamp: the only source is a generation already admitted by
+        # `_uint`, which fails closed above MAX_SAFE_INTEGER, so `generation +
+        # 1` can never overflow a cell.
+        encoded = generation + 1
+        for row, index in zip(
+            self._generation_fence,
+            self._generation_fence_indices(scope, identity),
+            strict=True,
+        ):
+            row[index] = max(row[index], encoded)
+
+    def _released_identity(self, scope: str, identity: str) -> bool:
+        return all(
+            self._identity_admission_fence[index >> 3] & (1 << (index & 7))
+            for index in self._admission_fence_indices(scope, identity)
+        )
+
+    def _retained_identity(
+        self,
+        store: OrderedDict[str, int] | OrderedDict[str, None],
+        identity: str,
+        *,
+        scope: str,
+    ) -> bool:
+        """Report whether this owner ever admitted the exact identity."""
+
+        return identity in store or self._released_identity(scope, identity)
+
+    def _retained_generation(
+        self,
+        store: OrderedDict[str, int],
+        identity: str,
+        *,
+        scope: str,
+    ) -> int | None:
+        """Report the highest admitted generation, exact truth first."""
+
+        exact = store.get(identity)
+        if exact is not None:
+            return exact
+        if not self._released_identity(scope, identity):
+            return None
+        fenced = min(
+            row[index]
+            for row, index in zip(
+                self._generation_fence,
+                self._generation_fence_indices(scope, identity),
+                strict=True,
+            )
+        )
+        # A released identity with no generation cell was only ever admitted at
+        # generation zero, which the admission fence alone already refuses.
+        return int(fenced) - 1 if fenced >= 1 else 0
+
+    @staticmethod
+    def _releasable_identity(
+        store: OrderedDict[str, int] | OrderedDict[str, None],
+        live: Collection[str],
+    ) -> str | None:
+        """Pick the least recently retained identity that no stream owns."""
+
+        return next((retained for retained in store if retained not in live), None)
+
+    def _require_identity_capacity(
+        self,
+        store: OrderedDict[str, int] | OrderedDict[str, None],
+        identity: str,
+        *,
+        live: Collection[str],
         reason: str,
         message: str,
     ) -> None:
-        if identity not in store and len(store) >= self._max_identity_tombstones:
+        """Reject only when every retained identity still owns a stream.
+
+        This check never mutates, so a rejected admission leaves the ledgers,
+        the fences and every other retained structure exactly as they were.
+        """
+
+        if identity in store or len(store) < self._max_identity_tombstones:
+            return
+        if self._releasable_identity(store, live) is None:
             raise StreamingSpeechViolation(reason, message)
+
+    def _make_identity_capacity(
+        self,
+        store: OrderedDict[str, int] | OrderedDict[str, None],
+        identity: str,
+        *,
+        scope: str,
+        live: Collection[str],
+    ) -> None:
+        """Release retired identities into the bounded fence, never live ones."""
+
+        if identity in store:
+            return
+        while len(store) >= self._max_identity_tombstones:
+            retired = self._releasable_identity(store, live)
+            if retired is None:
+                return
+            self._release_identity(store, retired, scope=scope)
+
+    def _live_recognition_identities(self) -> set[str]:
+        return {state.ref.session_id for state in self._recognition.values()}
+
+    def _live_synthesis_identities(self) -> set[str]:
+        return {state.request.ref.stream_id for state in self._synthesis.values()}
+
+    def _live_interaction_identities(self) -> set[str]:
+        # An active response keeps its exact generation in `_active_responses`,
+        # so only a retained synthesis stream pins the interaction ledger.
+        return {
+            state.request.ref.response.interaction_id
+            for state in self._synthesis.values()
+        }
+
+    def _live_response_identities(self) -> set[str]:
+        return {
+            state.request.ref.response.response_id for state in self._synthesis.values()
+        }
 
     def _make_response_capacity(self) -> None:
         while len(self._active_responses) >= self._max_identity_tombstones:
