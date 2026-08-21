@@ -163,48 +163,138 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** P1/P2 repair integration into the closed W3 line — **closed
-  locally with scoped source/automation/build evidence**.
-- **Authority:** the deferred continuation contract, imported source range
-  `7814c147..046ecac0`, the
-  [W3 integration evidence](evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md)
-  and root `TESTING.md`. The accepted D-088 Wave-2 and D-089/D-090 Wave-3
-  source/evidence remain unchanged.
-- **Objective:** preserve the W3 Task presentation and consumer authorities
-  while integrating transparent post-TTS capture continuation, successor-capture
-  ACK decoupling, post-playout receipt truth and hands-free playout controls.
-- **Risk:** Tier 3 for capture/media/runtime ordering, cancellation and ACK
-  fencing. Documentation synchronization is Tier 0 but cannot upgrade the
-  source or physical verdict.
-- **Source state:** the six commits are migrated in order. Their four source/test
-  payloads have stable patch IDs identical to the originals; only STATUS needed
-  manual adaptation so old schema-v4/P3-2-active prose could not overwrite W3.
-  P3-2 through P3-6 retain their accepted scoped credit, and this integration
-  adds no Task schema, ledger, presentation ACK or intent authority.
-- **Execution:** exact integrated source `8846862f` passes browser audio
-  `103/103`, the affected backend set `194/194`, the Live Voice production
-  build and Formal Web `422/423`. The sole failure is the already disclosed
-  mounted Exit/immediate-re-enable case. The physical run was not repeated on
-  W3; its scoped credit remains bound to `e1df8b452`.
-- **Closeout interpretation:** the six-commit migration/core repair batch is
-  closed; formal P1/P2 overall remains **PARTIAL**, not “complete except for
-  validation.” There is one currently reproduced failing regression
-  (mounted Exit/immediate-re-enable), plus unfinished implementation for P2
-  notification latency and the feature-complete generation-time interruption
-  boundary. Fixed-corpus p50/p95, broader device/network coverage, a complete
-  W3 physical Journey and independent T2 review are subsequent verification
-  work, not substitutes for those code closures.
-- **Next action:** no new implementation packet is activated. Finish the P1/P2
-  code closures above and then execute one exact-source closeout validation, or
-  activate P3-7 in parallel under a disjoint owner; obtain exact approval before
-  any remote update.
-- **Excluded/non-claims:** generation-time barge-in, mounted Exit/immediate-
-  re-enable closure, fixed-corpus p50/p95, latency-target PASS, a new controlled
-  candidate, P3-7/P3-8B/P3-9, Production, `develop` integration and every remote
-  update.
-- **Inherited evidence:** the exact Wave-2 and Wave-3 records remain authoritative
-  for their own boundaries; the P1/P2 evidence must retain its exact original
-  tested-source attribution after migration.
+- **Packet:** D-060/D-062 bounded `P3-7` + staged `P3-8B` parallel batch —
+  **ACTIVE**. Main is the sole Integration Owner, shared semantic owner,
+  integration-branch Git writer and owner of STATUS, decisions, final evidence
+  and interface-freeze disposition. Workers may commit only their isolated task
+  branches and may not push or integrate their own returns.
+- **Activation baseline and D-085 findings:** exact clean source
+  `29589734a0bb51a697bf7d594e3b1bb552ddcd34`. The affected audit rows remain
+  Integrated Web, Observability and Configuration/cleanup: the formal carrier
+  still lacks the complete multi-Task experience and truthful display-layer
+  projection; the accepted P3-8A codec remains uncomposed; recovery correlation,
+  validated general configuration and replacement-gated legacy retirement stay
+  open. The later P3-2 through P3-6 and P3-8A scoped evidence, rather than the
+  audit's older implementation details, defines the accepted dependency source.
+- **Dependency and integration order:** accepted P3-2 through P3-6 open A's
+  formal composition Gate; accepted P3-8A opens only B's additive preparation.
+  A and B1 may implement concurrently with disjoint files. Main then reviews and
+  integrates A, runs the affected `P3-7` Gate, fixes findings, records a clean
+  Gate commit and freezes the formal interfaces. B1 integrates as its own
+  additive preparation commit. Only after `P3-7` is PASS may B2 compose the
+  frozen interfaces, migrate replacement oracles and retire manifest items.
+
+### Child A — P3-7 formal Integrated Web P3 experience
+
+- **Owner/capability/risk:** A worktree owns the Integrated Web product
+  experience and formal P3 Web projection; Tier 3 because visible mutation,
+  multi-Task isolation, Runtime presentation and product composition cross an
+  authority boundary. Main owns any semantic or interface conflict.
+- **Exact file ownership:** A exclusively owns
+  `LiveVoiceIntegratedRoutePanel.tsx`, `LiveVoiceDemoBar.tsx` and its CSS,
+  `ChatPanel/index.tsx`, a new `formalP3TaskExperience.ts`, their focused
+  frontend tests, the Integrated Web test script, and only the required i18n
+  entries. If exact backend authority projection is required, A also owns the
+  narrow `product_composition_registry.py` projection and its focused tests.
+  `agent_ws_server.py`, formal route modules and their tests may be changed only
+  if current source proves the existing closed method surface insufficient;
+  no new common ReqMethod or shared wire/Store schema is authorized.
+- **Intended behaviour:** show and revalidate at least two authoritative Tasks;
+  preserve stable Task/Attempt/correlation, exact state/outcome, admission/
+  queue, progress, blocking question, unread/result replay and successor
+  lineage; recover selection from browser storage as a hint without creating a
+  Task. Present command accepted, applied and terminal outcome separately.
+  Before every control, reread backend authority and bind the exact Task,
+  Attempt, command/request, event head and version/revision. Use only accepted
+  query/mutation primitives; keep `provide_input`, pause and resume unavailable
+  or stable unsupported. Revisions create an explicit successor and never
+  rewrite the predecessor or result.
+- **Authority and compatibility:** TaskResult/TaskEvent remain the sole Task
+  truth. Task events never call TTS directly; Runtime response/generation/TTS
+  and PresentationAck retain voice/text consumption ownership. Stop, response
+  cancel and barge-in never imply Task cancel. Feature-off retains the supported
+  text path; no legacy authority is deleted in A.
+- **Acceptance:** positive evidence covers two real Tasks, exact selection,
+  create/list/get/status/events/result, every backend-supported update/control,
+  reconnect/unread/replay and successor lineage. Negative/boundary/state/order/
+  concurrency/recovery/isolation/feature-off cases cover malformed,
+  unauthorized, unknown, unsupported, conflict, duplicate, stale head/owner,
+  wrong subject/project/session/Task/Attempt, reordered events, concurrent
+  terminal/control, missing ACK and reconnect. Every rejected or wrong-scope
+  path asserts zero Agent, Tool, Task, audio, history, store and foreign-scope
+  effects. The real AgentServer → Registry → SQLite Core seam, mounted React DOM
+  and Runtime ACK are required; physical audio perception is not claimed by
+  this package.
+- **Review/evidence:** focused frontend/backend tests, full affected Formal Web,
+  feature-off/build/static checks, complete scoped diff review and independent
+  Tier-3 review. The known mounted Exit/immediate-re-enable baseline is disclosed
+  and may not be counted as an A regression without source evidence. Main owns
+  the `P3-7` review/evidence record and the frozen Panel/formal-route,
+  Registry/AgentServer, Task projection, Runtime ACK and feature-off contract.
+
+### Child B — P3-8B additive preparation, then frozen-interface composition
+
+- **Owner/capability/risk:** B worktree owns observability correlation,
+  validated configuration declaration, privacy conformance and retirement
+  inventory; Tier 3 for telemetry privacy/diagnostic truth and configuration
+  capability claims. Pure inventory documentation is Tier 0 but grants no
+  product credit.
+- **B1 exact add-only ownership:** B may only add
+  `observability_correlation_contract.py`,
+  `live_voice_configuration_declaration.py`, their focused tests,
+  `tests/fixtures/live_voice_retirement_manifest_v1/manifest.json`, its manifest
+  test and `reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md`. B1 does
+  not modify package exports, P3-8A source, A files, AgentServer, Registry,
+  formal routes, Panel, common wire schema or any product composition file.
+- **B1 intended behaviour:** provide immutable pure validation for the bounded
+  subject/project/session/interaction/response/generation and Task/Attempt/
+  Command/Event/outbox/Executor/checkpoint/effect/presentation causation map;
+  keep high-cardinality identifiers out of bounded metric dimensions. Convert
+  already validated configuration into an exact capability declaration without
+  reading environment variables, starting a worker/provider/backend or silently
+  downgrading authentication/durability. Inventory every legacy item with its
+  replacement owner, oracle migration, deletion precondition, affected tests,
+  rollback and `inventory` phase; delete nothing.
+- **B1 acceptance:** valid correlation/configuration and complete inventory
+  cases succeed; unknown/private/malformed/over-bound, missing-parent,
+  cross-scope, conflicting replay and impossible capability combinations fail
+  closed. Rejected and feature-off paths produce zero exporter, network,
+  persistence, Agent, Tool, Task, audio, history or business effect. Focused
+  tests plus the accepted P3-8A affected privacy/codec/adapter suite, scoped
+  static checks, link/manifest validation and independent Tier-3 review pass.
+  External OTel/backend, product composition, lifecycle/health and retirement
+  are explicitly unclaimed.
+- **B2 frozen-interface scope:** after Main records `P3-7` PASS, B may connect
+  P3-8A codec/SLI/privacy assets behind the existing formal adapter/exporter;
+  carry content-free diagnostics through admission, queue, lease, outbox,
+  checkpoint, recovery, reconcile, result and presentation seams; consume
+  validated Provider/Executor/profile configuration; and migrate each oracle
+  before its manifest deletion. Any A-owned file requires a new Main-issued
+  single-writer lease after interface freeze. Raw audio, prompt, blocking answer,
+  TaskResult/artifact content and credentials remain prohibited; metric labels
+  are closed and bounded.
+- **B2 acceptance and retirement Gate:** a failed journey identifies the exact
+  Task/Attempt/Command/generation/ACK/Executor seam without private content;
+  ordinary production stays default-off; configuration/privacy/failure paths
+  fail closed; formal composition is the sole product authority. An entrypoint,
+  runner, validator, scheduler/Bridge/UI authority, Demo itinerary/bypass
+  dependency or compatibility path is deleted only after its replacement owner,
+  migrated oracle, flag-on/flag-off regression, rollback and affected review
+  pass. Generic non-Live-Voice `schedule.*` consumers are outside retirement.
+
+- **Shared exclusions/non-claims:** no P1/P2 Exit/immediate-re-enable repair,
+  notification-latency work, VAD/TTS/media change, generation-time barge-in,
+  new classifier/product policy, canonical Task state or primitive, shared
+  protocol/schema/migration/auth/durability change, AgentCore strategic
+  migration, Hermes rewrite, P3-9, cumulative human acceptance, complete P3,
+  feature complete, product readiness, Production, `develop` integration or
+  remote-ref update. Discovery of any such requirement pauses the affected
+  child for explicit re-scope/re-tier while disjoint work continues.
+
+## Closed P1/P2 integration packet detail
+
+The following source-bound records preserve the just-closed P1/P2 integration
+facts and remaining gaps. They are not child packages in the active P3 batch.
 
 ### Batch member P1/P2-T1 — post-TTS capture continuation repair
 
