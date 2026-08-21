@@ -26,6 +26,13 @@ streaming TTS Adapter.
 **Spec:**
 [`live-voice/roadmap/STABLE_SENTENCE_AGENT_TTS_AUTHORITY_SPEC_2026-08-21.md`](STABLE_SENTENCE_AGENT_TTS_AUTHORITY_SPEC_2026-08-21.md)
 
+> **Execution result — 2026-08-21:** The Phase A materiality-screen boundary
+> completed. Task 5 produced a
+> real-Provider materiality decision of `STOP` at source `81903777f8dccb40ba2cb70fbe9b28d28d86c7f5`:
+> candidate→final/projected-gain p50 was 177.2 ms and relative p50 was 7.43%.
+> Tasks 6–12 are therefore not authorized and were intentionally not executed.
+> See the [causal result](../evidence/STABLE_SENTENCE_AGENT_TTS_CAUSAL_RESULT_2026-08-21.md).
+
 ## Global Constraints
 
 - Planning and implementation branch:
@@ -100,6 +107,8 @@ streaming TTS Adapter.
 ## Phase A — policy and causal screen
 
 ### Task 1: Implement the Pure Stable-Sentence Policy
+
+**Execution:** COMPLETE — commit `5541a9558c9076329d03367a41ccbefe3d219138`.
 
 **Files:**
 - Create: `jiuwenswarm/server/live_voice/stable_sentence_policy.py`
@@ -262,6 +271,8 @@ git commit -m "feat(live-voice): add stable sentence policy"
 
 ### Task 2: Extend the Existing Probe for Sentence Experiment Points
 
+**Execution:** COMPLETE — commit `1dbdea469b1b03bfc34eb5e6dd9f3176816d1bcc`.
+
 **Files:**
 - Modify: `jiuwenswarm/server/live_voice/latency_probe.py`
 - Modify: `jiuwenswarm/server/live_voice/latency_probe_report.py`
@@ -348,6 +359,8 @@ git commit -m "test(live-voice): bind stable sentence probe points"
 ```
 
 ### Task 3: Build the Controlled Causal Runner
+
+**Execution:** COMPLETE — commit `4bb3d236c828d8174e2e2a7321938bc12c88ffb9`.
 
 **Files:**
 - Create: `scripts/live_voice/stable_sentence_causal_benchmark.py`
@@ -475,6 +488,13 @@ git commit -m "feat(live-voice): add stable sentence causal screen"
 
 ### Task 4: Add the Provider-Real No-Chrome Driver
 
+**Execution:** COMPLETE for the Task 5 screen — commits
+`8a125a36fd1d2023e9af938d11d57cd4f1028994` and
+`81903777f8dccb40ba2cb70fbe9b28d28d86c7f5`. The conditional
+`ProductRuntimeAttemptDriver`/A1-B-A2 product port was not instantiated after
+the materiality `STOP`; the real formal-Agent and benchmark-only TTS ports used
+by the screen are complete.
+
 **Files:**
 - Modify: `scripts/live_voice/stable_sentence_causal_benchmark.py`
 - Modify: `tests/unit_tests/live_voice/test_stable_sentence_causal_benchmark.py`
@@ -596,6 +616,9 @@ git commit -m "feat(live-voice): add real stable sentence screen driver"
 
 ### Task 5: Execute and Freeze the Materiality Screen
 
+**Execution:** COMPLETE with decision `STOP`. Step 6 is not applicable because
+it is explicitly conditional on `PASS`; no local A reference was created.
+
 **Files:**
 - Create: `live-voice/evidence/STABLE_SENTENCE_AGENT_TTS_CAUSAL_RESULT_2026-08-21.md`
 - Modify only if the evidence changes current analytical ordering:
@@ -690,6 +713,10 @@ remote ref update.
 ## Phase B — conditional single product candidate
 
 Tasks 6-12 execute only when Task 5 records `PASS` on exact clean source.
+
+**Execution:** NOT AUTHORIZED — Task 5 recorded `STOP`. All Phase B checkboxes
+remain intentionally open as non-executed conditional work, not unfinished
+work in this lane.
 
 ### Task 6: Add the Default-Off Backend Runtime Candidate
 

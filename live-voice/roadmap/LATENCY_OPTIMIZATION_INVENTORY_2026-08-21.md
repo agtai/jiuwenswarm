@@ -204,7 +204,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **PROPOSED** | **700–840 ms estimated** | `browserAudioIOAdapter.ts`; current fixed `PLAYOUT_STARTUP_LEAD_SECONDS = 1.0` | Strong code-fact headroom. Start with roughly 160–300 ms contiguous decoded audio and a bounded reserve. Physical Chrome is ultimately required for underrun and first-audible acceptance. |
 | 5 | Separate receipt settlement from successor readiness | **OPEN AUTHORITY QUESTION** | Controlled wait exposed at approximately **254/754/1007 ms** for 250/750/1100 ms injected delays | `productP1VoiceRoute.ts`, P2 presentation ACK and next-turn ownership | First audio is already decoupled, but terminal receipt still follows successor readiness. Any optimization must retain truthful playout and interruption authority. |
-| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **PROPOSED — LARGEST STRUCTURAL CANDIDATE** | **1.5–2.5 s ordinarily; up to 3.5 s** for long responses | `agent_conversation_runtime.py`, PresentationUnit ownership, P1 TTS/downlink | It does not modify Agent-Core generation. Stable append-only sentences could begin TTS before `chat.final`, while final text/history remain authoritative. High cancellation and rewrite risk. |
+| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP`** | Real three-case pilot: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%** | Pure policy and no-Chrome runner only; no Runtime/P2/Browser product wiring | Three of three real formal-Agent/real-TTS attempts completed with exact prefixes and zero forbidden effects, but failed the 500 ms headroom, 400 ms gain and 10% gates. The earlier 1.5–2.5 s ordinary estimate is not credited. See [causal result](../evidence/STABLE_SENTENCE_AGENT_TTS_CAUSAL_RESULT_2026-08-21.md). |
 | 7 | Bounded next-sentence TTS prefetch | **PROPOSED** | **100–800 ms between sentences** | Conversation Runtime, streaming synthesis route, bounded semantic queue | Primarily improves continuity, not first-sentence latency. It must discard prefetched speech on replacement/barge-in. |
 | 8 | Fixed authoritative phrase cache | **PROPOSED** | **800–1400 ms per cache hit** | Conversation Runtime and TTS cache keyed by text hash, locale, model, voice and render version | Suitable only for stable non-private acknowledgements. It must not cache arbitrary Agent or user content. |
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
@@ -244,9 +244,10 @@ replace the current product-truth execution packet in `live-voice/STATUS.md`.
 1. Run the EOT/STT A1 materiality screen; stop without a product change if the
    removable wait is below 80 ms or 10%.
 2. Evaluate semantic/adaptive VAD with the 1200 ms fallback.
-3. Specify the Runtime-owned stable-sentence TTS path, the largest remaining
-   real structural headroom.
-4. Add bounded sentence prefetch.
+3. Do not implement the screened stable-sentence product candidate; reopen it
+   only for a new representative workload/materiality hypothesis.
+4. Keep bounded sentence prefetch independent and measure continuity headroom
+   before changing product behavior.
 5. Add truthful P3 acknowledgements and, separately, fixed-phrase caching.
 6. Revisit residual P2 push/coalescing only if real backlog remains material.
 7. Reopen Chrome only for physical WebAudio startup, underrun, first-audible
@@ -268,6 +269,8 @@ listed as branch-bound paths rather than current-tree links.
   `live-voice/evidence/TTS_FIRST_AUDIO_CAUSAL_RESULT_2026-08-21.md`
 - `latency/tts-provider-connection-reuse`:
   `live-voice/roadmap/TTS_PROVIDER_CONNECTION_REUSE_RESULT_2026-08-21.md`
+- `latency/stable-sentence-agent-tts`:
+  `live-voice/evidence/STABLE_SENTENCE_AGENT_TTS_CAUSAL_RESULT_2026-08-21.md`
 - `latency/eot-stt-settlement-overlap`:
   `live-voice/roadmap/NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md`
 - `latency/eot-stt-settlement-overlap`:
@@ -288,8 +291,8 @@ listed as branch-bound paths rather than current-tree links.
 
 The combined checkpoint now proves that the accepted P2 and TTS changes retain
 controlled full-round gains of 1.015–8.570 seconds across W1–W3, with longer
-notification-heavy workloads benefiting most. The strongest remaining
-non-Agent opportunities are adaptive WebAudio startup, safe endpointing and
-sentence-level Runtime-to-TTS overlap. Sentence-level TTS has the largest
-likely structural headroom; the immediate next measurement gate is the
-conditional EOT/STT A1 screen.
+notification-heavy workloads benefiting most. The stable-sentence real pilot
+then measured only 177.2 ms p50 projected gain and stopped before product
+wiring. The strongest remaining non-Agent opportunities are therefore adaptive
+WebAudio startup and safe endpointing; the immediate next measurement gate is
+the conditional EOT/STT A1 screen.
