@@ -131,6 +131,8 @@ CORE_POINTS_BY_COMPONENT: Final[Mapping[str, tuple[str, ...]]] = {
         "browser.downlink_attached",
         "browser.playout_underrun",
         "browser.playout_rebuffer",
+        "browser.streaming_result_request_started",
+        "browser.streaming_result_returned",
     ),
     "gateway": (
         "gateway.stt_request_started",
@@ -177,6 +179,8 @@ FIXED_SEGMENT_IDS: Final = frozenset(
         "task_command_to_presentation", "presentation_dispatch",
         "tts_transport_open", "tts_open_to_first_audio", "tts_time_to_first_audio",
         "tts_first_audio_to_ticket", "tts_first_audio_to_first_send",
+        "streaming_result_wait", "streaming_result_validation",
+        "uplink_settled_to_stt_final",
     }
 )
 

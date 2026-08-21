@@ -570,7 +570,8 @@ def test_closed_config_parses_every_field_and_nested_experiment_contract(run_con
     }
     expected_core_points = {
         "browser": {
-            "browser.eot_received", "browser.stt_final_received", "browser.commit_submit_started",
+            "browser.eot_received", "browser.streaming_result_request_started",
+            "browser.streaming_result_returned", "browser.stt_final_received", "browser.commit_submit_started",
             "browser.presentation_received", "browser.tts_request_started",
             "browser.downlink_first_frame_received", "browser.playout_first_frame_scheduled",
             "browser.playout_first_frame_started_estimate", "browser.playout_completed",

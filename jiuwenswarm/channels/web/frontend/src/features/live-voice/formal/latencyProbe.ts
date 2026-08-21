@@ -38,6 +38,8 @@ export const BROWSER_LATENCY_CORE_POINTS = Object.freeze([
   'browser.downlink_attached',
   'browser.playout_underrun',
   'browser.playout_rebuffer',
+  'browser.streaming_result_request_started',
+  'browser.streaming_result_returned',
 ] as const);
 
 const TERMINAL_OUTCOMES = new Set<string>(['completed', 'failed', 'cancelled', 'unknown']);

@@ -2211,11 +2211,14 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
 
 test('formal P1 consumes the streaming STT final without replaying batch audio', async () => {
   const calls = [];
+  const latency = latencyProbeHarness();
   const binding = serverBinding();
   const socket = new FakeSocket();
   const environment = audioEnvironment();
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
+    latency_probe: latency.probe,
+    latency_monotonic_ms: () => 100,
     expected_origin: 'https://voice.example.test',
     audio_environment: environment,
     socket_factory: () => {
@@ -2254,6 +2257,16 @@ test('formal P1 consumes the streaming STT final without replaying batch audio',
   assert.deepEqual(
     calls.map(([method]) => method),
     [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_streaming_result']
+  );
+  assert.deepEqual(
+    latency.rounds[0].marks.map(mark => mark.point).filter(point => [
+      'browser.streaming_result_request_started',
+      'browser.streaming_result_returned',
+    ].includes(point)),
+    [
+      'browser.streaming_result_request_started',
+      'browser.streaming_result_returned',
+    ],
   );
   assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
 });

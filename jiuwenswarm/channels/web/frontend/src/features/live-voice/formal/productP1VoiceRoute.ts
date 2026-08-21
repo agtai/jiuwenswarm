@@ -888,7 +888,9 @@ export class ProductP1VoiceRouteOwner {
       let degradationReason: string | null = this.#streamingFallbackReason;
       let result: Readonly<FormalBatchRecognitionResult | FormalStreamingRecognitionResult> | null;
       if (this.#streamingRecognitionAvailable) {
+        this.#markLatency(latencyRound, 'browser.streaming_result_request_started');
         const streaming = await speech.recognizeStreamingFinal(recognitionInput);
+        this.#markLatency(latencyRound, 'browser.streaming_result_returned');
         this.#requireCurrent(operationGeneration);
         if (streaming.status === 'completed') {
           result = streaming.result;

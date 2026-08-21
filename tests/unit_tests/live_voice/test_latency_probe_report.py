@@ -88,6 +88,17 @@ def test_reducer_accepts_the_post_capture_v1_manifest(tmp_path: Path) -> None:
     assert report.profile("dialogue_no_tool").segment("response_total").attempts == 1
 
 
+def test_fixed_segments_expose_streaming_result_waiter_boundaries() -> None:
+    by_id = {definition.segment_id: definition for definition in FIXED_SEGMENTS}
+
+    assert by_id["streaming_result_wait"].start_point == "browser.streaming_result_request_started"
+    assert by_id["streaming_result_wait"].end_point == "browser.streaming_result_returned"
+    assert by_id["streaming_result_validation"].start_point == "browser.streaming_result_returned"
+    assert by_id["streaming_result_validation"].end_point == "browser.stt_final_received"
+    assert by_id["uplink_settled_to_stt_final"].start_point == "browser.uplink_closed"
+    assert by_id["uplink_settled_to_stt_final"].end_point == "browser.stt_final_received"
+
+
 @pytest.fixture
 def run_config(tmp_path):
     path = tmp_path / "run.json"

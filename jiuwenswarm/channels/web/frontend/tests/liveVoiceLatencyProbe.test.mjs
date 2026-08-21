@@ -513,6 +513,24 @@ test('closed point and observation validation rejects duplicates, arbitrary expe
   );
 });
 
+test('streaming result waiter points are core points with closed duplicate and private-observation validation', () => {
+  assert.equal(BROWSER_LATENCY_CORE_POINTS.includes('browser.streaming_result_request_started'), true);
+  assert.equal(BROWSER_LATENCY_CORE_POINTS.includes('browser.streaming_result_returned'), true);
+
+  const h = harness();
+  const probe = createBrowserLatencyProbe(h.dependencies);
+  const round = probe.beginRound(initialIdentity);
+
+  assert.equal(round.mark('browser.streaming_result_request_started', initialIdentity), true);
+  assert.equal(round.mark('browser.streaming_result_request_started', initialIdentity), false);
+  assert.equal(round.mark('browser.streaming_result_returned', initialIdentity, { text: 'PRIVATE_TRANSCRIPT_SENTINEL' }), false);
+  assert.equal(round.mark('browser.streaming_result_returned', initialIdentity), true);
+  assert.deepEqual(
+    round.finish('completed').marks.map(mark => mark.point),
+    ['browser.streaming_result_request_started', 'browser.streaming_result_returned'],
+  );
+});
+
 test('slot 63 is reserved for one capacity observation and all later operations are inert', () => {
   const experimentPoints = Array.from({ length: 64 }, (_, index) => `experiment.capacity-${index}`);
   const h = harness({ experimentPoints, clockValues: Array.from({ length: 70 }, (_, index) => index) });
