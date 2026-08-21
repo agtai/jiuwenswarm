@@ -2358,9 +2358,11 @@ async def test_expired_grant_drain_during_parked_read_joins_the_worker_on_close(
     assert prepared.detach_task is not None
     assert prepared.detach_task.done() is False
 
-    # Awaited directly on purpose: wrapping this in a task would let the woken
-    # worker settle before close() observes the unsettled worker.
-    await activation.lease.close()
+    # The timeout is a deadlock guard, not a settling delay: wait_for runs the
+    # coroutine inline here, so close() still observes the unsettled worker.
+    # Without it a close() that skipped the join would hang this case on the
+    # parked read instead of reporting which half of the claim broke.
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
 
     assert harness.bridge.snapshot().worker_pending is False
     assert prepared.detach_task.done() is True
