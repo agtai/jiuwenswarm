@@ -78,11 +78,13 @@ def test_prepare_derives_only_declared_pause_and_preserves_source(tmp_path: Path
     for case in manifest.cases:
         derived = support.read_pcm16_mono_wav(case.wav_path).samples
         pause_samples = case.pause_ms * 48
-        assert derived[:split_frame] == source_samples[:split_frame]
-        assert derived[split_frame : split_frame + pause_samples] == (0,) * pause_samples
-        assert derived[split_frame + pause_samples :] == source_samples[split_frame:]
-        assert case.second_clause_first_frame == split_frame + pause_samples
-        assert case.final_voiced_frame == 5760 + pause_samples
+        boundary_start = 2_400
+        boundary_end = 3_360
+        assert derived[:boundary_start] == source_samples[:boundary_start]
+        assert derived[boundary_start : boundary_start + pause_samples] == (0,) * pause_samples
+        assert derived[boundary_start + pause_samples :] == source_samples[boundary_end:]
+        assert case.second_clause_first_frame == boundary_start + pause_samples
+        assert case.final_voiced_frame == 4_800 + pause_samples
         assert hashlib.sha256(case.wav_path.read_bytes()).hexdigest() == case.wav_sha256
         assert stat.S_IMODE(case.wav_path.stat().st_mode) == 0o600
     assert stat.S_IMODE((output_root / "manifest.json").stat().st_mode) == 0o600
@@ -115,10 +117,10 @@ def test_builder_ignores_low_energy_phone_noise_after_last_voiced_frame(tmp_path
     )
 
     assert {case.final_voiced_frame for case in manifest.cases} == {
-        5_760,
-        20_160,
-        34_560,
-        53_760,
+        4_800,
+        19_200,
+        33_600,
+        52_800,
     }
 
 

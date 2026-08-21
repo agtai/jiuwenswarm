@@ -206,7 +206,9 @@ def _validate_request(request: PrepareVadCorpusRequest) -> None:
         raise ValueError("VAD_CORPUS_REQUEST_INVALID")
 
 
-def _validate_source(request: PrepareVadCorpusRequest) -> tuple[Pcm16MonoWav, int]:
+def _validate_source(
+    request: PrepareVadCorpusRequest,
+) -> tuple[Pcm16MonoWav, int, int, int]:
     if _sha256_file(request.source_wav) != request.source_sha256:
         raise ValueError("VAD_CORPUS_SOURCE_HASH_MISMATCH")
     decoded = read_pcm16_mono_wav(request.source_wav)
@@ -229,7 +231,15 @@ def _validate_source(request: PrepareVadCorpusRequest) -> tuple[Pcm16MonoWav, in
             final_voiced = offset + len(window)
     if final_voiced <= split:
         raise ValueError("VAD_CORPUS_SPLIT_INVALID")
-    return decoded, final_voiced
+    boundary_start = split
+    while boundary_start > 0 and abs(samples[boundary_start - 1]) <= 512:
+        boundary_start -= 1
+    boundary_end = split
+    while boundary_end < speech_area and abs(samples[boundary_end]) <= 512:
+        boundary_end += 1
+    if boundary_end - boundary_start < 960 or boundary_end >= final_voiced:
+        raise ValueError("VAD_CORPUS_SPLIT_INVALID")
+    return decoded, final_voiced, boundary_start, boundary_end
 
 
 def _write_wav(path: Path, samples: tuple[int, ...]) -> None:
@@ -244,7 +254,7 @@ def _write_wav(path: Path, samples: tuple[int, ...]) -> None:
 def prepare_vad_corpus(request: PrepareVadCorpusRequest) -> VadCorpusManifest:
     _validate_request(request)
     expected, required_tokens = _load_expectation(request.expectation_json)
-    decoded, final_voiced = _validate_source(request)
+    decoded, final_voiced, boundary_start, boundary_end = _validate_source(request)
     created: list[Path] = []
     root_created = False
     try:
@@ -254,9 +264,9 @@ def prepare_vad_corpus(request: PrepareVadCorpusRequest) -> VadCorpusManifest:
         for case_id, pause_ms in zip(CASE_IDS, PAUSES_MS, strict=True):
             pause_samples = pause_ms * 48
             samples = (
-                decoded.samples[: request.split_frame]
+                decoded.samples[:boundary_start]
                 + (0,) * pause_samples
-                + decoded.samples[request.split_frame :]
+                + decoded.samples[boundary_end:]
             )
             output_path = request.output_root / f"{case_id}.wav"
             _write_wav(output_path, samples)
@@ -267,8 +277,8 @@ def prepare_vad_corpus(request: PrepareVadCorpusRequest) -> VadCorpusManifest:
                     "pause_ms": pause_ms,
                     "wav_path": output_path.name,
                     "sha256": _sha256_file(output_path),
-                    "final_voiced_frame": final_voiced + pause_samples,
-                    "second_clause_first_frame": request.split_frame + pause_samples,
+                    "final_voiced_frame": final_voiced - (boundary_end - boundary_start) + pause_samples,
+                    "second_clause_first_frame": boundary_start + pause_samples,
                 }
             )
         manifest_raw = {
@@ -367,7 +377,12 @@ def load_vad_corpus_manifest(path: Path) -> VadCorpusManifest:
             raise ValueError(reason)
         decoded = read_pcm16_mono_wav(wav_path)
         final_voiced = _required_int(case["final_voiced_frame"], minimum=1, maximum=len(decoded.samples), reason=reason)
-        second_clause = _required_int(case["second_clause_first_frame"], minimum=split_frame, maximum=final_voiced, reason=reason)
+        second_clause = _required_int(
+            case["second_clause_first_frame"],
+            minimum=1,
+            maximum=final_voiced,
+            reason=reason,
+        )
         if any(decoded.samples[-96_000:]):
             raise ValueError(reason)
         cases.append(

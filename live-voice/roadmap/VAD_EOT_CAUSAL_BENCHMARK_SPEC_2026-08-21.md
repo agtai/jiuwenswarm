@@ -91,8 +91,10 @@ The corpus root remains outside Git:
 
 It is derived from one immutable 48 kHz mono PCM WAV in the existing `en-v1`
 corpus. The builder performs no normalization, denoise, compression, speed or
-pitch change. It inserts digital silence at one frozen low-energy boundary
-between two spoken clauses.
+pitch change. Around one frozen point between two spoken clauses, it replaces
+the complete contiguous low-energy boundary with the case's declared digital
+silence. Thus `pause_ms` is the exact total derived pause, rather than that
+pause plus an uncontrolled silence already present in the phone recording.
 
 Required cases:
 

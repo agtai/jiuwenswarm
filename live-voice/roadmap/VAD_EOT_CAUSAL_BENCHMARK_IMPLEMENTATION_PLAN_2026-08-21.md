@@ -136,8 +136,8 @@ def test_derivation_inserts_only_declared_pause_and_final_silence(tmp_path: Path
     manifest = builder.prepare_vad_corpus(request_for(tmp_path))
     for case in manifest.cases:
         samples = support.read_pcm16_mono_wav(case.wav_path).samples
-        assert samples[:SPLIT] == SOURCE[:SPLIT]
-        assert samples[SPLIT + case.pause_ms * 48 :] == SOURCE[SPLIT:]
+        assert samples[:BOUNDARY_START] == SOURCE[:BOUNDARY_START]
+        assert samples[BOUNDARY_START + case.pause_ms * 48 :] == SOURCE[BOUNDARY_END:]
 ```
 
 - [x] **Step 5: Implement the corpus builder and closed CLI**
