@@ -348,6 +348,7 @@ async def test_observed_early_eot_remains_turn_failure_when_tail_protocol_fails(
     assert result.outcome is runner.VadAttemptOutcome.FAILED
     assert result.reason is runner.VadAttemptReason.EARLY_EOT
     assert result.final_voiced_frame_to_eot_ms is None
+    assert result.pacing_valid is True
     assert provider.closed is True
 
 

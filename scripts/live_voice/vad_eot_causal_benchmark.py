@@ -620,6 +620,7 @@ async def run_vad_attempt(
                 pass
     cleanup = bool(provider is not None and provider.cleanup_snapshot.clean)
     if early_eot and cleanup:
+        pacing_valid = bool(lateness) and (_nearest_rank(lateness, 0.95) or 0.0) <= 20.0 and max(lateness) <= 50.0
         return VadAttemptResult.failed(
             configuration_id,
             silence_duration_ms,
