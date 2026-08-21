@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 27/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 29/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -63,14 +63,16 @@ At the start of every new Session:
    `STATUS.md` `Current execution packet`, this checkpoint, §6 and §7. Read a
    closed wave record or the historical revalidation only for a disputed
    finding mechanism.
-3. Preserve the current **27/88 closed, 61 remaining** count. The closed set is
-   A2, A3, A4, A8, A11, A12, A16, A18, A20, A21, A23, A25, B2, B6, B7, B9,
-   B10, B12, B13, B14, B16, B36, B41, C5, L14, L20 and L21. A8+B6 share
-   SRR-06, A2+B2 share SRR-10, B12+B13+B14 share SRR-20 and B36+L20+L21 share
-   SRR-21; each shared packet still counts one unique defect per finding.
-4. No candidate is implemented or awaiting review. Wave 9 closed with SRR-21 at
-   `b0341f41b` and SRR-20 at `0a2361f81`; both worker branches were left
-   unmerged and must stay that way.
+3. Preserve the current **29/88 closed, 59 remaining** count. The closed set is
+   A2, A3, A4, A6, A8, A11, A12, A16, A18, A20, A21, A23, A25, B2, B4, B6, B7,
+   B9, B10, B12, B13, B14, B16, B36, B41, C5, L14, L20 and L21. A8+B6 share
+   SRR-06, A2+B2 share SRR-10, B12+B13+B14 share SRR-20, B36+L20+L21 share
+   SRR-21 and A6+B4 share SRR-22; each shared packet still counts one unique
+   defect per finding.
+4. Wave 10 is in flight. SRR-22/A6+B4 closed at `935a4f74e`. SRR-23/A13 and
+   SRR-24/A1 remain open; see §5.10 for their exact state. No closure credit
+   is granted before an independent reviewer who did not implement a packet
+   passes its complete module diff.
 5. Activate one or more disjoint owner-scoped packets from §6. Freeze each
    packet from the latest integration branch and record its capability/module,
    risk tier, dependencies, scope, exclusions and acceptance before editing.
@@ -847,8 +849,8 @@ routed after that branch merges. A5, A9, A15, A17 and B42 stay unactivated in §
 
 ## 6. Queued repair programs
 
-The 61 remaining unique defects consist of the four activated Wave 10
-candidates A1, A6, A13 and B4 plus the 57 unactivated defects below. These
+The 59 remaining unique defects consist of the two still-open Wave 10
+candidates A1 and A13 plus the 57 unactivated defects below. These
 groups are not worker write authority. Each activation removes its IDs from
 this queue and freezes smaller owner-specific packets before editing.
 
@@ -866,9 +868,9 @@ this queue and freezes smaller owner-specific packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 9 + 8 + 4 + 29 = 57`; adding the four activated
-Wave 10 candidates gives the 61 unique remaining defects. By historical family
-that remainder is 11 A, 28 B, 19 L and three D findings, of which the
+The queue arithmetic is `7 + 9 + 8 + 4 + 29 = 57`; adding the two still-open
+Wave 10 candidates gives the 59 unique remaining defects. By historical family
+that remainder is 10 A, 27 B, 19 L and three D findings, of which the
 unactivated 57 are 8 A, 27 B, 19 L and three D.
 
 ### 6.1 Findings routed out of Wave 9
@@ -957,6 +959,7 @@ and risk checkpoint before implementation.
 | SRR-10 / A2+B2 | 21/88 | `ea55258ff`…`b5e6dd6e7`; a FINAL/COMPLETED that was published but not yet dequeued now retires locally on exact cancel — sensitive transcript/PCM queue released, `partial_text` cleared, session and transport converged — without issuing another Provider cancel or rewriting terminal truth. Active cancel is unchanged, and unknown, stale, wrong-generation and already-retired references still reject. Dequeue-vs-cancel and duplicate cancel linearize on one synchronous claim so only one winner reports success; caller cancellation mid-retirement leaves exactly one retained owner genuinely pending instead of a fabricated completion; provider close keeps cleaning neighbouring sessions, transports, queues, maps and owners through ordinary, cancellation and process-control failures while preserving chronological first-failure truth and content-free identity; reap and transport cleanup stay once-only. Independent Tier-3 review reproduced the defect on baseline `3d488e8c3` — candidate tests RED with conformance `RECOGNITION_ALREADY_TERMINAL`/`SYNTHESIS_ALREADY_TERMINAL` violations — then passed 94 provider and 155 affected conformance/route cases under asyncio debug, with the one disclosed pre-existing route failure byte-identical on baseline, candidate and integration, zero new Ruff findings and unchanged formatting |
 | SRR-21 / B36+L20+L21 | 24/88 | `155c15b36`…`b0341f41b`; an authoritative `task.get`/`task.status` snapshot can no longer roll a formal task replica back. Attempt rollback and identity forgery, event-head rollback, terminal resurrection and terminal-outcome change all reject through the existing `validTaskStateTransition` rule rather than a new policy, and the consumed event cursor survives a refresh that still describes the head that produced it instead of resetting to null. Legacy `{ok:true,result}` success no longer carries mutation authority for create, cancel or retry while queries keep accepting it. A cancelled destructive confirmation is invalidated with, not after, its durable removal: an owner-scoped cancellation tombstone fails both submit and `recoverPending` closed before any journal claim or Gateway call, and settles retryably. Independent Tier-3 review reproduced all three mechanisms RED on baseline `455873109` after recompiling (6 business assertions), then passed 49 focused and 418 package cases with the one disclosed mounted-panel failure unchanged, typecheck and build clean |
 | SRR-20 / B12+B13+B14 | 27/88 | `950bb9830`…`0a2361f81`; progress-generation admission no longer erases its high-water when capacity evicts the heavy closed-route state, so a superseded generation can never activate again: the retired mark moves into the same conservative max sketch already used for the P2 fences, where collisions can only fail closed and the exact map still wins. Higher-generation P2 replacement now runs the same cleanup normal close runs, retiring every accepted voice commit bound to the superseded route by exact commit id, which releases the commit-level gate evidence while preserving the interaction's monotonic input-generation fence that the successor immediately reuses. A definite submit failure releases the critical-input maps and the token gate, while unknown outcomes and every successful dispatch keep theirs. Two review rounds: the first rejected the candidate for releasing gate evidence on the successful default Agent path and for an unproven B13 acceptance; the repair narrowed the release to the task branch and proved the acceptance end to end, showing that a superseded generation previously minted a redeemable `formal` confirmation token through the successor's route. Deterministic lock-barrier concurrency, both uint64 boundary sides, restart characterization and exactly-once subscription evidence; 161 focused plus 240 consumer tests passed with Ruff parity and the one disclosed `pywintypes` environment failure unchanged |
+| SRR-22 / A6+B4 | 29/88 | `935a4f74e`; the critical notification reserve stops being one set that is simultaneously a uniqueness ledger and a capacity counter and is never released. Capacity is now measured by queued items and returned on both removal paths, released identities move into an exact per-lane bounded tombstone, and only what that tombstone evicts folds into a conservative membership sketch, so eviction can never drop the fence and a collision can only refuse a never-published identity. Progress terminals get an independent reserve, so they can no longer starve presentation or terminal delivery. A publication failure inside the sole bridge consumer is now recorded as an attributable diagnostic instead of killing the consumer, which also lets teardown finish closing the Harness and CR that the escaping violation used to skip. Independent review reproduced six business REDs on baseline, confirmed the implementer's own declaration that two further tests are API-missing rather than defect reproductions, and killed six targeted mutants including a plain-LRU variant; 107 focused and 487 consumer tests passed with Ruff parity |
 
 ### 7.1 Closed-fix revalidation entrypoints
 
@@ -982,6 +985,7 @@ mechanism and integration seam are reviewed again.
 | A20 | `python -m pytest tests/unit_tests/gateway/test_app_gateway_shutdown.py tests/unit_tests/gateway/test_app_gateway_acp.py --no-cov --asyncio-debug` |
 | A8, B6 | `python -m pytest tests/unit_tests/live_voice/test_agent_conversation_runtime.py --no-cov --asyncio-debug` |
 | A2, B2 | `python -m pytest tests/unit_tests/live_voice/test_openai_streaming_speech.py --no-cov --asyncio-debug` |
+| A6, B4 | `python -m pytest tests/unit_tests/live_voice/test_agent_conversation_runtime.py --no-cov --asyncio-debug` |
 | B12, B13, B14 | `python -m pytest tests/unit_tests/live_voice/test_product_composition_registry.py --no-cov`; also rerun the `test_voice_task_bridge.py`, `test_p3_authenticated_composition.py` and `test_critical_token_safety.py` seams and compare the disclosed `pywintypes` failure with the baseline |
 | B36, L20, L21 | From `jiuwenswarm/channels/web/frontend`: `npm run test:live-voice-integrated-web`; require the formal task leaf and intent blocks to pass and compare any full-suite failure with the disclosed mounted-panel baseline below. A source-level baseline comparison **must recompile** first, because the tests import the tsc output under `node_modules/.cache/`. |
 | L14 | `python -m pytest tests/unit_tests/auto_harness/test_schedule_task_service.py --no-cov` |

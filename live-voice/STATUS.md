@@ -30,7 +30,7 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects; **27/88 are closed** on this branch,
+  packet against 88 unique current defects; **29/88 are closed** on this branch,
   beginning with exact authority and privacy boundaries. Progress is counted
   only after reproduced defects,
   affected verification and independent module review close; the
@@ -144,7 +144,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — **27/88 closed**, 61 unique current
+- **Packet:** strict-review remediation — **29/88 closed**, 59 unique current
   defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
@@ -177,10 +177,9 @@ exact-source Alpha result.
   their exact positive, negative, boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
-- **Remaining accounting:** 61 unique defects remain: 11 A findings, 28 B
-  findings, 19 L findings and D1-D3. Four are the activated Wave 10 candidates
-  A1, A6, A13 and B4; the other 57 remain unactivated in the owner-scoped
-  queue.
+- **Remaining accounting:** 59 unique defects remain: 10 A findings, 27 B
+  findings, 19 L findings and D1-D3. Two are the still-open Wave 10 candidates
+  A1 and A13; the other 57 remain unactivated in the owner-scoped queue.
   C3 continues to alias B42 and B17 continues to alias B13, so neither creates
   another unique repair. Six findings discovered while closing Wave 9 are routed
   in §6.1 of the execution contract and are outside the audited 88.
