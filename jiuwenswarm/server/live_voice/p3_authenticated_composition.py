@@ -74,6 +74,12 @@ from .p3_confirmation import (
     p3_confirmation_intent_fingerprint,
 )
 from .p3_model_resolution import P3ModelResolver, ResolvedP3Model
+from .p3_production_intent_composition import (
+    CallLocalProductionConfirmationClaim,
+    CallLocalProductionConfirmationConsumer,
+    CallLocalProductionOriginAuthority,
+    StoreProductionTaskAuthorityReader,
+)
 from .product_authority import (
     AuthorityResourceBinding,
     ResolvedProductAuthority,
@@ -87,6 +93,14 @@ from .project_code_executor import (
     DirectStreamObserver,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
+)
+from .production_task_intent import (
+    AuthenticatedTaskFact,
+    ProductionIntentOrigin,
+    ProductionOriginBinding,
+    ProductionTaskPolicyOutcome,
+    ProductionTaskResolution,
+    TaskAuthorityRead,
 )
 from .task_event_subscription import TaskEventSubscription
 from .task_progress_return import (
@@ -118,8 +132,21 @@ P3_QUERY_OPERATIONS = frozenset(
 # class P3 operation, because dropping it here would silently disable the
 # mutation validation every retry admission depends on.
 P3_OPERATIONS = frozenset(P3_ROUTE_METHODS.values()) | P3_MUTATIONS
+P3_PRODUCTION_MUTATIONS = frozenset(
+    {
+        "task.create",
+        "task.update",
+        "task.adjust",
+        "task.reprioritize",
+        "task.cancel",
+        "task.create_successor",
+    }
+)
+P3_PRODUCTION_OPERATIONS = P3_QUERY_OPERATIONS | P3_PRODUCTION_MUTATIONS
 P3_PRESENTATION_OPERATIONS = frozenset({"task.unread_events", "task.ack_events"})
-P3_PRODUCT_AUTHORITY_OPERATIONS = P3_OPERATIONS | P3_PRESENTATION_OPERATIONS
+P3_PRODUCT_AUTHORITY_OPERATIONS = (
+    P3_OPERATIONS | P3_PRODUCTION_OPERATIONS | P3_PRESENTATION_OPERATIONS
+)
 
 _ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_ENABLED"
 _TOKEN_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN"
@@ -340,6 +367,22 @@ class ResolvedAuthority:
     principal: AuthenticatedPrincipal
     scope: ScopeRef
     context: ResolvedTaskContext
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedProductionIntentAuthority:
+    """Authenticated, read-only authority used only while resolving an intent.
+
+    This is not a Task authorization grant.  It exposes the exact authenticated
+    Scope and the Store-backed reader needed to resolve a name/reference before
+    the final operation and target are freshly authorized by
+    ``handle_production_resolution``.
+    """
+
+    principal_id: str
+    scope: ScopeRef
+    reader: StoreProductionTaskAuthorityReader
+    observed_at: str
 
 
 class AuthorityResolver(Protocol):
@@ -1112,6 +1155,85 @@ class P3AuthenticatedComposition:
         database = getattr(store, "database_path", None)
         return None if database is None else Path(database)
 
+    @property
+    def production_intent_available(self) -> bool:
+        """Report whether the formal Store-backed production resolver can run."""
+
+        return isinstance(getattr(self._core, "store", None), SqliteTaskStore)
+
+    def prepare_production_intent_authority(
+        self,
+        *,
+        bearer_token: object,
+        operation: str,
+        session_id: str,
+    ) -> PreparedProductionIntentAuthority:
+        """Authenticate one proposal operation and expose read-only Task facts.
+
+        Targeted natural requests may name or describe a Task rather than carry
+        its opaque ID.  Consequently this step deliberately does not mint a
+        grant or authorize a target.  The final exact operation/target is
+        authenticated and reread again by ``handle_production_resolution``.
+        """
+
+        if not self._accepting:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal task route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if operation not in P3_PRODUCTION_OPERATIONS:
+            raise FormalTaskViolation(
+                "UNSUPPORTED_FORMAL_TASK_INTENT",
+                "production Task intent operation is unsupported",
+                ErrorCode.UNSUPPORTED,
+            )
+        now = self._clock()
+        principal = self._authenticator.authenticate(
+            bearer_token,
+            operation=operation,
+            now=now,
+        )
+        authority = self._authority_resolver.resolve(
+            principal,
+            session_id=_required_text(session_id, "session_id", maximum=256),
+            now=now,
+            require_clean=False,
+        )
+        authority.context.require_usable(
+            scope=authority.scope,
+            required_permissions=frozenset(),
+            destructive=False,
+            now=now,
+        )
+        store = getattr(self._core, "store", None)
+        if not isinstance(store, SqliteTaskStore):
+            raise FormalTaskViolation(
+                "PRODUCTION_TASK_AUTHORITY_UNAVAILABLE",
+                "production Task authority requires the formal SQLite Store",
+                ErrorCode.UNAVAILABLE,
+            )
+        collection_selection = (
+            self._select_production_create_candidate()
+            if operation == "task.create"
+            else None
+        )
+        reader_arguments: dict[str, object] = {
+            "store": store,
+            "principal_id": principal.principal_id,
+            "scope": authority.scope,
+        }
+        if collection_selection is not None:
+            reader_arguments["collection_capability_profile_digest"] = (
+                collection_selection.capability_profile_digest
+            )
+        return PreparedProductionIntentAuthority(
+            principal_id=principal.principal_id,
+            scope=authority.scope,
+            reader=StoreProductionTaskAuthorityReader(**reader_arguments),
+            observed_at=now,
+        )
+
     def next_product_p2_response_generation(
         self,
         session_id: str,
@@ -1194,7 +1316,11 @@ class P3AuthenticatedComposition:
             "task.result",
             "task.unread_events",
             "task.ack_events",
+            "task.update",
+            "task.adjust",
+            "task.reprioritize",
             "task.cancel",
+            "task.create_successor",
         }
         if targeted != bool(task_id):
             raise FormalTaskViolation(
@@ -1599,7 +1725,7 @@ class P3AuthenticatedComposition:
         context: ResolvedTaskContext,
         now: str,
     ) -> None:
-        destructive = operation == "task.cancel"
+        destructive = operation in P3_MUTATIONS | P3_PRODUCTION_MUTATIONS
         context.require_usable(
             scope=authority.scope,
             required_permissions=(
@@ -1849,6 +1975,24 @@ class P3AuthenticatedComposition:
         requirements = _product_execution_requirements(
             executor_id=spec.executor_id,
             side_effect_class=spec.side_effect_class,
+            durability_level=self._execution_durability_level,
+        )
+        return _persisted_executor_selection(
+            select_executor(self._executor_profiles, requirements)
+        )
+
+    def _select_production_create_candidate(self) -> PersistedExecutorSelection:
+        """Freeze the exact product create capability before confirmation."""
+
+        if self._executor_profiles is None:
+            raise FormalTaskViolation(
+                "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                "production task.create requires an Executor capability candidate",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        requirements = _product_execution_requirements(
+            executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+            side_effect_class="project_mutation",
             durability_level=self._execution_durability_level,
         )
         return _persisted_executor_selection(
@@ -2847,6 +2991,646 @@ class P3AuthenticatedComposition:
             if entered:
                 await self._leave_operation()
 
+    @staticmethod
+    def _production_capability_digest(
+        visible: TaskAuthorityRead,
+        target: AuthenticatedTaskFact | None,
+    ) -> str:
+        if target is not None:
+            return target.capability_profile_digest
+        return visible.collection_capability_profile_digest
+
+    @staticmethod
+    def _production_origin_payload(
+        binding: ProductionOriginBinding,
+    ) -> dict[str, object]:
+        if binding.origin is ProductionIntentOrigin.STRUCTURED:
+            return {"kind": "structured", "turn_id": None, "commit_id": None}
+        return {
+            "kind": "committed_turn",
+            "turn_id": binding.source_id,
+            "commit_id": binding.commit_id,
+        }
+
+    async def handle_production_resolution(
+        self,
+        *,
+        resolution: ProductionTaskResolution,
+        bearer_token: object,
+        request_id: str,
+        session_id: str,
+        correlation_id: str,
+        origin_authority: CallLocalProductionOriginAuthority,
+        confirmation_consumer: CallLocalProductionConfirmationConsumer | None = None,
+        current_background_session_id: str | None = None,
+    ) -> P3RouteResult:
+        """Freshly authorize and invoke one generalized production resolution.
+
+        Confirmation was already atomically consumed by the resolver.  This
+        path never invokes the legacy confirmation verifier; it rereads all
+        Store authority and claims the private call-local receipt immediately
+        before the single Core invocation.
+        """
+
+        started = time.monotonic()
+        outcome = "rejected"
+        reason: str | None = None
+        entered = False
+        operation = (
+            resolution.operation
+            if isinstance(resolution, ProductionTaskResolution)
+            else None
+        )
+        try:
+            await self._enter_operation()
+            entered = True
+            if (
+                not isinstance(resolution, ProductionTaskResolution)
+                or resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+                or operation not in P3_PRODUCTION_OPERATIONS
+                or resolution.command_id is None
+                or resolution.origin_binding is None
+                or resolution.origin_receipt_id is None
+                or resolution.origin_binding_fingerprint is None
+                or resolution.task_set_fingerprint is None
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCTION_TASK_RESOLUTION",
+                    "only one complete proposed production resolution may reach Core",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                bearer_token,
+                operation=operation,
+                now=now,
+            )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=_required_text(session_id, "session_id", maximum=256),
+                now=now,
+                require_clean=operation in {"task.create", "task.create_successor"},
+            )
+            destructive = operation in P3_PRODUCTION_MUTATIONS
+            authority.context.require_usable(
+                scope=authority.scope,
+                required_permissions=(
+                    frozenset({"task.execute", "project.write"})
+                    if destructive
+                    else frozenset()
+                ),
+                destructive=destructive,
+                now=now,
+            )
+            origin_binding = resolution.origin_binding
+            if (
+                origin_binding.scope != authority.scope
+                or origin_binding.principal_id != principal.principal_id
+                or origin_binding.fingerprint != resolution.origin_binding_fingerprint
+            ):
+                raise FormalTaskViolation(
+                    "PRODUCTION_ORIGIN_AUTHORITY_MISMATCH",
+                    "production origin no longer matches current authenticated authority",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if type(origin_authority) is not CallLocalProductionOriginAuthority:
+                raise FormalTaskViolation(
+                    "PRODUCTION_ORIGIN_AUTHORITY_MISMATCH",
+                    "exact call-local production origin authority is required",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            try:
+                origin_receipt = origin_authority.verify_origin(origin_binding)
+            except (TypeError, ValueError) as error:
+                raise FormalTaskViolation(
+                    "PRODUCTION_ORIGIN_AUTHORITY_MISMATCH",
+                    "production origin authority could not be re-proved",
+                    ErrorCode.PERMISSION_DENIED,
+                ) from error
+            if (
+                origin_receipt.receipt_id != resolution.origin_receipt_id
+                or origin_receipt.principal_id != principal.principal_id
+                or origin_receipt.binding_fingerprint
+                != resolution.origin_binding_fingerprint
+            ):
+                raise FormalTaskViolation(
+                    "PRODUCTION_ORIGIN_AUTHORITY_MISMATCH",
+                    "production origin receipt changed before Core invocation",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+
+            store = getattr(self._core, "store", None)
+            if not isinstance(store, SqliteTaskStore):
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_AUTHORITY_UNAVAILABLE",
+                    "production Task authority requires the formal SQLite Store",
+                    ErrorCode.UNAVAILABLE,
+                )
+            create_selection = (
+                self._select_production_create_candidate()
+                if operation == "task.create"
+                else None
+            )
+            reader_arguments: dict[str, object] = {
+                "store": store,
+                "principal_id": principal.principal_id,
+                "scope": authority.scope,
+            }
+            if create_selection is not None:
+                reader_arguments["collection_capability_profile_digest"] = (
+                    create_selection.capability_profile_digest
+                )
+            reader = StoreProductionTaskAuthorityReader(**reader_arguments)
+            visible = await self._run_blocking(
+                reader.list_visible_tasks, authority.scope
+            )
+            if visible.fingerprint != resolution.task_set_fingerprint:
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                    "visible Task set changed after intent resolution",
+                    ErrorCode.STALE,
+                )
+            target = (
+                None
+                if resolution.target_task_id is None
+                else next(
+                    (
+                        item
+                        for item in visible.tasks
+                        if item.task_id == resolution.target_task_id
+                    ),
+                    None,
+                )
+            )
+            targeted = operation not in {"task.create", "task.list"}
+            if targeted and target is None:
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_NOT_FOUND",
+                    "resolved production Task is no longer visible",
+                    ErrorCode.NOT_FOUND,
+                )
+            if target is not None and (
+                resolution.authority_fingerprint != target.fingerprint
+                or operation not in target.supported_operations
+            ):
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                    "resolved Task capability or lifecycle changed before invocation",
+                    ErrorCode.STALE,
+                )
+            if not targeted and resolution.authority_fingerprint is not None:
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                    "collection resolution carried an unexpected target authority",
+                    ErrorCode.STALE,
+                )
+
+            task_snapshot = None
+            if operation in {
+                "task.update",
+                "task.reprioritize",
+                "task.create_successor",
+            }:
+                assert target is not None
+                task_snapshot = await self._run_blocking(
+                    store.task_read_snapshot,
+                    target.task_id,
+                    authority.scope,
+                )
+            final_visible = await self._run_blocking(
+                reader.list_visible_tasks, authority.scope
+            )
+            if final_visible.fingerprint != visible.fingerprint:
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                    "Task authority changed during final invocation preparation",
+                    ErrorCode.STALE,
+                )
+            final_target = (
+                None
+                if target is None
+                else next(
+                    (
+                        item
+                        for item in final_visible.tasks
+                        if item.task_id == target.task_id
+                    ),
+                    None,
+                )
+            )
+            if target is not None and final_target != target:
+                raise FormalTaskViolation(
+                    "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                    "target Task changed during final invocation preparation",
+                    ErrorCode.STALE,
+                )
+
+            arguments = dict(resolution.arguments)
+            issued_at = now
+            request_identity = _required_text(request_id, "request_id", maximum=256)
+            correlation = _required_text(correlation_id, "correlation_id", maximum=256)
+            origin_payload = self._production_origin_payload(origin_binding)
+            target_id = resolution.target_task_id
+            grant: TaskAuthorizationGrant
+            if operation in P3_QUERY_OPERATIONS:
+                if resolution.confirmation != "not_required":
+                    raise FormalTaskViolation(
+                        "PRODUCTION_CONFIRMATION_MISMATCH",
+                        "read-only production query cannot consume confirmation",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                payload: dict[str, object]
+                if operation == "task.list":
+                    payload = {"cursor": None, "limit": int(arguments["limit"])}
+                    query_target = "task-list"
+                elif operation == "task.events":
+                    payload = {
+                        "after_seq": int(arguments["after_seq"]),
+                        "limit": int(arguments["limit"]),
+                    }
+                    assert target_id is not None
+                    query_target = target_id
+                else:
+                    payload = {}
+                    assert target_id is not None
+                    query_target = target_id
+                envelope: CommandEnvelope | QueryEnvelope = QueryEnvelope.from_dict(
+                    {
+                        "contract_version": CONTRACT_VERSION,
+                        "request_id": request_identity,
+                        "query_type": operation,
+                        "issued_at": issued_at,
+                        "scope": authority.scope.to_dict(),
+                        "correlation_id": correlation,
+                        "causation_id": None,
+                        "target_ref": {"kind": "task", "id": query_target},
+                        "context_refs": [],
+                        "required_capabilities": [operation],
+                        "payload": payload,
+                        "extensions": {},
+                    }
+                )
+                grant = TaskAuthorizationGrant(
+                    principal_id=principal.principal_id,
+                    scope=authority.scope,
+                    operation=operation,
+                    command_id=None,
+                    target_task_id=(None if operation == "task.list" else target_id),
+                    allowed_capabilities=frozenset({operation}),
+                    confirmation_id=None,
+                    confirmed=False,
+                    expires_at=principal.expires_at,
+                )
+                result = await self._run_blocking(
+                    self._core.query,
+                    envelope,
+                    grant,
+                    now=now,
+                )
+            else:
+                if (
+                    resolution.confirmation != "confirmed"
+                    or resolution.confirmation_binding is None
+                    or type(confirmation_consumer)
+                    is not CallLocalProductionConfirmationConsumer
+                    or not confirmation_consumer.bound_to_verifier(
+                        self._confirmation_verifier
+                    )
+                ):
+                    raise FormalTaskViolation(
+                        "PRODUCTION_CONFIRMATION_REQUIRED",
+                        "production Task mutation requires one consumed confirmation",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                current_capability = self._production_capability_digest(
+                    final_visible, final_target
+                )
+                if (
+                    resolution.confirmation_binding.capability_profile_digest
+                    != current_capability
+                ):
+                    raise FormalTaskViolation(
+                        "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                        "Executor capability changed after confirmation",
+                        ErrorCode.STALE,
+                    )
+                command_payload: dict[str, object]
+                selection: PersistedExecutorSelection | None = None
+                command_context: ResolvedTaskContext | None = None
+                if operation == "task.create":
+                    if self._model_resolver is None:
+                        raise FormalTaskViolation(
+                            "P3_MODEL_CATALOG_UNAVAILABLE",
+                            "production task.create requires model authority",
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                        )
+                    model = await self._run_blocking(
+                        self._model_resolver.resolve,
+                        None,
+                        instantiate=False,
+                    )
+                    command_payload = {
+                        "name": arguments["name"],
+                        "instruction": arguments["instruction"],
+                        "executor_id": FORMAL_PROJECT_EXECUTOR_ID,
+                        "side_effect_class": "project_mutation",
+                        "attributes": {
+                            "model_identity": model.identity,
+                            "model_config_version": model.config_version,
+                        },
+                    }
+                    command_context = authority.context
+                elif operation == "task.update":
+                    assert final_target is not None and task_snapshot is not None
+                    persistent_task, persistent_attempt, _admission = task_snapshot
+                    if (
+                        persistent_task.task_id != final_target.task_id
+                        or persistent_attempt.attempt_id != final_target.attempt_id
+                        or persistent_task.event_head != final_target.event_head
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                            "update preparation no longer binds the current Task",
+                            ErrorCode.STALE,
+                        )
+                    command_payload = {
+                        "attempt_id": final_target.attempt_id,
+                        "expected_event_head": final_target.event_head,
+                        "instruction": arguments["instruction"],
+                        "constraints": list(persistent_task.spec.constraints),
+                    }
+                elif operation == "task.adjust":
+                    command_payload = {"adjustment": arguments["adjustment"]}
+                elif operation == "task.reprioritize":
+                    assert final_target is not None and task_snapshot is not None
+                    persistent_task, persistent_attempt, _admission = task_snapshot
+                    if (
+                        persistent_task.task_id != final_target.task_id
+                        or persistent_attempt.attempt_id != final_target.attempt_id
+                        or persistent_task.event_head != final_target.event_head
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                            "reprioritize preparation no longer binds the current Task",
+                            ErrorCode.STALE,
+                        )
+                    command_payload = {
+                        "attempt_id": final_target.attempt_id,
+                        "expected_event_head": final_target.event_head,
+                        "priority": arguments["priority"],
+                        "reason": "production_intent",
+                    }
+                elif operation == "task.cancel":
+                    command_payload = {}
+                else:
+                    assert operation == "task.create_successor"
+                    assert final_target is not None and task_snapshot is not None
+                    persistent_task, persistent_attempt, _admission = task_snapshot
+                    if (
+                        persistent_task.task_id != final_target.task_id
+                        or persistent_attempt.attempt_id != final_target.attempt_id
+                        or persistent_task.event_head != final_target.event_head
+                        or persistent_task.outcome is None
+                        or final_target.terminal_event_id is None
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                            "successor preparation no longer binds the predecessor",
+                            ErrorCode.STALE,
+                        )
+                    prior_context = persistent_task.spec.context
+                    if (
+                        prior_context.source,
+                        prior_context.stable_id,
+                        prior_context.uri,
+                        prior_context.scope,
+                    ) != (
+                        authority.context.source,
+                        authority.context.stable_id,
+                        authority.context.uri,
+                        authority.context.scope,
+                    ):
+                        raise FormalTaskViolation(
+                            "TASK_SUCCESSOR_CONTEXT_IDENTITY_MISMATCH",
+                            "successor context changed its predecessor project identity",
+                            ErrorCode.PERMISSION_DENIED,
+                        )
+                    attributes = dict(persistent_task.spec.attributes)
+                    if set(attributes) != {
+                        "model_identity",
+                        "model_config_version",
+                    }:
+                        raise FormalTaskViolation(
+                            "INVALID_FORMAL_TASK_ATTRIBUTES",
+                            "successor predecessor lacks one exact model binding",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    if self._model_resolver is None:
+                        raise FormalTaskViolation(
+                            "P3_MODEL_CATALOG_UNAVAILABLE",
+                            "production successor requires model authority",
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                        )
+                    model = await self._run_blocking(
+                        self._model_resolver.resolve,
+                        attributes["model_identity"],
+                        expected_identity=attributes["model_identity"],
+                        expected_config_version=attributes["model_config_version"],
+                        instantiate=False,
+                    )
+                    command_payload = {
+                        "expected_predecessor_revision_number": final_target.revision_number,
+                        "expected_predecessor_event_head": final_target.event_head,
+                        "predecessor_terminal_event_id": final_target.terminal_event_id,
+                        "predecessor_outcome": persistent_task.outcome.value,
+                        "predecessor_result_sha256": final_target.result_digest,
+                        "name": arguments["name"],
+                        "instruction": arguments["instruction"],
+                        "constraints": list(persistent_task.spec.constraints),
+                        "executor_id": persistent_task.spec.executor_id,
+                        "side_effect_class": persistent_task.spec.side_effect_class,
+                        "attributes": {
+                            "model_identity": model.identity,
+                            "model_config_version": model.config_version,
+                        },
+                    }
+                    command_context = authority.context
+                assert resolution.command_id is not None
+                envelope = CommandEnvelope.from_dict(
+                    {
+                        "contract_version": CONTRACT_VERSION,
+                        "request_id": request_identity,
+                        "command_id": resolution.command_id,
+                        "command_type": operation,
+                        "issued_at": issued_at,
+                        "scope": authority.scope.to_dict(),
+                        "correlation_id": correlation,
+                        "causation_id": None,
+                        "origin": origin_payload,
+                        "target_ref": {
+                            "kind": "task",
+                            "id": (
+                                f"create:{resolution.command_id}"
+                                if operation == "task.create"
+                                else target_id
+                            ),
+                        },
+                        "context_refs": [],
+                        "required_capabilities": [operation],
+                        "payload": command_payload,
+                        "extensions": {},
+                    }
+                )
+                if operation == "task.create":
+                    fresh_selection = self._select_create_executor(
+                        envelope,
+                        command_context,
+                    )
+                    if (
+                        create_selection is None
+                        or fresh_selection is None
+                        or fresh_selection != create_selection
+                        or fresh_selection.capability_profile_digest
+                        != current_capability
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                            "task.create Executor selection changed after confirmation",
+                            ErrorCode.STALE,
+                        )
+                    selection = fresh_selection
+                elif operation == "task.create_successor":
+                    assert task_snapshot is not None
+                    _persistent_task, persistent_attempt, _admission = task_snapshot
+                    persisted_selection = persistent_attempt.selection
+                    if (
+                        persisted_selection is None
+                        or persisted_selection.capability_profile_digest
+                        != current_capability
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                            "successor Executor selection changed after confirmation",
+                            ErrorCode.STALE,
+                        )
+                    if self._executor_profiles is None:
+                        raise FormalTaskViolation(
+                            "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                            "production successor requires the persisted Executor candidate",
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                        )
+                    matching_profiles = tuple(
+                        profile
+                        for profile in self._executor_profiles
+                        if profile.adapter_id == persisted_selection.adapter_id
+                        and profile.canonical_bytes()
+                        == persisted_selection.capability_profile_json
+                        and profile.digest_sha256()
+                        == persisted_selection.capability_profile_digest
+                    )
+                    if len(matching_profiles) != 1:
+                        raise FormalTaskViolation(
+                            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                            "persisted successor Executor candidate is no longer exact",
+                            ErrorCode.STALE,
+                        )
+                    selection = persisted_selection
+                claim = confirmation_consumer.claim_for(resolution)
+                if (
+                    type(claim) is not CallLocalProductionConfirmationClaim
+                    or claim.production_binding != resolution.confirmation_binding
+                    or claim.consumption_id != resolution.confirmation_consumption_id
+                    or claim.resolution_fingerprint != resolution.fingerprint
+                    or claim.p3_binding.intent_fingerprint
+                    != claim.production_binding.fingerprint
+                    or claim.verified.replayed
+                ):
+                    raise FormalTaskViolation(
+                        "PRODUCTION_CONFIRMATION_CLAIM_INVALID",
+                        "Core composition requires the exact sealed call-local claim",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                expected_p3 = claim.p3_binding
+                if (
+                    expected_p3.principal_id != principal.principal_id
+                    or expected_p3.scope != authority.scope
+                    or expected_p3.operation != operation
+                    or expected_p3.command_id != resolution.command_id
+                    or expected_p3.target_task_id != target_id
+                ):
+                    raise FormalTaskViolation(
+                        "PRODUCTION_CONFIRMATION_AUTHORITY_MISMATCH",
+                        "call-local confirmation claim no longer matches current authority",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                grant = TaskAuthorizationGrant(
+                    principal_id=principal.principal_id,
+                    scope=authority.scope,
+                    operation=operation,
+                    command_id=resolution.command_id,
+                    target_task_id=(None if operation == "task.create" else target_id),
+                    allowed_capabilities=frozenset({operation}),
+                    confirmation_id=claim.verified.confirmation_id,
+                    confirmed=True,
+                    expires_at=_earlier_expiry(
+                        principal.expires_at, claim.verified.expires_at
+                    ),
+                )
+                result = await self._run_blocking(
+                    self._core.execute,
+                    envelope,
+                    grant,
+                    context=command_context,
+                    now=now,
+                    current_background_session_id=(
+                        current_background_session_id
+                        if operation == "task.create"
+                        else None
+                    ),
+                    selection=selection,
+                    admission_policy=(
+                        self._admission_policy if selection is not None else None
+                    ),
+                )
+                if result.ok:
+                    self._wake.set()
+            outcome = "accepted" if result.ok else "rejected"
+            reason = None if result.error is None else result.error.reason
+            return P3RouteResult(result.ok, result.to_dict())
+        except FormalTaskViolation as error:
+            reason = error.reason
+            return P3RouteResult(
+                False,
+                {
+                    "request_id": request_id,
+                    "ok": False,
+                    "result": None,
+                    "error": {
+                        "code": error.code.value,
+                        "message": str(error),
+                        "reason": error.reason,
+                        "retryable": error.code
+                        in {ErrorCode.UNAVAILABLE, ErrorCode.TIMEOUT},
+                        "details": {},
+                    },
+                },
+            )
+        finally:
+            if entered:
+                await self._leave_operation()
+            try:
+                self._telemetry.emit(
+                    P3RouteTelemetry(
+                        operation=str(operation or "production.unknown"),
+                        outcome=outcome,
+                        reason=reason,
+                        duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                    )
+                )
+            except Exception:  # noqa: BLE001 -- telemetry cannot change authority
+                logger.exception("[LiveVoiceP3] telemetry sink failed")
+
     async def handle(
         self,
         *,
@@ -3689,11 +4473,14 @@ __all__ = [
     "AuthenticatedPrincipal",
     "LoggingP3TelemetrySink",
     "P3AuthenticatedComposition",
+    "PreparedProductionIntentAuthority",
     "PreparedP3MutationConfirmation",
     "P3ConfirmationBinding",
     "P3RouteResult",
     "P3RouteTelemetry",
     "P3_MUTATIONS",
+    "P3_PRODUCTION_MUTATIONS",
+    "P3_PRODUCTION_OPERATIONS",
     "P3_ROUTE_METHODS",
     "P3_TARGETED_MUTATIONS",
     "ServerSessionProjectAuthorityResolver",

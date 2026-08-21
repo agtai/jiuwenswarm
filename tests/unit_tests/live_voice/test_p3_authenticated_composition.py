@@ -56,8 +56,10 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
     AuthenticatedPrincipal,
     P3AuthenticatedComposition,
+    PreparedProductionIntentAuthority,
     P3_MUTATIONS,
     P3_OPERATIONS,
+    P3_PRODUCTION_OPERATIONS,
     P3_PRODUCT_AUTHORITY_OPERATIONS,
     P3_ROUTE_METHODS,
     P3_TARGETED_MUTATIONS,
@@ -69,8 +71,17 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     _resolve_database_path,
     create_p3_composition_from_environment,
 )
+from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
+    CallLocalProductionConfirmationConsumer,
+    CallLocalProductionOriginAuthority,
+    StoreProductionTaskAuthorityReader,
+)
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     TaskPresentationDelivery,
+)
+from jiuwenswarm.server.live_voice.product_composition_registry import (
+    AgentServerProductCompositionRegistry,
+    ProductCompositionSettings,
 )
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityDecisionStatus,
@@ -79,10 +90,16 @@ from jiuwenswarm.server.live_voice.product_authority import (
     ProductAuthorityService,
 )
 from jiuwenswarm.server.live_voice.p3_confirmation import (
+    BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
+    P3ConfirmationOwnerContext,
     PreparedP3RetryFacts,
     SqliteP3ConfirmationLedger,
+    TrustedP3ConfirmationIssue,
     p3_confirmation_intent_fingerprint,
+)
+from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+    ProductP3ConfirmationForwarder,
 )
 from jiuwenswarm.server.live_voice.p3_model_resolution import (
     ResolvedP3Model,
@@ -94,11 +111,21 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
+from jiuwenswarm.server.live_voice.production_task_classifier import (
+    ProductionTaskIntentClassifier,
+)
+from jiuwenswarm.server.live_voice.production_task_intent import (
+    BoundedClarificationOwner,
+    ProductionIntentOrigin,
+    ProductionTaskIntentRequest,
+    build_production_origin_binding,
+)
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
 )
+from jiuwenswarm.server.live_voice.voice_task_bridge import VoiceTaskBridge
 from jiuwenswarm.server.live_voice.voice_task_policy import FormalTaskPolicyAdapter
 
 NOW = "2026-08-05T12:00:00Z"
@@ -321,6 +348,308 @@ class _ModelResolver:
         )
 
 
+class _NoProductionConfirmation:
+    def verify_and_consume(self, confirmation_id, binding):
+        del confirmation_id, binding
+        raise AssertionError("read-only production query consumed confirmation")
+
+
+def _confirmed_production_resolution(
+    harness: _Harness,
+    tmp_path: Path,
+    *,
+    operation: str,
+    target: str | None,
+    arguments: dict[str, object],
+    identity: str,
+    now: str,
+    expires_at: str,
+):
+    classifier = ProductionTaskIntentClassifier()
+    proposal = classifier.parse_structured(
+        {"operation": operation, "target": target, "arguments": arguments},
+        committed=True,
+        source_confidence=1.0,
+    )
+    request = ProductionTaskIntentRequest(
+        origin=ProductionIntentOrigin.STRUCTURED,
+        scope=_scope(),
+        command_id=f"command-production-{identity}",
+        proposal=proposal,
+        source_id=f"structured-production-{identity}",
+    )
+    expected_origin = build_production_origin_binding(request)
+    origin_authority = CallLocalProductionOriginAuthority(
+        expected_binding=expected_origin
+    )
+    reader_arguments: dict[str, object] = {
+        "store": harness.composition._core.store,
+        "principal_id": _scope().subject_id,
+        "scope": _scope(),
+    }
+    if operation == "task.create":
+        reader_arguments["collection_capability_profile_digest"] = (
+            harness.composition._select_production_create_candidate().capability_profile_digest
+        )
+    reader = StoreProductionTaskAuthorityReader(**reader_arguments)
+    clarification = BoundedClarificationOwner(
+        capacity=8,
+        per_subject_capacity=2,
+        boot_id=f"production-{identity}-boot",
+    )
+    bridge = VoiceTaskBridge()
+    prepared = bridge.resolve_production(
+        request,
+        reader,
+        origin_authority,
+        _NoProductionConfirmation(),
+        clarification,
+    )
+    assert prepared.confirmation == "required", prepared
+    assert prepared.confirmation_binding is not None
+    production_binding = prepared.confirmation_binding
+    p3_binding = P3ConfirmationBinding(
+        principal_id=_scope().subject_id,
+        scope=_scope(),
+        operation=production_binding.operation,
+        command_id=production_binding.command_id,
+        target_task_id=production_binding.target_task_id,
+        intent_fingerprint=production_binding.fingerprint,
+    )
+    owner_context = P3ConfirmationOwnerContext(
+        session_id="session-1",
+        correlation_id=f"correlation-production-{identity}",
+        owner_generation=1,
+    )
+    owner = BoundedP3ConfirmationOwner(
+        harness.database,
+        enabled=True,
+    )
+    confirmation_id = f"confirmation-production-{identity}"
+    owner.issue(
+        TrustedP3ConfirmationIssue(
+            binding=p3_binding,
+            owner=owner_context,
+            expires_at=expires_at,
+            confirmation_id=confirmation_id,
+        ),
+        now=now,
+    )
+    validated = owner.validate_for_forwarding(
+        confirmation_id,
+        p3_binding,
+        owner_context,
+        now=now,
+    )
+    consumer = CallLocalProductionConfirmationConsumer(
+        expected_binding=production_binding,
+        validated=validated,
+        forwarder=ProductP3ConfirmationForwarder(owner),
+        now=now,
+    )
+    confirmed = bridge.resolve_production(
+        replace(request, confirmation_id=confirmation_id),
+        reader,
+        origin_authority,
+        consumer,
+        clarification,
+    )
+    assert confirmed.confirmation == "confirmed", confirmed
+    return confirmed, origin_authority, consumer
+
+
+@pytest.mark.asyncio
+async def test_production_core_rejects_duck_typed_origin_authority(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={
+            "session-1": _context(
+                tmp_path,
+                expires_at="2026-08-22T04:00:00Z",
+            )
+        },
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        expires_at="2026-08-22T04:00:00Z",
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        resolution, _origin_authority, consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.create",
+            target=None,
+            arguments={"name": "sealed", "instruction": "stay sealed"},
+            identity="forged-origin",
+            now=run_now,
+            expires_at="2026-08-21T02:02:00Z",
+        )
+        before = _store_counts(harness.database)
+
+        class _ForgedOriginAuthority:
+            calls = 0
+
+            def verify_origin(self, _binding):
+                self.calls += 1
+                raise AssertionError("duck-typed origin authority was invoked")
+
+        forged = _ForgedOriginAuthority()
+        routed = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-forged-origin",
+            session_id="session-1",
+            correlation_id="correlation-production-forged-origin",
+            origin_authority=forged,  # type: ignore[arg-type]
+            confirmation_consumer=consumer,
+        )
+
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] == (
+            "PRODUCTION_ORIGIN_AUTHORITY_MISMATCH"
+        )
+        assert forged.calls == 0
+        assert _store_counts(harness.database) == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_core_rejects_duck_typed_confirmation_consumer(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={
+            "session-1": _context(
+                tmp_path,
+                expires_at="2026-08-22T04:00:00Z",
+            )
+        },
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        expires_at="2026-08-22T04:00:00Z",
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        resolution, origin_authority, _consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.create",
+            target=None,
+            arguments={"name": "sealed", "instruction": "stay sealed"},
+            identity="forged-consumer",
+            now=run_now,
+            expires_at="2026-08-21T02:02:00Z",
+        )
+        before = _store_counts(harness.database)
+
+        class _ForgedConsumer:
+            def claim_for(self, _resolution):
+                raise AssertionError("duck-typed confirmation consumer was invoked")
+
+        routed = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-forged-consumer",
+            session_id="session-1",
+            correlation_id="correlation-production-forged-consumer",
+            origin_authority=origin_authority,
+            confirmation_consumer=_ForgedConsumer(),  # type: ignore[arg-type]
+        )
+
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] == "PRODUCTION_CONFIRMATION_REQUIRED"
+        assert _store_counts(harness.database) == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
+
+        production_binding = resolution.confirmation_binding
+        assert production_binding is not None
+        rogue_owner = BoundedP3ConfirmationOwner(
+            tmp_path / "rogue-production-confirmations.sqlite3",
+            enabled=True,
+        )
+        rogue_p3_binding = P3ConfirmationBinding(
+            principal_id=production_binding.principal_id,
+            scope=production_binding.scope,
+            operation=production_binding.operation,
+            command_id=production_binding.command_id,
+            target_task_id=production_binding.target_task_id,
+            intent_fingerprint=production_binding.fingerprint,
+        )
+        rogue_context = P3ConfirmationOwnerContext(
+            session_id="session-1",
+            correlation_id="correlation-production-forged-ledger",
+            owner_generation=1,
+        )
+        rogue_id = "confirmation-production-forged-ledger"
+        rogue_owner.issue(
+            TrustedP3ConfirmationIssue(
+                binding=rogue_p3_binding,
+                owner=rogue_context,
+                expires_at="2026-08-21T02:02:00Z",
+                confirmation_id=rogue_id,
+            ),
+            now=run_now,
+        )
+        rogue_consumer = CallLocalProductionConfirmationConsumer(
+            expected_binding=production_binding,
+            validated=rogue_owner.validate_for_forwarding(
+                rogue_id,
+                rogue_p3_binding,
+                rogue_context,
+                now=run_now,
+            ),
+            forwarder=ProductP3ConfirmationForwarder(rogue_owner),
+            now=run_now,
+        )
+        rogue_receipt = rogue_consumer.verify_and_consume(rogue_id, production_binding)
+        rogue_routed = await harness.composition.handle_production_resolution(
+            resolution=replace(
+                resolution,
+                confirmation_consumption_id=rogue_receipt.consumption_id,
+            ),
+            bearer_token=TOKEN,
+            request_id="request-production-forged-ledger",
+            session_id="session-1",
+            correlation_id="correlation-production-forged-ledger",
+            origin_authority=origin_authority,
+            confirmation_consumer=rogue_consumer,
+        )
+        assert rogue_routed.ok is False
+        assert rogue_routed.payload["error"]["reason"] == (
+            "PRODUCTION_CONFIRMATION_REQUIRED"
+        )
+        assert _store_counts(harness.database) == before
+    finally:
+        await harness.composition.stop()
+
+
+async def _stop_test_reconciliation_worker(
+    composition: P3AuthenticatedComposition,
+) -> None:
+    """Leave the route accepting while deterministic tests invoke Core directly."""
+
+    worker = composition._worker
+    assert worker is not None
+    composition._closed = True
+    composition._wake.set()
+    await worker
+    composition._worker = None
+    composition._closed = False
+
+
 @dataclass
 class _Harness:
     composition: P3AuthenticatedComposition
@@ -356,6 +685,7 @@ def _harness(
     allowed_operations: frozenset[str] = P3_OPERATIONS,
     commit_ledger: TurnCommitLedger | None = None,
     executor_profiles: tuple[ExecutorCapabilityProfile, ...] | None = None,
+    clock=None,
 ) -> _Harness:
     database = tmp_path / "formal-tasks.sqlite3"
     executor = _Executor()
@@ -389,7 +719,7 @@ def _harness(
         telemetry=telemetry,
         policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=3600,
-        clock=lambda: NOW,
+        clock=clock or (lambda: NOW),
         executor_profiles=executor_profiles,
     )
     return _Harness(
@@ -402,6 +732,1064 @@ def _harness(
         confirmations,
         models,
     )
+
+
+def _production_registry_text_params(
+    *,
+    stem: str,
+    text: str,
+    continuation_id: str | None = None,
+) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": TOKEN,
+        "session_id": "session-1",
+        "correlation_id": f"production-correlation-{stem}",
+        "source": "text",
+        "interaction_id": "production-intent-interaction",
+        "turn_id": f"production-turn-{stem}",
+        "commit_id": f"production-commit-{stem}",
+        "committed_at": NOW,
+        "text": text,
+    }
+    if continuation_id is not None:
+        params["continuation_id"] = continuation_id
+    return params
+
+
+@pytest.mark.asyncio
+async def test_registry_production_classifier_bridge_store_and_core_without_hints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commits = TurnCommitLedger()
+    harness = _harness(
+        tmp_path,
+        commit_ledger=commits,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        commit_ledger=commits,
+    )
+    created_pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="create",
+            text="新建一个任务，基于合成依赖起草发布说明。",
+        ),
+        request_id="production-intent-create",
+        session_id="session-1",
+    )
+    assert created_pending.ok is True, created_pending.payload
+    pending_result = created_pending.payload["result"]
+    assert isinstance(pending_result, dict)
+    token = pending_result["confirmation_token"]
+    assert isinstance(token, str)
+    assert pending_result["operation"] == "task.create"
+    retained_confirmation = registry._pending_production_task_intents[token]
+    assert retained_confirmation.confirmation_id is not None
+    assert retained_confirmation.confirmation_owner_context is not None
+    production_binding = retained_confirmation.resolution.confirmation_binding
+    assert production_binding is not None
+    owner.validate_for_forwarding(
+        retained_confirmation.confirmation_id,
+        P3ConfirmationBinding(
+            principal_id=production_binding.principal_id,
+            scope=production_binding.scope,
+            operation=production_binding.operation,
+            command_id=production_binding.command_id,
+            target_task_id=production_binding.target_task_id,
+            intent_fingerprint=production_binding.fingerprint,
+        ),
+        retained_confirmation.confirmation_owner_context,
+        now=NOW,
+    )
+
+    create_confirmation_params = _production_registry_text_params(
+        stem="create-confirm",
+        text=f"confirm task request {token}",
+        continuation_id=token,
+    )
+    original_issue = owner.issue
+
+    def unexpected_reissue(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("confirmation answer cannot issue a new authority fact")
+
+    monkeypatch.setattr(owner, "issue", unexpected_reissue)
+    created = await registry.handle_p3_intent(
+        params=create_confirmation_params,
+        request_id="production-intent-create-confirm",
+        session_id="session-1",
+    )
+    monkeypatch.setattr(owner, "issue", original_issue)
+    assert created.ok is True, created.payload
+    created_result = created.payload["result"]
+    assert isinstance(created_result, dict)
+    assert created_result["status"] == "dispatched"
+    task_id = created_result["task_id"]
+    assert isinstance(task_id, str)
+    assert harness.composition._core.store.get_task(task_id, _scope()) is not None
+    after_create = harness.composition._core.store.counts()
+    replayed_create = await registry.handle_p3_intent(
+        params=create_confirmation_params,
+        request_id="production-intent-create-confirm",
+        session_id="session-1",
+    )
+    assert replayed_create.payload == created.payload
+    assert harness.composition._core.store.counts() == after_create
+    changed_replay = await registry.handle_p3_intent(
+        params={**create_confirmation_params, "text": "confirm changed request"},
+        request_id="production-intent-create-confirm",
+        session_id="session-1",
+    )
+    assert changed_replay.ok is False
+    assert changed_replay.payload["error"]["reason"] == ("PRODUCT_REQUEST_ID_CONFLICT")
+    assert harness.composition._core.store.counts() == after_create
+
+    recovered_create = await registry.handle_p3_intent_status(
+        params={
+            "auth_token": TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "production-correlation-create-confirm",
+            "intent_request_id": "production-intent-create-confirm",
+        },
+        request_id="production-intent-create-recovery",
+        session_id="session-1",
+    )
+    assert recovered_create.ok is True, recovered_create.payload
+    recovered_result = recovered_create.payload["result"]
+    assert isinstance(recovered_result, dict)
+    assert recovered_result["status"] == "settled"
+    recovered_intent = recovered_result["intent"]
+    assert isinstance(recovered_intent, dict)
+    assert recovered_intent["formal_task_result"] == {
+        "recovered": True,
+        "task_id": task_id,
+    }
+    assert harness.composition._core.store.counts() == after_create
+
+    reprioritize_pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="reprioritize",
+            text="Set priority urgent for task named Synthetic release notes.",
+        ),
+        request_id="production-intent-reprioritize",
+        session_id="session-1",
+    )
+    assert reprioritize_pending.ok is True, reprioritize_pending.payload
+    reprioritize_pending_result = reprioritize_pending.payload["result"]
+    assert isinstance(reprioritize_pending_result, dict)
+    reprioritize_token = reprioritize_pending_result["confirmation_token"]
+    assert isinstance(reprioritize_token, str)
+    reprioritized = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="reprioritize-confirm",
+            text=f"confirm task request {reprioritize_token}",
+            continuation_id=reprioritize_token,
+        ),
+        request_id="production-intent-reprioritize-confirm",
+        session_id="session-1",
+    )
+    assert reprioritized.ok is True, reprioritized.payload
+    assert (
+        harness.composition._core.store.admission_projection(
+            task_id, _scope()
+        ).priority.value
+        == "urgent"
+    )
+
+    listed = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="list",
+            text="列出当前任务",
+        ),
+        request_id="production-intent-list",
+        session_id="session-1",
+    )
+    assert listed.ok is True, listed.payload
+    listed_result = listed.payload["result"]
+    assert isinstance(listed_result, dict)
+    assert listed_result["operation"] == "task.list"
+    formal_list = listed_result["formal_task_result"]
+    assert isinstance(formal_list, dict)
+    assert any(item["task_id"] == task_id for item in formal_list["tasks"])
+
+    authenticator = harness.composition._authenticator
+
+    class _RevokedAuthenticator:
+        def authenticate(
+            self, *_args: object, **_kwargs: object
+        ) -> AuthenticatedPrincipal:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "revoked production intent bearer",
+                ErrorCode.UNAUTHENTICATED,
+            )
+
+    before_revoked_replay = harness.composition._core.store.counts()
+    harness.composition._authenticator = _RevokedAuthenticator()
+    revoked_replay = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="list",
+            text="列出当前任务",
+        ),
+        request_id="production-intent-list",
+        session_id="session-1",
+    )
+    assert revoked_replay.ok is False
+    assert revoked_replay.payload["error"]["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert harness.composition._core.store.counts() == before_revoked_replay
+    harness.composition._authenticator = authenticator
+
+    status = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="status",
+            text=f"status {task_id}",
+        ),
+        request_id="production-intent-status",
+        session_id="session-1",
+    )
+    assert status.ok is True, status.payload
+    status_result = status.payload["result"]
+    assert isinstance(status_result, dict)
+    assert status_result["operation"] == "task.status"
+    assert status_result["task_id"] == task_id
+
+    structured_status = await registry.handle_p3_intent(
+        params={
+            "auth_token": TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "production-correlation-structured-status",
+            "source": "structured",
+            "source_id": "accepted-structured-status",
+            "structured_intent": {
+                "operation": "task.status",
+                "target": task_id,
+                "arguments": {"query_kind": "status"},
+            },
+        },
+        request_id="production-intent-structured-status",
+        session_id="session-1",
+    )
+    assert structured_status.ok is True, structured_status.payload
+    structured_result = structured_status.payload["result"]
+    assert isinstance(structured_result, dict)
+    assert structured_result["operation"] == "task.status"
+    assert structured_result["task_id"] == task_id
+    assert (
+        structured_result["formal_task_result"] == (status_result["formal_task_result"])
+    )
+
+    before_unsupported = harness.composition._core.store.counts()
+    unsupported_pause = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="pause",
+            text=f"pause {task_id}",
+        ),
+        request_id="production-intent-pause",
+        session_id="session-1",
+    )
+    assert unsupported_pause.ok is False
+    assert unsupported_pause.payload["error"]["code"] == ErrorCode.UNSUPPORTED.value
+    assert harness.composition._core.store.counts() == before_unsupported
+    assert registry._pending_production_task_intents == {}
+
+    cancel_pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="cancel",
+            text=f"cancel {task_id}",
+        ),
+        request_id="production-intent-cancel",
+        session_id="session-1",
+    )
+    assert cancel_pending.ok is True, cancel_pending.payload
+    cancel_pending_result = cancel_pending.payload["result"]
+    assert isinstance(cancel_pending_result, dict)
+    cancel_token = cancel_pending_result["confirmation_token"]
+    assert isinstance(cancel_token, str)
+    cancelled = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="cancel-confirm",
+            text=f"confirm task request {cancel_token}",
+            continuation_id=cancel_token,
+        ),
+        request_id="production-intent-cancel-confirm",
+        session_id="session-1",
+    )
+    assert cancelled.ok is True, cancelled.payload
+    cancelled_result = cancelled.payload["result"]
+    assert isinstance(cancelled_result, dict)
+    assert cancelled_result["status"] == "dispatched"
+    assert cancelled_result["task_id"] == task_id
+    assert registry._pending_production_task_intents == {}
+
+    await registry.stop()
+    await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_registry_inflight_production_replay_reauthorizes_resolved_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commits = TurnCommitLedger()
+    harness = _harness(
+        tmp_path,
+        commit_ledger=commits,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        commit_ledger=commits,
+    )
+    pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="inflight-create",
+            text="新建一个任务，基于合成依赖起草发布说明。",
+        ),
+        request_id="production-inflight-create",
+        session_id="session-1",
+    )
+    assert pending.ok is True, pending.payload
+    pending_result = pending.payload["result"]
+    assert isinstance(pending_result, dict)
+    token = pending_result["confirmation_token"]
+    assert isinstance(token, str)
+
+    base_authenticator = harness.composition._authenticator
+    observed_operations: list[str] = []
+
+    class _MutationRevokedAfterOriginalInvocation:
+        create_authentications = 0
+
+        def authenticate(
+            self, bearer_token: object, *, operation: str, now: str
+        ) -> AuthenticatedPrincipal:
+            observed_operations.append(operation)
+            if operation == "task.create":
+                self.create_authentications += 1
+                if self.create_authentications > 4:
+                    raise FormalTaskViolation(
+                        "PRODUCTION_MUTATION_AUTHORITY_REVOKED",
+                        "retained mutation authority was revoked",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+            return base_authenticator.authenticate(
+                bearer_token,
+                operation=operation,
+                now=now,
+            )
+
+    harness.composition._authenticator = _MutationRevokedAfterOriginalInvocation()
+    original_prepare = harness.composition.prepare_production_intent_authority
+    preparation_entered = threading.Event()
+    release_preparation = threading.Event()
+    prepare_calls = 0
+
+    def blocked_prepare(**kwargs: object) -> PreparedProductionIntentAuthority:
+        nonlocal prepare_calls
+        prepared = original_prepare(**kwargs)
+        if kwargs.get("operation") == "task.create":
+            prepare_calls += 1
+        if prepare_calls == 2:
+            preparation_entered.set()
+            if not release_preparation.wait(5):
+                raise AssertionError(
+                    "timed out waiting to release production preparation"
+                )
+        return prepared
+
+    monkeypatch.setattr(
+        harness.composition,
+        "prepare_production_intent_authority",
+        blocked_prepare,
+    )
+    confirmation_params = _production_registry_text_params(
+        stem="inflight-create-confirm",
+        text=f"confirm task request {token}",
+        continuation_id=token,
+    )
+    original = asyncio.create_task(
+        registry.handle_p3_intent(
+            params=confirmation_params,
+            request_id="production-inflight-create-confirm",
+            session_id="session-1",
+        )
+    )
+    assert await asyncio.to_thread(preparation_entered.wait, 5)
+    replay = asyncio.create_task(
+        registry.handle_p3_intent(
+            params=confirmation_params,
+            request_id="production-inflight-create-confirm",
+            session_id="session-1",
+        )
+    )
+    release_preparation.set()
+    original_result, replay_result = await asyncio.gather(original, replay)
+
+    assert original_result.ok is True, original_result.payload
+    assert replay_result.ok is False
+    assert replay_result.payload["error"]["reason"] == (
+        "PRODUCTION_MUTATION_AUTHORITY_REVOKED"
+    )
+    assert observed_operations.count("task.create") == 5
+    assert "task.list" not in observed_operations
+    assert harness.composition._core.store.counts()["tasks"] == 1
+
+    await registry.stop()
+    await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_registry_preflights_production_authority_before_replay_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commits = TurnCommitLedger()
+    harness = _harness(
+        tmp_path,
+        commit_ledger=commits,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=ProductP3ConfirmationForwarder(owner),
+        commit_ledger=commits,
+    )
+    retained = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="preflight-retained",
+            text="列出当前任务",
+        ),
+        request_id="production-preflight-retained",
+        session_id="session-1",
+    )
+    assert retained.ok is True, retained.payload
+    monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+    retained_entry = registry._p3_intent_operations["production-preflight-retained"]
+    authenticator = harness.composition._authenticator
+
+    class _RevokedAuthenticator:
+        def authenticate(
+            self, *_args: object, **_kwargs: object
+        ) -> AuthenticatedPrincipal:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "revoked before replay capacity",
+                ErrorCode.UNAUTHENTICATED,
+            )
+
+    harness.composition._authenticator = _RevokedAuthenticator()
+    rejected = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="preflight-revoked",
+            text="列出当前任务",
+        ),
+        request_id="production-preflight-revoked",
+        session_id="session-1",
+    )
+    assert rejected.ok is False
+    assert rejected.payload["error"]["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert registry._p3_intent_operations == {
+        "production-preflight-retained": retained_entry
+    }
+
+    harness.composition._authenticator = authenticator
+    uncommitted = await registry.handle_p3_intent(
+        params={
+            **_production_registry_text_params(
+                stem="preflight-uncommitted",
+                text="列出当前任务",
+            ),
+            "committed": False,
+        },
+        request_id="production-preflight-uncommitted",
+        session_id="session-1",
+    )
+    assert uncommitted.ok is False
+    assert uncommitted.payload["error"]["reason"] == "INPUT_NOT_COMMITTED"
+    assert registry._p3_intent_operations == {
+        "production-preflight-retained": retained_entry
+    }
+    assert registry._pending_production_task_intents == {}
+    assert registry._critical_input_guarded_commits == set()
+
+    voice_commit = TurnCommit.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "commit_id": "production-preflight-voice-commit",
+            "turn_id": "production-preflight-voice-turn",
+            "interaction_id": "production-preflight-voice-interaction",
+            "text": "新建一个任务，基于合成依赖起草发布说明。",
+            "hypothesis_provenance": {
+                "provider": "product.web.voice",
+                "kind": "committed_text",
+            },
+            "scope": _scope().to_dict(),
+            "context_refs": [],
+            "committed_at": NOW,
+        }
+    )
+    assert commits.accept(voice_commit) is True
+    voice_route = ("session-1", voice_commit.interaction_id)
+    registry._accepted_turn_commits_by_commit[voice_commit.commit_id] = voice_commit
+    registry._accepted_voice_commit_routes[voice_commit.commit_id] = voice_route
+    registry._p2_routes[voice_route] = object()  # type: ignore[assignment]
+    registry._critical_input_guarded_commits.add(voice_commit.commit_id)
+    before_voice_maps = (
+        dict(registry._accepted_turn_commits_by_commit),
+        dict(registry._accepted_voice_commit_routes),
+        dict(registry._p2_routes),
+        set(registry._critical_input_guarded_commits),
+    )
+    uncommitted_voice = await registry.handle_p3_intent(
+        params={
+            "auth_token": TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "production-preflight-voice-correlation",
+            "source": "voice",
+            "interaction_id": voice_commit.interaction_id,
+            "turn_id": voice_commit.turn_id,
+            "commit_id": voice_commit.commit_id,
+            "source_confidence": 1.0,
+            "committed": False,
+        },
+        request_id="production-preflight-uncommitted-voice",
+        session_id="session-1",
+    )
+    assert uncommitted_voice.ok is False
+    assert uncommitted_voice.payload["error"]["reason"] == "INPUT_NOT_COMMITTED"
+    assert (
+        dict(registry._accepted_turn_commits_by_commit),
+        dict(registry._accepted_voice_commit_routes),
+        dict(registry._p2_routes),
+        set(registry._critical_input_guarded_commits),
+    ) == before_voice_maps
+    assert registry._p3_intent_operations == {
+        "production-preflight-retained": retained_entry
+    }
+    registry._p2_routes.pop(voice_route)
+    registry._accepted_turn_commits_by_commit.pop(voice_commit.commit_id)
+    registry._accepted_voice_commit_routes.pop(voice_commit.commit_id)
+    registry._critical_input_guarded_commits.remove(voice_commit.commit_id)
+
+    feature_off = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=False,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=ProductP3ConfirmationForwarder(owner),
+        commit_ledger=commits,
+    )
+    disabled = await feature_off.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="preflight-disabled",
+            text="列出当前任务",
+        ),
+        request_id="production-preflight-disabled",
+        session_id="session-1",
+    )
+    assert disabled.ok is False
+    assert disabled.payload["error"]["reason"] == "PRODUCT_P3_TEXT_DISABLED"
+    assert feature_off._p3_intent_operations == {}
+
+    await feature_off.stop()
+    await registry.stop()
+    await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_registry_production_clarification_is_owner_bound_and_single_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commits = TurnCommitLedger()
+    harness = _harness(
+        tmp_path,
+        commit_ledger=commits,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        commit_ledger=commits,
+    )
+
+    async def create(stem: str) -> str:
+        pending = await registry.handle_p3_intent(
+            params=_production_registry_text_params(
+                stem=f"{stem}-create",
+                text="新建一个任务，基于合成依赖起草发布说明。",
+            ),
+            request_id=f"{stem}-create",
+            session_id="session-1",
+        )
+        assert pending.ok is True, pending.payload
+        result = pending.payload["result"]
+        assert isinstance(result, dict)
+        token = result["confirmation_token"]
+        assert isinstance(token, str)
+        confirmed = await registry.handle_p3_intent(
+            params=_production_registry_text_params(
+                stem=f"{stem}-confirm",
+                text=f"confirm task request {token}",
+                continuation_id=token,
+            ),
+            request_id=f"{stem}-confirm",
+            session_id="session-1",
+        )
+        assert confirmed.ok is True, confirmed.payload
+        confirmed_result = confirmed.payload["result"]
+        assert isinstance(confirmed_result, dict)
+        task_id = confirmed_result["task_id"]
+        assert isinstance(task_id, str)
+        return task_id
+
+    first_task = await create("duplicate-a")
+    second_task = await create("duplicate-b")
+    assert first_task != second_task
+    before = harness.composition._core.store.counts()
+
+    failed_issue_pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-cancel-failed-issue",
+            text="Cancel the task named Synthetic release notes.",
+        ),
+        request_id="duplicate-cancel-failed-issue",
+        session_id="session-1",
+    )
+    assert failed_issue_pending.ok is True, failed_issue_pending.payload
+    failed_issue_result = failed_issue_pending.payload["result"]
+    assert isinstance(failed_issue_result, dict)
+    assert failed_issue_result["status"] == "clarification"
+    failed_issue_token = failed_issue_result["confirmation_token"]
+    assert isinstance(failed_issue_token, str)
+    original_issue = owner.issue
+    issue_calls = 0
+
+    def fail_before_issue(*_args: object, **_kwargs: object) -> None:
+        nonlocal issue_calls
+        issue_calls += 1
+        raise FormalTaskViolation(
+            "P3_CONFIRMATION_UNAVAILABLE",
+            "injected confirmation issue failure",
+            ErrorCode.UNAVAILABLE,
+        )
+
+    monkeypatch.setattr(owner, "issue", fail_before_issue)
+    failed_issue = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-cancel-failed-answer",
+            text=f"cancel {second_task}",
+            continuation_id=failed_issue_token,
+        ),
+        request_id="duplicate-cancel-failed-answer",
+        session_id="session-1",
+    )
+    monkeypatch.setattr(owner, "issue", original_issue)
+    assert failed_issue.ok is False
+    assert failed_issue.payload["error"]["reason"] == "P3_CONFIRMATION_UNAVAILABLE"
+    assert issue_calls == 1
+    assert failed_issue_token not in registry._pending_production_task_intents
+    assert registry._pending_production_task_intents == {}
+    assert harness.composition._core.store.counts() == before
+    assert harness.executor.cancels == []
+
+    failed_issue_retry = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-cancel-failed-retry",
+            text=f"cancel {second_task}",
+            continuation_id=failed_issue_token,
+        ),
+        request_id="duplicate-cancel-failed-retry",
+        session_id="session-1",
+    )
+    assert failed_issue_retry.ok is False
+    assert failed_issue_retry.payload["error"]["reason"] == (
+        "TASK_INTENT_CONTINUATION_UNAVAILABLE"
+    )
+    assert harness.composition._core.store.counts() == before
+
+    committed_issue_pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-cancel-committed-issue",
+            text="Cancel the task named Synthetic release notes.",
+        ),
+        request_id="duplicate-cancel-committed-issue",
+        session_id="session-1",
+    )
+    assert committed_issue_pending.ok is True, committed_issue_pending.payload
+    committed_issue_result = committed_issue_pending.payload["result"]
+    assert isinstance(committed_issue_result, dict)
+    committed_clarification_token = committed_issue_result["confirmation_token"]
+    assert isinstance(committed_clarification_token, str)
+
+    def fail_after_issue(*args: object, **kwargs: object) -> None:
+        original_issue(*args, **kwargs)
+        raise RuntimeError("injected post-commit confirmation response loss")
+
+    monkeypatch.setattr(owner, "issue", fail_after_issue)
+    reconciled_issue = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-cancel-committed-answer",
+            text=f"cancel {second_task}",
+            continuation_id=committed_clarification_token,
+        ),
+        request_id="duplicate-cancel-committed-answer",
+        session_id="session-1",
+    )
+    monkeypatch.setattr(owner, "issue", original_issue)
+    assert reconciled_issue.ok is True, reconciled_issue.payload
+    reconciled_result = reconciled_issue.payload["result"]
+    assert isinstance(reconciled_result, dict)
+    assert reconciled_result["status"] == "clarification"
+    assert reconciled_result["reason"] == "TASK_CONFIRMATION_REQUIRED"
+    reconciled_token = reconciled_result["confirmation_token"]
+    assert isinstance(reconciled_token, str)
+    assert committed_clarification_token not in (
+        registry._pending_production_task_intents
+    )
+    assert reconciled_token in registry._pending_production_task_intents
+    assert harness.composition._core.store.counts() == before
+
+    retained_reconciled = registry._pending_production_task_intents[reconciled_token]
+    retained_binding = retained_reconciled.resolution.confirmation_binding
+    assert retained_binding is not None
+    expected_p3_binding = P3ConfirmationBinding(
+        principal_id=retained_binding.principal_id,
+        scope=retained_binding.scope,
+        operation=retained_binding.operation,
+        command_id=retained_binding.command_id,
+        target_task_id=retained_binding.target_task_id,
+        intent_fingerprint=retained_binding.fingerprint,
+    )
+    original_validate = owner.validate_for_forwarding
+    observed_confirmation_bindings: list[P3ConfirmationBinding] = []
+
+    def capture_confirmation_binding(
+        confirmation_id: str,
+        binding: P3ConfirmationBinding,
+        owner_context: P3ConfirmationOwnerContext,
+        *,
+        now: str,
+    ):
+        observed_confirmation_bindings.append(binding)
+        return original_validate(
+            confirmation_id,
+            binding,
+            owner_context,
+            now=now,
+        )
+
+    monkeypatch.setattr(owner, "validate_for_forwarding", capture_confirmation_binding)
+
+    cancelled = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-cancel-committed-confirm",
+            text=f"confirm task request {reconciled_token}",
+            continuation_id=reconciled_token,
+        ),
+        request_id="duplicate-cancel-committed-confirm",
+        session_id="session-1",
+    )
+    monkeypatch.setattr(owner, "validate_for_forwarding", original_validate)
+    assert observed_confirmation_bindings[-1] == expected_p3_binding
+    assert cancelled.ok is True, cancelled.payload
+    cancelled_result = cancelled.payload["result"]
+    assert isinstance(cancelled_result, dict)
+    assert cancelled_result["status"] == "dispatched"
+    assert cancelled_result["task_id"] == second_task
+    assert registry._pending_production_task_intents == {}
+    before = harness.composition._core.store.counts()
+
+    ambiguous = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-status",
+            text="status “Synthetic release notes”",
+        ),
+        request_id="duplicate-status",
+        session_id="session-1",
+    )
+    assert ambiguous.ok is True, ambiguous.payload
+    ambiguous_result = ambiguous.payload["result"]
+    assert isinstance(ambiguous_result, dict)
+    assert ambiguous_result["status"] == "clarification"
+    assert set(ambiguous_result["candidate_task_ids"]) == {
+        first_task,
+        second_task,
+    }
+    token = ambiguous_result["confirmation_token"]
+    assert isinstance(token, str)
+
+    wrong_hint = await registry.handle_p3_intent(
+        params={
+            **_production_registry_text_params(
+                stem="ambiguous-wrong-hint",
+                text=f"status {second_task}",
+                continuation_id=token,
+            ),
+            "operation_hint": "task.status",
+            "task_id_hint": first_task,
+        },
+        request_id="duplicate-status-wrong-hint",
+        session_id="session-1",
+    )
+    assert wrong_hint.ok is False
+    assert wrong_hint.payload["error"]["reason"] == "TASK_INTENT_HINT_MISMATCH"
+    assert token in registry._pending_production_task_intents
+    assert harness.composition._core.store.counts() == before
+
+    selected = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-select",
+            text=f"status {second_task}",
+            continuation_id=token,
+        ),
+        request_id="duplicate-status-selected",
+        session_id="session-1",
+    )
+    assert selected.ok is True, selected.payload
+    selected_result = selected.payload["result"]
+    assert isinstance(selected_result, dict)
+    assert selected_result["status"] == "dispatched"
+    assert selected_result["task_id"] == second_task
+    assert harness.composition._core.store.counts() == before
+
+    replay = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="ambiguous-replay",
+            text=f"status {second_task}",
+            continuation_id=token,
+        ),
+        request_id="duplicate-status-replay",
+        session_id="session-1",
+    )
+    assert replay.ok is False
+    assert replay.payload["error"]["reason"] == ("TASK_INTENT_CONTINUATION_UNAVAILABLE")
+    assert harness.composition._core.store.counts() == before
+    assert registry._pending_production_task_intents == {}
+
+    restart_pending = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="restart-status",
+            text="status “Synthetic release notes”",
+        ),
+        request_id="duplicate-status-restart",
+        session_id="session-1",
+    )
+    assert restart_pending.ok is True, restart_pending.payload
+    restart_result = restart_pending.payload["result"]
+    assert isinstance(restart_result, dict)
+    restart_token = restart_result["confirmation_token"]
+    assert isinstance(restart_token, str)
+    await registry.stop()
+
+    restarted = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        commit_ledger=commits,
+    )
+    after_restart = await restarted.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="restart-answer",
+            text=f"status {first_task}",
+            continuation_id=restart_token,
+        ),
+        request_id="duplicate-status-restart-answer",
+        session_id="session-1",
+    )
+    assert after_restart.ok is False
+    assert after_restart.payload["error"]["reason"] == (
+        "TASK_INTENT_CONTINUATION_UNAVAILABLE"
+    )
+    assert harness.composition._core.store.counts() == before
+    assert restarted._pending_production_task_intents == {}
+    await restarted.stop()
+    await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_registry_production_confirmation_task_set_drift_has_zero_effect(
+    tmp_path: Path,
+) -> None:
+    commits = TurnCommitLedger()
+    harness = _harness(
+        tmp_path,
+        commit_ledger=commits,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        commit_ledger=commits,
+    )
+    stale = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="stale-create",
+            text="新建一个任务，基于合成依赖起草发布说明。",
+        ),
+        request_id="stale-create",
+        session_id="session-1",
+    )
+    assert stale.ok is True, stale.payload
+    stale_result = stale.payload["result"]
+    assert isinstance(stale_result, dict)
+    stale_token = stale_result["confirmation_token"]
+    assert isinstance(stale_token, str)
+
+    intervening = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="intervening-create",
+            text="新建一个任务，基于合成依赖起草发布说明。",
+        ),
+        request_id="intervening-create",
+        session_id="session-1",
+    )
+    intervening_result = intervening.payload["result"]
+    assert isinstance(intervening_result, dict)
+    intervening_token = intervening_result["confirmation_token"]
+    assert isinstance(intervening_token, str)
+    accepted = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="intervening-confirm",
+            text=f"confirm task request {intervening_token}",
+            continuation_id=intervening_token,
+        ),
+        request_id="intervening-confirm",
+        session_id="session-1",
+    )
+    assert accepted.ok is True, accepted.payload
+    before_stale_confirmation = harness.composition._core.store.counts()
+
+    rejected = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="stale-confirm",
+            text=f"confirm task request {stale_token}",
+            continuation_id=stale_token,
+        ),
+        request_id="stale-confirm",
+        session_id="session-1",
+    )
+    assert rejected.ok is False
+    assert rejected.payload["error"]["reason"] == (
+        "TASK_INTENT_CONFIRMATION_FACTS_CHANGED"
+    )
+    assert harness.composition._core.store.counts() == before_stale_confirmation
+    assert stale_token not in registry._pending_production_task_intents
+
+    replay = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="stale-confirm-replay",
+            text=f"confirm task request {stale_token}",
+            continuation_id=stale_token,
+        ),
+        request_id="stale-confirm-replay",
+        session_id="session-1",
+    )
+    assert replay.ok is False
+    assert replay.payload["error"]["reason"] == ("TASK_INTENT_CONTINUATION_UNAVAILABLE")
+    assert harness.composition._core.store.counts() == before_stale_confirmation
+
+    await registry.stop()
+    await harness.composition.stop()
 
 
 def _base(session_id: str = "session-1") -> dict[str, object]:
@@ -674,6 +2062,530 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
     finally:
         await harness.composition.stop()
     assert harness.closer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_classifier_bridge_store_and_authenticated_core_queries(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-production-query-seed"),
+            request_id="request-production-query-seed",
+            session_id="session-1",
+        )
+        assert created.ok and created.payload["result"] is not None
+        task_id = str(created.payload["result"]["task_id"])
+        await harness.composition.reconcile_once()
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).state
+            is FormalTaskState.RUNNING
+        )
+        before = _store_counts(harness.database)
+        classifier = ProductionTaskIntentClassifier()
+        bridge = VoiceTaskBridge()
+        clarification = BoundedClarificationOwner(
+            capacity=8,
+            per_subject_capacity=2,
+            boot_id="production-query-boot",
+        )
+        reader = StoreProductionTaskAuthorityReader(
+            store=harness.composition._core.store,
+            principal_id=_scope().subject_id,
+            scope=_scope(),
+        )
+        cases = (
+            ("task.list", None, {"query_kind": "list", "limit": 20}),
+            ("task.get", task_id, {"query_kind": "get"}),
+            ("task.status", task_id, {"query_kind": "status"}),
+            (
+                "task.events",
+                task_id,
+                {"query_kind": "events", "after_seq": -1, "limit": 100},
+            ),
+            ("task.result", task_id, {"query_kind": "result"}),
+        )
+        assert {case[0] for case in cases} <= P3_PRODUCTION_OPERATIONS
+        results = {}
+        for index, (operation, target, arguments) in enumerate(cases):
+            proposal = classifier.parse_structured(
+                {
+                    "operation": operation,
+                    "target": target,
+                    "arguments": arguments,
+                },
+                committed=True,
+                source_confidence=1.0,
+            )
+            request = ProductionTaskIntentRequest(
+                origin=ProductionIntentOrigin.STRUCTURED,
+                scope=_scope(),
+                command_id=f"command-production-query-{index}",
+                proposal=proposal,
+                source_id=f"structured-production-query-{index}",
+            )
+            expected_origin = build_production_origin_binding(request)
+            origin_authority = CallLocalProductionOriginAuthority(
+                expected_binding=expected_origin
+            )
+            resolution = bridge.resolve_production(
+                request,
+                reader,
+                origin_authority,
+                _NoProductionConfirmation(),
+                clarification,
+            )
+
+            routed = await harness.composition.handle_production_resolution(
+                resolution=resolution,
+                bearer_token=TOKEN,
+                request_id=f"request-production-query-{index}",
+                session_id="session-1",
+                correlation_id=f"correlation-production-query-{index}",
+                origin_authority=origin_authority,
+            )
+
+            assert routed.ok is True, routed.payload
+            results[operation] = routed.payload["result"]
+
+        assert [item["task_id"] for item in results["task.list"]["tasks"]] == [task_id]
+        assert results["task.get"]["task"]["task_id"] == task_id
+        assert results["task.status"]["attempt"]["task_id"] == task_id
+        assert results["task.events"]["events"][0]["event_type"] == "task.accepted"
+        assert results["task.result"]["availability"] == "not_ready"
+        assert _store_counts(harness.database) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_confirmation_is_consumed_once_before_exact_core_cancel(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    run_expiry = "2026-08-22T04:00:00Z"
+    context = _context(tmp_path, expires_at=run_expiry)
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": context},
+        expires_at=run_expiry,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        create_params = _create_params("command-production-cancel-seed")
+        create_params["issued_at"] = run_now
+        _issue_confirmation(
+            harness,
+            create_params,
+            operation="task.create",
+            expires_at="2026-08-21T02:02:00Z",
+            now=run_now,
+        )
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=create_params,
+            request_id="request-production-cancel-seed",
+            session_id="session-1",
+        )
+        assert created.ok and created.payload["result"] is not None
+        task_id = str(created.payload["result"]["task_id"])
+        assert await harness.composition._core.drain_outbox_once(observed_at=run_now)
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).state
+            is FormalTaskState.RUNNING
+        )
+        reader = StoreProductionTaskAuthorityReader(
+            store=harness.composition._core.store,
+            principal_id=_scope().subject_id,
+            scope=_scope(),
+        )
+        classifier = ProductionTaskIntentClassifier()
+        proposal = classifier.parse_structured(
+            {
+                "operation": "task.cancel",
+                "target": task_id,
+                "arguments": {},
+            },
+            committed=True,
+            source_confidence=1.0,
+        )
+        request = ProductionTaskIntentRequest(
+            origin=ProductionIntentOrigin.STRUCTURED,
+            scope=_scope(),
+            command_id="command-production-cancel",
+            proposal=proposal,
+            source_id="structured-production-cancel",
+        )
+        expected_origin = build_production_origin_binding(request)
+        origin_authority = CallLocalProductionOriginAuthority(
+            expected_binding=expected_origin
+        )
+        clarification = BoundedClarificationOwner(
+            capacity=8,
+            per_subject_capacity=2,
+            boot_id="production-cancel-boot",
+        )
+        bridge = VoiceTaskBridge()
+        prepared = bridge.resolve_production(
+            request,
+            reader,
+            origin_authority,
+            _NoProductionConfirmation(),
+            clarification,
+        )
+        assert prepared.confirmation == "required"
+        assert prepared.confirmation_binding is not None
+        production_binding = prepared.confirmation_binding
+        p3_binding = P3ConfirmationBinding(
+            principal_id=_scope().subject_id,
+            scope=_scope(),
+            operation=production_binding.operation,
+            command_id=production_binding.command_id,
+            target_task_id=production_binding.target_task_id,
+            intent_fingerprint=production_binding.fingerprint,
+        )
+        owner_context = P3ConfirmationOwnerContext(
+            session_id="session-1",
+            correlation_id="correlation-production-cancel",
+            owner_generation=1,
+        )
+        confirmation_owner = BoundedP3ConfirmationOwner(
+            harness.database,
+            enabled=True,
+        )
+        confirmation_id = "confirmation-production-cancel"
+        confirmation_owner.issue(
+            TrustedP3ConfirmationIssue(
+                binding=p3_binding,
+                owner=owner_context,
+                expires_at="2026-08-21T02:02:00Z",
+                confirmation_id=confirmation_id,
+            ),
+            now=run_now,
+        )
+        validated = confirmation_owner.validate_for_forwarding(
+            confirmation_id,
+            p3_binding,
+            owner_context,
+            now=run_now,
+        )
+        consumer = CallLocalProductionConfirmationConsumer(
+            expected_binding=production_binding,
+            validated=validated,
+            forwarder=ProductP3ConfirmationForwarder(confirmation_owner),
+            now=run_now,
+        )
+        confirmed = bridge.resolve_production(
+            replace(request, confirmation_id=confirmation_id),
+            reader,
+            origin_authority,
+            consumer,
+            clarification,
+        )
+        assert confirmed.confirmation == "confirmed"
+        before = _store_counts(harness.database)
+
+        routed = await harness.composition.handle_production_resolution(
+            resolution=confirmed,
+            bearer_token=TOKEN,
+            request_id="request-production-cancel",
+            session_id="session-1",
+            correlation_id="correlation-production-cancel",
+            origin_authority=origin_authority,
+            confirmation_consumer=consumer,
+        )
+        assert await harness.composition._core.drain_outbox_once(observed_at=run_now)
+        await _wait_until(lambda: len(harness.executor.cancels) == 1)
+        after = _store_counts(harness.database)
+        replay = await harness.composition.handle_production_resolution(
+            resolution=confirmed,
+            bearer_token=TOKEN,
+            request_id="request-production-cancel-replay",
+            session_id="session-1",
+            correlation_id="correlation-production-cancel",
+            origin_authority=origin_authority,
+            confirmation_consumer=consumer,
+        )
+
+        assert routed.ok is True, routed.payload
+        assert after[4] == before[4] + 1
+        assert replay.ok is False
+        assert replay.payload["error"]["reason"] in {
+            "PRODUCTION_CONFIRMATION_CLAIM_REPLAY",
+            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+        }
+        assert _store_counts(harness.database) == after
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_mutations_map_create_update_reprioritize_adjust_and_successor(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    confirmation_expiry = "2026-08-21T02:02:00Z"
+    run_expiry = "2026-08-22T04:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": _context(tmp_path, expires_at=run_expiry)},
+        expires_at=run_expiry,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        create, create_origin, create_consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.create",
+            target=None,
+            arguments={
+                "name": "Production mutable task",
+                "instruction": "Prepare one bounded production artifact.",
+            },
+            identity="create-full",
+            now=run_now,
+            expires_at=confirmation_expiry,
+        )
+        exact_profiles = harness.composition._executor_profiles
+        assert exact_profiles is not None
+        before_create_drift = _store_counts(harness.database)
+        harness.composition._executor_profiles = (
+            replace(exact_profiles[0], profile_id="direct-drifted-create"),
+        )
+        rejected_create_drift = await harness.composition.handle_production_resolution(
+            resolution=create,
+            bearer_token=TOKEN,
+            request_id="request-production-create-drifted",
+            session_id="session-1",
+            correlation_id="correlation-production-create-full",
+            origin_authority=create_origin,
+            confirmation_consumer=create_consumer,
+            current_background_session_id="session-1",
+        )
+        assert rejected_create_drift.ok is False
+        assert rejected_create_drift.payload["error"]["reason"] == (
+            "PRODUCTION_TASK_AUTHORITY_CHANGED"
+        )
+        assert _store_counts(harness.database) == before_create_drift
+        harness.composition._executor_profiles = exact_profiles
+        created = await harness.composition.handle_production_resolution(
+            resolution=create,
+            bearer_token=TOKEN,
+            request_id="request-production-create-full",
+            session_id="session-1",
+            correlation_id="correlation-production-create-full",
+            origin_authority=create_origin,
+            confirmation_consumer=create_consumer,
+            current_background_session_id="session-1",
+        )
+        assert created.ok and created.payload["result"] is not None
+        task_id = str(created.payload["result"]["task_id"])
+        task = harness.composition._core.store.get_task(task_id, _scope())
+        assert task.state is FormalTaskState.ACCEPTED
+
+        update, update_origin, update_consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.update",
+            target=task_id,
+            arguments={"instruction": "Prepare the revised bounded artifact."},
+            identity="update-full",
+            now=run_now,
+            expires_at=confirmation_expiry,
+        )
+        updated = await harness.composition.handle_production_resolution(
+            resolution=update,
+            bearer_token=TOKEN,
+            request_id="request-production-update-full",
+            session_id="session-1",
+            correlation_id="correlation-production-update-full",
+            origin_authority=update_origin,
+            confirmation_consumer=update_consumer,
+        )
+        assert updated.ok is True, updated.payload
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).spec.instruction
+            == "Prepare the revised bounded artifact."
+        )
+
+        reprioritize, reprioritize_origin, reprioritize_consumer = (
+            _confirmed_production_resolution(
+                harness,
+                tmp_path,
+                operation="task.reprioritize",
+                target=task_id,
+                arguments={"priority": "urgent"},
+                identity="reprioritize-full",
+                now=run_now,
+                expires_at=confirmation_expiry,
+            )
+        )
+        reprioritized = await harness.composition.handle_production_resolution(
+            resolution=reprioritize,
+            bearer_token=TOKEN,
+            request_id="request-production-reprioritize-full",
+            session_id="session-1",
+            correlation_id="correlation-production-reprioritize-full",
+            origin_authority=reprioritize_origin,
+            confirmation_consumer=reprioritize_consumer,
+        )
+        assert reprioritized.ok is True, reprioritized.payload
+        assert (
+            harness.composition._core.store.admission_projection(
+                task_id, _scope()
+            ).priority.value
+            == "urgent"
+        )
+
+        harness.executor.dispatch_outcome = None
+        assert await harness.composition._core.drain_outbox_once(observed_at=run_now)
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).state
+            is FormalTaskState.RUNNING
+        )
+        adjust, adjust_origin, adjust_consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.adjust",
+            target=task_id,
+            arguments={"adjustment": "Use the final bounded checkpoint."},
+            identity="adjust-full",
+            now=run_now,
+            expires_at=confirmation_expiry,
+        )
+        adjusted = await harness.composition.handle_production_resolution(
+            resolution=adjust,
+            bearer_token=TOKEN,
+            request_id="request-production-adjust-full",
+            session_id="session-1",
+            correlation_id="correlation-production-adjust-full",
+            origin_authority=adjust_origin,
+            confirmation_consumer=adjust_consumer,
+        )
+        assert adjusted.ok is True, adjusted.payload
+        assert adjusted.payload["result"]["adjustment_state"] == "pending"
+
+        second_create, second_origin, second_consumer = (
+            _confirmed_production_resolution(
+                harness,
+                tmp_path,
+                operation="task.create",
+                target=None,
+                arguments={
+                    "name": "Production predecessor task",
+                    "instruction": "Produce one predecessor artifact.",
+                },
+                identity="predecessor-full",
+                now=run_now,
+                expires_at=confirmation_expiry,
+            )
+        )
+        predecessor_created = await harness.composition.handle_production_resolution(
+            resolution=second_create,
+            bearer_token=TOKEN,
+            request_id="request-production-predecessor-full",
+            session_id="session-1",
+            correlation_id="correlation-production-predecessor-full",
+            origin_authority=second_origin,
+            confirmation_consumer=second_consumer,
+        )
+        assert predecessor_created.ok and predecessor_created.payload["result"]
+        predecessor_id = str(predecessor_created.payload["result"]["task_id"])
+        harness.executor.dispatch_outcome = TerminalOutcome.CANCELLED
+        while await harness.composition._core.drain_outbox_once(observed_at=run_now):
+            pass
+        predecessor = harness.composition._core.store.get_task(predecessor_id, _scope())
+        assert predecessor.outcome is TerminalOutcome.CANCELLED
+
+        successor, successor_origin, successor_consumer = (
+            _confirmed_production_resolution(
+                harness,
+                tmp_path,
+                operation="task.create_successor",
+                target=predecessor_id,
+                arguments={
+                    "name": "Production successor task",
+                    "instruction": "Produce the exact successor artifact.",
+                },
+                identity="successor-full",
+                now=run_now,
+                expires_at=confirmation_expiry,
+            )
+        )
+        exact_profiles = harness.composition._executor_profiles
+        assert exact_profiles is not None
+        before_successor_drift = _store_counts(harness.database)
+        harness.composition._executor_profiles = (
+            replace(exact_profiles[0], profile_id="direct-drifted-successor"),
+        )
+        rejected_successor_drift = (
+            await harness.composition.handle_production_resolution(
+                resolution=successor,
+                bearer_token=TOKEN,
+                request_id="request-production-successor-drifted",
+                session_id="session-1",
+                correlation_id="correlation-production-successor-full",
+                origin_authority=successor_origin,
+                confirmation_consumer=successor_consumer,
+            )
+        )
+        assert rejected_successor_drift.ok is False
+        assert rejected_successor_drift.payload["error"]["reason"] == (
+            "PRODUCTION_TASK_AUTHORITY_CHANGED"
+        )
+        assert _store_counts(harness.database) == before_successor_drift
+        harness.composition._executor_profiles = exact_profiles
+        succeeded = await harness.composition.handle_production_resolution(
+            resolution=successor,
+            bearer_token=TOKEN,
+            request_id="request-production-successor-full",
+            session_id="session-1",
+            correlation_id="correlation-production-successor-full",
+            origin_authority=successor_origin,
+            confirmation_consumer=successor_consumer,
+        )
+        assert succeeded.ok is True, succeeded.payload
+        successor_id = str(succeeded.payload["result"]["task_id"])
+        successor_task = harness.composition._core.store.get_task(
+            successor_id, _scope()
+        )
+        predecessor_attempt = harness.composition._core.store.task_read_snapshot(
+            predecessor_id, _scope()
+        )[1]
+        successor_attempt = harness.composition._core.store.task_read_snapshot(
+            successor_id, _scope()
+        )[1]
+        assert successor_attempt.selection == predecessor_attempt.selection
+        assert successor_task.predecessor_task_id == predecessor_id
+        assert successor_task.revision_number == predecessor.revision_number + 1
+        projected = StoreProductionTaskAuthorityReader(
+            store=harness.composition._core.store,
+            principal_id=_scope().subject_id,
+            scope=_scope(),
+        ).list_visible_tasks(_scope())
+        projected_by_id = {fact.task_id: fact for fact in projected.tasks}
+        assert projected_by_id[predecessor_id].successor_task_id == successor_id
+        assert projected_by_id[successor_id].predecessor_task_id == predecessor_id
+        assert (
+            projected_by_id[successor_id].revision_number
+            == projected_by_id[predecessor_id].revision_number + 1
+        )
+    finally:
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio

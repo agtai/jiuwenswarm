@@ -78,11 +78,11 @@ def _fact(
     state: TaskState = TaskState.ACCEPTED,
     outcome: TerminalOutcome | None = None,
     capabilities: frozenset[str] = frozenset({"task.cancel"}),
-    dispatch_state: str = "unclaimed",
+    dispatch_control: str = "unclaimed",
     decision_event: str | None = None,
     result_digest: str | None = None,
     name: str = "Task A",
-    admission_revision: int | None = None,
+    admission_fingerprint: str | None = None,
     revision: int = 1,
     predecessor_task_id: str | None = None,
 ) -> AuthenticatedTaskFact:
@@ -110,8 +110,8 @@ def _fact(
         supported_operations=capabilities,
         result_digest=result_digest,
         decision_required_event_id=decision_event,
-        dispatch_state=dispatch_state,
-        admission_revision=admission_revision,
+        dispatch_control=dispatch_control,
+        admission_fingerprint=admission_fingerprint,
         predecessor_task_id=predecessor_task_id,
     )
 
@@ -146,10 +146,6 @@ class RecordingAuthority:
         return next(
             fact for fact in self.facts if fact.task_id == task_id
         ).result_digest
-
-    def unread_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str] | None:
-        self.read_calls.append("unread")
-        return None
 
 
 class RecordingOriginAuthority:
@@ -446,7 +442,7 @@ def test_canonical_failed_successor_and_opaque_short_id_are_legal() -> None:
         outcome=TerminalOutcome.FAILED,
         capabilities=frozenset({"task.create_successor"}),
         result_digest=None,
-        dispatch_state="none",
+        dispatch_control="none",
     )
     authority = RecordingAuthority(failed)
     origin = RecordingOriginAuthority()
@@ -495,7 +491,7 @@ def test_noncompleted_terminal_task_result_is_illegal(
             state=TaskState.TERMINAL,
             outcome=outcome,
             result_digest="b" * 64,
-            dispatch_state="none",
+            dispatch_control="none",
         )
 
 
@@ -505,7 +501,7 @@ def test_completed_terminal_requires_canonical_result_digest() -> None:
             "x",
             state=TaskState.TERMINAL,
             outcome=TerminalOutcome.COMPLETED,
-            dispatch_state="none",
+            dispatch_control="none",
         )
 
 
@@ -716,7 +712,7 @@ def test_clarification_concurrent_issue_never_exceeds_capacity(
             {"priority": "root"},
             _fact(
                 capabilities=frozenset({"task.reprioritize"}),
-                admission_revision=1,
+                admission_fingerprint="c" * 64,
             ),
             "TASK_PRIORITY_INVALID",
         ),
@@ -758,13 +754,13 @@ def test_invalid_values_reject_before_task_or_interaction_authority(
     [
         _fact(
             capabilities=frozenset({"task.reprioritize"}),
-            dispatch_state="claimed",
-            admission_revision=1,
+            dispatch_control="taken_over",
+            admission_fingerprint="c" * 64,
         ),
         _fact(
             state=TaskState.RUNNING,
             capabilities=frozenset({"task.reprioritize"}),
-            admission_revision=1,
+            admission_fingerprint="c" * 64,
         ),
     ],
 )
@@ -798,7 +794,7 @@ def test_queued_reprioritize_requires_real_admission_capability_and_confirmation
 ):
     fact = _fact(
         capabilities=frozenset({"task.reprioritize"}),
-        admission_revision=1,
+        admission_fingerprint="c" * 64,
     )
     authority = RecordingAuthority(fact)
     origin = RecordingOriginAuthority()
@@ -846,6 +842,145 @@ def test_provide_input_requires_exact_decision_state_and_event() -> None:
     assert result.reason == "TASK_INPUT_STATE_CONFLICT"
     assert confirmation.calls == []
     assert clarifications.issue_calls == clarifications.consume_calls == 0
+    _assert_no_effects(result, authority)
+
+
+def test_natural_input_binds_current_decision_identity_after_exact_reread() -> None:
+    authority = RecordingAuthority(
+        _fact(
+            state=TaskState.DECISION_REQUIRED,
+            capabilities=frozenset(),
+            dispatch_control="taken_over",
+            decision_event="decision-current",
+        )
+    )
+    origin = RecordingOriginAuthority()
+    confirmation = RecordingConfirmationConsumer()
+    clarifications = RecordingClarificationOwner(boot_id="boot-a", capacity=8)
+    text = "answer task-a with option B"
+    proposal = ProductionTaskIntentProposal(
+        "task.provide_input",
+        "task-a",
+        {"answer": "Use option B."},
+        1.0,
+        True,
+        target_kind="task_id",
+        extractions=(
+            ProductionFieldExtraction("operation", 0, 6),
+            ProductionFieldExtraction("target", 7, 13),
+            ProductionFieldExtraction("arguments.answer", 14, len(text)),
+        ),
+        origin_deferred_fields=("responds_to_event_id",),
+    )
+    request = _request(proposal, origin, text=text)
+
+    result = _resolve(request, authority, origin, confirmation, clarifications)
+
+    assert result.outcome is ProductionTaskPolicyOutcome.UNSUPPORTED
+    assert result.reason == "TASK_INPUT_UNSUPPORTED"
+    assert dict(result.arguments) == {
+        "answer": "Use option B.",
+        "responds_to_event_id": "decision-current",
+    }
+    assert confirmation.calls == []
+    assert authority.read_calls == ["list", "get", "status"]
+    _assert_no_effects(result, authority)
+
+
+def test_natural_successor_spec_is_derived_from_exact_predecessor_fact() -> None:
+    digest = "b" * 64
+    authority = RecordingAuthority(
+        _fact(
+            state=TaskState.TERMINAL,
+            outcome=TerminalOutcome.COMPLETED,
+            capabilities=frozenset({"task.create_successor"}),
+            dispatch_control="taken_over",
+            result_digest=digest,
+            name="Synthetic build report",
+        )
+    )
+    origin = RecordingOriginAuthority()
+    confirmation = RecordingConfirmationConsumer()
+    clarifications = RecordingClarificationOwner(boot_id="boot-a", capacity=8)
+    text = "create successor for task-a"
+    proposal = ProductionTaskIntentProposal(
+        "task.create_successor",
+        "task-a",
+        {},
+        1.0,
+        True,
+        target_kind="task_id",
+        extractions=(
+            ProductionFieldExtraction("operation", 7, 16),
+            ProductionFieldExtraction("target", 21, len(text)),
+        ),
+        origin_deferred_fields=("name", "instruction"),
+    )
+    request = _request(proposal, origin, text=text)
+
+    result = _resolve(request, authority, origin, confirmation, clarifications)
+
+    assert result.outcome is ProductionTaskPolicyOutcome.PROPOSED
+    assert result.confirmation == "required"
+    assert dict(result.arguments) == {
+        "name": "Synthetic revised report",
+        "instruction": "Create a revised synthetic build report.",
+    }
+    assert result.predecessor_result_digest == digest
+    assert result.confirmation_binding is not None
+    assert (
+        result.confirmation_binding.arguments_sha256
+        == hashlib.sha256(
+            b'{"instruction":"Create a revised synthetic build report.",'
+            b'"name":"Synthetic revised report"}'
+        ).hexdigest()
+    )
+    assert confirmation.calls == []
+    _assert_no_effects(result, authority)
+
+
+def test_successor_requires_reader_advertised_capability_before_confirmation() -> None:
+    authority = RecordingAuthority(
+        _fact(
+            state=TaskState.TERMINAL,
+            outcome=TerminalOutcome.FAILED,
+            capabilities=frozenset(),
+            dispatch_control="taken_over",
+            result_digest=None,
+        )
+    )
+    origin = RecordingOriginAuthority()
+    confirmation = RecordingConfirmationConsumer()
+    clarifications = RecordingClarificationOwner(boot_id="boot-a", capacity=8)
+    text = "create successor for task-a"
+    proposal = ProductionTaskIntentProposal(
+        "task.create_successor",
+        "task-a",
+        {"name": "Next", "instruction": "Continue safely"},
+        1.0,
+        True,
+        target_kind="task_id",
+        extractions=(
+            ProductionFieldExtraction("operation", 7, 16),
+            ProductionFieldExtraction("target", 21, len(text)),
+            ProductionFieldExtraction("arguments.name", 0, len(text)),
+            ProductionFieldExtraction("arguments.instruction", 0, len(text)),
+        ),
+    )
+
+    result = _resolve(
+        _request(proposal, origin, text=text),
+        authority,
+        origin,
+        confirmation,
+        clarifications,
+    )
+
+    assert result.outcome is ProductionTaskPolicyOutcome.UNSUPPORTED
+    assert result.reason == "TASK_SUCCESSOR_UNSUPPORTED"
+    assert result.confirmation == "not_applicable"
+    assert confirmation.calls == []
+    assert authority.read_calls == ["list", "get", "status", "result"]
     _assert_no_effects(result, authority)
 
 

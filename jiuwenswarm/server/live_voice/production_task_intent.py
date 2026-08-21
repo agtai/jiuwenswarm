@@ -164,6 +164,15 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+_UNSPECIFIED_COLLECTION_CAPABILITY_DIGEST = _sha256(
+    {
+        "authority": "live_voice.production_task_intent",
+        "fact": "unspecified_collection_capability",
+        "version": 1,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticatedTaskFact:
     """Canonical Task/Attempt facts from one authenticated Core authority."""
@@ -184,8 +193,8 @@ class AuthenticatedTaskFact:
     supported_operations: frozenset[str]
     result_digest: str | None = None
     decision_required_event_id: str | None = None
-    dispatch_state: str = "none"
-    admission_revision: int | None = None
+    dispatch_control: str = "none"
+    admission_fingerprint: str | None = None
     predecessor_task_id: str | None = None
     successor_task_id: str | None = None
 
@@ -254,16 +263,17 @@ class AuthenticatedTaskFact:
             _require_persistent_identity(
                 self.decision_required_event_id, "decision_required_event_id"
             )
-        if (self.state is TaskState.DECISION_REQUIRED) != (
+        if (
             self.decision_required_event_id is not None
+            and self.state is not TaskState.DECISION_REQUIRED
         ):
             raise ValueError("DECISION_REQUIRED_EVENT_MISMATCH")
-        if self.dispatch_state not in {"none", "unclaimed", "claimed", "delivered"}:
+        if self.dispatch_control not in {"none", "unclaimed", "taken_over"}:
             raise ValueError("INVALID_DISPATCH_FACT")
-        if self.admission_revision is not None and (
-            type(self.admission_revision) is not int or self.admission_revision < 1
+        if self.admission_fingerprint is not None and (
+            _SHA256.fullmatch(self.admission_fingerprint) is None
         ):
-            raise ValueError("INVALID_ADMISSION_REVISION")
+            raise ValueError("INVALID_ADMISSION_FINGERPRINT")
         for name, value in (
             ("predecessor_task_id", self.predecessor_task_id),
             ("successor_task_id", self.successor_task_id),
@@ -285,7 +295,7 @@ class AuthenticatedTaskFact:
 
     def canonical_dict(self) -> dict[str, object]:
         return {
-            "admission_revision": self.admission_revision,
+            "admission_fingerprint": self.admission_fingerprint,
             "attempt_id": self.attempt_id,
             "attempt_outcome": (
                 None if self.attempt_outcome is None else self.attempt_outcome.value
@@ -293,7 +303,7 @@ class AuthenticatedTaskFact:
             "attempt_state": self.attempt_state.value,
             "capability_profile_digest": self.capability_profile_digest,
             "decision_required_event_id": self.decision_required_event_id,
-            "dispatch_state": self.dispatch_state,
+            "dispatch_control": self.dispatch_control,
             "event_head": self.event_head,
             "event_head_id": self.event_head_id,
             "name": self.name,
@@ -319,6 +329,9 @@ class TaskAuthorityRead:
     scope: ScopeRef
     generation: str
     tasks: tuple[AuthenticatedTaskFact, ...]
+    collection_capability_profile_digest: str = (
+        _UNSPECIFIED_COLLECTION_CAPABILITY_DIGEST
+    )
 
     def __post_init__(self) -> None:
         if self.scope.assurance != "authenticated":
@@ -332,11 +345,16 @@ class TaskAuthorityRead:
             raise ValueError("DUPLICATE_VISIBLE_TASK_ID")
         if len({task.stable_reference for task in self.tasks}) != len(self.tasks):
             raise ValueError("DUPLICATE_STABLE_TASK_REFERENCE")
+        if _SHA256.fullmatch(self.collection_capability_profile_digest) is None:
+            raise ValueError("INVALID_COLLECTION_CAPABILITY_PROFILE_DIGEST")
 
     @property
     def fingerprint(self) -> str:
         return _sha256(
             {
+                "collection_capability_profile_digest": (
+                    self.collection_capability_profile_digest
+                ),
                 "generation": self.generation,
                 "scope": self.scope.to_dict(),
                 "tasks": [
@@ -362,8 +380,6 @@ class ProductionTaskAuthorityReader(Protocol):
     def event_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str]: ...
 
     def result_digest(self, scope: ScopeRef, task_id: str) -> str | None: ...
-
-    def unread_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,6 +612,7 @@ class ProductionTaskIntentProposal:
     reason: str = "TASK_INTENT_PROPOSED"
     extractions: tuple[ProductionFieldExtraction, ...] = ()
     observed_task_revision: int | None = None
+    origin_deferred_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", _canonical_mapping(self.arguments))
@@ -625,6 +642,24 @@ class ProductionTaskIntentProposal:
             or self.observed_task_revision < 1
         ):
             raise ValueError("INVALID_OBSERVED_TASK_REVISION")
+        if (
+            not isinstance(self.origin_deferred_fields, tuple)
+            or len(set(self.origin_deferred_fields)) != len(self.origin_deferred_fields)
+            or any(
+                type(field) is not str or _FIELD_NAME.fullmatch(field) is None
+                for field in self.origin_deferred_fields
+            )
+        ):
+            raise ValueError("INVALID_ORIGIN_DEFERRED_FIELDS")
+        allowed_deferred = {
+            "task.provide_input": ("responds_to_event_id",),
+            "task.create_successor": ("name", "instruction"),
+        }
+        if self.origin_deferred_fields and (
+            self.origin_deferred_fields != allowed_deferred.get(self.operation)
+            or any(field in self.arguments for field in self.origin_deferred_fields)
+        ):
+            raise ValueError("INVALID_ORIGIN_DEFERRED_FIELD_BINDING")
 
     @classmethod
     def dialogue(cls, *, reason: str) -> ProductionTaskIntentProposal:
@@ -667,6 +702,7 @@ class ProductionTaskIntentRequest:
     commit: TurnCommit | None = None
     source_id: str = "structured-request"
     clarification_answer: ClarificationAnswer | None = None
+    clarification_answer_fingerprint: str | None = None
     confirmation_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -681,6 +717,15 @@ class ProductionTaskIntentRequest:
                 raise ValueError("INVALID_STRUCTURED_ORIGIN")
         elif not isinstance(self.commit, TurnCommit) or self.commit.scope != self.scope:
             raise ValueError("AUTHORITATIVE_COMMITTED_INPUT_REQUIRED")
+        if self.clarification_answer_fingerprint is not None:
+            if _SHA256.fullmatch(self.clarification_answer_fingerprint) is None:
+                raise ValueError("INVALID_CLARIFICATION_ANSWER_DIGEST")
+            if (
+                self.clarification_answer is not None
+                and self.clarification_answer.fingerprint
+                != self.clarification_answer_fingerprint
+            ):
+                raise ValueError("CLARIFICATION_ANSWER_DIGEST_MISMATCH")
         if self.confirmation_id is not None:
             _require_opaque(self.confirmation_id, "confirmation_id")
 
@@ -705,10 +750,20 @@ class ProductionTaskResolution:
     clarification_generation: int | None = None
     predecessor_result_digest: str | None = None
     confirmation_consumption_id: str | None = None
+    confirmation_binding: ProductionConfirmationBinding | None = None
     zero_effects: tuple[str, ...] = _ZERO_EFFECTS
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", _canonical_mapping(self.arguments))
+        if self.confirmation_binding is not None and (
+            not isinstance(self.confirmation_binding, ProductionConfirmationBinding)
+            or self.confirmation_binding.operation != self.operation
+            or self.confirmation_binding.target_task_id != self.target_task_id
+            or self.confirmation_binding.command_id != self.command_id
+            or self.confirmation_binding.arguments_sha256
+            != _sha256(dict(self.arguments))
+        ):
+            raise ValueError("INVALID_RESOLUTION_CONFIRMATION_BINDING")
 
     def canonical_policy_tuple(self) -> tuple[object, ...]:
         return (
@@ -718,6 +773,33 @@ class ProductionTaskResolution:
             canonical_json_bytes(dict(self.arguments)),
             self.confirmation,
             self.outcome.value,
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        return _sha256(
+            {
+                "arguments": dict(self.arguments),
+                "authority_fingerprint": self.authority_fingerprint,
+                "candidate_task_ids": list(self.candidate_task_ids),
+                "classification": self.classification,
+                "command_id": self.command_id,
+                "confirmation": self.confirmation,
+                "confirmation_binding": (
+                    None
+                    if self.confirmation_binding is None
+                    else self.confirmation_binding.fingerprint
+                ),
+                "confirmation_consumption_id": self.confirmation_consumption_id,
+                "operation": self.operation,
+                "origin_binding_fingerprint": self.origin_binding_fingerprint,
+                "origin_receipt_id": self.origin_receipt_id,
+                "outcome": self.outcome.value,
+                "predecessor_result_digest": self.predecessor_result_digest,
+                "reason": self.reason,
+                "target_task_id": self.target_task_id,
+                "task_set_fingerprint": self.task_set_fingerprint,
+            }
         )
 
 
@@ -959,6 +1041,11 @@ def _structured_semantic_digest(proposal: ProductionTaskIntentProposal) -> str:
 def _build_origin_binding(
     request: ProductionTaskIntentRequest,
 ) -> ProductionOriginBinding:
+    clarification_answer_sha256 = (
+        request.clarification_answer.fingerprint
+        if request.clarification_answer is not None
+        else request.clarification_answer_fingerprint
+    )
     if request.origin is ProductionIntentOrigin.STRUCTURED:
         return ProductionOriginBinding(
             principal_id=request.scope.subject_id,
@@ -969,11 +1056,7 @@ def _build_origin_binding(
             commit_sha256=None,
             extractions=(),
             structured_semantic_sha256=_structured_semantic_digest(request.proposal),
-            clarification_answer_sha256=(
-                None
-                if request.clarification_answer is None
-                else request.clarification_answer.fingerprint
-            ),
+            clarification_answer_sha256=clarification_answer_sha256,
         )
     commit = request.commit
     assert commit is not None
@@ -1005,12 +1088,18 @@ def _build_origin_binding(
         commit_sha256=hashlib.sha256(commit.canonical_bytes()).hexdigest(),
         extractions=tuple(bound),
         structured_semantic_sha256=None,
-        clarification_answer_sha256=(
-            None
-            if request.clarification_answer is None
-            else request.clarification_answer.fingerprint
-        ),
+        clarification_answer_sha256=clarification_answer_sha256,
     )
+
+
+def build_production_origin_binding(
+    request: ProductionTaskIntentRequest,
+) -> ProductionOriginBinding:
+    """Build the exact call-local origin binding verified by product composition."""
+
+    if not isinstance(request, ProductionTaskIntentRequest):
+        raise TypeError("PRODUCTION_TASK_INTENT_REQUEST_REQUIRED")
+    return _build_origin_binding(request)
 
 
 def _proposal_field_value(
@@ -1028,8 +1117,12 @@ def _proposal_field_value(
     raise ValueError("INVALID_EXTRACTION_FIELD")
 
 
-def _validate_arguments(operation: str, arguments: Mapping[str, object]) -> str | None:
-    if set(arguments) != _ARGUMENT_FIELDS[operation]:
+def _validate_arguments(
+    operation: str,
+    arguments: Mapping[str, object],
+    deferred_fields: tuple[str, ...] = (),
+) -> str | None:
+    if set(arguments) != _ARGUMENT_FIELDS[operation] - set(deferred_fields):
         return "TASK_INTENT_ARGUMENT_SCHEMA_MISMATCH"
     if operation in _QUERY_KIND and arguments["query_kind"] != _QUERY_KIND[operation]:
         return "TASK_QUERY_KIND_MISMATCH"
@@ -1039,7 +1132,7 @@ def _validate_arguments(operation: str, arguments: Mapping[str, object]) -> str 
             return "TASK_QUERY_LIMIT_INVALID"
     if operation == "task.events":
         after_seq = arguments["after_seq"]
-        if type(after_seq) is not int or after_seq < 0:
+        if type(after_seq) is not int or after_seq < -1:
             return "TASK_EVENT_CURSOR_INVALID"
     text_fields = {
         "task.create": ("name", "instruction"),
@@ -1049,6 +1142,8 @@ def _validate_arguments(operation: str, arguments: Mapping[str, object]) -> str 
         "task.create_successor": ("name", "instruction"),
     }.get(operation, ())
     for field_name in text_fields:
+        if field_name in deferred_fields:
+            continue
         try:
             material = _require_text(
                 arguments[field_name],
@@ -1060,6 +1155,8 @@ def _validate_arguments(operation: str, arguments: Mapping[str, object]) -> str 
         except ValueError:
             return "TASK_INTENT_ARGUMENT_VALUE_INVALID"
     if operation == "task.provide_input":
+        if "responds_to_event_id" in deferred_fields:
+            return None
         try:
             _require_opaque(arguments["responds_to_event_id"], "responds_to_event_id")
         except ValueError:
@@ -1165,7 +1262,9 @@ class ProductionMultiTaskResolver:
                 **origin_fields,
             )
         operation = proposal.operation
-        argument_error = _validate_arguments(operation, proposal.arguments)
+        argument_error = _validate_arguments(
+            operation, proposal.arguments, proposal.origin_deferred_fields
+        )
         if argument_error is not None:
             return self._safe(
                 request,
@@ -1347,15 +1446,60 @@ class ProductionMultiTaskResolver:
                     **origin_fields,
                 )
 
+        try:
+            resolved_arguments = self._bind_deferred_arguments(proposal, reread)
+        except ValueError as error:
+            return self._safe(
+                request,
+                "task_intent",
+                operation,
+                None if target is None else target.task_id,
+                proposal.arguments,
+                "not_applicable",
+                ProductionTaskPolicyOutcome.CONFLICT,
+                str(error),
+                task_set_fingerprint=visible.fingerprint,
+                authority_fingerprint=(None if reread is None else reread.fingerprint),
+                **origin_fields,
+            )
+        if _validate_arguments(operation, resolved_arguments) is not None:
+            return self._safe(
+                request,
+                "rejected",
+                operation,
+                None if target is None else target.task_id,
+                {},
+                "not_applicable",
+                ProductionTaskPolicyOutcome.REJECTED,
+                "AUTHORITY_DERIVED_ARGUMENT_INVALID",
+                task_set_fingerprint=visible.fingerprint,
+                authority_fingerprint=(None if reread is None else reread.fingerprint),
+                **origin_fields,
+            )
         outcome, reason, predecessor_digest = self._state_capability_policy(
-            operation, proposal.arguments, reread, request.scope, authority
+            operation, resolved_arguments, reread, request.scope, authority
         )
         confirmation = "not_applicable"
         consumption_id = None
+        confirmation_binding = None
         if outcome is ProductionTaskPolicyOutcome.PROPOSED:
             confirmation = (
                 "required" if operation in _MATERIAL_OPERATIONS else "not_required"
             )
+            if confirmation == "required":
+                confirmation_binding = ProductionConfirmationBinding(
+                    principal_id=request.scope.subject_id,
+                    scope=request.scope,
+                    command_id=request.command_id,
+                    origin=request.origin,
+                    origin_receipt_id=origin_receipt.receipt_id,
+                    origin_binding_fingerprint=origin_binding.fingerprint,
+                    operation=operation,
+                    target_task_id=None if target is None else target.task_id,
+                    arguments_sha256=_sha256(dict(resolved_arguments)),
+                    task_set_fingerprint=visible.fingerprint,
+                    capability_profile_digest=self._capability_digest(visible, reread),
+                )
         if request.confirmation_id is not None:
             if confirmation != "required":
                 return self._safe(
@@ -1373,29 +1517,17 @@ class ProductionMultiTaskResolver:
                     ),
                     **origin_fields,
                 )
-            binding = ProductionConfirmationBinding(
-                principal_id=request.scope.subject_id,
-                scope=request.scope,
-                command_id=request.command_id,
-                origin=request.origin,
-                origin_receipt_id=origin_receipt.receipt_id,
-                origin_binding_fingerprint=origin_binding.fingerprint,
-                operation=operation,
-                target_task_id=None if target is None else target.task_id,
-                arguments_sha256=_sha256(dict(proposal.arguments)),
-                task_set_fingerprint=visible.fingerprint,
-                capability_profile_digest=self._capability_digest(visible, reread),
-            )
+            assert confirmation_binding is not None
             try:
                 consumed = confirmation_consumer.verify_and_consume(
-                    request.confirmation_id, binding
+                    request.confirmation_id, confirmation_binding
                 )
             except (TypeError, ValueError):
                 consumed = None
             if (
                 not isinstance(consumed, TrustedConfirmationConsumptionReceipt)
                 or consumed.confirmation_id != request.confirmation_id
-                or consumed.binding_fingerprint != binding.fingerprint
+                or consumed.binding_fingerprint != confirmation_binding.fingerprint
                 or consumed.replayed
             ):
                 return self._safe(
@@ -1419,7 +1551,7 @@ class ProductionMultiTaskResolver:
             classification="task_intent",
             operation=operation,
             target_task_id=None if target is None else target.task_id,
-            arguments=proposal.arguments,
+            arguments=resolved_arguments,
             confirmation=confirmation,
             outcome=outcome,
             reason=reason,
@@ -1428,8 +1560,41 @@ class ProductionMultiTaskResolver:
             authority_fingerprint=None if reread is None else reread.fingerprint,
             predecessor_result_digest=predecessor_digest,
             confirmation_consumption_id=consumption_id,
+            confirmation_binding=confirmation_binding,
             **origin_fields,
         )
+
+    @staticmethod
+    def _bind_deferred_arguments(
+        proposal: ProductionTaskIntentProposal,
+        task: AuthenticatedTaskFact | None,
+    ) -> Mapping[str, object]:
+        if not proposal.origin_deferred_fields:
+            return proposal.arguments
+        if task is None:
+            raise ValueError("AUTHORITY_DERIVED_TARGET_REQUIRED")
+        resolved = dict(proposal.arguments)
+        if proposal.operation == "task.provide_input":
+            if task.decision_required_event_id is None:
+                raise ValueError("TASK_INPUT_STATE_CONFLICT")
+            resolved["responds_to_event_id"] = task.decision_required_event_id
+        elif proposal.operation == "task.create_successor":
+            predecessor = task.name.strip()
+            if predecessor.casefold().endswith("build report"):
+                name = predecessor[: -len("build report")] + "revised report"
+            else:
+                name = f"Revised {predecessor}"
+            article_name = predecessor[0].lower() + predecessor[1:]
+            instruction = f"Create a revised {article_name}."
+            if (
+                len(name.encode("utf-8")) > 256
+                or len(instruction.encode("utf-8")) > 4_096
+            ):
+                raise ValueError("SUCCESSOR_SPEC_DERIVATION_FAILED")
+            resolved.update({"name": name, "instruction": instruction})
+        else:
+            raise ValueError("AUTHORITY_DERIVED_ARGUMENT_UNSUPPORTED")
+        return _canonical_mapping(resolved)
 
     @staticmethod
     def _select_target(
@@ -1496,7 +1661,6 @@ class ProductionMultiTaskResolver:
                 )
             if operation == "task.result" and task is not None:
                 digest = authority.result_digest(scope, task.task_id)
-                authority.unread_head(scope, task.task_id)
                 if digest != task.result_digest:
                     return (
                         ProductionTaskPolicyOutcome.CONFLICT,
@@ -1539,6 +1703,12 @@ class ProductionMultiTaskResolver:
                     "SUCCESSOR_PREDECESSOR_CONFLICT",
                     None,
                 )
+            if "task.create_successor" not in task.supported_operations:
+                return (
+                    ProductionTaskPolicyOutcome.UNSUPPORTED,
+                    "TASK_SUCCESSOR_UNSUPPORTED",
+                    None,
+                )
             return (
                 ProductionTaskPolicyOutcome.PROPOSED,
                 "SUCCESSOR_POLICY_ACCEPTED",
@@ -1548,7 +1718,8 @@ class ProductionMultiTaskResolver:
             if (
                 task.state is not TaskState.ACCEPTED
                 or task.attempt_state is not AttemptState.ACCEPTED
-                or task.dispatch_state != "unclaimed"
+                or task.dispatch_control != "unclaimed"
+                or "task.update" not in task.supported_operations
             ):
                 return (
                     ProductionTaskPolicyOutcome.CONFLICT,
@@ -1604,7 +1775,7 @@ class ProductionMultiTaskResolver:
             if (
                 task.state is not TaskState.ACCEPTED
                 or task.attempt_state is not AttemptState.ACCEPTED
-                or task.dispatch_state != "unclaimed"
+                or task.dispatch_control != "unclaimed"
             ):
                 return (
                     ProductionTaskPolicyOutcome.CONFLICT,
@@ -1612,7 +1783,7 @@ class ProductionMultiTaskResolver:
                     None,
                 )
             if (
-                task.admission_revision is None
+                task.admission_fingerprint is None
                 or "task.reprioritize" not in task.supported_operations
             ):
                 return (
@@ -1646,12 +1817,7 @@ class ProductionMultiTaskResolver:
     ) -> str:
         if target is not None:
             return target.capability_profile_digest
-        return _sha256(
-            [
-                [item.task_id, item.capability_profile_digest]
-                for item in sorted(visible.tasks, key=lambda fact: fact.task_id)
-            ]
-        )
+        return visible.collection_capability_profile_digest
 
     @staticmethod
     def _safe(
@@ -1708,4 +1874,5 @@ __all__ = [
     "TaskAuthorityRead",
     "TrustedConfirmationConsumptionReceipt",
     "TrustedProductionOriginReceipt",
+    "build_production_origin_binding",
 ]

@@ -102,8 +102,8 @@ def _fact(
     capabilities: frozenset[str] = frozenset({"task.cancel"}),
     result_digest: str | None = None,
     decision_event: str | None = None,
-    dispatch_state: str = "unclaimed",
-    admission_revision: int | None = None,
+    dispatch_control: str = "unclaimed",
+    admission_fingerprint: str | None = None,
     successor_task_id: str | None = None,
 ) -> AuthenticatedTaskFact:
     attempt_state = {
@@ -132,8 +132,8 @@ def _fact(
         supported_operations=capabilities,
         result_digest=result_digest,
         decision_required_event_id=decision_event,
-        dispatch_state=dispatch_state,
-        admission_revision=admission_revision,
+        dispatch_control=dispatch_control,
+        admission_fingerprint=admission_fingerprint,
         predecessor_task_id=(f"predecessor-{task_id}" if revision > 1 else None),
         successor_task_id=successor_task_id,
     )
@@ -174,10 +174,6 @@ class RecordingAuthority:
         return next(
             fact for fact in self.facts if fact.task_id == task_id
         ).result_digest
-
-    def unread_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str] | None:
-        self.calls.append("unread")
-        return None
 
 
 class AcceptedOriginAuthority:
@@ -750,6 +746,8 @@ def _corpus_fact(raw: dict[str, object]) -> AuthenticatedTaskFact:
         capabilities.add("task.adjust")
     if state is TaskState.ACCEPTED and raw["dispatch_outbox_state"] == "unclaimed":
         capabilities.add("task.update")
+    if state is TaskState.TERMINAL and outcome is not TerminalOutcome.UNKNOWN:
+        capabilities.add("task.create_successor")
     result_digest = "b" * 64 if outcome is TerminalOutcome.COMPLETED else None
     return _fact(
         str(raw["task_id"]),
@@ -764,7 +762,16 @@ def _corpus_fact(raw: dict[str, object]) -> AuthenticatedTaskFact:
             if raw["decision_required_event_id"] is not None
             else None
         ),
-        dispatch_state=str(raw["dispatch_outbox_state"]),
+        dispatch_control=(
+            "unclaimed"
+            if raw["dispatch_outbox_state"] == "unclaimed"
+            else "none"
+            if raw["dispatch_outbox_state"] == "none"
+            else "taken_over"
+        ),
+        admission_fingerprint=(
+            "c" * 64 if raw["dispatch_outbox_state"] == "unclaimed" else None
+        ),
     )
 
 

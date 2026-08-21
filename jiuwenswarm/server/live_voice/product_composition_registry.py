@@ -19,7 +19,7 @@ import secrets
 import threading
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -74,8 +74,11 @@ from .interaction_engine import InteractionEnginePort
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
     P3_MUTATIONS,
+    P3_PRODUCTION_MUTATIONS,
+    P3_PRODUCTION_OPERATIONS,
     P3AuthenticatedComposition,
     P3RouteResult,
+    PreparedProductionIntentAuthority,
 )
 from .p3_confirmation import (
     BoundedP3ConfirmationOwner,
@@ -83,6 +86,11 @@ from .p3_confirmation import (
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
     TrustedP3ConfirmationIssue,
+    ValidatedP3ConfirmationForwarding,
+)
+from .p3_production_intent_composition import (
+    CallLocalProductionConfirmationConsumer,
+    CallLocalProductionOriginAuthority,
 )
 from .p3_product_confirmation import ProductP3ConfirmationForwarder
 from .product_authority import (
@@ -158,6 +166,22 @@ from .progress_notification_arbiter import (
     ForegroundSnapshot,
     ProgressNotificationArbiter,
     SpeechPolicy,
+)
+from .production_task_classifier import (
+    ProductionTaskIntentClassifier,
+    ProductionTaskIntentClassifierContext,
+)
+from .production_task_intent import (
+    BoundedClarificationOwner,
+    ClarificationAnswer,
+    ProductionConfirmationBinding,
+    ProductionIntentOrigin,
+    ProductionTaskIntentProposal,
+    ProductionTaskIntentRequest,
+    ProductionTaskPolicyOutcome,
+    ProductionTaskResolution,
+    TrustedConfirmationConsumptionReceipt,
+    build_production_origin_binding,
 )
 from .task_progress_return import (
     TaskProgressNotificationIntent,
@@ -491,6 +515,7 @@ class _RetainedProductOperation:
     intent_interaction_id: str | None = None
     intent_turn_id: str | None = None
     intent_commit_id: str | None = None
+    intent_production: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,6 +527,36 @@ class _PendingTaskIntent:
     session_id: str
     correlation_id: str
     origin_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingProductionTaskIntent:
+    """Bounded continuation metadata; authority remains in dedicated owners."""
+
+    token: str
+    kind: str
+    proposal: ProductionTaskIntentProposal
+    resolution: ProductionTaskResolution
+    commit: TurnCommit | None
+    source: str
+    session_id: str
+    correlation_id: str
+    origin_key: str
+    expires_at: datetime
+    confirmation_id: str | None = None
+    confirmation_owner_context: P3ConfirmationOwnerContext | None = None
+    clarification_answer_fingerprint: str | None = None
+
+
+class _RejectingProductionConfirmationConsumer:
+    """Initial-resolution Port that cannot consume a confirmation."""
+
+    @staticmethod
+    def verify_and_consume(
+        _confirmation_id: str,
+        _binding: ProductionConfirmationBinding,
+    ) -> TrustedConfirmationConsumptionReceipt:
+        raise ValueError("PRODUCTION_CONFIRMATION_NOT_AVAILABLE")
 
 
 @dataclass(frozen=True, slots=True)
@@ -819,7 +874,16 @@ class AgentServerProductCompositionRegistry:
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_intent_operations: dict[str, _RetainedProductOperation] = {}
         self._pending_task_intents: dict[str, _PendingTaskIntent] = {}
+        self._pending_production_task_intents: dict[
+            str, _PendingProductionTaskIntent
+        ] = {}
         self._voice_task_origins: dict[str, _VoiceTaskOrigin] = {}
+        self._production_task_classifier = ProductionTaskIntentClassifier()
+        self._production_clarification_owner = BoundedClarificationOwner(
+            capacity=self._PRODUCT_OPERATION_CAPACITY,
+            per_subject_capacity=min(8, self._PRODUCT_OPERATION_CAPACITY),
+            boot_id=f"registry.{secrets.token_urlsafe(24)}",
+        )
         self._task_intent_bridge = (
             VoiceTaskBridge()
             if (
@@ -8263,6 +8327,11 @@ class AgentServerProductCompositionRegistry:
                 "commit_id",
                 "committed_at",
                 "text",
+                "structured_intent",
+                "source_id",
+                "source_confidence",
+                "committed",
+                "continuation_id",
                 "claimed_user_id",
                 "claimed_project_id",
             }
@@ -8276,32 +8345,48 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.PERMISSION_DENIED,
             )
         source = _required_text(params.get("source"), "source", maximum=16)
-        if source not in {"text", "voice"}:
+        if source not in {"text", "voice", "structured"}:
             raise FormalTaskViolation(
                 "INVALID_TASK_INTENT_SOURCE",
-                "formal natural-language task source must be text or voice",
+                "formal task source must be text, voice or structured",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        operation = _required_text(
-            params.get("operation_hint"), "operation_hint", maximum=32
+        operation_value = params.get("operation_hint")
+        operation = (
+            None
+            if operation_value is None
+            else _required_text(operation_value, "operation_hint", maximum=32)
         )
-        if operation not in {"task.create", "task.status", "task.cancel"}:
+        if operation is not None and operation not in P3_PRODUCTION_OPERATIONS:
             raise FormalTaskViolation(
                 "UNSUPPORTED_FORMAL_TASK_INTENT",
-                "natural-language Alpha supports create, status and cancel",
+                "task intent hint is outside the closed production vocabulary",
                 ErrorCode.UNSUPPORTED,
             )
         task_id = params.get("task_id_hint")
-        if operation == "task.create":
-            if task_id is not None:
-                raise FormalTaskViolation(
-                    "INVALID_TASK_CREATE_INTENT",
-                    "task.create cannot claim an existing task id",
-                    ErrorCode.INVALID_ARGUMENT,
-                )
-            parsed_task_id = None
-        else:
-            parsed_task_id = _required_text(task_id, "task_id_hint")
+        parsed_task_id = (
+            None if task_id is None else _required_text(task_id, "task_id_hint")
+        )
+        if operation in {"task.create", "task.list"} and parsed_task_id is not None:
+            raise FormalTaskViolation(
+                "INVALID_TASK_COLLECTION_INTENT",
+                "collection task intent cannot claim an existing task id",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        confidence_value = params.get("source_confidence", 1.0)
+        if type(confidence_value) not in {int, float} or not 0 <= confidence_value <= 1:
+            raise FormalTaskViolation(
+                "INVALID_TASK_INTENT_CONFIDENCE",
+                "task intent confidence must be between zero and one",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        committed_value = params.get("committed", True)
+        if type(committed_value) is not bool:
+            raise FormalTaskViolation(
+                "INVALID_TASK_INTENT_COMMIT_STATE",
+                "task intent committed state must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         clean: dict[str, object] = {
             "auth_token": params.get("auth_token"),
             "session_id": routed_session,
@@ -8311,26 +8396,73 @@ class AgentServerProductCompositionRegistry:
             "source": source,
             "operation_hint": operation,
             "task_id_hint": parsed_task_id,
-            "interaction_id": _required_text(
-                params.get("interaction_id"), "interaction_id"
+            "source_confidence": float(confidence_value),
+            "committed": committed_value,
+            "continuation_id": (
+                None
+                if params.get("continuation_id") is None
+                else _required_text(
+                    params.get("continuation_id"),
+                    "continuation_id",
+                    maximum=256,
+                )
             ),
-            "turn_id": _required_text(params.get("turn_id"), "turn_id"),
-            "commit_id": _required_text(params.get("commit_id"), "commit_id"),
         }
         for key in ("claimed_user_id", "claimed_project_id"):
             if key in params:
                 clean[key] = _required_text(params[key], key)
         if source == "text":
+            clean["interaction_id"] = _required_text(
+                params.get("interaction_id"), "interaction_id"
+            )
+            clean["turn_id"] = _required_text(params.get("turn_id"), "turn_id")
+            clean["commit_id"] = _required_text(params.get("commit_id"), "commit_id")
             clean["committed_at"] = _required_text(
                 params.get("committed_at"), "committed_at", maximum=64
             )
             clean["text"] = _required_content(params.get("text"), "text", maximum=8_192)
-        elif "committed_at" in params or "text" in params:
-            raise FormalTaskViolation(
-                "INVALID_VOICE_TASK_ORIGIN",
-                "voice task intent text must come from the retained P2 TurnCommit",
-                ErrorCode.INVALID_ARGUMENT,
+        elif source == "voice":
+            clean["interaction_id"] = _required_text(
+                params.get("interaction_id"), "interaction_id"
             )
+            clean["turn_id"] = _required_text(params.get("turn_id"), "turn_id")
+            clean["commit_id"] = _required_text(params.get("commit_id"), "commit_id")
+            if (
+                "committed_at" in params
+                or "text" in params
+                or "structured_intent" in params
+                or "source_id" in params
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_VOICE_TASK_ORIGIN",
+                    "voice task intent text must come from the retained P2 TurnCommit",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        else:
+            clean["source_id"] = _required_text(params.get("source_id"), "source_id")
+            structured = params.get("structured_intent")
+            if not isinstance(structured, (str, Mapping)):
+                raise FormalTaskViolation(
+                    "INVALID_STRUCTURED_TASK_INTENT",
+                    "structured task intent payload is required",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            clean["structured_intent"] = structured
+            if any(
+                field in params
+                for field in (
+                    "interaction_id",
+                    "turn_id",
+                    "commit_id",
+                    "committed_at",
+                    "text",
+                )
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_STRUCTURED_TASK_ORIGIN",
+                    "structured intent cannot claim a natural committed turn",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
         return clean
 
     async def handle_p3_intent(
@@ -8348,39 +8480,107 @@ class AgentServerProductCompositionRegistry:
         try:
             self._ensure_running()
             clean = self._validate_task_intent_params(params, session_id=session_id)
-            operation = str(clean["operation_hint"])
-            if operation == "task.status":
-                if not self._settings.p3_text_enabled:
-                    return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
-            elif not self._p3_control_ready():
-                return _error_result(
-                    request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
-                )
-            canonical = await self._preauthorize_task_intent(
-                params=clean,
-                session_id=str(clean["session_id"]),
-                operation=operation,
-                task_id=(
-                    None
-                    if clean["task_id_hint"] is None
-                    else str(clean["task_id_hint"])
-                ),
+            production = bool(
+                getattr(self._p3_composition, "production_intent_available", False)
             )
+            canonical: (
+                ResolvedProductAuthority | PreparedProductionIntentAuthority | None
+            ) = None
+            operation_hint = clean.get("operation_hint")
+            production_operation: str | None = None
+            if production:
+                async with self._lock:
+                    retained_preflight = self._p3_intent_operations.get(request_id)
+                if (
+                    retained_preflight is not None
+                    and retained_preflight.intent_production
+                ):
+                    retained_operation = retained_preflight.intent_operation
+                    if retained_operation not in P3_PRODUCTION_OPERATIONS:
+                        raise FormalTaskViolation(
+                            "TASK_INTENT_RECOVERY_UNAVAILABLE",
+                            "retained production operation is not exact",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    production_operation = retained_operation
+                    canonical = await asyncio.to_thread(
+                        self._p3_composition.prepare_production_intent_authority,
+                        bearer_token=clean.get("auth_token"),
+                        operation=production_operation,
+                        session_id=str(clean["session_id"]),
+                    )
+                    if (
+                        retained_preflight.intent_scope is None
+                        or canonical.scope != retained_preflight.intent_scope
+                    ):
+                        raise FormalTaskViolation(
+                            "TASK_INTENT_RECOVERY_SCOPE_MISMATCH",
+                            "current authority cannot replay the retained Task intent",
+                            ErrorCode.PERMISSION_DENIED,
+                        )
+                else:
+                    (
+                        production_operation,
+                        canonical,
+                    ) = await self._preflight_p3_production_intent(clean=clean)
+                if not bool(clean["committed"]):
+                    return self._intent_rejected_result(
+                        request_id,
+                        reason="INPUT_NOT_COMMITTED",
+                        code=ErrorCode.PERMISSION_DENIED,
+                        message="production Task intent requires committed input",
+                    )
+            else:
+                operation = _required_text(operation_hint, "operation_hint", maximum=32)
+                if operation not in {"task.create", "task.status", "task.cancel"}:
+                    raise FormalTaskViolation(
+                        "UNSUPPORTED_FORMAL_TASK_INTENT",
+                        "legacy task intent supports create, status and cancel",
+                        ErrorCode.UNSUPPORTED,
+                    )
+                task_hint = clean.get("task_id_hint")
+                if operation != "task.create" and task_hint is None:
+                    raise FormalTaskViolation(
+                        "INVALID_TASK_INTENT_TARGET",
+                        "legacy targeted task intent requires task_id_hint",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if operation == "task.status":
+                    if not self._settings.p3_text_enabled:
+                        return _error_result(
+                            request_id, reason="PRODUCT_P3_TEXT_DISABLED"
+                        )
+                elif not self._p3_control_ready():
+                    return _error_result(
+                        request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
+                    )
+                canonical = await self._preauthorize_task_intent(
+                    params=clean,
+                    session_id=str(clean["session_id"]),
+                    operation=operation,
+                    task_id=(None if task_hint is None else str(task_hint)),
+                )
             fingerprint = hashlib.sha256(
                 canonical_json_bytes(
                     {key: value for key, value in clean.items() if key != "auth_token"}
                 )
             ).digest()
+            replayed_existing = False
+            replay_fingerprint_conflict = False
             async with self._lock:
                 self._ensure_running()
                 existing = self._p3_intent_operations.get(request_id)
                 if existing is not None:
+                    replayed_existing = True
                     if existing.fingerprint != fingerprint:
-                        raise FormalTaskViolation(
-                            "PRODUCT_REQUEST_ID_CONFLICT",
-                            "task intent request_id cannot change binding",
-                            ErrorCode.CONFLICT,
-                        )
+                        if production:
+                            replay_fingerprint_conflict = True
+                        else:
+                            raise FormalTaskViolation(
+                                "PRODUCT_REQUEST_ID_CONFLICT",
+                                "task intent request_id cannot change binding",
+                                ErrorCode.CONFLICT,
+                            )
                 else:
                     self._require_product_request_not_evicted("p3.intent", request_id)
                     if (
@@ -8396,10 +8596,17 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.UNAVAILABLE,
                         )
                     task = asyncio.create_task(
-                        self._run_p3_intent(
-                            clean=clean,
-                            request_id=request_id,
-                            canonical=canonical,
+                        (
+                            self._run_p3_production_intent(
+                                clean=clean,
+                                request_id=request_id,
+                            )
+                            if production
+                            else self._run_p3_intent(
+                                clean=clean,
+                                request_id=request_id,
+                                canonical=canonical,
+                            )
                         ),
                         name=f"live-voice-product-p3-intent:{request_id}",
                     )
@@ -8408,19 +8615,79 @@ class AgentServerProductCompositionRegistry:
                         task,
                         intent_session_id=str(clean["session_id"]),
                         intent_correlation_id=str(clean["correlation_id"]),
-                        intent_operation=operation,
+                        intent_operation=(
+                            production_operation
+                            if production
+                            else None
+                            if operation_hint is None
+                            else str(operation_hint)
+                        ),
                         intent_task_id=(
                             None
                             if clean["task_id_hint"] is None
                             else str(clean["task_id_hint"])
                         ),
                         intent_source=str(clean["source"]),
-                        intent_scope=canonical.scope,
-                        intent_interaction_id=str(clean["interaction_id"]),
-                        intent_turn_id=str(clean["turn_id"]),
-                        intent_commit_id=str(clean["commit_id"]),
+                        intent_scope=(None if canonical is None else canonical.scope),
+                        intent_interaction_id=(
+                            None
+                            if clean.get("interaction_id") is None
+                            else str(clean["interaction_id"])
+                        ),
+                        intent_turn_id=(
+                            None
+                            if clean.get("turn_id") is None
+                            else str(clean["turn_id"])
+                        ),
+                        intent_commit_id=(
+                            None
+                            if clean.get("commit_id") is None
+                            else str(clean["commit_id"])
+                        ),
+                        intent_production=production,
                     )
                     self._p3_intent_operations[request_id] = existing
+            if production and replayed_existing:
+                # Wait for the original call to freeze its server-resolved
+                # operation and Scope before reauthorizing a response replay.
+                # Authorizing the pre-resolution fallback (normally task.list)
+                # could otherwise disclose a retained mutation result to a
+                # principal whose destructive authority was revoked while the
+                # first call was still in flight.
+                completed = await asyncio.shield(existing.task)
+                async with self._lock:
+                    if self._p3_intent_operations.get(request_id) is not existing:
+                        raise FormalTaskViolation(
+                            "TASK_INTENT_RECOVERY_UNAVAILABLE",
+                            "the exact retained Task intent is no longer available",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    retained_operation = existing.intent_operation
+                    retained_scope = existing.intent_scope
+                replay_operation = (
+                    retained_operation
+                    if retained_operation in P3_PRODUCTION_OPERATIONS
+                    else "task.list"
+                )
+                replay_authority = await asyncio.to_thread(
+                    self._p3_composition.prepare_production_intent_authority,
+                    bearer_token=clean.get("auth_token"),
+                    operation=replay_operation,
+                    session_id=str(clean["session_id"]),
+                )
+                if retained_scope is None or replay_authority.scope != retained_scope:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_RECOVERY_SCOPE_MISMATCH",
+                        "current authority cannot replay the retained Task intent",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                if replay_fingerprint_conflict:
+                    raise FormalTaskViolation(
+                        "PRODUCT_REQUEST_ID_CONFLICT",
+                        "task intent request_id cannot change binding",
+                        ErrorCode.CONFLICT,
+                    )
+                return completed
             return await asyncio.shield(existing.task)
         except FormalTaskViolation as exc:
             return self._intent_rejected_result(
@@ -8495,7 +8762,7 @@ class AgentServerProductCompositionRegistry:
                 else None
             ),
         }
-        if retained.intent_source not in {"text", "voice"}:
+        if retained.intent_source not in {"text", "voice", "structured"}:
             raise FormalTaskViolation(
                 "TASK_INTENT_RECOVERY_INVALID",
                 "retained task intent source is unavailable",
@@ -8546,9 +8813,10 @@ class AgentServerProductCompositionRegistry:
                     retained is None
                     or retained.intent_session_id != routed_session
                     or retained.intent_correlation_id != correlation_id
-                    or retained.intent_operation
+                    or retained.intent_operation not in P3_PRODUCTION_OPERATIONS
+                    and retained.intent_operation
                     not in {"task.create", "task.status", "task.cancel"}
-                    or retained.intent_source not in {"text", "voice"}
+                    or retained.intent_source not in {"text", "voice", "structured"}
                     or retained.intent_scope is None
                 ):
                     raise FormalTaskViolation(
@@ -8567,13 +8835,23 @@ class AgentServerProductCompositionRegistry:
             for key in ("claimed_user_id", "claimed_project_id"):
                 if key in params:
                     authority_params[key] = params[key]
-            canonical = await self._preauthorize_task_intent(
-                params=authority_params,
-                session_id=routed_session,
-                operation=operation,
-                task_id=task_id,
-            )
-            if canonical.scope != expected_scope:
+            if retained.intent_production:
+                prepared = await asyncio.to_thread(
+                    self._p3_composition.prepare_production_intent_authority,
+                    bearer_token=authority_params.get("auth_token"),
+                    operation=operation,
+                    session_id=routed_session,
+                )
+                current_scope = prepared.scope
+            else:
+                canonical = await self._preauthorize_task_intent(
+                    params=authority_params,
+                    session_id=routed_session,
+                    operation=operation,
+                    task_id=task_id,
+                )
+                current_scope = canonical.scope
+            if current_scope != expected_scope:
                 raise FormalTaskViolation(
                     "TASK_INTENT_RECOVERY_SCOPE_MISMATCH",
                     "current authority cannot recover the retained task intent",
@@ -8599,6 +8877,22 @@ class AgentServerProductCompositionRegistry:
                 if isinstance(confirmation_token, str):
                     async with self._lock:
                         pending = self._pending_task_intents.get(confirmation_token)
+                        production_pending = self._pending_production_task_intents.get(
+                            confirmation_token
+                        )
+                        if (
+                            production_pending is not None
+                            and datetime.now(UTC) >= production_pending.expires_at
+                        ):
+                            self._pending_production_task_intents.pop(
+                                confirmation_token, None
+                            )
+                            if production_pending.commit is not None:
+                                self._release_task_intent_commit_locked(
+                                    production_pending.commit,
+                                    production_pending.source,
+                                )
+                            production_pending = None
                         pending_is_current = bool(
                             pending is not None
                             and pending.session_id == retained.intent_session_id
@@ -8614,6 +8908,16 @@ class AgentServerProductCompositionRegistry:
                             == safe.get("resolution_id")
                             and pending.resolution.commit_sha256
                             == safe.get("commit_sha256")
+                        ) or bool(
+                            production_pending is not None
+                            and production_pending.session_id
+                            == retained.intent_session_id
+                            and production_pending.resolution.operation
+                            == retained.intent_operation
+                            and production_pending.resolution.target_task_id
+                            == retained.intent_task_id
+                            and production_pending.resolution.fingerprint
+                            == safe.get("resolution_id")
                         )
                     if not pending_is_current:
                         return _success_result(
@@ -8663,7 +8967,7 @@ class AgentServerProductCompositionRegistry:
         self,
         *,
         clean: Mapping[str, object],
-        canonical: ResolvedProductAuthority,
+        canonical: ResolvedProductAuthority | PreparedProductionIntentAuthority,
     ) -> TurnCommit:
         source = str(clean["source"])
         commit_id = str(clean["commit_id"])
@@ -8744,10 +9048,18 @@ class AgentServerProductCompositionRegistry:
             commit.scope,
         )
         self._critical_token_gate.release_commit(commit.commit_id)
-        if not any(
-            pending.commit.interaction_id == commit.interaction_id
-            for pending in self._pending_task_intents.values()
-        ) and not any(key[1] == commit.interaction_id for key in self._p2_routes):
+        if (
+            not any(
+                pending.commit.interaction_id == commit.interaction_id
+                for pending in self._pending_task_intents.values()
+            )
+            and not any(
+                pending.commit is not None
+                and pending.commit.interaction_id == commit.interaction_id
+                for pending in self._pending_production_task_intents.values()
+            )
+            and not any(key[1] == commit.interaction_id for key in self._p2_routes)
+        ):
             self._critical_token_gate.release_interaction(commit.interaction_id)
 
     def _drop_voice_task_origins_for_route_locked(
@@ -8763,6 +9075,16 @@ class AgentServerProductCompositionRegistry:
             ):
                 self._pending_task_intents.pop(token, None)
                 self._release_task_intent_commit_locked(pending.commit, pending.source)
+        for token, pending in tuple(self._pending_production_task_intents.items()):
+            if (
+                pending.source == "voice"
+                and (pending.session_id, pending.origin_key) == route_key
+            ):
+                self._pending_production_task_intents.pop(token, None)
+                if pending.commit is not None:
+                    self._release_task_intent_commit_locked(
+                        pending.commit, pending.source
+                    )
 
     def _evict_oldest_pending_task_intent_locked(self) -> bool:
         try:
@@ -8772,6 +9094,1252 @@ class AgentServerProductCompositionRegistry:
         pending = self._pending_task_intents.pop(token)
         self._release_task_intent_commit_locked(pending.commit, pending.source)
         return True
+
+    async def _peek_voice_task_intent_commit(
+        self, clean: Mapping[str, object]
+    ) -> TurnCommit:
+        commit_id = str(clean["commit_id"])
+        turn_id = str(clean["turn_id"])
+        interaction_id = str(clean["interaction_id"])
+        route_key = (str(clean["session_id"]), interaction_id)
+        async with self._lock:
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if (
+                commit is None
+                or commit.turn_id != turn_id
+                or commit.interaction_id != interaction_id
+                or self._accepted_voice_commit_routes.get(commit_id) != route_key
+                or route_key not in self._p2_routes
+                or commit.commit_id not in self._critical_input_guarded_commits
+            ):
+                raise FormalTaskViolation(
+                    "VOICE_TASK_ROUTE_MISMATCH",
+                    "voice task intent requires its exact live P2 TurnCommit route",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return commit
+
+    async def _peek_production_intent_continuation(
+        self,
+        *,
+        clean: Mapping[str, object],
+        source_text: str | None,
+    ) -> _PendingProductionTaskIntent | None:
+        """Read one continuation without allocating, evicting, or consuming it."""
+
+        explicit = clean.get("continuation_id")
+        async with self._lock:
+            now = datetime.now(UTC)
+            if explicit is not None:
+                pending = self._pending_production_task_intents.get(str(explicit))
+                if pending is None or now >= pending.expires_at:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "the exact production intent continuation is unavailable",
+                        ErrorCode.CONFLICT,
+                    )
+                matches = (pending,)
+            elif source_text is not None:
+                matches = tuple(
+                    pending
+                    for token, pending in self._pending_production_task_intents.items()
+                    if now < pending.expires_at and token in source_text
+                )
+            else:
+                matches = ()
+            if len(matches) > 1:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_AMBIGUOUS",
+                    "committed input names more than one continuation",
+                    ErrorCode.CONFLICT,
+                )
+            if not matches:
+                return None
+            pending = matches[0]
+            if pending.session_id != clean["session_id"]:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                    "production continuation belongs to another Session",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return pending
+
+    async def _preflight_p3_production_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+    ) -> tuple[str, PreparedProductionIntentAuthority]:
+        """Authorize and feature-gate production intent before replay allocation."""
+
+        source = str(clean["source"])
+        source_commit = (
+            await self._peek_voice_task_intent_commit(clean)
+            if source == "voice"
+            else None
+        )
+        source_text = (
+            source_commit.text
+            if source_commit is not None
+            else str(clean["text"])
+            if source == "text"
+            else None
+        )
+        continuation = await self._peek_production_intent_continuation(
+            clean=clean,
+            source_text=source_text,
+        )
+        proposal = self._classify_production_task_intent(
+            clean=clean,
+            source_text=source_text,
+            continuation=continuation,
+        )
+        operation = (
+            proposal.operation
+            if proposal.operation in P3_PRODUCTION_OPERATIONS
+            else "task.list"
+        )
+        if operation in P3_PRODUCTION_MUTATIONS and not self._p3_control_ready():
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation requires the confirmation owner",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            operation not in P3_PRODUCTION_MUTATIONS
+            and not self._settings.p3_text_enabled
+        ):
+            raise FormalTaskViolation(
+                "PRODUCT_P3_TEXT_DISABLED",
+                "production Task query route is disabled",
+                ErrorCode.UNAVAILABLE,
+            )
+        authority = await asyncio.to_thread(
+            self._p3_composition.prepare_production_intent_authority,
+            bearer_token=clean.get("auth_token"),
+            operation=operation,
+            session_id=str(clean["session_id"]),
+        )
+        return operation, authority
+
+    async def _production_intent_continuation(
+        self,
+        *,
+        clean: Mapping[str, object],
+        source_text: str | None,
+    ) -> _PendingProductionTaskIntent | None:
+        explicit = clean.get("continuation_id")
+        async with self._lock:
+            now = datetime.now(UTC)
+            for token, stale in tuple(self._pending_production_task_intents.items()):
+                if now >= stale.expires_at:
+                    self._pending_production_task_intents.pop(token, None)
+                    if stale.commit is not None:
+                        self._release_task_intent_commit_locked(
+                            stale.commit, stale.source
+                        )
+            if explicit is not None:
+                pending = self._pending_production_task_intents.get(str(explicit))
+                if pending is None:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "the exact production intent continuation is unavailable",
+                        ErrorCode.CONFLICT,
+                    )
+                matches = (pending,)
+            elif source_text is not None:
+                matches = tuple(
+                    pending
+                    for token, pending in self._pending_production_task_intents.items()
+                    if token in source_text
+                )
+            else:
+                matches = ()
+            if len(matches) > 1:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_AMBIGUOUS",
+                    "committed input names more than one continuation",
+                    ErrorCode.CONFLICT,
+                )
+            if not matches:
+                return None
+            pending = matches[0]
+            if pending.session_id != clean["session_id"]:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                    "production continuation belongs to another Session",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return pending
+
+    def _classify_production_task_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        source_text: str | None,
+        continuation: _PendingProductionTaskIntent | None,
+    ) -> ProductionTaskIntentProposal:
+        context = (
+            None
+            if continuation is None
+            else ProductionTaskIntentClassifierContext(
+                kind=continuation.kind,
+                context_id=continuation.token,
+                bound_operation=str(continuation.resolution.operation),
+                bound_target_task_id=continuation.resolution.target_task_id,
+                bound_arguments=continuation.resolution.arguments,
+                bound_origin_deferred_fields=tuple(
+                    field
+                    for field in continuation.proposal.origin_deferred_fields
+                    if field not in continuation.resolution.arguments
+                ),
+            )
+        )
+        committed = bool(clean["committed"])
+        confidence = float(clean["source_confidence"])
+        source = str(clean["source"])
+        try:
+            if source == "structured":
+                if continuation is not None:
+                    raise ValueError("STRUCTURED_CONTINUATION_UNSUPPORTED")
+                return self._production_task_classifier.parse_structured(
+                    clean["structured_intent"],
+                    committed=committed,
+                    source_confidence=confidence,
+                )
+            assert source_text is not None
+            return self._production_task_classifier.classify_natural(
+                source_text,
+                origin=(
+                    ProductionIntentOrigin.VOICE
+                    if source == "voice"
+                    else ProductionIntentOrigin.NATURAL_TEXT
+                ),
+                committed=committed,
+                source_confidence=confidence,
+                context=context,
+            )
+        except ValueError as error:
+            raise FormalTaskViolation(
+                str(error),
+                "production task intent classifier rejected the committed input",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+
+    @staticmethod
+    def _production_intent_request(
+        *,
+        clean: Mapping[str, object],
+        proposal: ProductionTaskIntentProposal,
+        authority: PreparedProductionIntentAuthority,
+        commit: TurnCommit | None,
+        command_id: str,
+        clarification_answer: ClarificationAnswer | None = None,
+        confirmation_id: str | None = None,
+    ) -> ProductionTaskIntentRequest:
+        source = str(clean["source"])
+        origin = (
+            ProductionIntentOrigin.STRUCTURED
+            if source == "structured"
+            else ProductionIntentOrigin.VOICE
+            if source == "voice"
+            else ProductionIntentOrigin.NATURAL_TEXT
+        )
+        return ProductionTaskIntentRequest(
+            origin=origin,
+            scope=authority.scope,
+            command_id=command_id,
+            proposal=proposal,
+            commit=commit,
+            source_id=(
+                str(clean["source_id"])
+                if source == "structured"
+                else str(clean["turn_id"])
+            ),
+            clarification_answer=clarification_answer,
+            confirmation_id=confirmation_id,
+        )
+
+    @staticmethod
+    def _resolve_clarification_selection(
+        *,
+        proposal: ProductionTaskIntentProposal,
+        pending: _PendingProductionTaskIntent,
+        authority: PreparedProductionIntentAuthority,
+    ) -> ClarificationAnswer:
+        resolution = pending.resolution
+        if (
+            pending.kind != "clarification"
+            or resolution.clarification_handle_id is None
+            or resolution.clarification_generation is None
+            or resolution.task_set_fingerprint is None
+            or not resolution.candidate_task_ids
+            or proposal.operation != resolution.operation
+            or dict(proposal.arguments) != dict(resolution.arguments)
+        ):
+            raise FormalTaskViolation(
+                "CLARIFICATION_BINDING_CONFLICT",
+                "clarification answer changed the retained operation or arguments",
+                ErrorCode.CONFLICT,
+            )
+        visible = authority.reader.list_visible_tasks(authority.scope)
+        candidates = tuple(
+            fact
+            for fact in visible.tasks
+            if fact.task_id in resolution.candidate_task_ids
+        )
+        selected = tuple(
+            fact
+            for fact in candidates
+            if (
+                proposal.target_kind == "task_id"
+                and fact.task_id == proposal.target
+                or proposal.target_kind == "stable_reference"
+                and fact.stable_reference.casefold() == str(proposal.target).casefold()
+                or proposal.target_kind == "name"
+                and fact.name.casefold() == str(proposal.target).casefold()
+            )
+        )
+        if len(selected) != 1:
+            raise FormalTaskViolation(
+                "CLARIFICATION_SELECTION_UNRESOLVED",
+                "clarification answer must select one exact retained candidate",
+                ErrorCode.CONFLICT,
+            )
+        return ClarificationAnswer(
+            handle_id=resolution.clarification_handle_id,
+            generation=resolution.clarification_generation,
+            selected_task_id=selected[0].task_id,
+            task_set_fingerprint=resolution.task_set_fingerprint,
+        )
+
+    async def _retain_production_continuation(
+        self,
+        *,
+        kind: str,
+        proposal: ProductionTaskIntentProposal,
+        resolution: ProductionTaskResolution,
+        commit: TurnCommit | None,
+        clean: Mapping[str, object],
+        replacing_token: str | None = None,
+        confirmation_id: str | None = None,
+        confirmation_owner_context: P3ConfirmationOwnerContext | None = None,
+        clarification_answer_fingerprint: str | None = None,
+    ) -> str:
+        if kind not in {"clarification", "confirmation"}:
+            raise ValueError("INVALID_PRODUCTION_CONTINUATION_KIND")
+        if (
+            (confirmation_id is None) != (confirmation_owner_context is None)
+            or (kind == "confirmation" and confirmation_id is None)
+            or (kind == "clarification" and confirmation_id is not None)
+        ):
+            raise ValueError("INVALID_PRODUCTION_CONFIRMATION_CONTINUATION")
+        token = secrets.token_urlsafe(24)
+        pending = _PendingProductionTaskIntent(
+            token=token,
+            kind=kind,
+            proposal=proposal,
+            resolution=resolution,
+            commit=commit,
+            source=str(clean["source"]),
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            origin_key=str(
+                clean.get("interaction_id") or clean.get("source_id") or "structured"
+            ),
+            expires_at=datetime.now(UTC) + P3_CONFIRMATION_MAX_TTL,
+            confirmation_id=confirmation_id,
+            confirmation_owner_context=confirmation_owner_context,
+            clarification_answer_fingerprint=clarification_answer_fingerprint,
+        )
+        async with self._lock:
+            if self._stopped:
+                raise FormalTaskViolation(
+                    "PRODUCT_COMPOSITION_STOPPED",
+                    "Live Voice product composition is stopped",
+                    ErrorCode.UNAVAILABLE,
+                )
+            now = datetime.now(UTC)
+            for stale_token, stale in tuple(
+                self._pending_production_task_intents.items()
+            ):
+                if now >= stale.expires_at:
+                    self._pending_production_task_intents.pop(stale_token, None)
+                    if stale.commit is not None:
+                        self._release_task_intent_commit_locked(
+                            stale.commit, stale.source
+                        )
+            replacing_current = bool(
+                replacing_token is not None
+                and replacing_token in self._pending_production_task_intents
+            )
+            if (
+                len(self._pending_production_task_intents) - int(replacing_current)
+                >= self._PRODUCT_OPERATION_CAPACITY
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_CAPACITY_UNAVAILABLE",
+                    "bounded production continuation capacity is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            self._pending_production_task_intents[token] = pending
+        return token
+
+    @staticmethod
+    def _production_resolution_facts(
+        resolution: ProductionTaskResolution,
+    ) -> dict[str, object]:
+        return {
+            "operation": resolution.operation,
+            "task_id": resolution.target_task_id,
+            "resolver_provider": "production_multi_task",
+            "resolver_implementation_class": "formal",
+            "resolution_id": resolution.fingerprint,
+            "commit_sha256": (
+                None
+                if resolution.origin_binding is None
+                else resolution.origin_binding.commit_sha256
+            ),
+            "source_span": None,
+            "target_span": None,
+            "partial_command_count": 0,
+        }
+
+    async def _release_production_intent_origins(
+        self,
+        *,
+        current_commit: TurnCommit | None,
+        current_source: str,
+        pending: _PendingProductionTaskIntent | None = None,
+        remove_pending: bool = False,
+    ) -> None:
+        async with self._lock:
+            if pending is not None and remove_pending:
+                if self._pending_production_task_intents.get(pending.token) is pending:
+                    self._pending_production_task_intents.pop(pending.token, None)
+            prior = None if pending is None else pending.commit
+            if prior is not None and prior is not current_commit:
+                self._release_task_intent_commit_locked(prior, pending.source)
+            if current_commit is not None:
+                self._release_task_intent_commit_locked(current_commit, current_source)
+
+    async def _retire_prior_production_continuation(
+        self,
+        *,
+        pending: _PendingProductionTaskIntent | None,
+        current_commit: TurnCommit | None,
+    ) -> None:
+        if pending is None:
+            return
+        async with self._lock:
+            if self._pending_production_task_intents.get(pending.token) is pending:
+                self._pending_production_task_intents.pop(pending.token, None)
+            if pending.commit is not None and pending.commit is not current_commit:
+                self._release_task_intent_commit_locked(pending.commit, pending.source)
+
+    async def _release_failed_production_intent(
+        self,
+        *,
+        current_commit: TurnCommit | None,
+        current_source: str,
+        pending: _PendingProductionTaskIntent | None,
+    ) -> None:
+        released_pending = None
+        if pending is not None:
+            async with self._lock:
+                if (
+                    self._pending_production_task_intents.get(pending.token)
+                    is not pending
+                ):
+                    released_pending = pending
+        await self._release_production_intent_origins(
+            current_commit=current_commit,
+            current_source=current_source,
+            pending=released_pending,
+        )
+
+    async def _invoke_production_resolution(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        resolution: ProductionTaskResolution,
+        origin_authority: CallLocalProductionOriginAuthority,
+        confirmation_consumer: CallLocalProductionConfirmationConsumer | None,
+    ) -> P3RouteResult:
+        return await self._p3_composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=clean.get("auth_token"),
+            request_id=f"production-core-{request_id}",
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            origin_authority=origin_authority,
+            confirmation_consumer=confirmation_consumer,
+            current_background_session_id=str(clean["session_id"]),
+        )
+
+    async def _production_voice_origin(
+        self,
+        pending: _PendingProductionTaskIntent,
+    ) -> _VoiceTaskOrigin | None:
+        original = pending.commit
+        if pending.source != "voice" or original is None:
+            return None
+        async with self._lock:
+            route_key = self._accepted_voice_commit_routes.get(original.commit_id)
+            response_ref = self._accepted_voice_commit_responses.get(original.commit_id)
+            retained = None if route_key is None else self._p2_routes.get(route_key)
+            if retained is None or response_ref is None:
+                return None
+            return _VoiceTaskOrigin(
+                session_id=pending.session_id,
+                interaction_id=retained.binding.interaction_id,
+                activation_id=retained.binding.activation_id,
+                activation_generation=retained.binding.activation_generation,
+                correlation_id=retained.binding.correlation_id,
+                response_ref=response_ref,
+            )
+
+    async def _issue_production_confirmation_continuation(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        proposal: ProductionTaskIntentProposal,
+        resolution: ProductionTaskResolution,
+        commit: TurnCommit | None,
+        authority: PreparedProductionIntentAuthority,
+        replacing_token: str | None,
+        clarification_answer_fingerprint: str | None,
+    ) -> str:
+        """Issue the durable confirmation before returning its carrier token."""
+
+        owner = self._p3_confirmation_owner
+        generation = self._p3_confirmation_generation
+        binding = resolution.confirmation_binding
+        if owner is None or generation is None:
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation confirmation is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            binding is None
+            or resolution.confirmation != "required"
+            or resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+        ):
+            raise FormalTaskViolation(
+                resolution.reason,
+                "production mutation did not produce an exact confirmation binding",
+                ErrorCode.CONFLICT,
+            )
+        p3_binding = P3ConfirmationBinding(
+            principal_id=binding.principal_id,
+            scope=binding.scope,
+            operation=binding.operation,
+            command_id=binding.command_id,
+            target_task_id=binding.target_task_id,
+            intent_fingerprint=binding.fingerprint,
+        )
+        owner_context = P3ConfirmationOwnerContext(
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            owner_generation=generation,
+        )
+        observed = datetime.fromisoformat(
+            authority.observed_at.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        expires_at = (
+            (observed + P3_CONFIRMATION_MAX_TTL)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+        confirmation_id = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "binding": binding.fingerprint,
+                    "generation": generation,
+                    "request_id": request_id,
+                }
+            )
+        ).hexdigest()
+        token = await self._retain_production_continuation(
+            kind="confirmation",
+            proposal=proposal,
+            resolution=resolution,
+            commit=commit,
+            clean=clean,
+            replacing_token=replacing_token,
+            confirmation_id=confirmation_id,
+            confirmation_owner_context=owner_context,
+            clarification_answer_fingerprint=clarification_answer_fingerprint,
+        )
+        async with self._lock:
+            retained = self._pending_production_task_intents.get(token)
+            replaced = (
+                None
+                if replacing_token is None
+                else self._pending_production_task_intents.get(replacing_token)
+            )
+        try:
+            await asyncio.to_thread(
+                owner.issue,
+                TrustedP3ConfirmationIssue(
+                    binding=p3_binding,
+                    owner=owner_context,
+                    expires_at=expires_at,
+                    confirmation_id=confirmation_id,
+                ),
+                now=authority.observed_at,
+            )
+        except Exception as issue_error:
+            try:
+                await asyncio.to_thread(
+                    owner.validate_for_forwarding,
+                    confirmation_id,
+                    p3_binding,
+                    owner_context,
+                    now=authority.observed_at,
+                )
+            except Exception:
+                async with self._lock:
+                    if self._pending_production_task_intents.get(token) is retained:
+                        self._pending_production_task_intents.pop(token, None)
+                    if (
+                        replacing_token is not None
+                        and self._pending_production_task_intents.get(replacing_token)
+                        is replaced
+                    ):
+                        self._pending_production_task_intents.pop(replacing_token, None)
+                raise issue_error
+            return token
+        except BaseException:
+            async with self._lock:
+                if self._pending_production_task_intents.get(token) is retained:
+                    self._pending_production_task_intents.pop(token, None)
+                if (
+                    replacing_token is not None
+                    and self._pending_production_task_intents.get(replacing_token)
+                    is replaced
+                ):
+                    self._pending_production_task_intents.pop(replacing_token, None)
+            raise
+        return token
+
+    async def _confirm_production_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        pending: _PendingProductionTaskIntent,
+        request: ProductionTaskIntentRequest,
+        authority: PreparedProductionIntentAuthority,
+        origin_authority: CallLocalProductionOriginAuthority,
+        preliminary: ProductionTaskResolution,
+    ) -> tuple[ProductionTaskResolution, P3RouteResult]:
+        owner = self._p3_confirmation_owner
+        forwarder = self._p3_confirmation_forwarder
+        binding = preliminary.confirmation_binding
+        confirmation_id = pending.confirmation_id
+        owner_context = pending.confirmation_owner_context
+        if (
+            owner is None
+            or forwarder is None
+            or confirmation_id is None
+            or owner_context is None
+        ):
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation confirmation is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            binding is None
+            or preliminary.confirmation != "required"
+            or preliminary.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+        ):
+            raise FormalTaskViolation(
+                preliminary.reason,
+                "production continuation no longer resolves to an exact mutation",
+                ErrorCode.CONFLICT,
+            )
+        p3_binding = P3ConfirmationBinding(
+            principal_id=binding.principal_id,
+            scope=binding.scope,
+            operation=binding.operation,
+            command_id=binding.command_id,
+            target_task_id=binding.target_task_id,
+            intent_fingerprint=binding.fingerprint,
+        )
+        if owner_context.session_id != clean["session_id"]:
+            raise FormalTaskViolation(
+                "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                "production confirmation belongs to another Session",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        async with self._p3_operation_lock:
+            async with self._lock:
+                if (
+                    self._pending_production_task_intents.get(pending.token)
+                    is not pending
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "production confirmation continuation is no longer current",
+                        ErrorCode.CONFLICT,
+                    )
+            validated: ValidatedP3ConfirmationForwarding = await asyncio.to_thread(
+                owner.validate_for_forwarding,
+                confirmation_id,
+                p3_binding,
+                owner_context,
+                now=authority.observed_at,
+            )
+            consumer = CallLocalProductionConfirmationConsumer(
+                expected_binding=binding,
+                validated=validated,
+                forwarder=forwarder,
+                now=authority.observed_at,
+            )
+            confirmed_request = replace(request, confirmation_id=confirmation_id)
+            confirmed = await asyncio.to_thread(
+                self._task_intent_bridge.resolve_production,
+                confirmed_request,
+                authority.reader,
+                origin_authority,
+                consumer,
+                self._production_clarification_owner,
+            )
+            if (
+                confirmed.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+                or confirmed.confirmation != "confirmed"
+            ):
+                raise FormalTaskViolation(
+                    confirmed.reason,
+                    "production confirmation failed its final authority reread",
+                    ErrorCode.CONFLICT,
+                )
+            async with self._lock:
+                if (
+                    self._pending_production_task_intents.get(pending.token)
+                    is not pending
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "production confirmation lost its exact continuation",
+                        ErrorCode.CONFLICT,
+                    )
+                self._pending_production_task_intents.pop(pending.token, None)
+            result = await self._invoke_production_resolution(
+                clean=clean,
+                request_id=request_id,
+                resolution=confirmed,
+                origin_authority=origin_authority,
+                confirmation_consumer=consumer,
+            )
+            return confirmed, result
+
+    async def _run_p3_production_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+    ) -> P3RouteResult:
+        bridge = self._task_intent_bridge
+        if bridge is None:
+            return _error_result(request_id, reason="PRODUCT_P3_INTENT_DISABLED")
+        source = str(clean["source"])
+        commit: TurnCommit | None = None
+        pending: _PendingProductionTaskIntent | None = None
+        try:
+            source_commit = (
+                await self._peek_voice_task_intent_commit(clean)
+                if source == "voice"
+                else None
+            )
+            source_text = (
+                source_commit.text
+                if source_commit is not None
+                else str(clean["text"])
+                if source == "text"
+                else None
+            )
+            pending = await self._production_intent_continuation(
+                clean=clean,
+                source_text=source_text,
+            )
+            proposal = self._classify_production_task_intent(
+                clean=clean,
+                source_text=source_text,
+                continuation=pending,
+            )
+            operation_hint = clean.get("operation_hint")
+            task_hint = clean.get("task_id_hint")
+            if operation_hint is not None and proposal.operation != operation_hint:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "operation hint does not match the classified committed intent",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if pending is not None and (
+                proposal.operation != pending.resolution.operation
+                or dict(proposal.arguments) != dict(pending.resolution.arguments)
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_BINDING_MISMATCH",
+                    "continuation changed the retained operation or arguments",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            auth_operation = (
+                proposal.operation
+                if proposal.operation in P3_PRODUCTION_OPERATIONS
+                else "task.list"
+            )
+            if (
+                auth_operation in P3_PRODUCTION_MUTATIONS
+                and not self._p3_control_ready()
+            ):
+                raise FormalTaskViolation(
+                    "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                    "production mutation requires the confirmation owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if (
+                auth_operation not in P3_PRODUCTION_MUTATIONS
+                and not self._settings.p3_text_enabled
+            ):
+                raise FormalTaskViolation(
+                    "PRODUCT_P3_TEXT_DISABLED",
+                    "production Task query route is disabled",
+                    ErrorCode.UNAVAILABLE,
+                )
+            authority = await asyncio.to_thread(
+                self._p3_composition.prepare_production_intent_authority,
+                bearer_token=clean.get("auth_token"),
+                operation=auth_operation,
+                session_id=str(clean["session_id"]),
+            )
+            if source != "structured":
+                commit = await self._obtain_task_intent_commit(
+                    clean=clean,
+                    canonical=authority,
+                )
+                if source_commit is not None and commit is not source_commit:
+                    raise FormalTaskViolation(
+                        "VOICE_TASK_ROUTE_MISMATCH",
+                        "voice Task origin changed during classification",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+            command_id = (
+                str(pending.resolution.command_id)
+                if pending is not None
+                else "production-intent."
+                + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+            )
+            clarification_answer = (
+                None
+                if pending is None or pending.kind != "clarification"
+                else self._resolve_clarification_selection(
+                    proposal=proposal,
+                    pending=pending,
+                    authority=authority,
+                )
+            )
+            if (
+                task_hint is not None
+                and clarification_answer is not None
+                and clarification_answer.selected_task_id != task_hint
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "task hint does not match the authenticated clarification target",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if pending is not None and pending.kind == "confirmation":
+                pending_origin = (
+                    ProductionIntentOrigin.STRUCTURED
+                    if pending.source == "structured"
+                    else ProductionIntentOrigin.VOICE
+                    if pending.source == "voice"
+                    else ProductionIntentOrigin.NATURAL_TEXT
+                )
+                if pending_origin is not ProductionIntentOrigin.STRUCTURED and (
+                    pending.commit is None
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_BINDING_MISMATCH",
+                        "natural confirmation lost its original committed origin",
+                        ErrorCode.CONFLICT,
+                    )
+                intent_request = ProductionTaskIntentRequest(
+                    origin=pending_origin,
+                    scope=authority.scope,
+                    command_id=command_id,
+                    proposal=pending.proposal,
+                    commit=pending.commit,
+                    source_id=(
+                        pending.origin_key
+                        if pending_origin is ProductionIntentOrigin.STRUCTURED
+                        else pending.commit.turn_id  # type: ignore[union-attr]
+                    ),
+                    clarification_answer_fingerprint=(
+                        pending.clarification_answer_fingerprint
+                    ),
+                )
+            else:
+                intent_request = self._production_intent_request(
+                    clean=clean,
+                    proposal=proposal,
+                    authority=authority,
+                    commit=commit,
+                    command_id=command_id,
+                    clarification_answer=clarification_answer,
+                )
+            origin_binding = build_production_origin_binding(intent_request)
+            origin_authority = CallLocalProductionOriginAuthority(
+                expected_binding=origin_binding,
+                commit_ledger=(
+                    None
+                    if intent_request.origin is ProductionIntentOrigin.STRUCTURED
+                    else self._commit_ledger
+                ),
+            )
+            resolution = await asyncio.to_thread(
+                bridge.resolve_production,
+                intent_request,
+                authority.reader,
+                origin_authority,
+                _RejectingProductionConfirmationConsumer(),
+                self._production_clarification_owner,
+            )
+            if operation_hint is not None and resolution.operation != operation_hint:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "operation hint does not match the classified committed intent",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if task_hint is not None and resolution.target_task_id != task_hint:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "task hint does not match the resolved authenticated target",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if (
+                pending is not None
+                and pending.kind == "confirmation"
+                and (
+                    resolution.operation != pending.resolution.operation
+                    or resolution.target_task_id != pending.resolution.target_task_id
+                    or dict(resolution.arguments) != dict(pending.resolution.arguments)
+                    or resolution.task_set_fingerprint
+                    != pending.resolution.task_set_fingerprint
+                    or resolution.authority_fingerprint
+                    != pending.resolution.authority_fingerprint
+                    or resolution.confirmation_binding is None
+                    or pending.resolution.confirmation_binding is None
+                    or resolution.confirmation_binding.capability_profile_digest
+                    != pending.resolution.confirmation_binding.capability_profile_digest
+                )
+            ):
+                await self._release_production_intent_origins(
+                    current_commit=commit,
+                    current_source=source,
+                    pending=pending,
+                    remove_pending=True,
+                )
+                return self._intent_rejected_result(
+                    request_id,
+                    reason="TASK_INTENT_CONFIRMATION_FACTS_CHANGED",
+                    code=ErrorCode.CONFLICT,
+                    message="confirmed production Task facts changed before execution",
+                    origin_kind=(source if source in {"text", "voice"} else None),
+                    origin_id=(None if commit is None else commit.interaction_id),
+                )
+            async with self._lock:
+                retained = self._p3_intent_operations.get(request_id)
+                if retained is not None:
+                    retained.intent_operation = resolution.operation
+                    retained.intent_task_id = resolution.target_task_id
+                    retained.intent_scope = authority.scope
+
+            if pending is not None and pending.kind == "confirmation":
+                voice_origin = await self._production_voice_origin(pending)
+                confirmed, formal = await self._confirm_production_intent(
+                    clean=clean,
+                    request_id=request_id,
+                    pending=pending,
+                    request=intent_request,
+                    authority=authority,
+                    origin_authority=origin_authority,
+                    preliminary=resolution,
+                )
+                await self._release_production_intent_origins(
+                    current_commit=commit,
+                    current_source=source,
+                    pending=pending,
+                    remove_pending=True,
+                )
+                if not formal.ok:
+                    error = formal.payload.get("error")
+                    reason = (
+                        str(error.get("reason"))
+                        if isinstance(error, Mapping)
+                        else "TASK_INTENT_DISPATCH_REJECTED"
+                    )
+                    return self._intent_rejected_result(
+                        request_id,
+                        reason=reason,
+                        code=ErrorCode.CONFLICT,
+                        message="production Task mutation was rejected",
+                        formal_task_result=formal.payload,
+                        origin_kind=source,
+                        origin_id=(
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                    )
+                formal_result = formal.payload.get("result")
+                task_id = confirmed.target_task_id
+                if confirmed.operation == "task.create" and isinstance(
+                    formal_result, Mapping
+                ):
+                    created = formal_result.get("task_id")
+                    if isinstance(created, str) and created:
+                        task_id = created
+                if voice_origin is not None and task_id is not None:
+                    async with self._lock:
+                        if (
+                            task_id in self._voice_task_origins
+                            or len(self._voice_task_origins)
+                            < self._PRODUCT_OPERATION_CAPACITY
+                        ):
+                            self._voice_task_origins[task_id] = voice_origin
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.DISPATCHED.value,
+                        "reason": "TASK_INTENT_DISPATCHED",
+                        **self._production_resolution_facts(confirmed),
+                        "task_id": task_id,
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_commit_id": (
+                            None if commit is None else commit.commit_id
+                        ),
+                        "formal_task_result": formal_result,
+                    },
+                    self._p3_control_manifest(),
+                )
+
+            if resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED:
+                if resolution.confirmation == "required":
+                    token = await self._issue_production_confirmation_continuation(
+                        clean=clean,
+                        request_id=request_id,
+                        proposal=proposal,
+                        resolution=resolution,
+                        commit=commit,
+                        authority=authority,
+                        replacing_token=(None if pending is None else pending.token),
+                        clarification_answer_fingerprint=(
+                            None
+                            if clarification_answer is None
+                            else clarification_answer.fingerprint
+                        ),
+                    )
+                    await self._retire_prior_production_continuation(
+                        pending=pending,
+                        current_commit=commit,
+                    )
+                    return _success_result(
+                        request_id,
+                        {
+                            "status": TaskIntentDisposition.CLARIFICATION.value,
+                            "reason": "TASK_CONFIRMATION_REQUIRED",
+                            **self._production_resolution_facts(resolution),
+                            "origin_kind": source,
+                            "origin_id": (
+                                commit.interaction_id
+                                if commit is not None
+                                else str(clean["source_id"])
+                            ),
+                            "confirmation_token": token,
+                            "confirmation_form": f"confirm task request {token}",
+                            "partial_command_count": 0,
+                        },
+                        self._p3_control_manifest(),
+                    )
+                formal = await self._invoke_production_resolution(
+                    clean=clean,
+                    request_id=request_id,
+                    resolution=resolution,
+                    origin_authority=origin_authority,
+                    confirmation_consumer=None,
+                )
+                await self._release_production_intent_origins(
+                    current_commit=commit,
+                    current_source=source,
+                    pending=pending,
+                    remove_pending=pending is not None,
+                )
+                if not formal.ok:
+                    error = formal.payload.get("error")
+                    reason = (
+                        str(error.get("reason"))
+                        if isinstance(error, Mapping)
+                        else "TASK_INTENT_QUERY_REJECTED"
+                    )
+                    return self._intent_rejected_result(
+                        request_id,
+                        reason=reason,
+                        code=ErrorCode.UNAVAILABLE,
+                        message="production Task query was rejected",
+                        formal_task_result=formal.payload,
+                        origin_kind=source,
+                        origin_id=(
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                    )
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.DISPATCHED.value,
+                        "reason": "TASK_INTENT_DISPATCHED",
+                        **self._production_resolution_facts(resolution),
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_token": None,
+                        "confirmation_form": None,
+                        "formal_task_result": formal.payload.get("result"),
+                    },
+                    self._p3_control_manifest(),
+                )
+
+            if resolution.outcome is ProductionTaskPolicyOutcome.CLARIFICATION:
+                token = await self._retain_production_continuation(
+                    kind="clarification",
+                    proposal=proposal,
+                    resolution=resolution,
+                    commit=commit,
+                    clean=clean,
+                    replacing_token=(None if pending is None else pending.token),
+                )
+                await self._retire_prior_production_continuation(
+                    pending=pending,
+                    current_commit=commit,
+                )
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.CLARIFICATION.value,
+                        "reason": resolution.reason,
+                        **self._production_resolution_facts(resolution),
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_token": token,
+                        "confirmation_form": None,
+                        "candidate_task_ids": list(resolution.candidate_task_ids),
+                        "clarification_generation": resolution.clarification_generation,
+                        "partial_command_count": 0,
+                    },
+                    self._p3_control_manifest(),
+                )
+
+            await self._release_production_intent_origins(
+                current_commit=commit,
+                current_source=source,
+                pending=pending,
+                remove_pending=pending is not None,
+            )
+            if resolution.outcome is ProductionTaskPolicyOutcome.DIALOGUE:
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.CLARIFICATION.value,
+                        "reason": resolution.reason,
+                        **self._production_resolution_facts(resolution),
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_token": None,
+                        "confirmation_form": None,
+                        "partial_command_count": 0,
+                    },
+                    self._p3_control_manifest(),
+                )
+            code = (
+                ErrorCode.UNSUPPORTED
+                if resolution.outcome is ProductionTaskPolicyOutcome.UNSUPPORTED
+                else ErrorCode.CONFLICT
+                if resolution.outcome is ProductionTaskPolicyOutcome.CONFLICT
+                else ErrorCode.PERMISSION_DENIED
+            )
+            return self._intent_rejected_result(
+                request_id,
+                reason=resolution.reason,
+                code=code,
+                message="production Task intent was rejected",
+                origin_kind=source,
+                origin_id=(
+                    commit.interaction_id
+                    if commit is not None
+                    else str(clean["source_id"])
+                ),
+            )
+        except FormalTaskViolation as error:
+            await self._release_failed_production_intent(
+                current_commit=commit,
+                current_source=source,
+                pending=pending,
+            )
+            return self._intent_rejected_result(
+                request_id,
+                reason=error.reason,
+                code=error.code,
+                message="production Task intent failed closed",
+                origin_kind=(source if source in {"text", "voice"} else None),
+                origin_id=(None if commit is None else commit.interaction_id),
+            )
+        except Exception as error:  # noqa: BLE001 - never leak resolver details
+            await self._release_failed_production_intent(
+                current_commit=commit,
+                current_source=source,
+                pending=pending,
+            )
+            logger.warning(
+                "[LiveVoiceProduct] production Task intent failed closed",
+                extra={
+                    "live_voice_event": "production_task_intent_failed",
+                    "reason": "PRODUCTION_TASK_INTENT_FAILED",
+                    "exception_class": type(error).__name__,
+                    "request_digest": hashlib.sha256(
+                        request_id.encode("utf-8", errors="replace")
+                    ).hexdigest()[:16],
+                },
+            )
+            return self._intent_rejected_result(
+                request_id,
+                reason="PRODUCTION_TASK_INTENT_FAILED",
+                code=ErrorCode.UNAVAILABLE,
+                message="production Task intent failed closed",
+            )
 
     async def _run_p3_intent(
         self,
@@ -10832,6 +12400,12 @@ class AgentServerProductCompositionRegistry:
                         pending.commit, pending.source
                     )
             self._pending_task_intents.clear()
+            for pending in tuple(self._pending_production_task_intents.values()):
+                if pending.commit is not None:
+                    self._release_task_intent_commit_locked(
+                        pending.commit, pending.source
+                    )
+            self._pending_production_task_intents.clear()
             self._voice_task_origins.clear()
             self._pending_terminal_notifications.clear()
             self._terminal_notification_responses.clear()
