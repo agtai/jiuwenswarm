@@ -168,7 +168,8 @@ Not exercised and not numerically claimed by the deterministic checkpoint:
 ## 4. Deterministic workload matrix
 
 All prompts and outputs are public fixed fixtures. A1, B and A2 use identical
-fixture bytes, timing configuration and runner source.
+fixture bytes, non-optimization timing configuration and runner source. Their
+closed optimization mode differs only as specified in section 5.
 
 | ID | Type | Fixed recognized prompt | P2 sequence | Successor ACK | PCM playout |
 |---|---|---|---:|---:|---:|
@@ -231,16 +232,45 @@ B is the checkpoint branch with both accepted behaviors enabled. The exact
 commit is frozen only after implementation, cumulative verification and Tier-3
 review.
 
-### 5.3 A reference source
+### 5.3 A reference source and optimization modes
 
-A is derived from the same neutral-runner source and reverts only the two
-accepted behaviors:
+P2 already has a truthful feature-off baseline in the accepted source. A does
+not reverse the 14-file P2 implementation. It uses the same P2 code with:
 
-- P2 returns one notification per RPC;
-- successor ACK must complete before TTS downlink opens.
+```text
+server P2 notification batch flag = false
+Web notification_batch_size       = 1
+```
 
-No other code, runner, fixture, flags or diagnostics differ. A1 and A2 use the
-exact same 40-character commit. B must have a distinct exact commit.
+B uses:
+
+```text
+server P2 notification batch flag = true
+Web notification_batch_size       = 16
+```
+
+TTS successor-ACK decoupling has no equivalent runtime switch. A is derived
+from the neutral-runner source by reverse-applying only the accepted TTS
+product behavior in:
+
+```text
+jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts
+jiuwenswarm/gateway/live_voice/dedicated_media_registration.py
+```
+
+Tests and causal runners are not reverse-applied. The A diff must reproduce the
+old sequential rule—successor ACK before downlink—without changing any unrelated
+current behavior. A1 and A2 use the exact same 40-character commit. B uses the
+exact neutral-runner/optimized commit.
+
+The comparer accepts only these declared A/B differences:
+
+- P2 batch flag and canonical batch size 1 versus 16;
+- TTS sequential reference source versus accepted overlap source;
+- run/population/source identifiers.
+
+Every fixture, delay, workload, sample count, privacy rule, runner hash and
+non-optimization configuration must match.
 
 ### 5.4 Population
 
@@ -420,8 +450,10 @@ produce zero checkpoint write and zero new Agent/Tool/Task/audio/history effect.
 
 The deterministic checkpoint is complete only if:
 
-- A1/B/A2 runner and configuration hashes are identical;
-- A1 and A2 use the exact same source commit; B uses the exact optimized commit;
+- A1/B/A2 runner and fixture/timing hashes are identical; their optimization
+  mode fingerprints differ only by the closed fields allowed in section 5.3;
+- A1 and A2 use the exact same TTS-reference source commit; B uses the exact
+  accepted-overlap source commit;
 - all three populations complete 15/15 attempts;
 - every workload has five numeric `round_total` samples;
 - A1/A2 total and target-stage p50 drift is at most 10%;
