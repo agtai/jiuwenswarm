@@ -1,14 +1,16 @@
 # P3 implementation coverage and historical reuse audit — 2026-08-18
 
-> **Historical coverage snapshot with current routing.** The percentage estimates
+> **Historical coverage and routing snapshot, rebased 2026-08-19.** The percentage estimates
 > remain bound to implementation baseline
 > `7a8ba7e82042e188efe6adbac98d47363b0d5d8e` and have an approximate `±5%`
 > review margin. They intentionally do not re-score later P3-G0 work and are not
-> acceptance credit or package closure. Current [STATUS](../STATUS.md) records
-> that P3-G0 passed only its D-086 authoritative-foundation Gate, exact product
-> source `f24dd17d` remains a failed controlled product-readiness candidate,
-> P3-1 is accepted at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`, and
-> P3-2 is active. At each package activation, validate only its selected assets
+> acceptance credit or package closure. At the 2026-08-19 routing rebase,
+> STATUS recorded that P3-G0 passed only its D-086 authoritative-foundation
+> Gate, exact product source `f24dd17d` remained a failed controlled
+> product-readiness candidate, P3-1 was accepted at
+> `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`, and P3-2 was active. Current
+> routing remains exclusively in [STATUS](../STATUS.md). At each later package
+> activation, validate only its selected assets
 > against current HEAD and the relevant Git range; no separate G0 delta document
 > or whole-audit re-score is required.
 

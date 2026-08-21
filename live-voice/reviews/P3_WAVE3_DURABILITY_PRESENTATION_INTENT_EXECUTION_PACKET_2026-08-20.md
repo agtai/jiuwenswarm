@@ -1,12 +1,13 @@
 # P3 Wave-3 durability, presentation and intent execution packet (2026-08-20)
 
-Status: `ACTIVE / IMPLEMENTATION AND EVIDENCE PENDING`
+Status: `CLOSED LOCALLY / SCOPED SOURCE-AUTOMATION-REVIEW-PRIVATE-EVIDENCE PASS`
 
-This is the scoped D-089 execution and eventual review record for P3-4,
-P3-5B and P3-6. It grants no implementation, test, review, physical or product
-credit until the corresponding evidence is recorded on an exact clean source.
+This is the scoped D-089 execution and closure record for P3-4, P3-5B and P3-6.
+Its exact-source credit is limited to the results and evidence recorded in §5;
+it grants no complete-P3, controlled-product, feature-complete or Production
+credit.
 Current product judgement remains owned by [STATUS](../STATUS.md), design choices
-by [D-089](../decisions/DECISIONS.md), and risk/review rules by root
+by [D-089 and D-090](../decisions/DECISIONS.md), and risk/review rules by root
 [`TESTING.md`](../../TESTING.md).
 
 ## 1. Baseline, owner and dependencies

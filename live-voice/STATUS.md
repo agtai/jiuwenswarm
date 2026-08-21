@@ -9,8 +9,8 @@
 
 - **Last controlled-product baseline assessed:**
   `f24dd17d336c8266954f2d7299ca13bd0314d424`. Accepted P3-1 Task source and the
-  scoped Wave-2/P3-8A packages do not change its immutable controlled-product
-  result.
+  scoped Wave-2, Wave-3 and P3-8A packages do not change its immutable
+  controlled-product result.
 - **Latest scoped Wave-2 physical source:**
   `3aa61f0193ac25e3da277f2dd632870355baf95a`. This source passes the bounded
   P3-2/P3-3/P3-5A file-Tool/A2/control/cleanup Gate only; it is not a complete
@@ -37,10 +37,13 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** preserve the closed D-088 Wave-2 and D-089
-  Wave-3 source/evidence, then select the next bounded packet from the deferred
-  P1/P2 repair or later P3 completion work. No next implementation packet is
-  activated by this status update. The deferred P1/P2 issue is recorded in the
+- **Current highest priority:** preserve the closed D-088 Wave-2 and D-089/
+  D-090 Wave-3 source/evidence, then select the next bounded packet from the
+  deferred P1/P2 repair/quality route or the now-eligible P3-7 formal carrier.
+  No next implementation packet is activated by this status update. Any packet
+  that changes Interaction or intent semantics must first name its semantic
+  owner, fixed corpus/languages, thresholds and capability-owned positive/
+  negative/zero-effect evidence. The deferred P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
   and must close before a later controlled-candidate or feature-complete claim.
 - **Integration:** integration with a `develop` ref is deferred until the
@@ -148,7 +151,7 @@ exact-source Alpha result.
   presentation consumption and P3-6 multi-Task intent resolution; **closed
   locally with scoped source/automation/review/private-evidence PASS**.
 - **Authority:** clean activation baseline
-  `cfff0c43aa599c009ab9517397566fec5c1bdd95`, [D-089](decisions/DECISIONS.md),
+  `cfff0c43aa599c009ab9517397566fec5c1bdd95`, [D-089 and D-090](decisions/DECISIONS.md),
   the [Wave-3 execution packet](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EXECUTION_PACKET_2026-08-20.md),
   the [P3-4 preparation](reviews/P3_4_DURABILITY_RECOVERY_ACTIVATION_PREPARATION_2026-08-18.md)
   and [P3-5B/P3-6 preparation](reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
@@ -177,8 +180,8 @@ exact-source Alpha result.
   product-path automation credit rather than fabricated physical credit.
 - **Next action:** no new implementation packet is activated. Preserve the
   closed local Wave-3 line, obtain exact approval before any remote update, and
-  select the next bounded packet from the deferred P1/P2 repair or later P3
-  completion route.
+  select the next bounded packet from the deferred P1/P2 repair/quality route or
+  P3-7 formal carrier.
 - **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; unsupported
   controls without real primitives; P3-7 UI; P3-8B retirement; P3-9 cumulative
   acceptance; complete P3, feature complete, controlled-candidate PASS,
@@ -217,13 +220,17 @@ exact-source Alpha result.
    migrating each still-applicable
    historical oracle with its first owning package; perform code placement,
    duplicate consolidation and entrypoint/document retirement only after
-   replacement without deleting live coverage. Complete P1/P2 quality in
-   parallel with the
-   [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md): execute the
-   [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
-   across Speech/Media/Runtime/Interaction latency and recovery on one side;
-   activate owner-scoped packages for multi-Task, full controls, replay,
-   capability-driven Executor and supported D1/D2 semantics on the other.
+   replacement without deleting live coverage. The remaining bounded routes
+   are: owner-scoped P1/P2 repair/quality packets grounded in the
+   [deferred continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
+   and [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md),
+   plus P3-7 formal carrier → P3-8B composition/retirement → P3-9 cumulative
+   complete-P3 acceptance under the
+   [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md). P1/P2 and
+   P3-7 work may overlap only when owners/files are disjoint. A positive
+   `provide_input`, pause or resume claim first requires a separately accepted
+   real primitive/capability packet; otherwise the operations remain truthful
+   unsupported and their complete-P3 scope must be settled before P3-9 PASS.
 6. Generalize Provider/Executor/configuration/language/task policy and remove
    the exact itinerary, trusted Demo bypass, remaining product/UI current-Task
    assumptions and legacy product routes.
@@ -246,12 +253,13 @@ exact-source Alpha result.
   STATUS. It is documentation, not product progress: it grants no new
   module-completion credit and does not repair defects. If code changes, repeat
   the affected rows.
-- **P3 implementation/reuse audit — COMPLETE (2026-08-18, routing rebased
-  2026-08-19):** see the
+- **P3 implementation/reuse audit — COMPLETE (2026-08-18, routing snapshot
+  rebased 2026-08-19):** see the
   [P3 implementation coverage and historical reuse audit](reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md).
   Its estimates remain a committed pre-G0 nine-package coverage snapshot; its
-  current routing records the P3-G0 scoped PASS, accepted P3-1 package and
-  active P3-2 package. It also
+  dated routing overlay records the handoff from the P3-G0 scoped PASS through
+  accepted P3-1 into the then-active P3-2 package. It is not the current queue;
+  current package closure and selection remain in this STATUS. It also
   records the wave-to-asset migration overlay and per-commit extraction gates
   for the old 3A/3B/reader/S8.5 lines. Its companion
   [source-asset manifest](reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md)
@@ -266,10 +274,12 @@ exact-source Alpha result.
 - **Tests/code organization:** move every still-applicable old runner oracle to
   its capability owner before deletion; keep test fakes/fault helpers out of the
   apparent production tree.
-- **Documents:** Batch A is complete. Batches B/C retain the 55-file retirement
-  manifest until regression/contract extraction; the planned interim set is 20
-  Live Voice documents. Audit-time line counts are historical metrics, not
-  mutable status facts.
+- **Documents:** Batch A is complete. Batches B/C retain their original 55-file
+  retirement manifest until regression/contract extraction. That manifest's
+  20-file interim target predates the 20 P3 planning/review/evidence documents
+  added after the audit and is no longer an executable current count. Rebaseline
+  the retained/retired set before B/C deletion; audit-time counts remain
+  historical metrics, not mutable status facts.
 - **Hardcodes:** the explicit Demo profile and production-default flag-off are
   implemented and verified on `f24dd17d`; later P1/P2 and P3 packages must
   preserve them. Exact
@@ -294,8 +304,9 @@ exact-source Alpha result.
   records the current-source pure SLI/privacy/OTel codec scope, corrected
   `ca3d7780` findings, exact affected evidence and independent Tier-3 PASS. The
   assets are uncomposed and do not make P3-8, product readiness or Production
-  operations complete; the D-088 Wave-2 packet is now closed locally, while the
-  next P3-4/P3-5B/P3-6 activation remains separate.
+  operations complete. Its 2026-08-19 disposition that P3-2 could continue is
+  an exact-time routing fact; D-088 Wave 2 and D-089 Wave 3 are now separately
+  closed, and no later packet is activated here.
 - **Local artifacts:** coverage, caches, `dist`, `node_modules`, logs and private
   runtime databases/audio remain ignored and excluded from final integration.
 
@@ -343,9 +354,9 @@ exact-source Alpha result.
   [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md),
   but its repeated physical continuation failure prevents immutable PASS.
 - D-086 records P3-G0 PASS only for the expansion-foundation Gate and originally
-  activated P3-1; P3-1 and the Wave-2 source packages now pass their scoped
-  source evidence. It explicitly transfers, rather than passes, the missing
-  physical Journey and
+  activated P3-1; P3-1 and the Wave-2/Wave-3 source packages now pass their
+  scoped source evidence. It explicitly transfers, rather than passes, the
+  missing physical Journey and
   [P1/P2 continuation defect](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
 - A documentation-only commit never upgrades product readiness.
 - Runtime credentials, Provider settings, registered projects, device/browser

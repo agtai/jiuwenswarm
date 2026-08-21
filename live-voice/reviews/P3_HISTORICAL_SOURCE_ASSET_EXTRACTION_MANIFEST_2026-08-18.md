@@ -1,14 +1,15 @@
 # P3 historical source-asset extraction manifest — 2026-08-18
 
-> **Historical source inventory with current routing.** Source assets were
+> **Historical source inventory with a 2026-08-19 routing snapshot.** Source assets were
 > inspected read-only against product baseline
 > `7a8ba7e82042e188efe6adbac98d47363b0d5d8e`; their source facts remain fixed,
-> while activation mapping is always validated against current HEAD. P3-G0 has
-> since passed only its D-086 authoritative-foundation Gate, exact product source
-> `f24dd17d` remains a failed controlled product-readiness candidate, P3-1 is
-> accepted at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`, and P3-2 is active.
+> while activation mapping is always validated against current HEAD. At that
+> routing snapshot, P3-G0 had passed only its D-086 authoritative-foundation
+> Gate, exact product source `f24dd17d` remained a failed controlled
+> product-readiness candidate, P3-1 was accepted at
+> `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`, and P3-2 was active.
 > This manifest grants no implementation or acceptance credit. Package
-> status, dependencies and the active packet remain in [STATUS](../STATUS.md)
+> status, dependencies and the active packet always remain in [STATUS](../STATUS.md)
 > and the [complete P3 plan](../roadmap/FULL_P3_EXECUTION_PLAN.md). Package-level
 > estimates, Git topology and evidence boundaries are in the companion
 > [P3 implementation/reuse audit](P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md).

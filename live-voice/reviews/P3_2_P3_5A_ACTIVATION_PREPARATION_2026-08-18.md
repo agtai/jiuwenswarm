@@ -6,10 +6,13 @@
 > [STATUS](../STATUS.md). The complete package outcomes, dependencies and Gates
 > remain in the [complete P3 execution plan](../roadmap/FULL_P3_EXECUTION_PLAN.md).
 > [D-087](../decisions/DECISIONS.md) converts §3 into the accepted P3-2
-> shared-contract checkpoint. Sections 4–5 remain preparation for inactive
-> P3-5A and any later shared-schema packet. This record implements no production
-> code or schema change and grants no P3-2 or P3-5A implementation/completion
+> shared-contract checkpoint. Sections 4–5 remain a preparation record for the
+> then-inactive P3-5A and any later shared-schema packet. This record implements
+> no production code or schema change and grants no P3-2 or P3-5A implementation/completion
 > credit.
+> All activation language below is the 2026-08-18/19 preparation snapshot;
+> later package outcomes remain in [STATUS](../STATUS.md) and the
+> [Wave-2 implementation review](P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md).
 
 ## 1. Scope, risk and integrated-baseline identity
 
@@ -412,16 +415,17 @@ external Port could have been called.
 
 ## 8. Activation and re-review triggers
 
-STATUS alone owns whether P3-2 is active. An activated P3-2 packet may implement
-the frozen contract when its applicable triggers below are satisfied. P3-5A
-remains pre-activation and separately owns its §4/§5 triggers:
+STATUS alone owns whether a package is active. At this preparation snapshot, an
+activated P3-2 packet could implement the frozen contract when its applicable
+triggers below were satisfied, while P3-5A remained pre-activation and
+separately owned its §4/§5 triggers:
 
 1. The scoped P3-G0 foundation Gate is satisfied on the formal G0_FINAL lineage;
    the controlled product-readiness candidate remains `FAIL` and is not a
    prerequisite for this code packet.
-2. P3-1 is accepted at `d40e0ee3` on that same lineage, with schema/state/
-   successor identity and current-Task-as-hint semantics rechecked. STATUS now
-   activates P3-2; P3-5A requires a separately recorded parallel assignment or
+2. P3-1 was accepted at `d40e0ee3` on that same lineage, with schema/state/
+   successor identity and current-Task-as-hint semantics rechecked. STATUS then
+   activated P3-2; P3-5A required a separately recorded parallel assignment or
    later activation before implementation. Diff and re-audit every affected
    fact if the implementation baseline moves beyond that source.
 3. P3-2 selects `P3A-CTRL-01`, `P3A-CTRL-TXN-01`, `S85-RK-01`,

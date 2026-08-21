@@ -12,15 +12,22 @@
 >
 > Date: 2026-08-18
 >
-> Sequencing update (2026-08-19): [D-086](../decisions/DECISIONS.md) records
+> Sequencing record (2026-08-19): [D-086](../decisions/DECISIONS.md) records
 > P3-G0 PASS for the audited/source-verified P3 authority-foundation Gate and
 > transfers the failed post-TTS hands-free continuation and combined physical
 > candidate Journey to later cumulative P1/P2/P3 acceptance. P3-1 is accepted
-> at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`; current
-> [STATUS](../STATUS.md) activates P3-2 in Wave 2; D-087 freezes its six-item
-> command contract and records the additive P3-8A asset boundary separately.
+> at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`; STATUS then activated P3-2
+> in Wave 2, and D-087 froze its six-item command contract. The additive P3-8A
+> asset boundary was recorded separately.
 > This does not convert `f24dd17d` into a controlled-candidate PASS or grant
 > P3-2 implementation credit.
+>
+> Sequencing record (2026-08-21): D-088 Wave 2 and D-089/D-090 Wave 3 are
+> closed on their exact scoped sources. Their applicable P3-2 through P3-6
+> implementations now satisfy the dependency entrance to P3-7, but no P3-7 or
+> other next packet is activated by this plan. The deferred P1/P2 continuation
+> defect still blocks a later controlled-candidate or feature-complete claim.
+> Mutable selection remains only in [STATUS](../STATUS.md).
 
 ## 1. Purpose and required product outcome
 
@@ -64,7 +71,7 @@ This plan is interpreted in the following order:
    changes;
 2. [STATUS](../STATUS.md) for mutable progress, blockers, dependencies and the
    active execution packet;
-3. D-084 through D-086 in [DECISIONS](../decisions/DECISIONS.md);
+3. D-084 through D-090 in [DECISIONS](../decisions/DECISIONS.md);
 4. stable P1/P2/P3 and shared-contract boundaries in
    [the accepted design snapshot](../architecture/FULL_SOLUTION_2026-07-30.md)
    sections 2, 4 and 5;
@@ -280,9 +287,11 @@ that work is not a substitute for the final exact-source `P3-9` execution.
 ### 6.1 Dispatch waves
 
 The wave names below define dependency structure rather than mutable progress.
-Current activation always comes from STATUS; at the 2026-08-19 reconciliation,
-Wave 1/P3-1 is accepted and P3-2 is the only active production packet in Wave
-2. Additive P3-8A assets are accepted without product-composition credit.
+Activation always comes from STATUS. At the 2026-08-19 reconciliation, Wave
+1/P3-1 was accepted and P3-2 was the only active production packet in Wave 2;
+additive P3-8A assets were accepted without product-composition credit. The
+2026-08-21 sequencing record above preserves the later Wave-2/Wave-3 closure
+without turning this dependency table into the current queue.
 
 | Wave | Production work | Work that may run in parallel | Exit condition |
 |---|---|---|---|
@@ -308,7 +317,7 @@ one already-frozen shared contract.
 | `P3-3` | `P3-1` accepted | `P3-2`, `P3-5A`, additive `P3-8A` | Attempt/capability/lease vocabulary and product admission composition |
 | `P3-5A` | `P3-1` accepted | `P3-3`; `P3-2` conditionally; additive `P3-8A` | Store schema/migration and terminal settlement transaction |
 | `P3-8A` | `P3-1` accepted | `P3-2`, `P3-3`, `P3-5A`; later `P3-4`, `P3-6`, `P3-5B` | Central composition/profile activation is serialized with the package owning that entrypoint; this lane is additive only |
-| `P3-4` | `P3-3` accepted | `P3-6`, `P3-5B`, additive `P3-8A` | Executor/Store recovery transaction, selected Adapter and same-versus-linked Attempt decision |
+| `P3-4` | `P3-3` accepted | `P3-6`, `P3-5B`, additive `P3-8A` | Executor/Store recovery transaction, selected Adapter and D-089 linked-recovery-Attempt contract |
 | `P3-6` | `P3-2` and `P3-5A` implementations integrated/accepted; preparation may start at contract freeze | `P3-4`, `P3-5B`, additive `P3-8A` | Core command authority, result truth and Web presentation |
 | `P3-5B` | `P3-5A` accepted | `P3-4`, `P3-6`, additive `P3-8A` | Runtime generation/ACK owner if another lane touches the same presentation path |
 | `P3-7` | Applicable `P3-2` through `P3-6` implementations integrated/accepted; replica preparation may start at schema freeze | Late dependency review and non-invasive telemetry only | Registry/AgentServer/formal-route/Panel product composition and wire-schema changes |
@@ -697,8 +706,10 @@ map](../reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
 - Display command acceptance separately from application and terminal outcome.
 - Bind UI actions to exact task/attempt/command identity and show stable errors
   for conflict, unsupported, stale, authorization failure and unknown outcome.
-- Route blocking answers through `provide_input` and revisions through explicit
-  successor creation; do not mutate Task truth in the UI.
+- When the selected Executor exposes a separately accepted real `provide_input`
+  primitive, route blocking answers through it; otherwise keep the control
+  unavailable or return stable `unsupported`. Route revisions through explicit
+  successor creation and never mutate Task truth in the UI.
 - Reuse Runtime/TTS response ownership, generation fencing and PresentationAck.
   A Task event never bypasses the arbiter to speak directly.
 - Remove legacy hooks/flags only after formal composition, flag-off regression
@@ -783,11 +794,17 @@ map](../reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
 
 1. **Multi-Task control:** create Tasks A and B, continue foreground dialogue,
    query each, update A and cancel B without cross-effects.
-2. **Blocking/input:** observe one real blocked or decision-required event,
-   provide exact bounded input and prove ordered application before terminal.
-3. **Capability controls:** pause/resume/reprioritize only on a supporting
-   Executor/scheduler composition; prove stable unsupported behaviour on a
-   non-supporting path.
+2. **Blocking/input:** on a composition that declares a separately accepted real
+   `provide_input` primitive, observe one real blocked or decision-required
+   event, provide exact bounded input and prove ordered application before
+   terminal. If the selected product profile has no such primitive, prove stable
+   zero-effect `unsupported` and obtain an accepted complete-P3 scope decision
+   before PASS; absence cannot silently count as positive support.
+3. **Capability controls:** exercise pause/resume/reprioritize only on each
+   supporting Executor/scheduler composition and prove stable zero-effect
+   `unsupported` on a non-supporting path. If the selected product profile has
+   no real pause/resume primitive, settle that complete-P3 scope by accepted
+   decision before PASS rather than inheriting support from P3-3/P3-4.
 4. **Result/replay:** disconnect or refresh, recover Task identities, consume an
    unread terminal result and prove ACK/replay semantics.
 5. **Restart/durability:** prove D0 restart truth and every declared D1/D2 path
@@ -857,6 +874,18 @@ oracle moves to the current capability owner, is shown to detect the intended
 defect/forbidden effect, passes on current behaviour and participates in current
 test discovery before the historical entrypoint is deleted.
 
+Semantic and corpus ownership is package-scoped rather than a separate truth
+authority. A packet that changes endpoint/turn/Interaction policy is owned by
+P1/P2 Interaction Intelligence and freezes its languages, device/audio labels,
+false-endpoint/interruption/echo/double-talk corpus, thresholds and regression
+oracles before implementation. A packet that changes Task intent, targeting,
+clarification or confirmation policy is owned by the Voice–Task Bridge and
+freezes its languages, positive/negative/ambiguity/negation corpus, thresholds
+and zero-forbidden-effect evidence. P3-7 may consume only the accepted semantic
+result; it does not train or redefine it in UI state. P3-9 reruns the applicable
+fixed corpora and real seams cumulatively. Any new classifier or product policy
+requires an explicit scope/risk checkpoint before code changes.
+
 ## 10. Parallel ownership and integration strategy
 
 Parallel lanes are ownership boundaries, not a fixed worker count:
@@ -922,9 +951,9 @@ when the packet starts.
 ## 12. Settled and remaining design checkpoints
 
 The accepted design fixes the product boundary. P3-1 and D-087 settle the
-foundation and P3-2 command semantics below; later capability/recovery/result
-packages still own their explicitly remaining choices before their code
-diverges:
+foundation and P3-2 command semantics below; D-088 through D-090 further settle
+the scoped capability/admission, durability/recovery, consumption and targeting
+choices. Unsupported primitives and later product composition remain explicit:
 
 Accepted P3-1 source `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`
 already settles two foundation facts: `queued` is only a projection of an
@@ -935,17 +964,19 @@ command, eligibility and atomic creation transaction on that lineage.
 
 | Question | Current accepted decision | Remaining block |
 |---|---|---|
-| If pause/resume is supported, how is `paused` represented? | D-087 keeps it non-canonical and freezes P3-2 pause/resume as zero-effect `unsupported`; never relabel blocked/accepted/decision-required | Positive support still requires `P3-3`, `P3-4`, `P3-7`; no longer blocks P3-2 implementation |
-| Does D1 resume the same Attempt? | Preserve `task_id`; choose same or linked recovery `attempt_id` explicitly with checkpoint/retry accounting and provenance | `P3-4` |
-| Which adapters must prove D1/D2? | Every declared capability needs a real path; do not claim a level from interface support alone | `P3-3`, `P3-4`, `P3-9` |
-| What does reprioritize control? | D-087 freezes `low/normal/high/urgent` wire values but zero-effect `unsupported` until a real scheduler/admission owner exists | Positive support requires `P3-3`; no longer blocks P3-2 implementation |
-| How are decision-required answers represented? | D-087 binds bounded untrusted input to the exact current `task.decision_required` event; ordinary `blocked` is not input-required | Positive Executor application requires `P3-3`; natural-language routing remains `P3-6` |
-| What is unread/replay retention? | Define bounded cursor/retention and ACK semantics for the supported product profile without importing Production retention/SLO scope | `P3-5`, `P3-7` |
-| Which terminal outcomes and command contract may create a successor? | D-087 fixes `task.create_successor`, exact predecessor/result binding, one direct successor, eligible `completed/failed/cancelled/interrupted` outcomes and immutable predecessor truth | Contract settled; P3-2 implements it and P3-7 later composes it |
+| If pause/resume is supported, how is `paused` represented? | D-087 keeps it non-canonical and freezes pause/resume as zero-effect `unsupported`; never relabel blocked/accepted/decision-required | Scoped P3-3/P3-4 closure added no real primitive. Positive support requires a separately accepted capability/policy expansion and later P3-7 composition; it is not inherited from those package PASS results |
+| Does D1 resume the same Attempt? | D-089 preserves `task_id` and requires an explicit linked/new recovery `attempt_id` with immutable producer provenance | Settled for scoped Direct P3-4; later Executor generalization and P3-9 acceptance must preserve it |
+| Which adapters must prove D1/D2? | D-089 selects current Direct for the scoped real D1/D2 path and keeps legacy D0-only; interface support alone grants no level | Generalize the declared Executor/profile matrix and prove every claimed real path again in P3-9 |
+| What does reprioritize control? | D-088 gives the real admission queue `low|normal|high|urgent`; accepted/queued targets may apply it, while claimed/running/blocked/decision-required/terminal targets remain truthful conflict paths | P3-7 product composition and later policy/generalization; no running-scheduler capability is implied |
+| How are decision-required answers represented? | D-087 binds bounded untrusted input to the exact current `task.decision_required` event; D-089 P3-6 settles targeting/clarification/confirmation without inventing an Executor input primitive | `provide_input` remains unsupported until a real primitive receives a separately accepted owner/capability contract; later P3-7 may compose only that proven behavior |
+| What is unread/replay retention? | D-088 retains immutable TaskEvent/legal TaskResult for Task lifetime with class-isolated durable ACK; D-090 adds Task-wide, cross-Attempt bounded/paged cursor recovery over the same ledger | P3-7 product composition and P3-9 acceptance; Production retention/SLO/compaction remains outside this plan boundary |
+| Which terminal outcomes and command contract may create a successor? | D-087 fixes `task.create_successor`, exact predecessor/result binding, one direct successor, eligible `completed/failed/cancelled/interrupted` outcomes and immutable predecessor truth; D-089 P3-6 settles its authenticated routing | Contract and backend routing settled; P3-7 later composes them |
 
-D-087 rows are accepted P3-2 decisions; the D1/D2 and unread rows remain later
-package checkpoints. Any material change to accepted authority, durability or
-product semantics still goes through the decision process before implementation.
+D-087 through D-090 settle the scoped backend decisions above. Remaining work
+is explicit unsupported-primitive expansion, product composition,
+generalization and cumulative acceptance—not a license to reopen those contracts
+silently. Any material change to accepted authority, durability or product
+semantics still goes through the decision process before implementation.
 
 ## 13. Complete-P3 definition of done
 

@@ -1,6 +1,6 @@
 # P3-4 Durability / Recovery Activation Preparation (2026-08-18)
 
-Status: `PREPARATION ONLY / NOT ACTIVATED / NOT ACCEPTED`
+Status at the preparation snapshot: `PREPARATION ONLY / NOT YET ACTIVATED / NO CREDIT`
 
 This document prepares the P3-4 D0/D1/D2 design checkpoint, source landing and
 evidence matrix. It implements no production behavior, authorizes no schema or
@@ -8,6 +8,10 @@ Adapter change, and awards no implementation, review, test or acceptance
 credit. Current priority and authority remain [STATUS](../STATUS.md); the
 normative package contract remains [FULL_P3_EXECUTION_PLAN §7.5](../roadmap/FULL_P3_EXECUTION_PLAN.md#75-p3-4--d0-d1-and-d2-durabilityrecovery),
 and risk/evidence closure remains governed by [TESTING](../../TESTING.md).
+All activation/dependency language below is frozen to the 2026-08-18
+preparation point; later P3-4 outcome is recorded in the
+[implementation review](P3_4_DURABILITY_RECOVERY_IMPLEMENTATION_REVIEW_2026-08-21.md)
+and current [STATUS](../STATUS.md).
 
 Historical reuse is routed only through the frozen
 [P3 implementation/reuse audit](P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md)

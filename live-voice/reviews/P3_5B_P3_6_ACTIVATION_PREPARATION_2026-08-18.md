@@ -1,6 +1,6 @@
 # P3-5B and P3-6 activation preparation — 2026-08-18
 
-Status: **PREPARATION ONLY / NOT ACTIVATED / NO PRODUCT OR COMPLETION CREDIT**
+Status at the preparation snapshot: **PREPARATION ONLY / NOT YET ACTIVATED / NO CREDIT**
 
 This packet prepares two Wave-3 implementation lanes from the accepted scheduling
 contract in the [complete P3 plan](../roadmap/FULL_P3_EXECUTION_PLAN.md):
@@ -11,11 +11,15 @@ contract in the [complete P3 plan](../roadmap/FULL_P3_EXECUTION_PLAN.md):
   and voice/text operation parity over accepted `P3-2` commands and `P3-5A`
   result/event truth.
 
-It selects current source seams, candidate contracts, historical oracle IDs,
-test destinations, collision rules, activation Gates and re-review triggers. It
-inherits the scoped P3-G0 foundation and accepted P3-1 facts but does **not**
-authorize production implementation while the named P3-5A/P3-2 hard
-dependencies remain unaccepted.
+It selects the source seams, candidate contracts, historical oracle IDs, test
+destinations, collision rules, activation Gates and re-review triggers that
+applied at the 2026-08-18 preparation point. It inherited the scoped P3-G0
+foundation and accepted P3-1 facts but did **not** itself authorize production
+implementation while the named P3-5A/P3-2 hard dependencies were then
+unaccepted. Later outcomes are recorded in current [STATUS](../STATUS.md), the
+[P3-5B review](P3_5B_PRESENTATION_CONSUMPTION_IMPLEMENTATION_REVIEW_2026-08-21.md)
+and the
+[Wave-3 review](P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md).
 
 ## 1. Evidence identity, scope and committed source facts
 

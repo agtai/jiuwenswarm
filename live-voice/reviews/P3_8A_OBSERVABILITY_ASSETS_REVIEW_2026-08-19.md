@@ -100,7 +100,9 @@ uncomposed Python assets and is therefore scoped out rather than claimed.
 ## 6. Disposition and remaining work
 
 The P3-8A additive asset tranche is accepted within this exact pure-code
-boundary. P3-2 remains the active primary execution package and may continue.
+boundary. At this review's 2026-08-19 disposition, P3-2 remained the active
+primary execution package and could continue; later routing is owned only by
+[STATUS](../STATUS.md).
 
 P3-8 remains `PARTIAL`: a later package must compose the codec behind the
 existing product observability adapter/exporter, add validated backend

@@ -1,6 +1,6 @@
 # P3-3 Capability / Admission Activation Preparation (2026-08-18)
 
-Status: `PREPARATION ONLY / NOT ACTIVATED / NOT ACCEPTED`
+Status at the preparation snapshot: `PREPARATION ONLY / NOT YET ACTIVATED / NO CREDIT`
 
 This review prepares the capability, admission, Attempt, lease and recovery
 decisions that P3-3 must freeze before implementation. It inherits accepted
@@ -33,11 +33,13 @@ manifest. Any later port must reopen the exact source object and review its diff
 
 ## 2. Admission gates and activation rule
 
-The P3-1 hard dependency is satisfied at `d40e0ee3` on the formal G0_FINAL
-lineage. STATUS currently activates P3-2, not P3-3; a later queue decision must
-activate a bounded P3-3 packet before production work starts. P3-4 remains
-downstream of accepted P3-3. This preparation does not satisfy either P3-3 or
-P3-4 acceptance.
+The P3-1 hard dependency was satisfied at `d40e0ee3` on the formal G0_FINAL
+lineage. At this 2026-08-18 preparation snapshot, STATUS activated P3-2 rather
+than P3-3; a later queue decision still had to activate a bounded P3-3 packet
+before production work. This preparation itself does not satisfy either P3-3
+or P3-4 acceptance; later package outcomes are recorded in
+[STATUS](../STATUS.md) and the
+[Wave-2 implementation review](P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md).
 
 Before P3-3 implementation, Main must accept one contract that:
 

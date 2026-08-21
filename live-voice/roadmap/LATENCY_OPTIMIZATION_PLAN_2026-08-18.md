@@ -330,9 +330,11 @@ from the reference materials:
 ## 10. Status relationship
 
 This plan is queued under the `Observability, benchmark and latency` capability
-and dependency route to feature complete in [STATUS](../STATUS.md). The current
-execution packet remains the higher-priority authoritative product-truth defect
-repair. Latency implementation starts as its own P1/P2 quality packet when the
-dependency route has a clean candidate and has migrated the applicable test
-oracles; compatible instrumentation may be included earlier in an affected
-defect packet only when its ownership and acceptance are explicit.
+and dependency route to feature complete in [STATUS](../STATUS.md). The
+2026-08-21 routing record closes D-089/D-090 Wave 3 and activates no next packet.
+Latency implementation starts only when STATUS selects an owner-scoped P1/P2
+repair/quality packet with a fresh physical baseline, fixed corpus, applicable
+test-oracle migration, risk and acceptance. Compatible instrumentation may be
+included earlier in another affected packet only when its ownership and
+acceptance are explicit; this preparatory plan never outranks or activates the
+current STATUS route by itself.
