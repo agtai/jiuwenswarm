@@ -131,7 +131,7 @@ export interface CheckpointP1Facts {
   readonly next_turn_ready: boolean;
   readonly downlink_opened_before_successor_ack: boolean;
   readonly product_owner: 'ProductP1VoiceRouteOwner';
-  readonly successor_ack_observed_ms: number;
+  readonly successor_ack_observed: Readonly<{ value_ms: number; truth_class: 'measured' }>;
   readonly interaction_id: string;
   readonly response_id: string;
   readonly unit_id: string;
@@ -175,6 +175,13 @@ export interface CheckpointAttempt {
   readonly events: readonly CheckpointEvent[];
   readonly segments: Readonly<Partial<Record<CheckpointSegment, CheckpointDuration>>>;
   readonly controlled_targets: Readonly<Record<string, Readonly<{ value_ms: number; truth_class: 'controlled' }>>>;
+  readonly controlled_observations: Readonly<{
+    stt_settlement: Readonly<{ value_ms: number | null; truth_class: 'measured' }>;
+    admission: Readonly<{ value_ms: number | null; truth_class: 'measured' }>;
+    agent_model: Readonly<{ value_ms: number | null; truth_class: 'measured' }>;
+    tool_interval: Readonly<{ value_ms: number | null; truth_class: 'measured' }>;
+    tts_generation: Readonly<{ value_ms: number | null; truth_class: 'measured' }>;
+  }>;
   readonly p2: CheckpointP2Facts | null;
   readonly p1: CheckpointP1Facts | null;
 }
@@ -185,12 +192,13 @@ class AttemptInvalid extends Error {
   }
 }
 
-function frozenControlledTargets(): CheckpointAttempt['controlled_targets'] {
-  return Object.freeze(
-    Object.fromEntries(
-      Object.entries(CHECKPOINT_CONTROLLED_TARGETS).map(([name, value_ms]) => [name, Object.freeze({ value_ms, truth_class: 'controlled' as const })]),
-    ),
-  );
+function frozenControlledTargets(workloadId: CheckpointWorkloadId): CheckpointAttempt['controlled_targets'] {
+  const targets: [string, number][] = [
+    ...(Object.entries(CHECKPOINT_CONTROLLED_TARGETS) as [string, number][]),
+    ['successor_ack_ms', CHECKPOINT_WORKLOADS[workloadId].successor_ack_delay_ms],
+    ['playout_ms', CHECKPOINT_WORKLOADS[workloadId].playout_duration_ms],
+  ];
+  return Object.freeze(Object.fromEntries(targets.map(([name, value_ms]) => [name, Object.freeze({ value_ms, truth_class: 'controlled' as const })])));
 }
 
 function safeNow(clock: CheckpointClock): number {
@@ -199,12 +207,13 @@ function safeNow(clock: CheckpointClock): number {
   return value;
 }
 
-async function controlledWait(clock: CheckpointClock, targetMs: number): Promise<void> {
+async function controlledWait(clock: CheckpointClock, targetMs: number): Promise<number> {
   const started = safeNow(clock);
   await clock.waitMs(targetMs);
   const elapsed = safeNow(clock) - started;
   if (elapsed < targetMs) throw new AttemptInvalid('CONTROLLED_WAIT_EARLY');
   if (elapsed > targetMs + Math.max(25, targetMs * 0.05)) throw new AttemptInvalid('CONTROLLED_WAIT_LATE');
+  return elapsed;
 }
 
 function measuredSegments(events: readonly CheckpointEvent[]): CheckpointAttempt['segments'] {
@@ -224,6 +233,13 @@ export async function runCheckpointAttempt(config: CheckpointAttemptConfig, depe
   const events: CheckpointEvent[] = [];
   let p2: CheckpointP2Facts | null = null;
   let p1: CheckpointP1Facts | null = null;
+  const controlledObserved: Record<'stt_settlement' | 'admission' | 'agent_model' | 'tool_interval' | 'tts_generation', number | null> = {
+    stt_settlement: null,
+    admission: null,
+    agent_model: null,
+    tool_interval: null,
+    tts_generation: null,
+  };
 
   const mark = (point: CheckpointPoint): void => {
     const expected = CHECKPOINT_POINTS[events.length];
@@ -238,20 +254,21 @@ export async function runCheckpointAttempt(config: CheckpointAttemptConfig, depe
   let reason: string | null = null;
   try {
     mark('speech_end');
-    await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.stt_settlement_ms);
+    controlledObserved.stt_settlement = await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.stt_settlement_ms);
     mark('stt_final');
-    await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.admission_ms);
+    controlledObserved.admission = await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.admission_ms);
     mark('admission_accepted');
     if (config.workload_id === 'W3') {
-      await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms);
-      await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms - CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms);
+      controlledObserved.tool_interval = await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms);
+      const remainder = await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms - CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms);
+      controlledObserved.agent_model = controlledObserved.tool_interval + remainder;
     } else {
-      await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms);
+      controlledObserved.agent_model = await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms);
     }
     mark('model_complete_and_notifications_enqueued');
     p2 = Object.freeze(await dependencies.deliverPresentation({ workload }));
     mark('presentation_final_consumed');
-    await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.tts_generation_ms);
+    controlledObserved.tts_generation = await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.tts_generation_ms);
     mark('tts_ready_and_successor_capture_requested');
     p1 = Object.freeze(await dependencies.playResponse({ workload, mark, p2 }));
     if (events.length !== CHECKPOINT_POINTS.length || !p1.successor_ack_confirmed || !p1.next_turn_ready)
@@ -280,7 +297,10 @@ export async function runCheckpointAttempt(config: CheckpointAttemptConfig, depe
     reason,
     events: Object.freeze([...events]),
     segments: measuredSegments(events),
-    controlled_targets: frozenControlledTargets(),
+    controlled_targets: frozenControlledTargets(config.workload_id),
+    controlled_observations: Object.freeze(
+      Object.fromEntries(Object.entries(controlledObserved).map(([name, value_ms]) => [name, Object.freeze({ value_ms, truth_class: 'measured' as const })])),
+    ) as CheckpointAttempt['controlled_observations'],
     p2,
     p1,
   });
@@ -340,6 +360,18 @@ export interface CheckpointReport {
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
+const OPTIMIZATION_MODE_KEYS = Object.freeze(['p2_notification_batch_size', 'tts_successor_ack_overlap']);
+
+function validOptimizationMode(value: unknown): value is CheckpointOptimizationMode {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    exactKeys(value as Record<string, unknown>, OPTIMIZATION_MODE_KEYS) &&
+    ((value as CheckpointOptimizationMode).p2_notification_batch_size === 1 || (value as CheckpointOptimizationMode).p2_notification_batch_size === 16) &&
+    typeof (value as CheckpointOptimizationMode).tts_successor_ack_overlap === 'boolean'
+  );
+}
 
 function reportViolation(reason: string): never {
   throw new Error(reason);
@@ -357,8 +389,7 @@ function validateReportConfig(config: CheckpointReportConfig): void {
     !Number.isSafeInteger(config.samples_per_workload) ||
     config.samples_per_workload < 1 ||
     config.samples_per_workload > 30 ||
-    (config.optimization_mode.p2_notification_batch_size !== 1 && config.optimization_mode.p2_notification_batch_size !== 16) ||
-    typeof config.optimization_mode.tts_successor_ack_overlap !== 'boolean'
+    !validOptimizationMode(config.optimization_mode)
   )
     reportViolation('CHECKPOINT_REPORT_CONFIG_INVALID');
 }
@@ -427,17 +458,22 @@ const ATTEMPT_KEYS = Object.freeze([
   'events',
   'segments',
   'controlled_targets',
+  'controlled_observations',
   'p2',
   'p1',
 ]);
 const EVENT_KEYS = Object.freeze(['point', 'monotonic_ms', 'truth_class']);
+const CONTROLLED_OBSERVATION_KEYS = Object.freeze(['stt_settlement', 'admission', 'agent_model', 'tool_interval', 'tts_generation']);
+const OBSERVED_VALUE_KEYS = Object.freeze(['value_ms', 'truth_class']);
 const P2_KEYS = Object.freeze(['truth_class', 'notification_rpc_count', 'notification_batch_count', 'ordered_barriers', 'batches', 'response']);
+const P2_BATCH_KEYS = Object.freeze(['rpc_index', 'start_publish_seq', 'end_publish_seq', 'count', 'duration_ms']);
+const P2_RESPONSE_KEYS = Object.freeze(['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'response_id', 'response_generation', 'unit_id']);
 const P1_KEYS = Object.freeze([
   'successor_ack_confirmed',
   'next_turn_ready',
   'downlink_opened_before_successor_ack',
   'product_owner',
-  'successor_ack_observed_ms',
+  'successor_ack_observed',
   'interaction_id',
   'response_id',
   'unit_id',
@@ -473,6 +509,7 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
     attempt.runner_fingerprint !== config.runner_fingerprint ||
     attempt.fixture_fingerprint !== config.fixture_fingerprint ||
     attempt.timing_fingerprint !== config.timing_fingerprint ||
+    !validOptimizationMode(attempt.optimization_mode) ||
     JSON.stringify(attempt.optimization_mode) !== JSON.stringify(config.optimization_mode) ||
     !Object.prototype.hasOwnProperty.call(CHECKPOINT_WORKLOADS, attempt.workload_id) ||
     !['completed', 'invalid', 'failed', 'unknown'].includes(attempt.outcome) ||
@@ -497,7 +534,27 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
   }
   if (attempt.outcome === 'completed' && attempt.events.length !== CHECKPOINT_POINTS.length) reportViolation('CHECKPOINT_ATTEMPT_EVENTS_INVALID');
   if (JSON.stringify(attempt.segments) !== JSON.stringify(measuredSegments(attempt.events))) reportViolation('CHECKPOINT_ATTEMPT_SEGMENTS_INVALID');
-  if (JSON.stringify(attempt.controlled_targets) !== JSON.stringify(frozenControlledTargets())) reportViolation('CHECKPOINT_ATTEMPT_TARGETS_INVALID');
+  if (JSON.stringify(attempt.controlled_targets) !== JSON.stringify(frozenControlledTargets(attempt.workload_id)))
+    reportViolation('CHECKPOINT_ATTEMPT_TARGETS_INVALID');
+  if (
+    attempt.controlled_observations === null ||
+    typeof attempt.controlled_observations !== 'object' ||
+    Array.isArray(attempt.controlled_observations) ||
+    !exactKeys(attempt.controlled_observations as unknown as Record<string, unknown>, CONTROLLED_OBSERVATION_KEYS)
+  )
+    reportViolation('CHECKPOINT_ATTEMPT_CONTROLLED_INVALID');
+  for (const [name, observation] of Object.entries(attempt.controlled_observations)) {
+    if (
+      observation === null ||
+      typeof observation !== 'object' ||
+      Array.isArray(observation) ||
+      !exactKeys(observation as unknown as Record<string, unknown>, OBSERVED_VALUE_KEYS) ||
+      observation.truth_class !== 'measured' ||
+      (observation.value_ms !== null && (!Number.isFinite(observation.value_ms) || observation.value_ms < 0)) ||
+      (name === 'tool_interval' && attempt.workload_id !== 'W3' && observation.value_ms !== null)
+    )
+      reportViolation('CHECKPOINT_ATTEMPT_CONTROLLED_INVALID');
+  }
   if (attempt.p2 !== null) {
     const expectedRpcCount = expectedP2RpcCount(config, attempt.workload_id);
     if (
@@ -512,6 +569,15 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
       JSON.stringify(attempt.p2.batches.map(batch => batch.end_publish_seq)) !== JSON.stringify(expectedBatchTails(config, attempt.workload_id)) ||
       attempt.p2.batches.some(
         (batch, index) =>
+          batch === null ||
+          typeof batch !== 'object' ||
+          Array.isArray(batch) ||
+          !exactKeys(batch as unknown as Record<string, unknown>, P2_BATCH_KEYS) ||
+          !Number.isSafeInteger(batch.rpc_index) ||
+          !Number.isSafeInteger(batch.start_publish_seq) ||
+          !Number.isSafeInteger(batch.end_publish_seq) ||
+          !Number.isSafeInteger(batch.count) ||
+          !Number.isFinite(batch.duration_ms) ||
           batch.rpc_index !== index + 1 ||
           batch.start_publish_seq !== (index === 0 ? 0 : attempt.p2!.batches[index - 1].end_publish_seq + 1) ||
           batch.count !== batch.end_publish_seq - batch.start_publish_seq + 1 ||
@@ -519,9 +585,12 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
       ) ||
       attempt.p2.response === null ||
       typeof attempt.p2.response !== 'object' ||
+      Array.isArray(attempt.p2.response) ||
+      !exactKeys(attempt.p2.response as unknown as Record<string, unknown>, P2_RESPONSE_KEYS) ||
       !['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'response_id', 'unit_id'].every(key =>
         TOKEN.test(attempt.p2!.response[key as keyof typeof attempt.p2.response] as string),
       ) ||
+      !Number.isSafeInteger(attempt.p2.response.response_generation) ||
       attempt.p2.response.response_generation !== 0
     )
       reportViolation('CHECKPOINT_ATTEMPT_P2_INVALID');
@@ -535,7 +604,11 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
       attempt.p1.next_turn_ready !== true ||
       attempt.p1.downlink_opened_before_successor_ack !== config.optimization_mode.tts_successor_ack_overlap ||
       attempt.p1.product_owner !== 'ProductP1VoiceRouteOwner' ||
-      attempt.p1.successor_ack_observed_ms !== CHECKPOINT_WORKLOADS[attempt.workload_id].successor_ack_delay_ms ||
+      attempt.p1.successor_ack_observed === null ||
+      typeof attempt.p1.successor_ack_observed !== 'object' ||
+      !exactKeys(attempt.p1.successor_ack_observed as unknown as Record<string, unknown>, OBSERVED_VALUE_KEYS) ||
+      attempt.p1.successor_ack_observed.truth_class !== 'measured' ||
+      attempt.p1.successor_ack_observed.value_ms !== CHECKPOINT_WORKLOADS[attempt.workload_id].successor_ack_delay_ms ||
       attempt.p2 === null ||
       attempt.p1.interaction_id !== attempt.p2.response.interaction_id ||
       attempt.p1.response_id !== attempt.p2.response.response_id ||
@@ -544,6 +617,19 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
       reportViolation('CHECKPOINT_ATTEMPT_P1_INVALID');
   }
   if (attempt.outcome === 'completed' && (attempt.p2 === null || attempt.p1 === null)) reportViolation('CHECKPOINT_ATTEMPT_SETTLEMENT_INVALID');
+  if (attempt.outcome === 'completed') {
+    const controlledPairs: readonly (readonly [number | null, number])[] = [
+      [attempt.controlled_observations.stt_settlement.value_ms, CHECKPOINT_CONTROLLED_TARGETS.stt_settlement_ms],
+      [attempt.controlled_observations.admission.value_ms, CHECKPOINT_CONTROLLED_TARGETS.admission_ms],
+      [attempt.controlled_observations.agent_model.value_ms, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms],
+      [attempt.controlled_observations.tts_generation.value_ms, CHECKPOINT_CONTROLLED_TARGETS.tts_generation_ms],
+      ...(attempt.workload_id === 'W3'
+        ? ([[attempt.controlled_observations.tool_interval.value_ms, CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms]] as const)
+        : []),
+    ];
+    if (controlledPairs.some(([observed, target]) => observed === null || observed < target || observed > target + Math.max(25, target * 0.05)))
+      reportViolation('CHECKPOINT_ATTEMPT_CONTROLLED_INVALID');
+  }
   if (
     attempt.outcome === 'completed' &&
     attempt.segments.first_source_to_playout?.duration_ms !== CHECKPOINT_WORKLOADS[attempt.workload_id].playout_duration_ms
@@ -837,10 +923,31 @@ export function parseCheckpointComparison(value: unknown): CheckpointComparison 
       !SHA64.test(identity.runner_fingerprint) ||
       !SHA64.test(identity.fixture_fingerprint) ||
       !SHA64.test(identity.timing_fingerprint) ||
-      (identity.report_sha256 !== null && !SHA64.test(identity.report_sha256))
+      identity.report_sha256 === null ||
+      !SHA64.test(identity.report_sha256) ||
+      !validOptimizationMode(identity.optimization_mode)
     )
       reportViolation('CHECKPOINT_COMPARISON_INVALID');
   }
+  const a1Input = inputs.a1 as CheckpointComparison['inputs']['a1'];
+  const bInput = inputs.b as CheckpointComparison['inputs']['b'];
+  const a2Input = inputs.a2 as CheckpointComparison['inputs']['a2'];
+  if (
+    a1Input.source_commit !== a2Input.source_commit ||
+    a1Input.runner_fingerprint !== bInput.runner_fingerprint ||
+    a1Input.runner_fingerprint !== a2Input.runner_fingerprint ||
+    a1Input.fixture_fingerprint !== bInput.fixture_fingerprint ||
+    a1Input.fixture_fingerprint !== a2Input.fixture_fingerprint ||
+    a1Input.timing_fingerprint !== bInput.timing_fingerprint ||
+    a1Input.timing_fingerprint !== a2Input.timing_fingerprint ||
+    a1Input.optimization_mode.p2_notification_batch_size !== 1 ||
+    a1Input.optimization_mode.tts_successor_ack_overlap !== false ||
+    a2Input.optimization_mode.p2_notification_batch_size !== 1 ||
+    a2Input.optimization_mode.tts_successor_ack_overlap !== false ||
+    bInput.optimization_mode.p2_notification_batch_size !== 16 ||
+    bInput.optimization_mode.tts_successor_ack_overlap !== true
+  )
+    reportViolation('CHECKPOINT_COMPARISON_INVALID');
   for (const workloadId of Object.keys(CHECKPOINT_WORKLOADS)) {
     const workload = workloads[workloadId];
     if (workload === null || typeof workload !== 'object' || Array.isArray(workload) || !exactKeys(workload as Record<string, unknown>, ['segments']))

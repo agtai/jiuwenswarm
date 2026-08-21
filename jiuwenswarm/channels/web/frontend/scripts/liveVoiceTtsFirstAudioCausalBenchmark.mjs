@@ -782,7 +782,7 @@ export async function runTtsFirstAudioCausalBenchmark(input) {
     );
   const materialDelayedPopulation = summaries.some(summary => {
     if (![250, 750].includes(summary.successor_ack_delay_ms)) return false;
-    if (summary.completed !== config.samples || zero?.p50_first_source_scheduled_ms === null) return false;
+    if (summary.completed !== config.samples || zero?.p50_first_source_scheduled_ms == null) return false;
     const population = populations.find(value => value.successor_ack_delay_ms === summary.successor_ack_delay_ms);
     if (
       population === undefined ||

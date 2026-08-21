@@ -112,12 +112,20 @@ function reportConfig(population, overrides = {}) {
 }
 
 function literalCompletedAttempt(population, workloadId, attemptIndex, roundTotalMs) {
-  const playoutCompletedMs = 170 + CHECKPOINT_WORKLOADS[workloadId].playout_duration_ms;
-  const effectiveRoundTotalMs = CHECKPOINT_WORKLOADS[workloadId].playout_duration_ms + 100 + roundTotalMs;
-  const timestamps = [100, 110, 120, 130, 140, 150, 160, 165, 170, playoutCompletedMs, 100 + effectiveRoundTotalMs];
-  const eventTimes = Object.fromEntries(CHECKPOINT_POINTS.map((point, index) => [point, timestamps[index]]));
   const optimizedRpcCounts = { W1: 1, W2: 4, W3: 8 };
   const notificationRpcCount = population === 'B' ? optimizedRpcCounts[workloadId] : CHECKPOINT_WORKLOADS[workloadId].notification_count;
+  const d0 = 100;
+  const d1 = d0 + 400;
+  const d2 = d1 + 500;
+  const d3 = d2 + 2000;
+  const d4 = d3 + notificationRpcCount * 85;
+  const d5 = d4 + 1000;
+  const d6 = d5 + (population === 'B' ? 0 : CHECKPOINT_WORKLOADS[workloadId].successor_ack_delay_ms);
+  const d8 = d6;
+  const d9 = d8 + CHECKPOINT_WORKLOADS[workloadId].playout_duration_ms;
+  const d10 = d9 + roundTotalMs;
+  const timestamps = [d0, d1, d2, d3, d4, d5, d6, d6, d8, d9, d10];
+  const eventTimes = Object.fromEntries(CHECKPOINT_POINTS.map((point, index) => [point, timestamps[index]]));
   const runId = `checkpoint-${population.toLowerCase()}`;
   const identitySuffix = `${runId}-${population}-${workloadId}-${attemptIndex}`;
   const batchTails =
@@ -148,8 +156,19 @@ function literalCompletedAttempt(population, workloadId, attemptIndex, roundTota
       Object.entries(CHECKPOINT_SEGMENTS).map(([name, [start, end]]) => [name, { duration_ms: eventTimes[end] - eventTimes[start], truth_class: 'measured' }]),
     ),
     controlled_targets: Object.fromEntries(
-      Object.entries(CHECKPOINT_CONTROLLED_TARGETS).map(([name, value_ms]) => [name, { value_ms, truth_class: 'controlled' }]),
+      [
+        ...Object.entries(CHECKPOINT_CONTROLLED_TARGETS),
+        ['successor_ack_ms', CHECKPOINT_WORKLOADS[workloadId].successor_ack_delay_ms],
+        ['playout_ms', CHECKPOINT_WORKLOADS[workloadId].playout_duration_ms],
+      ].map(([name, value_ms]) => [name, { value_ms, truth_class: 'controlled' }]),
     ),
+    controlled_observations: {
+      stt_settlement: { value_ms: 400, truth_class: 'measured' },
+      admission: { value_ms: 500, truth_class: 'measured' },
+      agent_model: { value_ms: 2000, truth_class: 'measured' },
+      tool_interval: { value_ms: workloadId === 'W3' ? 1000 : null, truth_class: 'measured' },
+      tts_generation: { value_ms: 1000, truth_class: 'measured' },
+    },
     p2: {
       truth_class: 'measured',
       notification_rpc_count: notificationRpcCount,
@@ -177,7 +196,10 @@ function literalCompletedAttempt(population, workloadId, attemptIndex, roundTota
       next_turn_ready: true,
       downlink_opened_before_successor_ack: population === 'B',
       product_owner: 'ProductP1VoiceRouteOwner',
-      successor_ack_observed_ms: CHECKPOINT_WORKLOADS[workloadId].successor_ack_delay_ms,
+      successor_ack_observed: {
+        value_ms: CHECKPOINT_WORKLOADS[workloadId].successor_ack_delay_ms,
+        truth_class: 'measured',
+      },
       interaction_id: `checkpoint-interaction-${identitySuffix}`,
       response_id: `checkpoint-response-${workloadId}`,
       unit_id: `checkpoint-final-${workloadId}`,
@@ -331,9 +353,9 @@ test('report uses direct attempt endpoints, nearest-rank percentiles, and missin
   });
   assert.deepEqual(report.summaries.W1.segments.round_total, {
     truth_class: 'measured',
-    samples_ms: [3200, 3300, 3400, 3500, 3600],
-    p50_ms: 3400,
-    p95_ms: 3600,
+    samples_ms: [8100, 8200, 8300, 8400, 8500],
+    p50_ms: 8300,
+    p95_ms: 8500,
   });
   assert.deepEqual(report.summaries.W2.outcomes, {
     intended: 6,
@@ -367,20 +389,20 @@ test('A1/B/A2 comparison emits absolute milliseconds before percentages and base
   assert.deepEqual(row, {
     result: 'IMPROVED',
     measurements: {
-      a1: { truth_class: 'measured', p50_ms: 3300, p95_ms: 3300 },
-      b: { truth_class: 'measured', p50_ms: 3270, p95_ms: 3270 },
-      a2: { truth_class: 'measured', p50_ms: 3310, p95_ms: 3310 },
+      a1: { truth_class: 'measured', p50_ms: 8200, p95_ms: 8200 },
+      b: { truth_class: 'measured', p50_ms: 7155, p95_ms: 7155 },
+      a2: { truth_class: 'measured', p50_ms: 8210, p95_ms: 8210 },
     },
     deltas: {
       truth_class: 'derived',
-      b_minus_a1_p50_ms: -30,
-      b_minus_a2_p50_ms: -40,
-      b_minus_a1_p95_ms: -30,
-      b_minus_a2_p95_ms: -40,
-      b_minus_a1_p50_percent: -0.909091,
-      b_minus_a2_p50_percent: -1.208459,
+      b_minus_a1_p50_ms: -1045,
+      b_minus_a2_p50_ms: -1055,
+      b_minus_a1_p95_ms: -1045,
+      b_minus_a2_p95_ms: -1055,
+      b_minus_a1_p50_percent: -12.743902,
+      b_minus_a2_p50_percent: -12.850183,
       baseline_drift_p50_ms: 10,
-      baseline_drift_p50_percent: 0.30303,
+      baseline_drift_p50_percent: 0.121951,
     },
   });
   assert.equal(comparison.decision, 'IMPROVED');
@@ -435,7 +457,7 @@ test('W1 owner composition uses one bounded P2 pull and overlaps successor ACK o
     next_turn_ready: true,
     downlink_opened_before_successor_ack: true,
     product_owner: 'ProductP1VoiceRouteOwner',
-    successor_ack_observed_ms: 250,
+    successor_ack_observed: { value_ms: 250, truth_class: 'measured' },
     interaction_id: 'checkpoint-interaction-checkpoint-b-B-W1-0',
     response_id: 'checkpoint-response-W1',
     unit_id: 'checkpoint-final-W1',
@@ -482,6 +504,37 @@ test('malformed P2 evidence fails closed before P1 and still closes its real own
     result.events.map(event => event.point),
     ['speech_end', 'stt_final', 'admission_accepted', 'model_complete_and_notifications_enqueued'],
   );
+});
+
+test('duplicate final nested Agent error and wrong Tool tail stay fail-closed without P1 effects', async () => {
+  const mutations = [
+    notification =>
+      notification.publish_seq === 0
+        ? {
+            ...notification,
+            agent_event: { ...notification.agent_event, event_type: 'chat.final' },
+            presentation_unit: {
+              surface: 'text',
+              unit_id: 'forged-final',
+              seq: 0,
+              source_start_utf8: 0,
+              source_end_utf8: 1,
+              content_ref: `sha256:${'0'.repeat(64)}`,
+            },
+          }
+        : notification,
+    notification =>
+      notification.publish_seq === 0 ? { ...notification, agent_event: { ...notification.agent_event, error_reason: 'PRIVATE_SENTINEL' } } : notification,
+    notification => (notification.publish_seq === 40 ? { ...notification, publish_seq: 42 } : notification),
+  ];
+  for (let index = 0; index < mutations.length; index += 1) {
+    const result = await runControlledOwnerAttempt(attemptConfig({ workload_id: index === 2 ? 'W3' : 'W1', attempt_index: index + 10 }), {
+      p2NotificationMutator: mutations[index],
+    });
+    assert.equal(result.outcome, 'unknown');
+    assert.equal(result.reason, 'CHECKPOINT_DEPENDENCY_FAILED');
+    assert.equal(result.p1, null);
+  }
 });
 
 test('checkpoint CLI parser is closed and never echoes an unknown private value', () => {
@@ -599,6 +652,15 @@ test('private report writer installs one mode-0600 deep-reparsed report without 
   cyclic.self = cyclic;
   await assert.rejects(writePrivateCheckpointReport(cyclicOutput, cyclic), /CHECKPOINT_REPORT_INVALID/);
   await assert.rejects(fs.stat(cyclicOutput), error => error?.code === 'ENOENT');
+  const oversized = path.join(root, 'oversized.json');
+  await fs.writeFile(oversized, Buffer.alloc(8 * 1024 * 1024 + 1));
+  await fs.chmod(oversized, 0o600);
+  await assert.rejects(readPrivateCheckpointReport(oversized), /CHECKPOINT_REPORT_INVALID/);
+  await fs.unlink(oversized);
+  const repositoryLink = path.join(root, 'repository-link');
+  await fs.symlink(process.cwd(), repositoryLink);
+  assert.throws(() => assertCheckpointOutputOutsideGit(path.join(repositoryLink, 'ignored', 'private.json'), process.cwd()), /CHECKPOINT_OUTPUT_INSIDE_GIT/);
+  await fs.unlink(repositoryLink);
   assert.deepEqual((await fs.readdir(root)).sort(), ['report.json']);
 });
 
@@ -660,8 +722,31 @@ test('private A1/B/A2 compare writes absolute deltas and renders milliseconds be
 
   assert.equal((await fs.stat(comparisonPath)).mode & 0o077, 0);
   assert.equal(comparison.decision, 'IMPROVED');
-  assert.match(markdown, /\| W1 \| round_total \| 3300\.000\/3300\.000 \| 3270\.000\/3270\.000 \| 3310\.000\/3310\.000 \| -30\.000 \| -40\.000 \|/);
-  assert.ok(markdown.indexOf('B−A1 ms') < markdown.indexOf('B−A1 %'));
+  assert.match(markdown, /\| W1 \| round_total \| 8200\.000\/8200\.000 \| 7155\.000\/7155\.000 \| 8210\.000\/8210\.000 \| -1045\.000 \| -1055\.000 \|/);
+  assert.ok(markdown.indexOf('B−A1 p50 ms') < markdown.indexOf('B−A1 %'));
+  assert.match(markdown, /## Exact inputs/);
+  assert.match(markdown, /## Measured B residual and share of total/);
+  assert.match(markdown, /## Proven removable headroom/);
+  assert.match(markdown, /## Estimated future headroom/);
+  assert.match(markdown, /## Controlled fixture and out-of-scope boundaries/);
+  for (const mutate of [
+    value => {
+      value.inputs.a1.report_sha256 = null;
+    },
+    value => {
+      value.inputs.a1.optimization_mode.private_transcript = 'PRIVATE_SENTINEL';
+    },
+    value => {
+      value.inputs.a1.optimization_mode = { p2_notification_batch_size: 16, tts_successor_ack_overlap: true };
+    },
+    value => {
+      value.inputs.a2.source_commit = 'f'.repeat(40);
+    },
+  ]) {
+    const corrupted = JSON.parse(JSON.stringify(comparison));
+    mutate(corrupted);
+    assert.throws(() => parseCheckpointComparison(corrupted), /CHECKPOINT_COMPARISON_INVALID/);
+  }
 });
 
 test('comparison remains inconclusive when one attempted candidate round is unknown', () => {
@@ -694,6 +779,26 @@ test('deep report parser rejects private or contradictory nested attempt fields'
   corrupted.attempts[0].p1.successor_ack_confirmed = false;
 
   assert.throws(() => parseCheckpointReport(corrupted), /CHECKPOINT_REPORT_INVALID/);
+  for (const mutate of [
+    value => {
+      value.attempts[0].optimization_mode.private_value = 'PRIVATE_SENTINEL';
+    },
+    value => {
+      value.attempts[0].p2.batches[0].private_payload = 'PRIVATE_SENTINEL';
+    },
+    value => {
+      value.attempts[0].p2.response.private_transcript = 'PRIVATE_SENTINEL';
+    },
+    value => {
+      value.attempts[0].controlled_observations.stt_settlement.value_ms = 10;
+      value.attempts[0].events[1].monotonic_ms = value.attempts[0].events[0].monotonic_ms + 10;
+      value.attempts[0].segments.stt_settlement.duration_ms = 10;
+    },
+  ]) {
+    const nested = JSON.parse(JSON.stringify(report));
+    mutate(nested);
+    assert.throws(() => parseCheckpointReport(nested), /CHECKPOINT_REPORT_INVALID/);
+  }
 });
 
 test('comparison parser rejects empty accepted evidence and straddled baselines are inconclusive', () => {

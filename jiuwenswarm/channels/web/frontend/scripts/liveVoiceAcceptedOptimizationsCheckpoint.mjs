@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { existsSync, realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -229,8 +230,16 @@ async function readPrivateCheckpointReportWithHash(input) {
 }
 
 export function assertCheckpointOutputOutsideGit(output, gitRoot) {
-  const resolvedOutput = path.resolve(output);
-  const resolvedRoot = path.resolve(gitRoot);
+  let existingParent = path.dirname(path.resolve(output));
+  const suffix = [path.basename(output)];
+  while (!existsSync(existingParent)) {
+    const parent = path.dirname(existingParent);
+    if (parent === existingParent) fail('CHECKPOINT_OUTPUT_PATH_INVALID');
+    suffix.unshift(path.basename(existingParent));
+    existingParent = parent;
+  }
+  const resolvedOutput = path.join(realpathSync(existingParent), ...suffix);
+  const resolvedRoot = realpathSync(gitRoot);
   const relative = path.relative(resolvedRoot, resolvedOutput);
   if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) fail('CHECKPOINT_OUTPUT_INSIDE_GIT');
   return resolvedOutput;
@@ -363,16 +372,61 @@ export function renderCheckpointComparisonMarkdown(comparison) {
     '',
     `Decision: **${parsed.decision}**`,
     '',
-    '| Workload | Stage | A1 p50/p95 ms | B p50/p95 ms | A2 p50/p95 ms | B−A1 ms | B−A2 ms | B−A1 % | B−A2 % | A drift % | Result | Truth |',
-    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|',
+    '## Exact inputs',
+    '',
+    '| Population | Run | Source commit | Raw report SHA-256 |',
+    '|---|---|---|---|',
+    `| A1 | ${parsed.inputs.a1.run_id} | ${parsed.inputs.a1.source_commit} | ${parsed.inputs.a1.report_sha256} |`,
+    `| B | ${parsed.inputs.b.run_id} | ${parsed.inputs.b.source_commit} | ${parsed.inputs.b.report_sha256} |`,
+    `| A2 | ${parsed.inputs.a2.run_id} | ${parsed.inputs.a2.source_commit} | ${parsed.inputs.a2.report_sha256} |`,
+    '',
+    '## Measured stages and derived deltas',
+    '',
+    '| Workload | Stage | A1 p50/p95 ms | B p50/p95 ms | A2 p50/p95 ms | B−A1 p50 ms | B−A2 p50 ms | B−A1 p95 ms | B−A2 p95 ms | B−A1 % | B−A2 % | A drift % | Result | Truth |',
+    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|',
   ];
   for (const [workloadId, workload] of Object.entries(parsed.workloads)) {
     for (const [segment, row] of Object.entries(workload.segments)) {
       lines.push(
-        `| ${workloadId} | ${segment} | ${fixed(row.measurements.a1.p50_ms)}/${fixed(row.measurements.a1.p95_ms)} | ${fixed(row.measurements.b.p50_ms)}/${fixed(row.measurements.b.p95_ms)} | ${fixed(row.measurements.a2.p50_ms)}/${fixed(row.measurements.a2.p95_ms)} | ${fixed(row.deltas.b_minus_a1_p50_ms)} | ${fixed(row.deltas.b_minus_a2_p50_ms)} | ${row.deltas.b_minus_a1_p50_percent === null ? 'n/a' : fixed(row.deltas.b_minus_a1_p50_percent)} | ${row.deltas.b_minus_a2_p50_percent === null ? 'n/a' : fixed(row.deltas.b_minus_a2_p50_percent)} | ${row.deltas.baseline_drift_p50_percent === null ? 'n/a' : fixed(row.deltas.baseline_drift_p50_percent)} | ${row.result} | MEASURED + DERIVED |`,
+        `| ${workloadId} | ${segment} | ${fixed(row.measurements.a1.p50_ms)}/${fixed(row.measurements.a1.p95_ms)} | ${fixed(row.measurements.b.p50_ms)}/${fixed(row.measurements.b.p95_ms)} | ${fixed(row.measurements.a2.p50_ms)}/${fixed(row.measurements.a2.p95_ms)} | ${fixed(row.deltas.b_minus_a1_p50_ms)} | ${fixed(row.deltas.b_minus_a2_p50_ms)} | ${fixed(row.deltas.b_minus_a1_p95_ms)} | ${fixed(row.deltas.b_minus_a2_p95_ms)} | ${row.deltas.b_minus_a1_p50_percent === null ? 'n/a' : fixed(row.deltas.b_minus_a1_p50_percent)} | ${row.deltas.b_minus_a2_p50_percent === null ? 'n/a' : fixed(row.deltas.b_minus_a2_p50_percent)} | ${row.deltas.baseline_drift_p50_percent === null ? 'n/a' : fixed(row.deltas.baseline_drift_p50_percent)} | ${row.result} | MEASURED + DERIVED |`,
       );
     }
   }
+  lines.push(
+    '',
+    '## Measured B residual and share of total',
+    '',
+    '| Workload | Stage | B p50 ms | Share of B round total | Truth |',
+    '|---|---|---:|---:|---|',
+  );
+  for (const [workloadId, workload] of Object.entries(parsed.workloads)) {
+    const total = workload.segments.round_total.measurements.b.p50_ms;
+    for (const [segment, row] of Object.entries(workload.segments)) {
+      const value = row.measurements.b.p50_ms;
+      lines.push(`| ${workloadId} | ${segment} | ${fixed(value)} | ${total === 0 ? 'n/a' : fixed((value / total) * 100)}% | MEASURED + DERIVED |`);
+    }
+  }
+  lines.push(
+    '',
+    '## Proven removable headroom',
+    '',
+    'Only the compatible A1/B/A2 deltas above are proven removable. They cover bounded P2 pulls and successor-ACK/TTS overlap; no other optimization receives credit.',
+    '',
+    '## Estimated future headroom',
+    '',
+    '| Hypothesis | Truth | Status |',
+    '|---|---|---|',
+    '| EOT/STT settlement overlap | ESTIMATED | Not exercised |',
+    '| Semantic/adaptive VAD | ESTIMATED | Not exercised |',
+    '| Post-audio.done EOF draining | ESTIMATED | Not exercised |',
+    '| Sentence-level Agent→TTS overlap | ESTIMATED | Not exercised |',
+    '',
+    '## Controlled fixture and out-of-scope boundaries',
+    '',
+    'CONTROLLED: fixed prompts, STT/admission/Agent/Tool/TTS waits, P2 RPC delay, successor ACK, and PCM playout duration.',
+    '',
+    'OUT_OF_SCOPE: microphone/device capture, real Provider/network latency, real Agent/Tool execution, physical Chrome/WebAudio scheduling, and human-perceived first audio.',
+  );
   return `${lines.join('\n')}\n`;
 }
 
@@ -407,14 +461,20 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   const args = parseAcceptedCheckpointArgs(argv);
+  const gitRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
   if (args.command === 'render-markdown') {
+    assertCheckpointOutputOutsideGit(args.comparison, gitRoot);
     const comparison = await readPrivateCheckpointComparison(args.comparison);
     await writeRenderedMarkdown(args.output, renderCheckpointComparisonMarkdown(comparison));
     process.stdout.write(`${JSON.stringify({ decision: comparison.decision })}\n`);
     return;
   }
-  const gitRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
   assertCheckpointOutputOutsideGit(args.output, gitRoot);
+  if (args.command === 'compare-a-b-a') {
+    assertCheckpointOutputOutsideGit(args.baseline_before, gitRoot);
+    assertCheckpointOutputOutsideGit(args.candidate, gitRoot);
+    assertCheckpointOutputOutsideGit(args.baseline_after, gitRoot);
+  }
   if (args.command === 'run') {
     const sourceBefore = assertExactCleanSource(args.git_commit);
     const report = await runAcceptedCheckpointPopulation(args);
@@ -671,7 +731,7 @@ async function playWithRealP1Owner(config, workload, clock, mark, p2) {
     next_turn_ready: typeof attempt.playout_receipt_accepted_ms === 'number',
     downlink_opened_before_successor_ack: typeof attempt.successor_first_ack_ms === 'number' && attempt.downlink_opened_ms < attempt.successor_first_ack_ms,
     product_owner: 'ProductP1VoiceRouteOwner',
-    successor_ack_observed_ms: attempt.successor_first_ack_ms,
+    successor_ack_observed: Object.freeze({ value_ms: attempt.successor_first_ack_ms, truth_class: 'measured' }),
     interaction_id: attempt.interaction_id,
     response_id: attempt.response_id,
     unit_id: attempt.unit_id,
