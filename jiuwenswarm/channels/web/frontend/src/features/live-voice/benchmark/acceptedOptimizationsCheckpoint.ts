@@ -587,9 +587,10 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
       typeof attempt.p2.response !== 'object' ||
       Array.isArray(attempt.p2.response) ||
       !exactKeys(attempt.p2.response as unknown as Record<string, unknown>, P2_RESPONSE_KEYS) ||
-      !['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'response_id', 'unit_id'].every(key =>
-        TOKEN.test(attempt.p2!.response[key as keyof typeof attempt.p2.response] as string),
-      ) ||
+      !['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'response_id', 'unit_id'].every(key => {
+        const value = attempt.p2!.response[key as keyof typeof attempt.p2.response];
+        return typeof value === 'string' && TOKEN.test(value);
+      }) ||
       !Number.isSafeInteger(attempt.p2.response.response_generation) ||
       attempt.p2.response.response_generation !== 0
     )
@@ -604,6 +605,12 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
       attempt.p1.next_turn_ready !== true ||
       attempt.p1.downlink_opened_before_successor_ack !== config.optimization_mode.tts_successor_ack_overlap ||
       attempt.p1.product_owner !== 'ProductP1VoiceRouteOwner' ||
+      typeof attempt.p1.interaction_id !== 'string' ||
+      typeof attempt.p1.response_id !== 'string' ||
+      typeof attempt.p1.unit_id !== 'string' ||
+      !TOKEN.test(attempt.p1.interaction_id) ||
+      !TOKEN.test(attempt.p1.response_id) ||
+      !TOKEN.test(attempt.p1.unit_id) ||
       attempt.p1.successor_ack_observed === null ||
       typeof attempt.p1.successor_ack_observed !== 'object' ||
       !exactKeys(attempt.p1.successor_ack_observed as unknown as Record<string, unknown>, OBSERVED_VALUE_KEYS) ||
@@ -629,6 +636,19 @@ function validateAttemptForReport(attempt: CheckpointAttempt, config: Checkpoint
     ];
     if (controlledPairs.some(([observed, target]) => observed === null || observed < target || observed > target + Math.max(25, target * 0.05)))
       reportViolation('CHECKPOINT_ATTEMPT_CONTROLLED_INVALID');
+    if (
+      attempt.segments.stt_settlement?.duration_ms !== attempt.controlled_observations.stt_settlement.value_ms ||
+      attempt.segments.admission?.duration_ms !== attempt.controlled_observations.admission.value_ms ||
+      attempt.segments.agent_model?.duration_ms !== attempt.controlled_observations.agent_model.value_ms ||
+      attempt.segments.tts_generation?.duration_ms !== attempt.controlled_observations.tts_generation.value_ms ||
+      attempt.p2 === null ||
+      attempt.segments.p2_final_delivery?.duration_ms !== attempt.p2.batches.reduce((total, batch) => total + batch.duration_ms, 0) ||
+      attempt.p1 === null ||
+      attempt.segments.tts_ready_to_downlink?.duration_ms !==
+        (config.optimization_mode.tts_successor_ack_overlap ? 0 : attempt.p1.successor_ack_observed.value_ms) ||
+      attempt.segments.playout_to_confirmed_ack?.duration_ms !== 0
+    )
+      reportViolation('CHECKPOINT_ATTEMPT_CONTROLLED_BINDING_INVALID');
   }
   if (
     attempt.outcome === 'completed' &&

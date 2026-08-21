@@ -111,7 +111,7 @@ function reportConfig(population, overrides = {}) {
   };
 }
 
-function literalCompletedAttempt(population, workloadId, attemptIndex, roundTotalMs) {
+function literalCompletedAttempt(population, workloadId, attemptIndex, _roundTotalMs) {
   const optimizedRpcCounts = { W1: 1, W2: 4, W3: 8 };
   const notificationRpcCount = population === 'B' ? optimizedRpcCounts[workloadId] : CHECKPOINT_WORKLOADS[workloadId].notification_count;
   const d0 = 100;
@@ -123,7 +123,7 @@ function literalCompletedAttempt(population, workloadId, attemptIndex, roundTota
   const d6 = d5 + (population === 'B' ? 0 : CHECKPOINT_WORKLOADS[workloadId].successor_ack_delay_ms);
   const d8 = d6;
   const d9 = d8 + CHECKPOINT_WORKLOADS[workloadId].playout_duration_ms;
-  const d10 = d9 + roundTotalMs;
+  const d10 = d9;
   const timestamps = [d0, d1, d2, d3, d4, d5, d6, d6, d8, d9, d10];
   const eventTimes = Object.fromEntries(CHECKPOINT_POINTS.map((point, index) => [point, timestamps[index]]));
   const runId = `checkpoint-${population.toLowerCase()}`;
@@ -353,9 +353,9 @@ test('report uses direct attempt endpoints, nearest-rank percentiles, and missin
   });
   assert.deepEqual(report.summaries.W1.segments.round_total, {
     truth_class: 'measured',
-    samples_ms: [8100, 8200, 8300, 8400, 8500],
-    p50_ms: 8300,
-    p95_ms: 8500,
+    samples_ms: [8000, 8000, 8000, 8000, 8000],
+    p50_ms: 8000,
+    p95_ms: 8000,
   });
   assert.deepEqual(report.summaries.W2.outcomes, {
     intended: 6,
@@ -389,20 +389,20 @@ test('A1/B/A2 comparison emits absolute milliseconds before percentages and base
   assert.deepEqual(row, {
     result: 'IMPROVED',
     measurements: {
-      a1: { truth_class: 'measured', p50_ms: 8200, p95_ms: 8200 },
-      b: { truth_class: 'measured', p50_ms: 7155, p95_ms: 7155 },
-      a2: { truth_class: 'measured', p50_ms: 8210, p95_ms: 8210 },
+      a1: { truth_class: 'measured', p50_ms: 8000, p95_ms: 8000 },
+      b: { truth_class: 'measured', p50_ms: 6985, p95_ms: 6985 },
+      a2: { truth_class: 'measured', p50_ms: 8000, p95_ms: 8000 },
     },
     deltas: {
       truth_class: 'derived',
-      b_minus_a1_p50_ms: -1045,
-      b_minus_a2_p50_ms: -1055,
-      b_minus_a1_p95_ms: -1045,
-      b_minus_a2_p95_ms: -1055,
-      b_minus_a1_p50_percent: -12.743902,
-      b_minus_a2_p50_percent: -12.850183,
-      baseline_drift_p50_ms: 10,
-      baseline_drift_p50_percent: 0.121951,
+      b_minus_a1_p50_ms: -1015,
+      b_minus_a2_p50_ms: -1015,
+      b_minus_a1_p95_ms: -1015,
+      b_minus_a2_p95_ms: -1015,
+      b_minus_a1_p50_percent: -12.6875,
+      b_minus_a2_p50_percent: -12.6875,
+      baseline_drift_p50_ms: 0,
+      baseline_drift_p50_percent: 0,
     },
   });
   assert.equal(comparison.decision, 'IMPROVED');
@@ -722,7 +722,7 @@ test('private A1/B/A2 compare writes absolute deltas and renders milliseconds be
 
   assert.equal((await fs.stat(comparisonPath)).mode & 0o077, 0);
   assert.equal(comparison.decision, 'IMPROVED');
-  assert.match(markdown, /\| W1 \| round_total \| 8200\.000\/8200\.000 \| 7155\.000\/7155\.000 \| 8210\.000\/8210\.000 \| -1045\.000 \| -1055\.000 \|/);
+  assert.match(markdown, /\| W1 \| round_total \| 8000\.000\/8000\.000 \| 6985\.000\/6985\.000 \| 8000\.000\/8000\.000 \| -1015\.000 \| -1015\.000 \|/);
   assert.ok(markdown.indexOf('B−A1 p50 ms') < markdown.indexOf('B−A1 %'));
   assert.match(markdown, /## Exact inputs/);
   assert.match(markdown, /## Measured B residual and share of total/);
@@ -819,5 +819,18 @@ test('comparison parser rejects empty accepted evidence and straddled baselines 
         Array.from({ length: 5 }, (_, index) => literalCompletedAttempt(population, workloadId, index, value)),
       ),
     );
-  assert.equal(compareCheckpointReports(make('A1', 200), make('B', 205), make('A2', 210)).decision, 'INCONCLUSIVE');
+  const withW1Round = (report, value) => ({
+    ...report,
+    summaries: {
+      ...report.summaries,
+      W1: {
+        ...report.summaries.W1,
+        segments: {
+          ...report.summaries.W1.segments,
+          round_total: { ...report.summaries.W1.segments.round_total, samples_ms: [value, value, value, value, value], p50_ms: value, p95_ms: value },
+        },
+      },
+    },
+  });
+  assert.equal(compareCheckpointReports(make('A1', 200), withW1Round(make('B', 205), 8005), withW1Round(make('A2', 210), 8010)).decision, 'INCONCLUSIVE');
 });
