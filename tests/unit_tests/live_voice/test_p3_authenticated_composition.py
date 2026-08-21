@@ -75,6 +75,8 @@ from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
     CallLocalProductionConfirmationConsumer,
     CallLocalProductionOriginAuthority,
     StoreProductionTaskAuthorityReader,
+    production_context_fingerprint,
+    production_model_binding_fingerprint,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     TaskPresentationDelivery,
@@ -386,10 +388,21 @@ def _confirmed_production_resolution(
         "store": harness.composition._core.store,
         "principal_id": _scope().subject_id,
         "scope": _scope(),
+        "authority_context_fingerprint": production_context_fingerprint(
+            harness.authority.contexts["session-1"]
+        ),
     }
     if operation == "task.create":
         reader_arguments["collection_capability_profile_digest"] = (
             harness.composition._select_production_create_candidate().capability_profile_digest
+        )
+        reader_arguments["collection_model_binding_fingerprint"] = (
+            production_model_binding_fingerprint(
+                {
+                    "model_config_version": harness.models.config_version,
+                    "model_identity": harness.models.identity,
+                }
+            )
         )
     reader = StoreProductionTaskAuthorityReader(**reader_arguments)
     clarification = BoundedClarificationOwner(
@@ -2099,6 +2112,9 @@ async def test_production_classifier_bridge_store_and_authenticated_core_queries
             store=harness.composition._core.store,
             principal_id=_scope().subject_id,
             scope=_scope(),
+            authority_context_fingerprint=production_context_fingerprint(
+                harness.authority.contexts["session-1"]
+            ),
         )
         cases = (
             ("task.list", None, {"query_kind": "list", "limit": 20}),
@@ -2208,6 +2224,9 @@ async def test_production_confirmation_is_consumed_once_before_exact_core_cancel
             store=harness.composition._core.store,
             principal_id=_scope().subject_id,
             scope=_scope(),
+            authority_context_fingerprint=production_context_fingerprint(
+                harness.authority.contexts["session-1"]
+            ),
         )
         classifier = ProductionTaskIntentClassifier()
         proposal = classifier.parse_structured(
@@ -2325,6 +2344,289 @@ async def test_production_confirmation_is_consumed_once_before_exact_core_cancel
             "PRODUCTION_TASK_AUTHORITY_CHANGED",
         }
         assert _store_counts(harness.database) == after
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "drift",
+    ["context_revision", "context_uri", "model_catalog"],
+)
+async def test_production_create_confirmation_rejects_context_or_model_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    run_expiry = "2026-08-22T04:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": _context(tmp_path, expires_at=run_expiry)},
+        expires_at=run_expiry,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        resolution, origin_authority, confirmation_consumer = (
+            _confirmed_production_resolution(
+                harness,
+                tmp_path,
+                operation="task.create",
+                target=None,
+                arguments={
+                    "name": "Context-bound production task",
+                    "instruction": "Create only under the confirmed authority.",
+                },
+                identity=f"create-{drift}",
+                now=run_now,
+                expires_at="2026-08-21T02:02:00Z",
+            )
+        )
+        before = _store_counts(harness.database)
+        if drift in {"context_revision", "context_uri"}:
+            current = harness.authority.contexts["session-1"]
+            harness.authority.contexts["session-1"] = replace(
+                current,
+                revision_value=(
+                    "different-clean-revision"
+                    if drift == "context_revision"
+                    else current.revision_value
+                ),
+                uri=(
+                    (tmp_path / "remapped-project").resolve().as_uri()
+                    if drift == "context_uri"
+                    else current.uri
+                ),
+            )
+        else:
+            harness.models.config_version = "catalog-v2"
+
+        routed = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id=f"request-production-create-{drift}",
+            session_id="session-1",
+            correlation_id=f"correlation-production-create-{drift}",
+            origin_authority=origin_authority,
+            confirmation_consumer=confirmation_consumer,
+            current_background_session_id="session-1",
+        )
+
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] == (
+            "PRODUCTION_TASK_AUTHORITY_CHANGED"
+        )
+        assert _store_counts(harness.database) == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_target_mutation_requires_exact_persisted_context_revision(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    run_expiry = "2026-08-22T04:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": _context(tmp_path, expires_at=run_expiry)},
+        expires_at=run_expiry,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        create, create_origin, create_consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.create",
+            target=None,
+            arguments={
+                "name": "Context seed task",
+                "instruction": "Seed one context-bound Task.",
+            },
+            identity="context-seed",
+            now=run_now,
+            expires_at="2026-08-21T02:02:00Z",
+        )
+        created = await harness.composition.handle_production_resolution(
+            resolution=create,
+            bearer_token=TOKEN,
+            request_id="request-production-context-seed",
+            session_id="session-1",
+            correlation_id="correlation-production-context-seed",
+            origin_authority=create_origin,
+            confirmation_consumer=create_consumer,
+            current_background_session_id="session-1",
+        )
+        assert created.ok and created.payload["result"] is not None
+        task_id = str(created.payload["result"]["task_id"])
+        resolution, origin_authority, confirmation_consumer = (
+            _confirmed_production_resolution(
+                harness,
+                tmp_path,
+                operation="task.cancel",
+                target=task_id,
+                arguments={},
+                identity="cancel-context-drift",
+                now=run_now,
+                expires_at="2026-08-21T02:02:00Z",
+            )
+        )
+        before = _store_counts(harness.database)
+        current = harness.authority.contexts["session-1"]
+        harness.authority.contexts["session-1"] = replace(
+            current,
+            revision_value="different-clean-revision",
+        )
+
+        routed = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-cancel-context-drift",
+            session_id="session-1",
+            correlation_id="correlation-production-cancel-context-drift",
+            origin_authority=origin_authority,
+            confirmation_consumer=confirmation_consumer,
+        )
+
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] in {
+            "EXECUTION_CONTEXT_REVISION_MISMATCH",
+            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+        }
+        assert _store_counts(harness.database) == before
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).cancel_requested
+            is False
+        )
+        assert harness.executor.cancels == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_query_allows_clean_revision_advance_but_rejects_remap(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    run_expiry = "2026-08-22T04:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": _context(tmp_path, expires_at=run_expiry)},
+        expires_at=run_expiry,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        create, create_origin, create_consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.create",
+            target=None,
+            arguments={
+                "name": "Readable context task",
+                "instruction": "Remain readable across one clean revision advance.",
+            },
+            identity="query-context-seed",
+            now=run_now,
+            expires_at="2026-08-21T02:02:00Z",
+        )
+        created = await harness.composition.handle_production_resolution(
+            resolution=create,
+            bearer_token=TOKEN,
+            request_id="request-production-query-context-seed",
+            session_id="session-1",
+            correlation_id="correlation-production-query-context-seed",
+            origin_authority=create_origin,
+            confirmation_consumer=create_consumer,
+            current_background_session_id="session-1",
+        )
+        assert created.ok and created.payload["result"] is not None
+        task_id = str(created.payload["result"]["task_id"])
+        proposal = ProductionTaskIntentClassifier().parse_structured(
+            {
+                "operation": "task.get",
+                "target": task_id,
+                "arguments": {"query_kind": "get"},
+            },
+            committed=True,
+            source_confidence=1.0,
+        )
+        request = ProductionTaskIntentRequest(
+            origin=ProductionIntentOrigin.STRUCTURED,
+            scope=_scope(),
+            command_id="command-production-query-context",
+            proposal=proposal,
+            source_id="structured-production-query-context",
+        )
+        origin_binding = build_production_origin_binding(request)
+        origin_authority = CallLocalProductionOriginAuthority(
+            expected_binding=origin_binding
+        )
+        original = harness.authority.contexts["session-1"]
+        reader = StoreProductionTaskAuthorityReader(
+            store=harness.composition._core.store,
+            principal_id=_scope().subject_id,
+            scope=_scope(),
+            authority_context_fingerprint=production_context_fingerprint(original),
+        )
+        resolution = VoiceTaskBridge().resolve_production(
+            request,
+            reader,
+            origin_authority,
+            _NoProductionConfirmation(),
+            BoundedClarificationOwner(
+                capacity=8,
+                per_subject_capacity=2,
+                boot_id="production-query-context-boot",
+            ),
+        )
+        before = _store_counts(harness.database)
+        harness.authority.contexts["session-1"] = replace(
+            original,
+            revision_value="next-clean-revision",
+        )
+        readable = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-query-context-revision",
+            session_id="session-1",
+            correlation_id="correlation-production-query-context-revision",
+            origin_authority=origin_authority,
+        )
+        assert readable.ok is True, readable.payload
+        assert readable.payload["result"]["task"]["task_id"] == task_id
+        assert _store_counts(harness.database) == before
+
+        harness.authority.contexts["session-1"] = replace(
+            original,
+            uri=(tmp_path / "remapped-project").resolve().as_uri(),
+        )
+        remapped = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-query-context-remap",
+            session_id="session-1",
+            correlation_id="correlation-production-query-context-remap",
+            origin_authority=origin_authority,
+        )
+        assert remapped.ok is False
+        assert remapped.payload["error"]["reason"] == (
+            "EXECUTION_CONTEXT_SCOPE_MISMATCH"
+        )
+        assert _store_counts(harness.database) == before
+        assert harness.executor.cancels == []
     finally:
         await harness.composition.stop()
 
@@ -2529,6 +2831,29 @@ async def test_production_mutations_map_create_update_reprioritize_adjust_and_su
         exact_profiles = harness.composition._executor_profiles
         assert exact_profiles is not None
         before_successor_drift = _store_counts(harness.database)
+        current_context = harness.authority.contexts["session-1"]
+        harness.authority.contexts["session-1"] = replace(
+            current_context,
+            revision_value="successor-context-drift",
+        )
+        rejected_successor_context_drift = (
+            await harness.composition.handle_production_resolution(
+                resolution=successor,
+                bearer_token=TOKEN,
+                request_id="request-production-successor-context-drifted",
+                session_id="session-1",
+                correlation_id="correlation-production-successor-full",
+                origin_authority=successor_origin,
+                confirmation_consumer=successor_consumer,
+            )
+        )
+        assert rejected_successor_context_drift.ok is False
+        assert rejected_successor_context_drift.payload["error"]["reason"] in {
+            "EXECUTION_CONTEXT_REVISION_MISMATCH",
+            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+        }
+        assert _store_counts(harness.database) == before_successor_drift
+        harness.authority.contexts["session-1"] = current_context
         harness.composition._executor_profiles = (
             replace(exact_profiles[0], profile_id="direct-drifted-successor"),
         )

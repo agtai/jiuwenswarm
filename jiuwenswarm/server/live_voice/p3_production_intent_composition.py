@@ -32,6 +32,7 @@ from .formal_task_models import (
     PersistentAdmissionRecord,
     PersistentAttemptRecord,
     PersistentTaskRecord,
+    ResolvedTaskContext,
     TaskResultAvailability,
 )
 from .p3_confirmation import (
@@ -68,6 +69,25 @@ _NO_EXECUTOR_PROFILE_DIGEST = hashlib.sha256(
         }
     )
 ).hexdigest()
+
+
+def production_context_fingerprint(context: ResolvedTaskContext) -> str:
+    """Digest the exact existing Context authority without creating a new owner."""
+
+    if not isinstance(context, ResolvedTaskContext):
+        raise TypeError("PRODUCTION_TASK_CONTEXT_REQUIRED")
+    return hashlib.sha256(canonical_json_bytes(context.to_dict())).hexdigest()
+
+
+def production_model_binding_fingerprint(attributes: object) -> str:
+    """Digest the immutable Task model attributes or current catalog binding."""
+
+    if not isinstance(attributes, dict) or any(
+        type(key) is not str or type(value) is not str
+        for key, value in attributes.items()
+    ):
+        raise TypeError("PRODUCTION_TASK_MODEL_BINDING_REQUIRED")
+    return hashlib.sha256(canonical_json_bytes(attributes)).hexdigest()
 
 
 def _reader_violation(
@@ -279,6 +299,8 @@ class StoreProductionTaskAuthorityReader:
         scope: ScopeRef,
         visible_task_capacity: int = 32,
         collection_capability_profile_digest: str = _NO_EXECUTOR_PROFILE_DIGEST,
+        authority_context_fingerprint: str | None = None,
+        collection_model_binding_fingerprint: str | None = None,
     ) -> None:
         if not isinstance(store, SqliteTaskStore):
             raise TypeError("PRODUCTION_TASK_STORE_REQUIRED")
@@ -311,6 +333,40 @@ class StoreProductionTaskAuthorityReader:
         self._collection_capability_profile_digest = (
             collection_capability_profile_digest
         )
+        self._authority_context_fingerprint = (
+            authority_context_fingerprint
+            if authority_context_fingerprint is not None
+            else hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "authority": "live_voice.production_task_intent",
+                        "fact": "unspecified_context",
+                        "version": 1,
+                    }
+                )
+            ).hexdigest()
+        )
+        self._collection_model_binding_fingerprint = (
+            collection_model_binding_fingerprint
+            if collection_model_binding_fingerprint is not None
+            else hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "authority": "live_voice.production_task_intent",
+                        "fact": "unspecified_model_binding",
+                        "version": 1,
+                    }
+                )
+            ).hexdigest()
+        )
+        for digest in (
+            self._authority_context_fingerprint,
+            self._collection_model_binding_fingerprint,
+        ):
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError("INVALID_PRODUCTION_TASK_AUTHORITY_FINGERPRINT")
 
     def _require_scope(self, scope: ScopeRef) -> None:
         if (
@@ -661,6 +717,12 @@ class StoreProductionTaskAuthorityReader:
                     admission_fingerprint=admission_fingerprint,
                     predecessor_task_id=task.predecessor_task_id,
                     successor_task_id=successor,
+                    context_fingerprint=production_context_fingerprint(
+                        task.spec.context
+                    ),
+                    model_binding_fingerprint=production_model_binding_fingerprint(
+                        dict(task.spec.attributes)
+                    ),
                 )
             )
         generation = hashlib.sha256(
@@ -683,6 +745,10 @@ class StoreProductionTaskAuthorityReader:
             tasks=tuple(facts),
             collection_capability_profile_digest=(
                 self._collection_capability_profile_digest
+            ),
+            authority_context_fingerprint=self._authority_context_fingerprint,
+            collection_model_binding_fingerprint=(
+                self._collection_model_binding_fingerprint
             ),
         )
 

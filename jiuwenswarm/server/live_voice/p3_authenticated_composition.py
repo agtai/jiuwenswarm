@@ -79,6 +79,8 @@ from .p3_production_intent_composition import (
     CallLocalProductionConfirmationConsumer,
     CallLocalProductionOriginAuthority,
     StoreProductionTaskAuthorityReader,
+    production_context_fingerprint,
+    production_model_binding_fingerprint,
 )
 from .product_authority import (
     AuthorityResourceBinding,
@@ -1222,10 +1224,31 @@ class P3AuthenticatedComposition:
             "store": store,
             "principal_id": principal.principal_id,
             "scope": authority.scope,
+            "authority_context_fingerprint": production_context_fingerprint(
+                authority.context
+            ),
         }
         if collection_selection is not None:
             reader_arguments["collection_capability_profile_digest"] = (
                 collection_selection.capability_profile_digest
+            )
+            if self._model_resolver is None:
+                raise FormalTaskViolation(
+                    "P3_MODEL_CATALOG_UNAVAILABLE",
+                    "production task.create requires model authority",
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                )
+            collection_model = self._model_resolver.resolve(
+                None,
+                instantiate=False,
+            )
+            reader_arguments["collection_model_binding_fingerprint"] = (
+                production_model_binding_fingerprint(
+                    {
+                        "model_config_version": collection_model.config_version,
+                        "model_identity": collection_model.identity,
+                    }
+                )
             )
         return PreparedProductionIntentAuthority(
             principal_id=principal.principal_id,
@@ -3132,14 +3155,39 @@ class P3AuthenticatedComposition:
                 if operation == "task.create"
                 else None
             )
+            current_create_model: ResolvedP3Model | None = None
             reader_arguments: dict[str, object] = {
                 "store": store,
                 "principal_id": principal.principal_id,
                 "scope": authority.scope,
+                "authority_context_fingerprint": production_context_fingerprint(
+                    authority.context
+                ),
             }
             if create_selection is not None:
                 reader_arguments["collection_capability_profile_digest"] = (
                     create_selection.capability_profile_digest
+                )
+                if self._model_resolver is None:
+                    raise FormalTaskViolation(
+                        "P3_MODEL_CATALOG_UNAVAILABLE",
+                        "production task.create requires model authority",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                current_create_model = await self._run_blocking(
+                    self._model_resolver.resolve,
+                    None,
+                    instantiate=False,
+                )
+                reader_arguments["collection_model_binding_fingerprint"] = (
+                    production_model_binding_fingerprint(
+                        {
+                            "model_config_version": (
+                                current_create_model.config_version
+                            ),
+                            "model_identity": current_create_model.identity,
+                        }
+                    )
                 )
             reader = StoreProductionTaskAuthorityReader(**reader_arguments)
             visible = await self._run_blocking(
@@ -3227,6 +3275,20 @@ class P3AuthenticatedComposition:
                 )
 
             arguments = dict(resolution.arguments)
+            if operation == "task.list":
+                self._require_list_task_contexts(
+                    authority=authority,
+                    now=now,
+                    cursor=None,
+                    limit=int(arguments["limit"]),
+                )
+            elif final_target is not None:
+                self._require_exact_task_context(
+                    authority=authority,
+                    operation=operation,
+                    task_id=final_target.task_id,
+                    now=now,
+                )
             issued_at = now
             request_identity = _required_text(request_id, "request_id", maximum=256)
             correlation = _required_text(correlation_id, "correlation_id", maximum=256)
@@ -3315,21 +3377,34 @@ class P3AuthenticatedComposition:
                         "Executor capability changed after confirmation",
                         ErrorCode.STALE,
                     )
+                current_context_fingerprint = production_context_fingerprint(
+                    authority.context
+                )
+                current_model_binding_fingerprint = (
+                    final_visible.collection_model_binding_fingerprint
+                    if operation == "task.create"
+                    else final_target.model_binding_fingerprint
+                    if final_target is not None
+                    else None
+                )
+                if (
+                    resolution.confirmation_binding.context_fingerprint
+                    != current_context_fingerprint
+                    or current_model_binding_fingerprint is None
+                    or resolution.confirmation_binding.model_binding_fingerprint
+                    != current_model_binding_fingerprint
+                ):
+                    raise FormalTaskViolation(
+                        "PRODUCTION_TASK_AUTHORITY_CHANGED",
+                        "Task context or model binding changed after confirmation",
+                        ErrorCode.STALE,
+                    )
                 command_payload: dict[str, object]
                 selection: PersistedExecutorSelection | None = None
                 command_context: ResolvedTaskContext | None = None
                 if operation == "task.create":
-                    if self._model_resolver is None:
-                        raise FormalTaskViolation(
-                            "P3_MODEL_CATALOG_UNAVAILABLE",
-                            "production task.create requires model authority",
-                            ErrorCode.CAPABILITY_UNAVAILABLE,
-                        )
-                    model = await self._run_blocking(
-                        self._model_resolver.resolve,
-                        None,
-                        instantiate=False,
-                    )
+                    assert current_create_model is not None
+                    model = current_create_model
                     command_payload = {
                         "name": arguments["name"],
                         "instruction": arguments["instruction"],

@@ -171,6 +171,20 @@ _UNSPECIFIED_COLLECTION_CAPABILITY_DIGEST = _sha256(
         "version": 1,
     }
 )
+_UNSPECIFIED_CONTEXT_FINGERPRINT = _sha256(
+    {
+        "authority": "live_voice.production_task_intent",
+        "fact": "unspecified_context",
+        "version": 1,
+    }
+)
+_UNSPECIFIED_MODEL_BINDING_FINGERPRINT = _sha256(
+    {
+        "authority": "live_voice.production_task_intent",
+        "fact": "unspecified_model_binding",
+        "version": 1,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +211,8 @@ class AuthenticatedTaskFact:
     admission_fingerprint: str | None = None
     predecessor_task_id: str | None = None
     successor_task_id: str | None = None
+    context_fingerprint: str = _UNSPECIFIED_CONTEXT_FINGERPRINT
+    model_binding_fingerprint: str = _UNSPECIFIED_MODEL_BINDING_FINGERPRINT
 
     def __post_init__(self) -> None:
         _require_persistent_identity(self.task_id, "task_id")
@@ -288,6 +304,12 @@ class AuthenticatedTaskFact:
             not terminal or self.outcome is TerminalOutcome.UNKNOWN
         ):
             raise ValueError("INVALID_TASK_LINEAGE")
+        for digest in (
+            self.context_fingerprint,
+            self.model_binding_fingerprint,
+        ):
+            if _SHA256.fullmatch(digest) is None:
+                raise ValueError("INVALID_TASK_AUTHORITY_FINGERPRINT")
 
     @property
     def terminal(self) -> bool:
@@ -302,11 +324,13 @@ class AuthenticatedTaskFact:
             ),
             "attempt_state": self.attempt_state.value,
             "capability_profile_digest": self.capability_profile_digest,
+            "context_fingerprint": self.context_fingerprint,
             "decision_required_event_id": self.decision_required_event_id,
             "dispatch_control": self.dispatch_control,
             "event_head": self.event_head,
             "event_head_id": self.event_head_id,
             "name": self.name,
+            "model_binding_fingerprint": self.model_binding_fingerprint,
             "outcome": None if self.outcome is None else self.outcome.value,
             "predecessor_task_id": self.predecessor_task_id,
             "result_digest": self.result_digest,
@@ -332,6 +356,8 @@ class TaskAuthorityRead:
     collection_capability_profile_digest: str = (
         _UNSPECIFIED_COLLECTION_CAPABILITY_DIGEST
     )
+    authority_context_fingerprint: str = _UNSPECIFIED_CONTEXT_FINGERPRINT
+    collection_model_binding_fingerprint: str = _UNSPECIFIED_MODEL_BINDING_FINGERPRINT
 
     def __post_init__(self) -> None:
         if self.scope.assurance != "authenticated":
@@ -347,6 +373,12 @@ class TaskAuthorityRead:
             raise ValueError("DUPLICATE_STABLE_TASK_REFERENCE")
         if _SHA256.fullmatch(self.collection_capability_profile_digest) is None:
             raise ValueError("INVALID_COLLECTION_CAPABILITY_PROFILE_DIGEST")
+        for digest in (
+            self.authority_context_fingerprint,
+            self.collection_model_binding_fingerprint,
+        ):
+            if _SHA256.fullmatch(digest) is None:
+                raise ValueError("INVALID_TASK_AUTHORITY_FINGERPRINT")
 
     @property
     def fingerprint(self) -> str:
@@ -354,6 +386,9 @@ class TaskAuthorityRead:
             {
                 "collection_capability_profile_digest": (
                     self.collection_capability_profile_digest
+                ),
+                "collection_model_binding_fingerprint": (
+                    self.collection_model_binding_fingerprint
                 ),
                 "generation": self.generation,
                 "scope": self.scope.to_dict(),
@@ -531,6 +566,8 @@ class ProductionConfirmationBinding:
     arguments_sha256: str
     task_set_fingerprint: str
     capability_profile_digest: str
+    context_fingerprint: str
+    model_binding_fingerprint: str
 
     def __post_init__(self) -> None:
         _require_opaque(self.principal_id, "confirmation_principal")
@@ -551,6 +588,8 @@ class ProductionConfirmationBinding:
             self.arguments_sha256,
             self.task_set_fingerprint,
             self.capability_profile_digest,
+            self.context_fingerprint,
+            self.model_binding_fingerprint,
         ):
             if _SHA256.fullmatch(digest) is None:
                 raise ValueError("INVALID_CONFIRMATION_FINGERPRINT")
@@ -562,6 +601,8 @@ class ProductionConfirmationBinding:
                 "arguments_sha256": self.arguments_sha256,
                 "capability_profile_digest": self.capability_profile_digest,
                 "command_id": self.command_id,
+                "context_fingerprint": self.context_fingerprint,
+                "model_binding_fingerprint": self.model_binding_fingerprint,
                 "operation": self.operation,
                 "origin": self.origin.value,
                 "origin_binding_fingerprint": self.origin_binding_fingerprint,
@@ -1476,6 +1517,24 @@ class ProductionMultiTaskResolver:
                 authority_fingerprint=(None if reread is None else reread.fingerprint),
                 **origin_fields,
             )
+        if (
+            operation in _MATERIAL_OPERATIONS
+            and reread is not None
+            and reread.context_fingerprint != visible.authority_context_fingerprint
+        ):
+            return self._safe(
+                request,
+                "task_intent",
+                operation,
+                reread.task_id,
+                resolved_arguments,
+                "not_applicable",
+                ProductionTaskPolicyOutcome.CONFLICT,
+                "TASK_CONTEXT_AUTHORITY_CHANGED",
+                task_set_fingerprint=visible.fingerprint,
+                authority_fingerprint=reread.fingerprint,
+                **origin_fields,
+            )
         outcome, reason, predecessor_digest = self._state_capability_policy(
             operation, resolved_arguments, reread, request.scope, authority
         )
@@ -1499,6 +1558,12 @@ class ProductionMultiTaskResolver:
                     arguments_sha256=_sha256(dict(resolved_arguments)),
                     task_set_fingerprint=visible.fingerprint,
                     capability_profile_digest=self._capability_digest(visible, reread),
+                    context_fingerprint=visible.authority_context_fingerprint,
+                    model_binding_fingerprint=(
+                        visible.collection_model_binding_fingerprint
+                        if reread is None
+                        else reread.model_binding_fingerprint
+                    ),
                 )
         if request.confirmation_id is not None:
             if confirmation != "required":

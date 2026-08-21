@@ -40,6 +40,8 @@ from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
     CallLocalProductionOriginAuthority,
     CallLocalProductionConfirmationConsumer,
     StoreProductionTaskAuthorityReader,
+    production_context_fingerprint,
+    production_model_binding_fingerprint,
 )
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     BoundedP3ConfirmationOwner,
@@ -383,12 +385,18 @@ def test_store_reader_projects_bounded_real_store_authority_without_writes(
 ) -> None:
     store = SqliteTaskStore(tmp_path / "production-reader.sqlite3")
     task_id, attempt_id = _seed_selected_task(store, tmp_path, suffix="a")
+    persisted = store.get_task(task_id, SCOPE)
+    context_fingerprint = production_context_fingerprint(persisted.spec.context)
+    model_fingerprint = production_model_binding_fingerprint(
+        dict(persisted.spec.attributes)
+    )
     before = store.counts()
     reader = StoreProductionTaskAuthorityReader(
         store=store,
         principal_id=SCOPE.subject_id,
         scope=SCOPE,
         visible_task_capacity=32,
+        authority_context_fingerprint=context_fingerprint,
     )
 
     authority = reader.list_visible_tasks(SCOPE)
@@ -401,6 +409,9 @@ def test_store_reader_projects_bounded_real_store_authority_without_writes(
     assert fact.event_head == 0
     assert fact.dispatch_control == "unclaimed"
     assert fact.admission_fingerprint is not None
+    assert authority.authority_context_fingerprint == context_fingerprint
+    assert fact.context_fingerprint == context_fingerprint
+    assert fact.model_binding_fingerprint == model_fingerprint
     assert {
         "task.get",
         "task.list",
@@ -832,6 +843,8 @@ def test_confirmation_consumer_yields_one_exact_call_local_claim(
         arguments_sha256=hashlib.sha256(b"{}").hexdigest(),
         task_set_fingerprint="b" * 64,
         capability_profile_digest="c" * 64,
+        context_fingerprint="d" * 64,
+        model_binding_fingerprint="e" * 64,
     )
     p3_binding = P3ConfirmationBinding(
         principal_id=SCOPE.subject_id,
