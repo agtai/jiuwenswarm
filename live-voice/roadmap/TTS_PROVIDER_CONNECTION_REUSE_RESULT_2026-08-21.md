@@ -1,7 +1,8 @@
 # TTS Provider Connection Reuse Result
 
-> **Status:** A-reference pilot and formal A1 complete on 2026-08-21;
-> candidate implementation, Tier-2 review, B, A2 and final decision remain open.
+> **Status:** A-reference pilot and formal A1 complete; the connection-reuse
+> candidate and first Tier-2 remediation are implemented on 2026-08-21. The
+> independent re-review, B, A2 and final decision remain open.
 >
 > **Measured boundary:** direct real
 > `OpenAIStreamingSpeechProvider`, no Gateway, Agent, Chrome, WebAudio, downlink
@@ -104,15 +105,58 @@ candidate will not be retained merely because reuse is technically visible.
 No end-to-end, Browser, audible output, downlink, P2 ACK or Production-readiness
 credit follows from A1.
 
-## 6. Remaining sequence
+The report field `stream_closed_ms` is a conservative completion-time proxy:
+the Provider closes the response before publishing `COMPLETED`, and the runner
+records the time it receives that terminal event. It is not an independent
+transport-close timestamp and must not support close-duration conclusions.
 
-1. implement the bounded Provider-owned HTTPX client with TDD;
-2. close the independent Tier-2 review before further paid calls;
-3. run B on the final reviewed candidate, six calls without retry;
-4. run A2 from a detached clean worktree at the unchanged A reference, six
+## 6. Candidate and Tier-2 remediation
+
+The initial product candidate was commit
+`022db8945af804e68cd91a2ca5a372263c9d38c4`. The first independent Tier-2
+review found no Critical issue and five Important gaps. All five were
+reproduced before remediation. The reviewed candidate is now
+`b44c82636d6e81ea4ac488afe95613488bd6e92c`, pending cold re-review.
+
+The candidate now provides:
+
+- one lazy HTTPX client per Provider and owning event loop;
+- pool bounds of 8 active connections, 8 keepalive connections and a 30-second
+  keepalive expiry;
+- response-only stream cleanup and Provider-owned client cleanup;
+- exact client retention across failed or late cleanup without duplicate close;
+- fail-closed cross-event-loop access and cleanup;
+- a fully inert content-free diagnostic observer, including `BaseException`;
+- a process-level benchmark watchdog capable of terminating a
+  cancellation-hostile worker;
+- immediate stop before another paid pair after dirty cleanup or an
+  infrastructure-invalid attempt;
+- causal coverage for simultaneous streams, one-stream cancellation, distinct
+  responses, Provider isolation, closed/custom-factory zero allocation, broken
+  pooled transport without retry, and repeated Gateway use of one selected
+  Provider.
+
+The watchdog and dirty-cleanup stop are control-plane/failure-path runner
+hardening added after A1. The successful `_main` timing path, trace collection,
+request population, report schema and metric calculation are unchanged. This
+runner byte difference is recorded explicitly; the independent re-review must
+decide whether it preserves A1 credit before B begins.
+
+Fresh remediation verification completed 115/115 focused cases, plus Ruff,
+`py_compile` and diff-check. Two broader Gateway tests still fail
+deterministically on the unchanged A and B source: one Windows-path-only test
+oracle running on Linux and one pre-existing fake-provider cancel cleanup race.
+They do not exercise the OpenAI client change and are excluded rather than
+silently credited.
+
+## 7. Remaining sequence
+
+1. close the independent Tier-2 re-review before further paid calls;
+2. run B on the final reviewed candidate, six calls without retry;
+3. run A2 from a detached clean worktree at the unchanged A reference, six
    calls without retry;
-5. apply every causal, regression and drift gate from the specification;
-6. record `ACCEPTED`, `REJECTED` or `INCONCLUSIVE` and synchronize current
+4. apply every causal, regression and drift gate from the specification;
+5. record `ACCEPTED`, `REJECTED` or `INCONCLUSIVE` and synchronize current
    documentation.
 
 Call accounting is currently 8/20: two pilot plus six formal A1 calls.
