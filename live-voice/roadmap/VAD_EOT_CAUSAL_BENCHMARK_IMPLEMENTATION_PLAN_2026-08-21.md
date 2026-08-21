@@ -483,7 +483,7 @@ git commit -m "test(live-voice): add real VAD screening runner"
 - Produces one sanitized exact-source pilot record and, if clean, one formal
   screening result.
 
-- [ ] **Step 1: Select and freeze the private split boundary**
+- [x] **Step 1: Select and freeze the private split boundary**
 
 Use an energy scan only to propose a between-clause low-energy frame. Inspect
 the source timing once, then pass the chosen integer explicitly to the builder.
@@ -491,19 +491,19 @@ Record source SHA-256, split frame and required post-pause tokens in the private
 manifest. Do not commit them if they reveal transcript content beyond the
 sanitized evidence boundary.
 
-- [ ] **Step 2: Build and independently verify `vad-en-v1`**
+- [x] **Step 2: Build and independently verify `vad-en-v1`**
 
 Run the builder with the exact source hash. Re-run manifest loading in a fresh
 process and verify all output hashes, decoded WAV facts, pause sample counts and
 mode 600. Preserve the immutable source corpus.
 
-- [ ] **Step 3: Freeze a clean runner commit**
+- [x] **Step 3: Freeze a clean runner commit**
 
 Run all Task 1–4 tests, the 189-test Streaming/OpenAI/Gateway baseline, Ruff,
 `py_compile`, diff-check and scoped self-review. Commit any review corrections,
 then require `git status --porcelain --untracked-files=all` to be empty.
 
-- [ ] **Step 4: Run one real-Provider pilot**
+- [x] **Step 4: Run one real-Provider pilot**
 
 Load credentials into the process environment without echoing them. Execute
 `pilot` with exact HEAD, private manifest and a unique output. Inspect only the
@@ -514,17 +514,21 @@ screening to quantify it; it is never converted into a successful sample.
 
 - [ ] **Step 5: Run independent Tier-2 review**
 
+Pending by explicit inline-execution constraint. Scoped self-review and
+RED/GREEN remediation closed corpus endpoint, exact-pause and early-EOT pacing
+truth defects; independent integration review remains a handoff gate.
+
 Review the complete runner/corpus diff and the sanitized pilot. Remediate every
 Critical/Important finding through RED/GREEN and rerun only materially affected
 gates plus the pilot when its semantics changed.
 
-- [ ] **Step 6: Run formal A1/E1/E2/A2 screening**
+- [x] **Step 6: Run formal A1/E1/E2/A2 screening**
 
 Use the same exact clean commit, Provider/model labels, corpus hash and machine.
 Run five attempts per case/configuration. Preserve the raw mode-600 report
 outside Git.
 
-- [ ] **Step 7: Interpret without changing product source**
+- [x] **Step 7: Interpret without changing product source**
 
 - `LOWER_THRESHOLD_ELIGIBLE`: record the selected threshold and create a later
   default-change spec/branch; do not change it in this packet.
@@ -533,7 +537,7 @@ outside Git.
 - `INCONCLUSIVE`: record the failed infrastructure/stability gate and no
   optimization claim.
 
-- [ ] **Step 8: Commit sanitized evidence**
+- [x] **Step 8: Commit sanitized evidence**
 
 The evidence records exact commit/run IDs, corpus aggregate hash, Provider/model
 labels, per-case counts/timings, decision, limitations and zero forbidden
@@ -560,7 +564,7 @@ git commit -m "docs(live-voice): record VAD causal screening"
 - Consumes Task 5's exact sanitized decision.
 - Produces current status only; it grants no Browser/end-to-end/product credit.
 
-- [ ] **Step 1: Update only the owning current facts**
+- [x] **Step 1: Update only the owning current facts**
 
 STATUS records the benchmark implementation and exact screening decision in the
 Speech Recognition/Interaction Intelligence/Observability rows. The latency
@@ -568,7 +572,7 @@ plan marks the no-Browser VAD screening step done and routes the next owner
 according to `ELIGIBLE|REJECTED|INCONCLUSIVE`. Do not duplicate the detailed
 result outside the evidence file.
 
-- [ ] **Step 2: Run final verification on exact source**
+- [x] **Step 2: Run final verification on exact source**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_prepare_vad_eot_corpus.py tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py tests/unit_tests/live_voice/test_streaming_speech.py tests/unit_tests/live_voice/test_openai_streaming_speech.py tests/unit_tests/gateway/test_streaming_speech_route.py -q --no-cov
@@ -580,7 +584,7 @@ git diff --check
 Expected: all commands exit 0; no test claims Browser, microphone, product or
 Production evidence.
 
-- [ ] **Step 3: Verify documentation links and commit synchronization**
+- [x] **Step 3: Verify documentation links and commit synchronization**
 
 Confirm every changed relative link resolves, raw/private paths remain
 untracked and `docs/zh/live-voice/` contains no duplicate. Then:

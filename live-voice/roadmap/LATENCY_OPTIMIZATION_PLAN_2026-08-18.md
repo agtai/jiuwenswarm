@@ -1,7 +1,8 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** MINIMAL PROBE IMPLEMENTED — accepted current-source warm/cold
-> measurement is not complete. [STATUS](../STATUS.md) remains the only owner
+> **Plan status:** P2 AND VAD CAUSAL SCREENS COMPLETE — accepted current-source
+> physical warm/cold measurement is not complete. [STATUS](../STATUS.md)
+> remains the only owner
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
 >
@@ -47,6 +48,14 @@
 > optimization layers below remain open.
 > Full method, result and limitation evidence is recorded in the
 > [P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
+
+> **2026-08-21 VAD/EOT causal decision:** a no-Browser real-OpenAI screening on
+> `048f944e4ff8bc88f0b006fe50731b161d67f485` ran exact total pauses of
+> 0/300/600/1000 ms in A1/1200 → E1/900 → E2/800 → A2/1200 order. Both controls
+> preserved 20/20 turns; 900 and 800 ms each preserved only 14/20. The fixed
+> lower thresholds are therefore rejected and the 1200 ms product default is
+> retained. This is Speech-Provider component evidence, not Browser or E2E
+> credit. See the [VAD/EOT causal result](../evidence/VAD_EOT_CAUSAL_RESULT_2026-08-21.md).
 
 ## 1. Outcome and judgement
 
@@ -284,8 +293,10 @@ in the EOT-to-STT-final segment.
 
 ### Tune VAD by evidence, not by a global constant change
 
-Run a controlled 800/900/1200 ms comparison on the physical breath-pause
-corpus. Semantic VAD may be evaluated behind explicit Provider capability and
+The controlled no-Browser 800/900/1200 ms Provider comparison is complete:
+both lower fixed thresholds failed turn integrity on the exact 1000 ms case,
+while both 1200 ms controls passed. Semantic VAD may now be evaluated behind
+explicit Provider capability and
 configuration, but fixed and semantic modes must share the same commit/fence
 contract. The default changes only if false-EOT, missed-EOT and latency evidence
 all improve; 500 ms is not a candidate default unless new physical evidence
@@ -382,13 +393,15 @@ Work should be packetized in this dependency order:
    component evidence only**
 3. clean physical Browser confirmation of an accepted P2 candidate, without
    retroactively relabelling the causal run as E2E evidence;
-4. physical fixed-corpus baseline for capture/STT/TTS/playout work, then
-   adaptive browser startup, first-downlink/capture decoupling, EOT overlap and
-   controlled VAD experiments;
-5. authoritative acknowledgement for genuinely long operations;
-6. Conversation Runtime-owned sentence streaming with bounded semantic
+4. ~~no-Browser real-Provider fixed-threshold VAD screen;~~ **DONE — 800/900
+   rejected, retain 1200; component evidence only**
+5. physical fixed-corpus baseline for capture/STT/TTS/playout work when the
+   Browser lane is available, while no-Browser work may continue with EOT
+   settlement overlap and a separately specified semantic/adaptive VAD owner;
+6. authoritative acknowledgement for genuinely long operations;
+7. Conversation Runtime-owned sentence streaming with bounded semantic
    prefetch;
-7. Agent/model/tool-path changes only where the preceding evidence still shows
+8. Agent/model/tool-path changes only where the preceding evidence still shows
    material delay.
 
 This is an order of proof, not a request for one large patch. Each packet names
