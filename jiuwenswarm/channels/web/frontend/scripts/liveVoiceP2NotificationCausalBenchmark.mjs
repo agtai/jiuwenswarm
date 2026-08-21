@@ -155,7 +155,7 @@ async function runAttempt(config, notificationCount, attempt) {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return boundResult(binding, 'active', { replayed: false });
       if (method === PRODUCT_P2_CLOSE_METHOD) return boundResult(binding, 'closed');
       if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
-        if (params.notification_sequence !== delivered + 1 || delivered >= notificationCount) {
+        if (params.notification_sequence !== notificationRpcCount + 1 || delivered >= notificationCount) {
           fail('P2_BENCHMARK_SEQUENCE_MISMATCH');
         }
         const requestedBatchSize = params.max_notifications ?? 1;
@@ -206,7 +206,7 @@ async function runAttempt(config, notificationCount, attempt) {
   }
   const completedAt = config.now();
   await owner.close();
-  if (!finalSeen || delivered !== notificationCount || notificationRpcCount !== notificationCount) {
+  if (!finalSeen || delivered !== notificationCount || notificationRpcCount < 1 || notificationRpcCount > notificationCount) {
     fail('P2_BENCHMARK_ATTEMPT_INCOMPLETE');
   }
   const duration = completedAt - startedAt;
@@ -240,7 +240,7 @@ export async function runP2NotificationCausalBenchmark(input) {
         attempts: config.sampleCount,
         successful: config.sampleCount,
         notification_rpc_count: notificationRpcCount,
-        expected_serial_ms: notificationCount * config.delayMs,
+        expected_serial_ms: (notificationRpcCount / config.sampleCount) * config.delayMs,
         samples_ms: Object.freeze(samples),
         p50_ms: rounded(nearestRank(samples, 50)),
         p95_ms: rounded(nearestRank(samples, 95)),
