@@ -967,18 +967,121 @@ parallel on `agtai/hx/0812_live_voice_w3`.
   no other module owner. C3 remains an audit-ID alias of B42 and adds no unique
   defect, so closing B42 closes C3's surviving concern without a separate entry.
 
+## 5.12 Wave 12 ownership record — ACTIVE
+
+Wave 12 is frozen from integration baseline `1bd8f8e89`, the Wave 11 closure record.
+Its three writer surfaces are disjoint. All three come from batch 3 of the
+revalidation's priority ordering, "cancellation, shutdown and successor
+ordering", whose common pattern the report states directly: publish a generation
+fence, settle every owned child in `finally`, preserve the business outcome, and
+retain cleanup truth when a total deadline expires.
+
+A22 is excluded because `productP1VoiceRoute.ts` is being modified in parallel on
+`agtai/hx/0819_live_voice_p1p2`. A19, B21, B23, D1 and D3 stay unactivated in §6
+to keep this wave reviewable. `product_composition_registry.py` is deliberately
+rested this wave: SRR-20 and SRR-23 both changed it, and its 167 tests now carry
+the boundary protection for three closed findings.
+
+**Standing evidence rule, from three consecutive rejections.** SRR-24, SRR-26 and
+SRR-27 were each rejected for the same shape: a safety property asserted in a
+comment or a report with no test that fails when the property is removed. Every
+packet in this wave must, for each safety property it claims, add a test that
+dies when that property is mutated away, and must report the seeded mutant and
+its observed failure. A property that only a comment defends is not delivered.
+
+### SRR-28 — A7 conversation runtime shutdown phase isolation
+
+- Capability/owner: `AgentConversationRuntime` shutdown ordering across bridge,
+  consumer, harness, conversation runtime and notification cleanup.
+- Risk: Tier 3 authority and terminal truth.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/agent_conversation_runtime.py` and
+  `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` only.
+- Intended behavior: A7 (`:2801-2878`) — shutdown wraps five owners in one `try`,
+  so the first error skips every later owner. Teardown becomes ordered,
+  independently guarded phases that aggregate and preserve errors.
+- Acceptance: reproduce RED first, per phase. Then injecting a failure in each
+  phase leaves every later owner called exactly once, children settled, and a
+  second close convergent. The authoritative exception keeps its existing
+  priority and identity, and cleanup secondary failure must not replace an
+  earlier business or process-control truth.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no other module owner. **SRR-06/A8+B6 and SRR-22/A6+B4 both closed boundaries
+  in this file** — terminal truth versus stream-cleanup disposition, the single
+  retained cleanup owner, the split critical lanes and the supervised bridge
+  publication. Do not reopen or weaken either; prove they survive. SRR-08/A20
+  closed the equivalent all-owner shutdown defect for the Gateway and is the
+  nearest accepted precedent for phase isolation and first-failure preservation.
+
+### SRR-29 — B24 synthesis route caller task ownership
+
+- Capability/owner: `StreamingSynthesisRouteOwner` selection and opening work,
+  and what it is allowed to cancel.
+- Risk: Tier 3 authority and availability.
+- Worker-owned source/tests:
+  `jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py` and
+  `tests/unit_tests/gateway/test_streaming_synthesis_route.py` only.
+- Intended behavior: B24 (`:552-555,712-764,1128-1139,1251,1338-1347`) — the
+  owner stores the caller's WebSocket or RPC task as selection or opening work,
+  so close or a successor cancels it directly and can kill the whole connection
+  request task. Only tasks the owner created may be cancelled; callers observe
+  supersession through a future or event instead.
+- Acceptance: reproduce RED first. Then a slow select or open racing close leaves
+  the connection task alive and usable for a later RPC; supersession is observed
+  by the caller without cancellation; owner-created work is still cancelled
+  exactly once. Deterministic barriers, restart/replay and zero forbidden effects
+  are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change, no
+  new reason code or fallback action, no conformance or Provider source change.
+  **SRR-25/A17 just closed the retained-binding lifetime and the typed
+  batch-eligible fallback in this same file**; its fences, its retirement rule
+  and its fallback vocabulary must survive unchanged. The disclosed pre-existing
+  failure at `test_cancel_api_caller_cancel_retries_cleanup_then_rethrows` has
+  been confirmed on baseline by five independent reviews and must remain
+  unchanged — neither repaired nor hidden.
+
+### SRR-30 — L7 progress return bridge close convergence
+
+- Capability/owner: `TaskProgressReturnBridge` close convergence and worker
+  settlement.
+- Risk: Tier 3 terminal truth and cleanup ownership. L7 is recorded as partially
+  fixed with a confirmed residual, so the packet closes the residual, not the
+  whole original finding.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/task_progress_return.py` and
+  `tests/unit_tests/live_voice/test_task_progress_return.py` only.
+- Intended behavior: L7 (`:898-916`, `:1062-1115`) — `_run` now closes its source,
+  but `close()` returns early for an externally induced FAILED, so `drain_voice`
+  can fail while the worker stays blocked reading source. The early return applies
+  only when source and worker are both settled; otherwise close runs idempotently.
+- Also delivered in this packet, outside the audited 88 and credited only in
+  §6.1: the uncontained background-task exception in the same `_run`. With a
+  delivered subscription event and a generation above `MAX_SAFE_INTEGER`, the
+  bridge leaves an unretrieved `ContractViolation` surfacing as `Task exception
+  was never retrieved`. The handler's own fail-closed is correct and unaffected;
+  only the bridge fails to contain its own background task. Keep it in a separate
+  commit so the numerator stays exact.
+- Acceptance: reproduce both RED first. Then an arbiter or emit failure during a
+  blocked read still closes the source and terminates polling; a second close
+  converges; no background task exception escapes unretrieved. Deterministic
+  barriers, restart/replay and zero forbidden effects are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change, no
+  other module owner. Do not change the handler's fail-closed behaviour, which
+  five reviews have observed to be correct; the defect is containment, not
+  disposition.
+
 ## 6. Queued repair programs
 
-The 54 remaining unique defects are the unactivated defects below; no
-candidate is in flight. These
+The 54 remaining unique defects consist of the three activated Wave 12
+candidates A7, B24 and L7 plus the 51 unactivated defects below. These
 groups are not worker write authority. Each activation removes its IDs from
 this queue and freezes smaller owner-specific packets before editing.
 
 - Generation/successor/authority cleanup (**7**): B18, B32, B37, B38, B39, D2
   and L19. B12, B13, B14, B36, L20 and L21 moved to the active Wave 9 packets.
   B17 remains an inactive alias of B13 and is activated with it.
-- Cancellation/teardown/retained cleanup (**9**): A7, A19, A22, B21, B23,
-  B24, D1, D3 and L7.
+- Cancellation/teardown/retained cleanup (**6**): A19, A22, B21, B23, D1 and
+  D3. A7, B24 and L7 moved to the active Wave 12 packets.
 - Capacity/lifetime/replay (**5**): A5, A9, B11, L5 and L18. A1, A6, A13 and
   B4 closed in Wave 10; A15, A17 and B42 closed in Wave 11, and C3 closed with
   B42 as its audit-ID alias.
@@ -988,9 +1091,10 @@ this queue and freezes smaller owner-specific packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 9 + 5 + 4 + 29 = 54`, the complete remainder now
-that Wave 11 closed. By historical family that remainder is 6 A, 26 B, 19 L and
-three D findings.
+The queue arithmetic is `7 + 6 + 5 + 4 + 29 = 51`; adding the three activated
+Wave 12 candidates gives the 54 unique remaining defects. By historical family
+that remainder is 6 A, 26 B, 19 L and three D findings, of which the
+unactivated 51 are 5 A, 25 B, 18 L and three D.
 
 ### 6.1 Findings routed out of Wave 9
 

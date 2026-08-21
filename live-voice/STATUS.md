@@ -178,7 +178,8 @@ exact-source Alpha result.
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
 - **Remaining accounting:** 54 unique defects remain: 6 A findings, 26 B
-  findings, 19 L findings and D1-D3, all unactivated in the owner-scoped queue.
+  findings, 19 L findings and D1-D3. Three are the activated Wave 12 candidates
+  A7, B24 and L7; the other 51 remain unactivated in the owner-scoped queue.
   C3 closed with B42 as its alias. A17 closed, so the product TTS ceiling A1
   left behind is lifted as well.
   A1 closed, but product TTS stays capped at 256 per channel owner until A17
@@ -190,13 +191,15 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** Wave 11 is frozen from `7109a274b` with three disjoint
-  packets in §5.11 of the repair execution contract: SRR-25 owns A17 in the
-  synthesis route, SRR-26 owns A15 in the P2 interaction adapter and SRR-27
-  owns B42 in the conversation loop. SRR-25 is what makes SRR-24's conformance
-  lift real end to end, because A17 is the second limit the review split from
-  A1. Wave 10 closed with SRR-22/A6+B4 at `935a4f74e`, SRR-23/A13 at
-  `1c860f980` and SRR-24/A1 at `05b59e317`. Each Wave 11 packet still requires
+- **Next action:** Wave 12 is frozen from `1bd8f8e89` with three disjoint packets
+  in §5.12, all from batch 3 of the revalidation ordering, cancellation and
+  shutdown and successor ordering: SRR-28 owns A7 in the conversation runtime
+  shutdown, SRR-29 owns B24 in the synthesis route's caller-task ownership and
+  SRR-30 owns the L7 residual in the progress return bridge. That record also
+  carries a standing evidence rule drawn from three consecutive rejections: any
+  safety property a packet claims must have a test that dies when the property
+  is mutated away. Wave 11 closed with SRR-25/A17 at `76817c34c`, SRR-26/A15 at
+  `8ce7a3645` and SRR-27/B42 at `799c6b407`. Each packet still requires
   deterministic RED reproduction, a minimum owner-scoped fix,
   negative/concurrency/restart evidence, independent review by someone who did
   not implement it, and Main-only integration with an affected rerun before the
