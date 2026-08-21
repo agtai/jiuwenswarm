@@ -62,6 +62,7 @@ from .formal_task_models import (
     TaskEventConsumerAuthorityPage,
     TaskEventConsumerCursorBaseline,
     TaskMutationDisposition,
+    TaskMutationPrecondition,
     TaskMutationResult,
     TaskResultArtifact,
     TaskResultAvailability,
@@ -170,13 +171,21 @@ _CANCEL_BUSINESS_DECISIONS = {
     "TASK_ALREADY_TERMINAL": (
         TaskCommandDisposition.CONFLICT,
         frozenset({ErrorCode.CONFLICT}),
-    )
+    ),
+    "TASK_MUTATION_PRECONDITION_STALE": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.STALE}),
+    ),
 }
 _ADJUST_BUSINESS_DECISIONS = {
     "TASK_ADJUSTMENT_STATE_CONFLICT": (
         TaskCommandDisposition.CONFLICT,
         frozenset({ErrorCode.CONFLICT}),
-    )
+    ),
+    "TASK_MUTATION_PRECONDITION_STALE": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.STALE}),
+    ),
 }
 _ACK_BUSINESS_DECISIONS = {
     "TASK_ACK_PRECONDITION_STALE": (
@@ -3058,21 +3067,20 @@ class SqliteTaskStore:
                 raise cls._corrupt(
                     "formal Task control command result is not canonical"
                 ) from error
-            if not stored_result.ok and (
-                command_type == "task.cancel"
-                or (
-                    stored_result.error is not None
-                    and stored_result.error.reason == "TASK_ADJUSTMENT_STATE_CONFLICT"
-                )
+            expected_decisions = (
+                _CANCEL_BUSINESS_DECISIONS
+                if command_type == "task.cancel"
+                else _ADJUST_BUSINESS_DECISIONS
+            )
+            if (
+                not stored_result.ok
+                and stored_result.error is not None
+                and stored_result.error.reason in expected_decisions
             ):
                 cls._verify_business_decision(
                     connection,
                     command_row,
-                    expected=(
-                        _CANCEL_BUSINESS_DECISIONS
-                        if command_type == "task.cancel"
-                        else _ADJUST_BUSINESS_DECISIONS
-                    ),
+                    expected=expected_decisions,
                 )
                 continue
             command, result = cls._control_command_from_row(command_row)
@@ -5070,6 +5078,7 @@ class SqliteTaskStore:
         command: CommandEnvelope,
         *,
         observed_at: str,
+        mutation_precondition: TaskMutationPrecondition | None = None,
     ) -> ResultEnvelope:
         """Atomically admit one adjustment for an exact addressed attempt."""
 
@@ -5083,7 +5092,10 @@ class SqliteTaskStore:
         # Validate content before opening the write transaction; the final carrier
         # is reconstructed with the authoritative request-event sequence below.
         TaskAdjustmentRequest(command.command_id, payload["adjustment"], 1)
-        fingerprint = command.fingerprint()
+        mutation_precondition = self._require_mutation_precondition(
+            command, mutation_precondition
+        )
+        fingerprint = self._mutation_fingerprint(command, mutation_precondition)
         scope_key = _scope_key(command.scope)
         task_id = command.target_ref.id
         with self._transaction() as connection:
@@ -5092,6 +5104,19 @@ class SqliteTaskStore:
                 return replay
             task = self._require_task_row(connection, task_id, command.scope)
             self._verify_durable_lineage(connection, task)
+            if self._mutation_precondition_stale(task, mutation_precondition):
+                return self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.STALE,
+                    reason="TASK_MUTATION_PRECONDITION_STALE",
+                    message=(
+                        "task mutation requires the exact confirmed Attempt and event head"
+                    ),
+                    observed_at=observed_at,
+                )
             attempt = connection.execute(
                 "SELECT * FROM attempts WHERE attempt_id=?",
                 (task["attempt_id"],),
@@ -5174,8 +5199,12 @@ class SqliteTaskStore:
         command: CommandEnvelope,
         *,
         observed_at: str,
+        mutation_precondition: TaskMutationPrecondition | None = None,
     ) -> ResultEnvelope:
-        fingerprint = command.fingerprint()
+        mutation_precondition = self._require_mutation_precondition(
+            command, mutation_precondition
+        )
+        fingerprint = self._mutation_fingerprint(command, mutation_precondition)
         scope_key = _scope_key(command.scope)
         task_id = command.target_ref.id
         with self._transaction() as connection:
@@ -5184,6 +5213,19 @@ class SqliteTaskStore:
                 return replay
             task = self._require_task_row(connection, task_id, command.scope)
             self._verify_durable_lineage(connection, task)
+            if self._mutation_precondition_stale(task, mutation_precondition):
+                return self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.STALE,
+                    reason="TASK_MUTATION_PRECONDITION_STALE",
+                    message=(
+                        "task mutation requires the exact confirmed Attempt and event head"
+                    ),
+                    observed_at=observed_at,
+                )
             if task["state"] == FormalTaskState.TERMINAL.value:
                 if task["outcome"] == TerminalOutcome.INTERRUPTED.value:
                     connection.execute(
@@ -5393,6 +5435,55 @@ class SqliteTaskStore:
             )
             self._hit("cancel.after_command")
             return result
+
+    @staticmethod
+    def _require_mutation_precondition(
+        command: CommandEnvelope,
+        precondition: TaskMutationPrecondition | None,
+    ) -> TaskMutationPrecondition | None:
+        if precondition is None:
+            return None
+        if not isinstance(precondition, TaskMutationPrecondition):
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition must be trusted and typed",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            command.command_type not in {"task.cancel", "task.adjust"}
+            or precondition.task_id != command.target_ref.id
+        ):
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition does not bind the exact command target",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return precondition
+
+    @staticmethod
+    def _mutation_precondition_stale(
+        task: sqlite3.Row,
+        precondition: TaskMutationPrecondition | None,
+    ) -> bool:
+        return precondition is not None and (
+            task["task_id"] != precondition.task_id
+            or task["attempt_id"] != precondition.attempt_id
+            or int(task["event_head"]) != precondition.expected_event_head
+        )
+
+    @staticmethod
+    def _mutation_fingerprint(
+        command: CommandEnvelope,
+        precondition: TaskMutationPrecondition | None,
+    ) -> bytes:
+        if precondition is None:
+            return command.fingerprint()
+        return canonical_json_bytes(
+            {
+                "command": json.loads(command.fingerprint()),
+                "mutation_precondition": precondition.to_dict(),
+            }
+        )
 
     @staticmethod
     def _retry_fingerprint(
@@ -6789,23 +6880,36 @@ class SqliteTaskStore:
         def load() -> tuple[CommandEnvelope, ResultEnvelope]:
             result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
             fingerprint = _json_load(row["fingerprint"])
+            mutation_precondition: TaskMutationPrecondition | None = None
+            if (
+                row["command_type"] in {"task.cancel", "task.adjust"}
+                and type(fingerprint) is dict
+                and set(fingerprint) == {"command", "mutation_precondition"}
+            ):
+                command_fingerprint = fingerprint["command"]
+                mutation_precondition = TaskMutationPrecondition.from_dict(
+                    fingerprint["mutation_precondition"]
+                )
+            else:
+                command_fingerprint = fingerprint
             if (
                 result.command_id != row["command_id"]
                 or (not result.ok and row["command_type"] != "task.adjust")
-                or type(fingerprint) is not dict
-                or "request_id" in fingerprint
+                or type(command_fingerprint) is not dict
+                or "request_id" in command_fingerprint
             ):
                 raise cls._corrupt(
                     "formal Task control command ledger is not canonical"
                 )
             command = CommandEnvelope.from_dict(
-                {"request_id": result.request_id, **fingerprint}
+                {"request_id": result.request_id, **command_fingerprint}
             )
             if (
                 command.command_id != row["command_id"]
                 or command.command_type != row["command_type"]
                 or _scope_key(command.scope) != row["scope_key"]
-                or command.fingerprint() != row["fingerprint"]
+                or cls._mutation_fingerprint(command, mutation_precondition)
+                != row["fingerprint"]
             ):
                 raise cls._corrupt(
                     "formal Task control command ledger binding is inconsistent"
@@ -7157,6 +7261,23 @@ class SqliteTaskStore:
             command,
             reason=reason,
         )
+        if reason == "TASK_MUTATION_PRECONDITION_STALE":
+            try:
+                replay_payload = json.loads(replay_fingerprint)
+                if (
+                    type(replay_payload) is not dict
+                    or set(replay_payload) != {"command", "mutation_precondition"}
+                    or replay_payload["command"] != json.loads(command.fingerprint())
+                ):
+                    raise ValueError("non-canonical mutation replay")
+                mutation_precondition = TaskMutationPrecondition.from_dict(
+                    replay_payload["mutation_precondition"]
+                )
+            except (FormalTaskViolation, TypeError, ValueError) as error:
+                raise cls._corrupt(
+                    "formal Task mutation decision lost its exact precondition"
+                ) from error
+            authority["mutation_precondition"] = mutation_precondition.to_dict()
         binding: dict[str, object] = {
             "binding_type": _DECISION_BINDING_TYPE,
             "version": _DECISION_BINDING_VERSION,
@@ -7256,11 +7377,13 @@ class SqliteTaskStore:
             }
             authority_fields = frozenset(authority)
             reprioritize_snapshot = authority.get("reprioritize")
+            mutation_precondition_snapshot = authority.get("mutation_precondition")
             if (
                 authority_fields
                 not in {
                     frozenset(base_authority_fields),
                     frozenset(base_authority_fields | {"reprioritize"}),
+                    frozenset(base_authority_fields | {"mutation_precondition"}),
                     frozenset(ack_authority_fields),
                 }
                 or (
@@ -7290,6 +7413,14 @@ class SqliteTaskStore:
                             type(value) is not bool
                             for value in reprioritize_snapshot.values()
                         )
+                    )
+                )
+                or (
+                    "mutation_precondition" in authority
+                    and (
+                        binding["command_type"] not in {"task.cancel", "task.adjust"}
+                        or result.error.reason != "TASK_MUTATION_PRECONDITION_STALE"
+                        or type(mutation_precondition_snapshot) is not dict
                     )
                 )
             ):
@@ -8045,16 +8176,34 @@ class SqliteTaskStore:
                 )
             valid_reason = reason == expected_reason
         elif command_type == "task.adjust":
-            valid_reason = reason == "TASK_ADJUSTMENT_STATE_CONFLICT" and (
-                task["state"] != FormalTaskState.RUNNING.value
-                or attempt["state"] != FormalAttemptState.RUNNING.value
-            )
+            if reason == "TASK_MUTATION_PRECONDITION_STALE":
+                precondition = TaskMutationPrecondition.from_dict(
+                    binding["authority"].get("mutation_precondition")
+                )
+                valid_reason = precondition.task_id == task["task_id"] and (
+                    precondition.attempt_id != task["attempt_id"]
+                    or precondition.expected_event_head != task["event_head"]
+                )
+            else:
+                valid_reason = reason == "TASK_ADJUSTMENT_STATE_CONFLICT" and (
+                    task["state"] != FormalTaskState.RUNNING.value
+                    or attempt["state"] != FormalAttemptState.RUNNING.value
+                )
         elif command_type == "task.cancel":
-            valid_reason = (
-                reason == "TASK_ALREADY_TERMINAL"
-                and task["state"] == FormalTaskState.TERMINAL.value
-                and head["event_type"] == "task.terminal"
-            )
+            if reason == "TASK_MUTATION_PRECONDITION_STALE":
+                precondition = TaskMutationPrecondition.from_dict(
+                    binding["authority"].get("mutation_precondition")
+                )
+                valid_reason = precondition.task_id == task["task_id"] and (
+                    precondition.attempt_id != task["attempt_id"]
+                    or precondition.expected_event_head != task["event_head"]
+                )
+            else:
+                valid_reason = (
+                    reason == "TASK_ALREADY_TERMINAL"
+                    and task["state"] == FormalTaskState.TERMINAL.value
+                    and head["event_type"] == "task.terminal"
+                )
         elif command_type == "task.retry":
             if binding["correlation_id"] != task["correlation_id"]:
                 expected_reason = None
@@ -13945,6 +14094,7 @@ class SqliteTaskStore:
                     )
                 stored_fingerprint = _json_load(row["command_fingerprint"])
                 fingerprint_selection: PersistedExecutorSelection | None = None
+                mutation_precondition: TaskMutationPrecondition | None = None
                 if kind is OutboxKind.ATTEMPT_DISPATCH and row[
                     "bound_command_type"
                 ] in {"task.create", "task.create_successor"}:
@@ -13990,6 +14140,15 @@ class SqliteTaskStore:
                     command_payload = stored_fingerprint["command"]
                     fingerprint_selection = _selection_from_fingerprint_payload(
                         stored_fingerprint["executor_selection"]
+                    )
+                elif (
+                    kind in {OutboxKind.ATTEMPT_CANCEL, OutboxKind.ATTEMPT_ADJUST}
+                    and type(stored_fingerprint) is dict
+                    and set(stored_fingerprint) == {"command", "mutation_precondition"}
+                ):
+                    command_payload = stored_fingerprint["command"]
+                    mutation_precondition = TaskMutationPrecondition.from_dict(
+                        stored_fingerprint["mutation_precondition"]
                     )
                 else:
                     command_payload = stored_fingerprint
@@ -14064,6 +14223,11 @@ class SqliteTaskStore:
                     or command.command_type != expected_command_type
                     or command.scope != scope
                     or tuple(command.required_capabilities) != (expected_command_type,)
+                    or (
+                        kind in {OutboxKind.ATTEMPT_CANCEL, OutboxKind.ATTEMPT_ADJUST}
+                        and cls._mutation_fingerprint(command, mutation_precondition)
+                        != row["command_fingerprint"]
+                    )
                     or not result.ok
                     or result.command_id != row["command_id"]
                 ):
@@ -14342,6 +14506,15 @@ class SqliteTaskStore:
                         or cancel_event_details != {"command_id": row["command_id"]}
                         or cancel_event_seq < 1
                         or cancel_event_seq > int(row["task_event_head"])
+                        or (
+                            mutation_precondition is not None
+                            and (
+                                mutation_precondition.task_id != row["task_id"]
+                                or mutation_precondition.attempt_id != row["attempt_id"]
+                                or mutation_precondition.expected_event_head
+                                != cancel_event_seq - 1
+                            )
+                        )
                     ):
                         raise FormalTaskViolation(
                             "OUTBOX_COMMAND_BINDING_MISMATCH",
@@ -14380,6 +14553,15 @@ class SqliteTaskStore:
                         or adjust_details != {"command_id": row["command_id"]}
                         or adjust_seq != adjustment.requested_seq
                         or adjust_seq > int(row["task_event_head"])
+                        or (
+                            mutation_precondition is not None
+                            and (
+                                mutation_precondition.task_id != row["task_id"]
+                                or mutation_precondition.attempt_id != row["attempt_id"]
+                                or mutation_precondition.expected_event_head
+                                != adjust_seq - 1
+                            )
+                        )
                     ):
                         raise FormalTaskViolation(
                             "OUTBOX_COMMAND_BINDING_MISMATCH",

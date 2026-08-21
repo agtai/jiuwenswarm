@@ -20,6 +20,7 @@ import pytest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CONTRACT_VERSION,
+    CommandEnvelope,
     ErrorCode,
     ProducerRef,
     ResponseRef,
@@ -2338,6 +2339,8 @@ async def test_production_confirmation_is_consumed_once_before_exact_core_cancel
 
         assert routed.ok is True, routed.payload
         assert after[4] == before[4] + 1
+        reopened = SqliteTaskStore(harness.database)
+        assert reopened.get_task(task_id, _scope()).task_id == task_id
         assert replay.ok is False
         assert replay.payload["error"]["reason"] in {
             "PRODUCTION_CONFIRMATION_CLAIM_REPLAY",
@@ -2513,6 +2516,89 @@ async def test_production_target_mutation_requires_exact_persisted_context_revis
 
 
 @pytest.mark.asyncio
+async def test_production_target_mutation_accepts_compatible_context_renewal(
+    tmp_path: Path,
+) -> None:
+    run_now = "2026-08-21T02:00:00Z"
+    run_expiry = "2026-08-22T04:00:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": _context(tmp_path, expires_at=run_expiry)},
+        expires_at="2026-08-22T06:00:00Z",
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        create, create_origin, create_consumer = _confirmed_production_resolution(
+            harness,
+            tmp_path,
+            operation="task.create",
+            target=None,
+            arguments={
+                "name": "Renewable context task",
+                "instruction": "Accept authority renewal without changing revision.",
+            },
+            identity="context-renewal-seed",
+            now=run_now,
+            expires_at="2026-08-21T02:02:00Z",
+        )
+        created = await harness.composition.handle_production_resolution(
+            resolution=create,
+            bearer_token=TOKEN,
+            request_id="request-production-context-renewal-seed",
+            session_id="session-1",
+            correlation_id="correlation-production-context-renewal-seed",
+            origin_authority=create_origin,
+            confirmation_consumer=create_consumer,
+            current_background_session_id="session-1",
+        )
+        assert created.ok and created.payload["result"] is not None
+        task_id = str(created.payload["result"]["task_id"])
+        persisted = harness.composition._core.store.get_task(task_id, _scope())
+        current = harness.authority.contexts["session-1"]
+        harness.authority.contexts["session-1"] = replace(
+            current,
+            expires_at="2026-08-22T05:00:00Z",
+        )
+        resolution, origin_authority, confirmation_consumer = (
+            _confirmed_production_resolution(
+                harness,
+                tmp_path,
+                operation="task.cancel",
+                target=task_id,
+                arguments={},
+                identity="cancel-context-renewal",
+                now=run_now,
+                expires_at="2026-08-21T02:02:00Z",
+            )
+        )
+
+        routed = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-cancel-context-renewal",
+            session_id="session-1",
+            correlation_id="correlation-production-cancel-context-renewal",
+            origin_authority=origin_authority,
+            confirmation_consumer=confirmation_consumer,
+        )
+
+        assert routed.ok is True, routed.payload
+        cancelled = harness.composition._core.store.get_task(task_id, _scope())
+        assert cancelled.cancel_requested is True
+        assert cancelled.spec.context == persisted.spec.context
+        assert (
+            harness.authority.contexts["session-1"].revision_value
+            == persisted.spec.context.revision_value
+        )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
 async def test_production_query_allows_clean_revision_advance_but_rejects_remap(
     tmp_path: Path,
 ) -> None:
@@ -2627,6 +2713,157 @@ async def test_production_query_allows_clean_revision_advance_but_rejects_remap(
         )
         assert _store_counts(harness.database) == before
         assert harness.executor.cancels == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_list_revalidates_returned_context_after_query_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_now = "2026-08-21T02:30:00Z"
+    harness = _harness(
+        tmp_path,
+        contexts={"session-1": _context(tmp_path, expires_at="2026-08-22T04:00:00Z")},
+        expires_at="2026-08-22T06:00:00Z",
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        clock=lambda: run_now,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        classifier = ProductionTaskIntentClassifier()
+        proposal = classifier.parse_structured(
+            {
+                "operation": "task.list",
+                "target": None,
+                "arguments": {"query_kind": "list", "limit": 20},
+            },
+            committed=True,
+            source_confidence=1.0,
+        )
+        request = ProductionTaskIntentRequest(
+            origin=ProductionIntentOrigin.STRUCTURED,
+            scope=_scope(),
+            command_id="command-production-list-context-race",
+            proposal=proposal,
+            source_id="structured-production-list-context-race",
+        )
+        origin_binding = build_production_origin_binding(request)
+        origin_authority = CallLocalProductionOriginAuthority(
+            expected_binding=origin_binding
+        )
+        reader = StoreProductionTaskAuthorityReader(
+            store=harness.composition._core.store,
+            principal_id=_scope().subject_id,
+            scope=_scope(),
+            authority_context_fingerprint=production_context_fingerprint(
+                harness.authority.contexts["session-1"]
+            ),
+        )
+        resolution = VoiceTaskBridge().resolve_production(
+            request,
+            reader,
+            origin_authority,
+            _NoProductionConfirmation(),
+            BoundedClarificationOwner(
+                capacity=8,
+                per_subject_capacity=2,
+                boot_id="production-list-context-race-boot",
+            ),
+        )
+        assert resolution.confirmation == "not_required"
+
+        core = harness.composition._core
+        original_query = core.query
+        injected_counts: list[tuple[int, ...]] = []
+
+        def query_after_context_remap(envelope, authorization, **kwargs):
+            command_id = "command-injected-remapped-context"
+            create = CommandEnvelope.from_dict(
+                {
+                    "contract_version": CONTRACT_VERSION,
+                    "request_id": "request-injected-remapped-context",
+                    "command_id": command_id,
+                    "command_type": "task.create",
+                    "issued_at": run_now,
+                    "scope": _scope().to_dict(),
+                    "correlation_id": "correlation-injected-remapped-context",
+                    "causation_id": None,
+                    "origin": {
+                        "kind": "structured",
+                        "turn_id": None,
+                        "commit_id": None,
+                    },
+                    "target_ref": {"kind": "task", "id": f"create:{command_id}"},
+                    "context_refs": [],
+                    "required_capabilities": ["task.create"],
+                    "payload": {
+                        "name": "Concurrent remapped Task",
+                        "instruction": "Must not escape through the returned list page.",
+                        "executor_id": FORMAL_PROJECT_EXECUTOR_ID,
+                        "side_effect_class": "project_mutation",
+                        "attributes": {
+                            "model_identity": harness.models.identity,
+                            "model_config_version": harness.models.config_version,
+                        },
+                    },
+                    "extensions": {},
+                }
+            )
+            remapped_context = replace(
+                harness.authority.contexts["session-1"],
+                uri=(tmp_path / "concurrent-remapped-project").resolve().as_uri(),
+            )
+            injected = core.execute(
+                create,
+                TaskAuthorizationGrant(
+                    principal_id=_scope().subject_id,
+                    scope=_scope(),
+                    operation="task.create",
+                    command_id=command_id,
+                    target_task_id=None,
+                    allowed_capabilities=frozenset({"task.create"}),
+                    confirmation_id="confirmation-injected-remapped-context",
+                    confirmed=True,
+                    expires_at="2026-08-22T05:00:00Z",
+                ),
+                context=remapped_context,
+                now=run_now,
+                selection=harness.composition._select_production_create_candidate(),
+                admission_policy=harness.composition._admission_policy,
+            )
+            assert injected.ok is True
+            injected_counts.append(_store_counts(harness.database))
+            return original_query(envelope, authorization, **kwargs)
+
+        monkeypatch.setattr(core, "query", query_after_context_remap)
+        before_executor = (
+            tuple(harness.executor.dispatches),
+            tuple(harness.executor.cancels),
+            tuple(harness.executor.adjustments),
+        )
+
+        routed = await harness.composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=TOKEN,
+            request_id="request-production-list-context-race",
+            session_id="session-1",
+            correlation_id="correlation-production-list-context-race",
+            origin_authority=origin_authority,
+        )
+
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] == "EXECUTION_CONTEXT_SCOPE_MISMATCH"
+        assert len(injected_counts) == 1
+        assert _store_counts(harness.database) == injected_counts[0]
+        assert (
+            tuple(harness.executor.dispatches),
+            tuple(harness.executor.cancels),
+            tuple(harness.executor.adjustments),
+        ) == before_executor
     finally:
         await harness.composition.stop()
 
@@ -2780,6 +3017,8 @@ async def test_production_mutations_map_create_update_reprioritize_adjust_and_su
         )
         assert adjusted.ok is True, adjusted.payload
         assert adjusted.payload["result"]["adjustment_state"] == "pending"
+        reopened = SqliteTaskStore(harness.database)
+        assert reopened.get_task(task_id, _scope()).task_id == task_id
 
         second_create, second_origin, second_consumer = (
             _confirmed_production_resolution(

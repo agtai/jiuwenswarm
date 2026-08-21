@@ -43,6 +43,7 @@ from .formal_task_models import (
     TaskAuthorizationGrant,
     TaskCommandDisposition,
     TaskMutationDisposition,
+    TaskMutationPrecondition,
     TaskMutationResult,
     TaskResultAvailability,
     TaskResultRecord,
@@ -511,6 +512,7 @@ class PersistentTaskCore:
         current_background_session_id: str | None = None,
         selection: PersistedExecutorSelection | None = None,
         admission_policy: AdmissionPolicy | None = None,
+        mutation_precondition: TaskMutationPrecondition | None = None,
     ) -> ResultEnvelope:
         observed_at = now or utc_now()
         try:
@@ -583,6 +585,25 @@ class PersistentTaskCore:
                 destructive=True,
                 now=observed_at,
             )
+            if mutation_precondition is not None:
+                if not isinstance(mutation_precondition, TaskMutationPrecondition):
+                    raise FormalTaskViolation(
+                        "TASK_MUTATION_PRECONDITION_INVALID",
+                        "formal Task mutation precondition must be trusted and typed",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if command.command_type not in {"task.cancel", "task.adjust"}:
+                    raise FormalTaskViolation(
+                        "TASK_MUTATION_PRECONDITION_UNSUPPORTED",
+                        "only task.cancel and task.adjust admit this exact precondition",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if mutation_precondition.task_id != command.target_ref.id:
+                    raise FormalTaskViolation(
+                        "TASK_MUTATION_PRECONDITION_INVALID",
+                        "task mutation precondition targets a different Task",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
             if command.command_type == "task.ack_events":
                 require_exact_payload(
                     command.payload,
@@ -601,7 +622,11 @@ class PersistentTaskCore:
                 require_exact_payload(
                     command.payload, frozenset(), field_name="task.cancel payload"
                 )
-                return self.store.cancel(command, observed_at=observed_at)
+                return self.store.cancel(
+                    command,
+                    observed_at=observed_at,
+                    mutation_precondition=mutation_precondition,
+                )
             if command.command_type in {
                 "task.provide_input",
                 "task.pause",
@@ -722,6 +747,7 @@ class PersistentTaskCore:
                 return self.store.adjust(
                     command,
                     observed_at=observed_at,
+                    mutation_precondition=mutation_precondition,
                 )
             if command.command_type == "task.retry":
                 authority_or_replay = self.store.read_retry_authority(

@@ -49,6 +49,7 @@ from .formal_task_models import (
     PersistedExecutorSelection,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskMutationPrecondition,
     TaskResultAvailability,
     TaskResultRecord,
     TaskRetryPrecondition,
@@ -3350,6 +3351,12 @@ class P3AuthenticatedComposition:
                     grant,
                     now=now,
                 )
+                if operation == "task.list":
+                    self._require_list_result_contexts(
+                        authority=authority,
+                        result=result,
+                        now=now,
+                    )
             else:
                 if (
                     resolution.confirmation != "confirmed"
@@ -3402,6 +3409,7 @@ class P3AuthenticatedComposition:
                 command_payload: dict[str, object]
                 selection: PersistedExecutorSelection | None = None
                 command_context: ResolvedTaskContext | None = None
+                mutation_precondition: TaskMutationPrecondition | None = None
                 if operation == "task.create":
                     assert current_create_model is not None
                     model = current_create_model
@@ -3436,7 +3444,13 @@ class P3AuthenticatedComposition:
                         "constraints": list(persistent_task.spec.constraints),
                     }
                 elif operation == "task.adjust":
+                    assert final_target is not None
                     command_payload = {"adjustment": arguments["adjustment"]}
+                    mutation_precondition = TaskMutationPrecondition(
+                        task_id=final_target.task_id,
+                        attempt_id=final_target.attempt_id,
+                        expected_event_head=final_target.event_head,
+                    )
                 elif operation == "task.reprioritize":
                     assert final_target is not None and task_snapshot is not None
                     persistent_task, persistent_attempt, _admission = task_snapshot
@@ -3457,7 +3471,13 @@ class P3AuthenticatedComposition:
                         "reason": "production_intent",
                     }
                 elif operation == "task.cancel":
+                    assert final_target is not None
                     command_payload = {}
+                    mutation_precondition = TaskMutationPrecondition(
+                        task_id=final_target.task_id,
+                        attempt_id=final_target.attempt_id,
+                        expected_event_head=final_target.event_head,
+                    )
                 else:
                     assert operation == "task.create_successor"
                     assert final_target is not None and task_snapshot is not None
@@ -3667,6 +3687,7 @@ class P3AuthenticatedComposition:
                     admission_policy=(
                         self._admission_policy if selection is not None else None
                     ),
+                    mutation_precondition=mutation_precondition,
                 )
                 if result.ok:
                     self._wake.set()

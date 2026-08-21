@@ -1517,24 +1517,6 @@ class ProductionMultiTaskResolver:
                 authority_fingerprint=(None if reread is None else reread.fingerprint),
                 **origin_fields,
             )
-        if (
-            operation in _MATERIAL_OPERATIONS
-            and reread is not None
-            and reread.context_fingerprint != visible.authority_context_fingerprint
-        ):
-            return self._safe(
-                request,
-                "task_intent",
-                operation,
-                reread.task_id,
-                resolved_arguments,
-                "not_applicable",
-                ProductionTaskPolicyOutcome.CONFLICT,
-                "TASK_CONTEXT_AUTHORITY_CHANGED",
-                task_set_fingerprint=visible.fingerprint,
-                authority_fingerprint=reread.fingerprint,
-                **origin_fields,
-            )
         outcome, reason, predecessor_digest = self._state_capability_policy(
             operation, resolved_arguments, reread, request.scope, authority
         )

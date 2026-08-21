@@ -54,6 +54,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskAdjustmentState,
     TaskEventAuthoritySnapshot,
     TaskMutationDisposition,
+    TaskMutationPrecondition,
     TaskResultArtifact,
     TaskResultAvailability,
     TaskResultRecord,
@@ -6406,6 +6407,252 @@ def test_retry_a_to_b_is_atomic_and_preserves_exact_history(tmp_path: Path) -> N
     snapshot = store.event_authority_snapshot(task_id, _scope(), max_events=20)
     assert snapshot.start_seq == boundary.seq
     assert snapshot.events == (boundary,)
+
+
+@pytest.mark.parametrize("operation", ("task.cancel", "task.adjust"))
+def test_confirmed_mutation_precondition_cannot_cross_attempt_rollover(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    """A confirmation for Attempt A must never mutate successor Attempt B."""
+
+    database = tmp_path / f"confirmed-{operation.removeprefix('task.')}-race.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path, identity_suffix=f"-{operation}")
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    dispatch_a = store.claim_outbox(f"dispatch-a-{operation}")
+    assert dispatch_a is not None
+    store.complete_outbox(
+        dispatch_a,
+        executor_ref=f"legacy:{dispatch_a.attempt_id}",
+        observations=_observations(dispatch_a),
+    )
+    confirmed_task = store.get_task(dispatch_a.task_id, _scope())
+    assert confirmed_task.state is FormalTaskState.RUNNING
+
+    cancel_a, cancel_a_grant = _wave2_command(
+        dispatch_a.task_id,
+        "task.cancel",
+        {},
+        command_id=f"command-rollover-cancel-a-{operation}",
+    )
+    accepted_cancel = core.execute(cancel_a, cancel_a_grant, now=NOW)
+    assert accepted_cancel.ok and accepted_cancel.result is not None
+    cancel_delivery = store.claim_outbox(f"cancel-a-{operation}")
+    assert cancel_delivery is not None
+    store.complete_outbox(
+        cancel_delivery,
+        executor_ref=f"legacy:{dispatch_a.attempt_id}",
+        observations=_observations(
+            cancel_delivery,
+            outcome=TerminalOutcome.CANCELLED,
+        ),
+    )
+    retry, retry_grant = _retry(
+        dispatch_a.task_id,
+        dispatch_a.attempt_id,
+        TerminalOutcome.CANCELLED,
+        2,
+        command_id=f"command-rollover-retry-b-{operation}",
+        correlation_id=confirmed_task.correlation_id,
+    )
+    retried = core.execute(
+        retry,
+        retry_grant,
+        context=replace(_context(tmp_path), revision_value="clean-revision-b"),
+        now=NOW,
+    )
+    assert retried.ok and retried.result is not None
+    attempt_b = str(retried.result["attempt_id"])
+    dispatch_b = store.claim_outbox(f"dispatch-b-{operation}")
+    assert dispatch_b is not None and dispatch_b.attempt_id == attempt_b
+    store.complete_outbox(
+        dispatch_b,
+        executor_ref=f"legacy:{attempt_b}",
+        observations=_observations(dispatch_b),
+    )
+
+    if operation == "task.cancel":
+        stale_command, stale_grant = _wave2_command(
+            dispatch_a.task_id,
+            operation,
+            {},
+            command_id="command-confirmed-stale-cancel",
+        )
+    else:
+        stale_command, stale_grant = _adjust(
+            dispatch_a.task_id,
+            "Apply only to the confirmed Attempt A.",
+            command_id="command-confirmed-stale-adjust",
+            request_id="request-confirmed-stale-adjust",
+        )
+
+    confirmed_precondition = TaskMutationPrecondition(
+        task_id=dispatch_a.task_id,
+        attempt_id=dispatch_a.attempt_id,
+        expected_event_head=confirmed_task.event_head,
+    )
+
+    before_task = store.get_task(dispatch_a.task_id, _scope())
+    before_events = store.events(dispatch_a.task_id, _scope())
+    with sqlite3.connect(database) as connection:
+        before_outbox = connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+    before_executor = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    )
+
+    rejected = core.execute(
+        stale_command,
+        stale_grant,
+        now=NOW,
+        mutation_precondition=confirmed_precondition,
+    )
+
+    assert rejected.ok is False
+    assert rejected.error is not None
+    assert rejected.error.code is ErrorCode.STALE
+    assert rejected.error.reason == "TASK_MUTATION_PRECONDITION_STALE"
+    assert store.get_task(dispatch_a.task_id, _scope()) == before_task
+    assert store.events(dispatch_a.task_id, _scope()) == before_events
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+            == before_outbox
+        )
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    ) == before_executor
+    reopened_store = SqliteTaskStore(database)
+    replay = PersistentTaskCore(reopened_store, _Executor()).execute(
+        stale_command,
+        stale_grant,
+        now=NOW,
+        mutation_precondition=confirmed_precondition,
+    )
+    assert replay == rejected
+
+
+@pytest.mark.parametrize("operation", ("task.cancel", "task.adjust"))
+def test_mutation_precondition_is_durable_and_tamper_evident(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    database = tmp_path / f"mutation-precondition-{operation}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path, identity_suffix=f"-precondition-{operation}")
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    dispatch = store.claim_outbox(f"precondition-dispatch-{operation}")
+    assert dispatch is not None
+    store.complete_outbox(
+        dispatch,
+        executor_ref=f"legacy:{dispatch.attempt_id}",
+        observations=_observations(dispatch),
+    )
+    current = store.get_task(dispatch.task_id, _scope())
+    precondition = TaskMutationPrecondition(
+        task_id=current.task_id,
+        attempt_id=current.attempt_id,
+        expected_event_head=current.event_head,
+    )
+    if operation == "task.cancel":
+        command, grant = _wave2_command(
+            current.task_id,
+            operation,
+            {},
+            command_id="command-precondition-positive-cancel",
+        )
+    else:
+        command, grant = _adjust(
+            current.task_id,
+            "Bind this adjustment to the exact durable checkpoint.",
+            command_id="command-precondition-positive-adjust",
+            request_id="request-precondition-positive-adjust",
+        )
+    accepted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        mutation_precondition=precondition,
+    )
+    assert accepted.ok and accepted.result is not None
+    accepted_counts = store.counts()
+    accepted_executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    )
+    changed_replay = core.execute(
+        command,
+        grant,
+        now=NOW,
+        mutation_precondition=replace(
+            precondition,
+            expected_event_head=precondition.expected_event_head + 1,
+        ),
+    )
+    assert not changed_replay.ok and changed_replay.error is not None
+    assert changed_replay.error.reason == "IDEMPOTENCY_CONFLICT"
+    assert store.counts() == accepted_counts
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    ) == accepted_executor_effects
+    assert SqliteTaskStore(database).get_task(current.task_id, _scope()).task_id == (
+        current.task_id
+    )
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint FROM commands WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+        assert row is not None
+        fingerprint = json.loads(row[0])
+        assert set(fingerprint) == {"command", "mutation_precondition"}
+        fingerprint["mutation_precondition"]["expected_event_head"] += 1
+        connection.execute(
+            "UPDATE commands SET fingerprint=? WHERE command_id=?",
+            (json.dumps(fingerprint, sort_keys=True), command.command_id),
+        )
+        connection.commit()
+    corrupted = _database_dump(database)
+    executor_effects = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    )
+
+    with pytest.raises(FormalTaskViolation) as violation:
+        SqliteTaskStore(database)
+
+    assert violation.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == corrupted
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    ) == executor_effects
 
 
 def test_new_retry_admission_requires_cancelled_predecessor_before_executor(

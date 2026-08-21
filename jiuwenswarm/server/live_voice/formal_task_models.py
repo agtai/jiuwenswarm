@@ -1401,6 +1401,69 @@ class TaskRetryPrecondition:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskMutationPrecondition:
+    """Trusted exact Task/Attempt/head facts for one targeted mutation.
+
+    This value is deliberately out-of-band from the client command payload.
+    Product composition derives it from freshly reread Store authority, while
+    the Store compares it inside the same transaction that would append the
+    mutation event or outbox item.
+    """
+
+    task_id: str
+    attempt_id: str
+    expected_event_head: int
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("task.mutation_precondition.task_id", self.task_id),
+            ("task.mutation_precondition.attempt_id", self.attempt_id),
+        ):
+            identity = _require_text(value, field_name)
+            if (
+                "\x00" in identity
+                or len(identity) > 256
+                or _utf8_size(identity, field_name) > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "TASK_MUTATION_PRECONDITION_INVALID",
+                    "task mutation precondition identity exceeds its closed bound",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        if type(self.expected_event_head) is not int or self.expected_event_head < 0:
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition event head must be a non-negative integer",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "expected_event_head": self.expected_event_head,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TaskMutationPrecondition:
+        if type(payload) is not dict or set(payload) != {
+            "task_id",
+            "attempt_id",
+            "expected_event_head",
+        }:
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition is not canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return cls(
+            task_id=payload["task_id"],  # type: ignore[arg-type]
+            attempt_id=payload["attempt_id"],  # type: ignore[arg-type]
+            expected_event_head=payload["expected_event_head"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskRetryAuthoritySnapshot:
     """Read-only retry admission snapshot; Store must re-check it when applying."""
 
