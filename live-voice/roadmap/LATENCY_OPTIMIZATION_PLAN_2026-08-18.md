@@ -45,6 +45,8 @@
 > forbidden Agent/Tool/Task/history/audio effect at zero. This accepts the P2
 > transport candidate only; physical Browser validation and all other
 > optimization layers below remain open.
+> Full method, result and limitation evidence is recorded in the
+> [P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
 
 ## 1. Outcome and judgement
 

@@ -230,6 +230,9 @@ B and unchanged-source A2 below.
 
 **A1/B/A2 decision:** `ACCEPT — P2 CAUSAL COMPONENT EVIDENCE ONLY`
 
+Detailed immutable method, rationale, verification and result evidence:
+[P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
+
 - R/A1/A2 commit: `31f9209d66682d19745acd1d2c15a16b59fc75e2`
 - B commit: `c1b4a47f51b0b200b12e2e544617577d7f307c69`
 - A1 run: `p2-a1-r-batch16-20260821T001711Z-31f9209d6`
