@@ -50,9 +50,9 @@
 > [P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
 
 > **2026-08-21 VAD/EOT causal decision:** a no-Browser real-OpenAI screening on
-> `048f944e4ff8bc88f0b006fe50731b161d67f485` ran exact total pauses of
+> `e2773bec2740e933721d1f598e06978b5b476860` ran exact total pauses of
 > 0/300/600/1000 ms in A1/1200 → E1/900 → E2/800 → A2/1200 order. Both controls
-> preserved 20/20 turns; 900 and 800 ms each preserved only 14/20. The fixed
+> preserved 20/20 turns; 900 and 800 ms each preserved only 15/20. The fixed
 > lower thresholds are therefore rejected and the 1200 ms product default is
 > retained. This is Speech-Provider component evidence, not Browser or E2E
 > credit. See the [VAD/EOT causal result](../evidence/VAD_EOT_CAUSAL_RESULT_2026-08-21.md).

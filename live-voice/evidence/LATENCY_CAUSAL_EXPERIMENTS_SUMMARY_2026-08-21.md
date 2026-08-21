@@ -24,7 +24,7 @@ Os registros exatos são:
 | Experimento | Pergunta | Resultado |
 |---|---|---|
 | P2 notification delivery | O `chat.final` fica esperando atrás de uma notificação por RPC? | Sim. Bounded pull reduziu o p50 em 90,0–92,9% e foi aceito no escopo causal P2 |
-| VAD/EOT | Podemos substituir globalmente 1200 ms por 900 ou 800 ms? | Não. Ambos reduziram o tempo nos casos bem-sucedidos, mas preservaram somente 14/20 turns |
+| VAD/EOT | Podemos substituir globalmente 1200 ms por 900 ou 800 ms? | Não. Ambos reduziram o tempo nos casos bem-sucedidos, mas preservaram somente 15/20 turns |
 
 Assim, houve um ganho implementável no P2. No VAD houve ganho de tempo
 potencial, mas não um ganho aceitável como constante global porque ele cortou
@@ -169,25 +169,25 @@ isso E1/E2 têm 14 amostras, enquanto A1/A2 têm 20.
 
 | Configuração | Sucesso | Fala final → EOT p50 / p95 | EOT → STT final p50 / p95 | Fala final → STT final p50 / p95 |
 |---|---:|---:|---:|---:|
-| A1 / 1200 | 20/20 | 1.504,686 / 1.544,771 ms | 398,451 / 559,717 ms | 1.912,139 / 2.062,348 ms |
-| E1 / 900 | 14/20 | 1.219,531 / 1.231,587 ms | 417,651 / 558,870 ms | 1.642,875 / 1.778,240 ms |
-| E2 / 800 | 14/20 | 1.095,555 / 1.135,512 ms | 394,576 / 523,472 ms | 1.490,178 / 1.596,774 ms |
-| A2 / 1200 | 20/20 | 1.504,093 / 1.568,416 ms | 400,308 / 561,132 ms | 1.915,885 / 2.064,958 ms |
+| A1 / 1200 | 20/20 | 1.508,675 / 1.574,711 ms | 388,360 / 616,357 ms | 1.907,360 / 2.124,197 ms |
+| E1 / 900 | 15/20 | 1.216,858 / 1.242,703 ms | 410,643 / 594,835 ms | 1.631,459 / 1.811,693 ms |
+| E2 / 800 | 15/20 | 1.096,765 / 1.114,144 ms | 389,902 / 1.004,559 ms | 1.503,506 / 2.080,557 ms |
+| A2 / 1200 | 20/20 | 1.503,845 / 1.526,562 ms | 404,256 / 580,386 ms | 1.917,071 / 2.088,051 ms |
 
 ### Integridade e EOT por pausa
 
 | Pausa | A1 / 1200 sucesso; EOT p50/p95 | E1 / 900 sucesso; EOT p50/p95 | E2 / 800 sucesso; EOT p50/p95 | A2 / 1200 sucesso; EOT p50/p95 |
 |---:|---:|---:|---:|---:|
-| 0 ms | 5/5; 1.503,5 / 1.561,2 | 5/5; 1.220,3 / 1.223,2 | 5/5; 1.078,2 / 1.080,5 | 5/5; 1.500,4 / 1.545,8 |
-| 300 ms | 5/5; 1.502,7 / 1.510,1 | 4/5; 1.199,3 / 1.231,4 | 4/5; 1.104,1 / 1.133,8 | 5/5; 1.498,3 / 1.568,4 |
-| 600 ms | 5/5; 1.521,6 / 1.544,8 | 5/5; 1.219,7 / 1.231,6 | 5/5; 1.099,6 / 1.135,5 | 5/5; 1.520,9 / 1.524,9 |
-| 1000 ms | 5/5; 1.501,4 / 1.516,7 | 0/5; — | 0/5; — | 5/5; 1.504,4 / 1.587,0 |
+| 0 ms | 5/5; 1.507,8 / 1.584,5 | 5/5; 1.221,9 / 1.222,9 | 5/5; 1.081,5 / 1.113,6 | 5/5; 1.498,8 / 1.509,8 |
+| 300 ms | 5/5; 1.505,6 / 1.529,4 | 5/5; 1.197,1 / 1.197,6 | 5/5; 1.080,1 / 1.107,9 | 5/5; 1.501,5 / 1.529,9 |
+| 600 ms | 5/5; 1.528,1 / 1.574,7 | 5/5; 1.218,7 / 1.242,7 | 5/5; 1.103,1 / 1.114,1 | 5/5; 1.520,6 / 1.526,6 |
+| 1000 ms | 5/5; 1.507,8 / 1.532,0 | 0/5; — | 0/5; — | 5/5; 1.504,2 / 1.516,1 |
 
-Os 12 failures dos thresholds menores foram dez `EARLY_EOT` e duas
-`TRANSCRIPT_INCOMPLETE`. Pacing e cleanup passaram 80/80; `UNKNOWN` e
+Os dez failures dos thresholds menores foram todos `EARLY_EOT` na pausa de
+1000 ms. Pacing e cleanup passaram 80/80; `UNKNOWN` e
 `INVALID` ficaram em zero. A redução observada nos casos válidos foi de cerca
-de 280–425 ms, mas 900 e 800 ms foram rejeitados como defaults globais porque
-cada um preservou somente 14/20 turns.
+de 285–412 ms, mas 900 e 800 ms foram rejeitados como defaults globais porque
+cada um preservou somente 15/20 turns.
 
 ## Como os dois experimentos se encaixam no pipeline
 

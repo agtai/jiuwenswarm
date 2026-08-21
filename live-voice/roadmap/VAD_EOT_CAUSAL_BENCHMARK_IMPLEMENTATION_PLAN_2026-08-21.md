@@ -512,11 +512,13 @@ Provider/network/echo, pacing or cleanup failure. A truthful `FAILED` early-EOT
 candidate is experiment data: complete the pilot matrix and allow formal
 screening to quantify it; it is never converted into a successful sample.
 
-- [ ] **Step 5: Run independent Tier-2 review**
+- [x] **Step 5: Run independent Tier-2 review**
 
-Pending by explicit inline-execution constraint. Scoped self-review and
-RED/GREEN remediation closed corpus endpoint, exact-pause and early-EOT pacing
-truth defects; independent integration review remains a handoff gate.
+Independent review found no Critical and eight Important findings. RED/GREEN
+remediation closed bounded Provider settlement, pacing precedence, continuous
+corpus/audio binding, artifact atomicity/semantics, CLI privacy, effective
+model identity and the Tier-2 matrix before the credited pilot/formal pair on
+`e2773bec2`.
 
 Review the complete runner/corpus diff and the sanitized pilot. Remediate every
 Critical/Important finding through RED/GREEN and rerun only materially affected
