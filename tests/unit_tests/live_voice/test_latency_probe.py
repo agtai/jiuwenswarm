@@ -188,6 +188,25 @@ def test_v1_run_declares_post_capture_track_and_ordered_dialogue_subset(tmp_path
     assert run.input_case_for_profile("dialogue_with_tool") == "tool-weather-en-v1"
 
 
+def test_v1_run_accepts_the_no_browser_agent_tts_causal_lane(tmp_path) -> None:
+    value = valid_post_capture_run_json()
+    value.update(
+        optimization_track="agent_tts_overlap",
+        benchmark_lane="no_browser_causal",
+        fixture_profile_id="stable-sentence-policy-v1",
+        profile_ids=["dialogue_no_tool"],
+        input_case_ids=["stable-sentence-controlled-v1"],
+    )
+    path = tmp_path / "stable-sentence-run.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    run = load_latency_run_config(path)
+
+    assert run.optimization_track == "agent_tts_overlap"
+    assert run.benchmark_lane == "no_browser_causal"
+    assert run.fixture_profile_id == "stable-sentence-policy-v1"
+
+
 def test_v0_run_remains_legacy_and_round_trips_without_v1_keys(run_config) -> None:
     assert run_config.optimization_track == "legacy_full_journey"
     assert run_config.benchmark_lane == "legacy_unspecified"

@@ -55,11 +55,13 @@ PROFILE_IDS: Final = (
 OPTIMIZATION_TRACKS: Final = (
     "capture_endpointing",
     "post_capture_pipeline",
+    "agent_tts_overlap",
 )
 BENCHMARK_LANES: Final = (
     "controlled_browser_fixture",
     "controlled_browser",
     "physical_journey",
+    "no_browser_causal",
 )
 _POST_CAPTURE_FIXTURE_PROFILES: Final = (
     "dialogue_no_tool",
