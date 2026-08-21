@@ -180,6 +180,7 @@ export class JsonLineRegistryFixture {
     this.lines = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     this.iterator = this.lines[Symbol.asyncIterator]();
     this.stderrBytes = 0;
+    this.protocolFailed = false;
     this.protocolClosed = false;
     this.reaped = false;
     this.termSent = false;
@@ -207,6 +208,7 @@ export class JsonLineRegistryFixture {
       }
     });
     this.child.on('error', () => {
+      this.protocolFailed = true;
       if (!this.spawnObserved) {
         resolveSpawn(false);
         settleExit({ code: null, signal: null, spawn_error: true });
@@ -218,6 +220,12 @@ export class JsonLineRegistryFixture {
     this.child.stderr.on('data', chunk => {
       this.stderrBytes = Math.min(4097, this.stderrBytes + chunk.length);
     });
+    const observeStreamError = () => {
+      this.protocolFailed = true;
+    };
+    this.child.stdin.on('error', observeStreamError);
+    this.child.stdout.on('error', observeStreamError);
+    this.child.stderr.on('error', observeStreamError);
   }
 
   async _bounded(promise, timeoutMs) {
@@ -251,7 +259,7 @@ export class JsonLineRegistryFixture {
         fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
       }
       await this._requireSpawned();
-      if (this.reaped) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      if (this.reaped || this.protocolFailed) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
       const line = `${JSON.stringify({ operation })}\n`;
       const write = await this._bounded(
         new Promise((resolve, reject) => {
@@ -259,9 +267,9 @@ export class JsonLineRegistryFixture {
         }),
         this.requestTimeoutMs,
       );
-      if (!write.settled) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      if (!write.settled || this.protocolFailed) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
       const itemResult = await this._bounded(this.iterator.next(), this.requestTimeoutMs);
-      if (!itemResult.settled) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      if (!itemResult.settled || this.protocolFailed) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
       const item = itemResult.value;
       if (item.done || typeof item.value !== 'string' || Buffer.byteLength(item.value, 'utf8') > 64 * 1024) {
         fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
@@ -315,6 +323,7 @@ export class JsonLineRegistryFixture {
         this.exitFact?.spawn_error === true ||
         this.exitFact?.code !== 0 ||
         this.exitFact?.signal !== null ||
+        this.protocolFailed ||
         this.stderrBytes !== 0
       ) {
         fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
@@ -351,12 +360,21 @@ export class JsonLineRegistryFixture {
       const terminated = await this._bounded(this.exited, this.shutdownTimeoutMs);
       if (!terminated.settled && !this.reaped) {
         this.killSent = this.child.kill('SIGKILL') || this.killSent;
-        await this._bounded(this.exited, this.killTimeoutMs);
+        const killed = await this._bounded(this.exited, this.killTimeoutMs);
+        if (!killed.settled || !this.reaped) {
+          this._closePipes();
+          fail('EOT_STT_BENCHMARK_FIXTURE_CLEANUP_FAILED');
+        }
       }
     } else if (!this.reaped) {
-      await this._bounded(this.exited, this.shutdownTimeoutMs);
+      const exited = await this._bounded(this.exited, this.shutdownTimeoutMs);
+      if (!exited.settled || !this.reaped) {
+        this._closePipes();
+        fail('EOT_STT_BENCHMARK_FIXTURE_CLEANUP_FAILED');
+      }
     }
     this._closePipes();
+    if (!this.reaped) fail('EOT_STT_BENCHMARK_FIXTURE_CLEANUP_FAILED');
     return this.lifecycle();
   }
 

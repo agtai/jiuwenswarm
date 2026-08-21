@@ -248,6 +248,21 @@ test('fixture spawn failure is awaited, stable, and has no unreaped child', asyn
   });
 });
 
+test('fixture immediate-exit write race stays stable and reaps without unhandled EPIPE', async () => {
+  const script = await writeChildScript(`
+    process.stdin.destroy();
+    process.exit(0);
+  `);
+  const fixture = new JsonLineRegistryFixture(process.execPath, 50, 50, {
+    fixture_script: script,
+    request_timeout_ms: 100,
+    shutdown_timeout_ms: 100,
+    kill_timeout_ms: 100,
+  });
+  await assert.rejects(fixture.request('open'), /EOT_STT_BENCHMARK_FIXTURE_FAILED/);
+  assert.equal(fixture.lifecycle().reaped, true);
+});
+
 test('nonresponsive fixture request times out and TERM reaps the child', async () => {
   const script = await writeChildScript(`
     process.stdin.resume();
@@ -285,4 +300,36 @@ test('fixture cleanup escalates ignored TERM to KILL and awaits the reaped child
     term_sent: true,
     kill_sent: true,
   });
+});
+
+test('fixture termination rejects stable when post-KILL exit cannot be confirmed', async () => {
+  const script = await writeChildScript(`
+    process.stdin.resume();
+    setInterval(() => undefined, 1000);
+  `);
+  const fixture = new JsonLineRegistryFixture(process.execPath, 50, 50, {
+    fixture_script: script,
+    request_timeout_ms: 100,
+    shutdown_timeout_ms: 30,
+    kill_timeout_ms: 30,
+  });
+  await fixture._requireSpawned();
+  const actualKill = fixture.child.kill.bind(fixture.child);
+  fixture.child.kill = () => true;
+  try {
+    await assert.rejects(
+      fixture.terminate(),
+      /EOT_STT_BENCHMARK_FIXTURE_CLEANUP_FAILED/,
+    );
+    assert.deepEqual(fixture.lifecycle(), {
+      reaped: false,
+      term_sent: true,
+      kill_sent: true,
+    });
+  } finally {
+    fixture.child.kill = actualKill;
+    actualKill('SIGKILL');
+    await fixture.exited;
+    fixture._closePipes();
+  }
 });
