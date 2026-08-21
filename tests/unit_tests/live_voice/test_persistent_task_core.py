@@ -20,6 +20,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     InputCommitState,
     LifecycleKind,
+    MAX_SAFE_INTEGER,
     QueryEnvelope,
     ResultEnvelope,
     ScopeRef,
@@ -6588,6 +6589,40 @@ def test_mutation_precondition_is_durable_and_tamper_evident(
             command_id="command-precondition-positive-adjust",
             request_id="request-precondition-positive-adjust",
         )
+    before_rejected_subclass = store.counts()
+    before_rejected_executor = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    )
+
+    class _ForgedMutationPrecondition(TaskMutationPrecondition):
+        def to_dict(self) -> dict[str, object]:
+            return {
+                "task_id": self.task_id,
+                "attempt_id": "attempt-forged",
+                "expected_event_head": self.expected_event_head,
+            }
+
+    forged = _ForgedMutationPrecondition(
+        task_id=precondition.task_id,
+        attempt_id=precondition.attempt_id,
+        expected_event_head=precondition.expected_event_head,
+    )
+    rejected_subclass = core.execute(
+        command,
+        grant,
+        now=NOW,
+        mutation_precondition=forged,
+    )
+    assert not rejected_subclass.ok and rejected_subclass.error is not None
+    assert rejected_subclass.error.reason == "TASK_MUTATION_PRECONDITION_INVALID"
+    assert store.counts() == before_rejected_subclass
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    ) == before_rejected_executor
     accepted = core.execute(
         command,
         grant,
@@ -6633,7 +6668,7 @@ def test_mutation_precondition_is_durable_and_tamper_evident(
         fingerprint["mutation_precondition"]["expected_event_head"] += 1
         connection.execute(
             "UPDATE commands SET fingerprint=? WHERE command_id=?",
-            (json.dumps(fingerprint, sort_keys=True), command.command_id),
+            (canonical_json_bytes(fingerprint), command.command_id),
         )
         connection.commit()
     corrupted = _database_dump(database)
@@ -6653,6 +6688,28 @@ def test_mutation_precondition_is_durable_and_tamper_evident(
         tuple(executor.cancels),
         tuple(executor.adjustments),
     ) == executor_effects
+
+
+def test_task_mutation_precondition_has_closed_public_numeric_contract() -> None:
+    from jiuwenswarm.server.live_voice import formal_task_models
+
+    assert "TaskMutationPrecondition" in formal_task_models.__all__
+    assert (
+        TaskMutationPrecondition(
+            task_id="task-bounded",
+            attempt_id="attempt-bounded",
+            expected_event_head=MAX_SAFE_INTEGER,
+        ).expected_event_head
+        == MAX_SAFE_INTEGER
+    )
+    for invalid in (True, -1, MAX_SAFE_INTEGER + 1):
+        with pytest.raises(FormalTaskViolation) as violation:
+            TaskMutationPrecondition(
+                task_id="task-bounded",
+                attempt_id="attempt-bounded",
+                expected_event_head=invalid,
+            )
+        assert violation.value.reason == "TASK_MUTATION_PRECONDITION_INVALID"
 
 
 def test_new_retry_admission_requires_cancelled_predecessor_before_executor(

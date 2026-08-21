@@ -586,7 +586,7 @@ class PersistentTaskCore:
                 now=observed_at,
             )
             if mutation_precondition is not None:
-                if not isinstance(mutation_precondition, TaskMutationPrecondition):
+                if type(mutation_precondition) is not TaskMutationPrecondition:
                     raise FormalTaskViolation(
                         "TASK_MUTATION_PRECONDITION_INVALID",
                         "formal Task mutation precondition must be trusted and typed",

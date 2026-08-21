@@ -25,6 +25,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
     ContractViolation,
     ErrorCode,
+    MAX_SAFE_INTEGER,
     OriginRef,
     ResultEnvelope,
     ScopeRef,
@@ -1430,10 +1431,14 @@ class TaskMutationPrecondition:
                     "task mutation precondition identity exceeds its closed bound",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-        if type(self.expected_event_head) is not int or self.expected_event_head < 0:
+        if (
+            type(self.expected_event_head) is not int
+            or self.expected_event_head < 0
+            or self.expected_event_head > MAX_SAFE_INTEGER
+        ):
             raise FormalTaskViolation(
                 "TASK_MUTATION_PRECONDITION_INVALID",
-                "task mutation precondition event head must be a non-negative integer",
+                "task mutation precondition event head is outside its closed bound",
                 ErrorCode.INVALID_ARGUMENT,
             )
 
@@ -2611,6 +2616,7 @@ __all__ = [
     "TaskEventConsumerAuthorityPage",
     "TaskEventConsumerCursorBaseline",
     "TaskMutationDisposition",
+    "TaskMutationPrecondition",
     "TaskMutationResult",
     "TaskResultArtifact",
     "TaskResultAvailability",

@@ -3089,23 +3089,38 @@ class SqliteTaskStore:
                 if command_type == "task.cancel"
                 else "task.adjust_requested"
             )
-            request_count = connection.execute(
-                """SELECT COUNT(*) FROM task_events AS e
+            request_rows = connection.execute(
+                """SELECT e.task_id, e.attempt_id, e.seq FROM task_events AS e
                    JOIN tasks AS t ON t.task_id=e.task_id
                    WHERE t.scope_key=? AND e.event_type=? AND e.causation_id=?""",
                 (scope_key, request_type, command_id),
-            ).fetchone()[0]
+            ).fetchall()
             outbox_count = connection.execute(
                 """SELECT COUNT(*) FROM outbox AS o
                    JOIN tasks AS t ON t.task_id=o.task_id
                    WHERE t.scope_key=? AND o.command_id=?""",
                 (scope_key, command_id),
             ).fetchone()[0]
-            if request_count == 1:
+            if len(request_rows) == 1:
                 allowed_outbox_counts = {0, 1} if command_type == "task.cancel" else {1}
                 if outbox_count not in allowed_outbox_counts:
                     raise cls._corrupt(
                         "formal Task control command has ambiguous durable ownership"
+                    )
+                fingerprint = _json_load(command_row["fingerprint"])
+                mutation_precondition = cls._mutation_precondition_from_fingerprint(
+                    command_type,
+                    fingerprint,
+                )
+                request = request_rows[0]
+                if mutation_precondition is not None and (
+                    mutation_precondition.task_id != request["task_id"]
+                    or mutation_precondition.attempt_id != request["attempt_id"]
+                    or mutation_precondition.expected_event_head
+                    != int(request["seq"]) - 1
+                ):
+                    raise cls._corrupt(
+                        "formal Task mutation precondition does not bind its request event"
                     )
                 continue
             value = result.result
@@ -3190,7 +3205,7 @@ class SqliteTaskStore:
             )
             if (
                 command_type != "task.cancel"
-                or request_count != 0
+                or request_rows
                 or outbox_count != 0
                 or not repeat_value_valid
                 or value["task_id"] != command.target_ref.id
@@ -5443,7 +5458,7 @@ class SqliteTaskStore:
     ) -> TaskMutationPrecondition | None:
         if precondition is None:
             return None
-        if not isinstance(precondition, TaskMutationPrecondition):
+        if type(precondition) is not TaskMutationPrecondition:
             raise FormalTaskViolation(
                 "TASK_MUTATION_PRECONDITION_INVALID",
                 "task mutation precondition must be trusted and typed",
@@ -5478,12 +5493,37 @@ class SqliteTaskStore:
     ) -> bytes:
         if precondition is None:
             return command.fingerprint()
+        if type(precondition) is not TaskMutationPrecondition:
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition must have its exact trusted type",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         return canonical_json_bytes(
             {
                 "command": json.loads(command.fingerprint()),
-                "mutation_precondition": precondition.to_dict(),
+                "mutation_precondition": {
+                    "task_id": precondition.task_id,
+                    "attempt_id": precondition.attempt_id,
+                    "expected_event_head": precondition.expected_event_head,
+                },
             }
         )
+
+    @staticmethod
+    def _mutation_precondition_from_fingerprint(
+        command_type: str,
+        fingerprint: object,
+    ) -> TaskMutationPrecondition | None:
+        if (
+            command_type in {"task.cancel", "task.adjust"}
+            and type(fingerprint) is dict
+            and set(fingerprint) == {"command", "mutation_precondition"}
+        ):
+            return TaskMutationPrecondition.from_dict(
+                fingerprint["mutation_precondition"]
+            )
+        return None
 
     @staticmethod
     def _retry_fingerprint(
@@ -6880,16 +6920,12 @@ class SqliteTaskStore:
         def load() -> tuple[CommandEnvelope, ResultEnvelope]:
             result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
             fingerprint = _json_load(row["fingerprint"])
-            mutation_precondition: TaskMutationPrecondition | None = None
-            if (
-                row["command_type"] in {"task.cancel", "task.adjust"}
-                and type(fingerprint) is dict
-                and set(fingerprint) == {"command", "mutation_precondition"}
-            ):
+            mutation_precondition = cls._mutation_precondition_from_fingerprint(
+                row["command_type"],
+                fingerprint,
+            )
+            if mutation_precondition is not None:
                 command_fingerprint = fingerprint["command"]
-                mutation_precondition = TaskMutationPrecondition.from_dict(
-                    fingerprint["mutation_precondition"]
-                )
             else:
                 command_fingerprint = fingerprint
             if (
