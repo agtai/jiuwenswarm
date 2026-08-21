@@ -1254,8 +1254,7 @@ def _bounded_text(
 ) -> str:
     text = _required_text(value, field_name)
     if "\x00" in text or (
-        max_utf8_bytes is not None
-        and len(text.encode("utf-8")) > max_utf8_bytes
+        max_utf8_bytes is not None and len(text.encode("utf-8")) > max_utf8_bytes
     ):
         raise _violation(
             "INVALID_BOUNDED_TEXT",
@@ -1319,15 +1318,13 @@ def _closed_string_map(value: object, field_name: str) -> dict[str, str]:
     data = _strict_object(value, field_name=field_name)
     parsed: dict[str, str] = {}
     for key, item in data.items():
-        parsed[
-            _bounded_text(key, f"{field_name} key", max_utf8_bytes=None)
-        ] = _bounded_text(item, f"{field_name}.{key}", max_utf8_bytes=None)
+        parsed[_bounded_text(key, f"{field_name} key", max_utf8_bytes=None)] = (
+            _bounded_text(item, f"{field_name}.{key}", max_utf8_bytes=None)
+        )
     return parsed
 
 
-def _closed_value(
-    value: object, field_name: str, *, values: frozenset[str]
-) -> str:
+def _closed_value(value: object, field_name: str, *, values: frozenset[str]) -> str:
     if type(value) is not str or value not in values:
         raise _violation(
             "INVALID_ENUM",
@@ -2425,6 +2422,9 @@ _EVENT_RULES: Final = MappingProxyType(
         ),
         "task.accepted": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
         "task.retry_accepted": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
+        "task.recovery_accepted": _EventRule(
+            IdentityKind.TASK, "task_core", "accepted"
+        ),
         "task.running": _EventRule(IdentityKind.TASK, "task_core", "running"),
         "task.blocked": _EventRule(IdentityKind.TASK, "task_core", "blocked"),
         "task.decision_required": _EventRule(
@@ -2473,6 +2473,16 @@ def _validate_event_payload(
             "previous_outcome",
             "attempt_number",
         }
+    elif event_type == "task.recovery_accepted":
+        required = {
+            "state",
+            "recovery_id",
+            "producer_attempt_id",
+            "producer_outcome",
+            "recovery_generation",
+            "recovery_budget_remaining",
+            "attempt_number",
+        }
     _require_exact_keys(data, required=required, field_name="event.payload")
     if data["state"] != rule.state:
         raise _violation(
@@ -2500,6 +2510,40 @@ def _validate_event_payload(
             raise _violation(
                 "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
                 "task.retry_accepted attempt_number must be 2 or 3",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+    elif event_type == "task.recovery_accepted":
+        _required_text(data["recovery_id"], "event.payload.recovery_id")
+        _required_text(
+            data["producer_attempt_id"],
+            "event.payload.producer_attempt_id",
+        )
+        outcome = _enum(
+            TerminalOutcome,
+            data["producer_outcome"],
+            "event.payload.producer_outcome",
+        )
+        attempt_number = _uint(
+            data["attempt_number"],
+            "event.payload.attempt_number",
+        )
+        recovery_generation = _uint(
+            data["recovery_generation"],
+            "event.payload.recovery_generation",
+        )
+        recovery_budget_remaining = _uint(
+            data["recovery_budget_remaining"],
+            "event.payload.recovery_budget_remaining",
+        )
+        if (
+            outcome is not TerminalOutcome.INTERRUPTED
+            or attempt_number not in {2, 3}
+            or recovery_generation != attempt_number - 1
+            or recovery_budget_remaining != 3 - attempt_number
+        ):
+            raise _violation(
+                "TASK_RECOVERY_EPOCH_INVALID",
+                "task.recovery_accepted must bind one interrupted recovery epoch",
                 code=ErrorCode.PROTOCOL_VIOLATION,
             )
     return _freeze_object(dict(data), "event.payload")
@@ -2636,6 +2680,14 @@ class EventEnvelope:
             raise _violation(
                 "TASK_RETRY_CAUSATION_MISMATCH",
                 "task.retry_accepted command_id must equal its causation_id",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if event_type == "task.recovery_accepted" and (
+            causation_id is None or result.payload["recovery_id"] != causation_id
+        ):
+            raise _violation(
+                "TASK_RECOVERY_CAUSATION_MISMATCH",
+                "task.recovery_accepted recovery_id must equal its causation_id",
                 code=ErrorCode.PROTOCOL_VIOLATION,
             )
         if rule.progress:

@@ -155,7 +155,7 @@ function retryEvents(events = retryHistoryThroughB(), headSeq = 3) {
   };
 }
 
-function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, progressOutcome = event.outcome } = {}) {
+function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, progressOutcome = event.outcome, rawOnly = false } = {}) {
   const sourcePayload = { state: event.state };
   if (sourceOutcome !== null) sourcePayload.outcome = sourceOutcome;
   const raw = {
@@ -219,6 +219,7 @@ function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, pro
       },
     },
   };
+  if (rawOnly) return raw;
   const parsed = parseProductTextProgressEvent(raw);
   assert.notEqual(parsed, null);
   return parsed;
@@ -732,6 +733,45 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(terminalPresentation.kind, 'presentation');
   assert.equal(terminalPresentation.task_notification, true);
   assert.equal(terminalPresentation.adjustment_notification, false);
+  const audioTaskPresentation = classifyProductP2Notification({
+    kind: 'agent.output',
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-task-audio',
+      response_generation: 9,
+    },
+    agent_event: {
+      event_type: 'chat.final',
+      text: 'The background task is running.',
+      source_provenance: 'server.task_notification',
+    },
+    presentation_unit: {
+      surface: 'audio',
+      unit_id: 'unit-task-audio',
+      seq: 0,
+      content_ref: `sha256:${'b'.repeat(64)}`,
+    },
+  });
+  assert.equal(audioTaskPresentation.kind, 'presentation');
+  assert.equal(audioTaskPresentation.task_notification, true);
+  assert.equal(audioTaskPresentation.ack.surface, 'audio');
+  assert.equal(
+    audioTaskPresentation.history_message_id,
+    `live-voice:interaction-1:response-task-audio:9:audio:0:0:${'b'.repeat(64)}`,
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({
+      kind: 'agent.output',
+      response: {
+        interaction_id: 'interaction-1',
+        response_id: 'response-untrusted-audio',
+        response_generation: 10,
+      },
+      agent_event: { event_type: 'chat.final', text: 'untrusted audio' },
+      presentation_unit: { surface: 'audio', unit_id: 'unit-untrusted-audio', seq: 0 },
+    }),
+    { kind: 'continue' },
+  );
   const adjustmentPresentation = classifyProductP2Notification({
     kind: 'agent.output',
     response: {
@@ -1392,16 +1432,10 @@ test('P3 progress reconciliation fails closed on outcome disagreement without li
   });
   adoptTaskEvents(leaf, retryEvents([accepted], 0));
 
-  await assert.rejects(
-    reconcileProductP3ProgressEvent({
-      request: async () => retryEvents([accepted, failed], 1),
-      leaf,
-      event: productProgressForTaskEvent(failed, { progressOutcome: 'completed' }),
-      session_id: 'session-1',
-      request_nonce: 'outcome-conflict',
-      is_current: () => true,
-    }),
-    /source, state, outcome, or producer mismatch/,
+  assert.equal(
+    parseProductTextProgressEvent(productProgressForTaskEvent(failed, { progressOutcome: 'completed', rawOnly: true })),
+    null,
+    'the carrier must reject outcome disagreement before reconciliation or DOM adoption',
   );
   assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
   assert.deepEqual(leaf.snapshot().progress_receipts, []);

@@ -108,9 +108,7 @@ def _event(
     return EventEnvelope.from_dict(raw)
 
 
-_P3_WAVE2_COMMAND_CASES: tuple[
-    tuple[str, dict[str, object], str, object], ...
-] = (
+_P3_WAVE2_COMMAND_CASES: tuple[tuple[str, dict[str, object], str, object], ...] = (
     (
         "task.update",
         {
@@ -1296,6 +1294,56 @@ def test_task_retry_command_and_epoch_event_are_strict_and_bounded() -> None:
     assert zero_effect_tracker.accept(retry_event).status is EventApplyStatus.APPLIED
 
 
+def test_task_recovery_epoch_event_is_strict_and_store_authority_bounded() -> None:
+    fixture = _load("critical_kernel.valid.json")
+    recovery_raw = copy.deepcopy(fixture["event"])
+    recovery_raw.update(
+        {
+            "event_id": "task-recovery-2",
+            "event_type": "task.recovery_accepted",
+            "seq": 2,
+            "causation_id": "recovery-2",
+            "payload": {
+                "state": "accepted",
+                "recovery_id": "recovery-2",
+                "producer_attempt_id": "attempt-1",
+                "producer_outcome": "interrupted",
+                "recovery_generation": 1,
+                "recovery_budget_remaining": 1,
+                "attempt_number": 2,
+            },
+        }
+    )
+    parsed = EventEnvelope.from_dict(recovery_raw)
+    assert parsed.payload["producer_outcome"] == "interrupted"
+    assert parsed.payload["attempt_number"] == 2
+
+    changes = (
+        ("producer_outcome", "failed", "TASK_RECOVERY_EPOCH_INVALID"),
+        ("recovery_generation", 2, "TASK_RECOVERY_EPOCH_INVALID"),
+        ("recovery_budget_remaining", 0, "TASK_RECOVERY_EPOCH_INVALID"),
+        ("attempt_number", 4, "TASK_RECOVERY_EPOCH_INVALID"),
+    )
+    for field_name, value, reason in changes:
+        changed = copy.deepcopy(recovery_raw)
+        changed["payload"][field_name] = value
+        with pytest.raises(ContractViolation) as rejected:
+            EventEnvelope.from_dict(changed)
+        assert rejected.value.reason == reason
+
+    wrong_cause = copy.deepcopy(recovery_raw)
+    wrong_cause["causation_id"] = "recovery-other"
+    with pytest.raises(ContractViolation) as rejected_cause:
+        EventEnvelope.from_dict(wrong_cause)
+    assert rejected_cause.value.reason == "TASK_RECOVERY_CAUSATION_MISMATCH"
+
+    extra = copy.deepcopy(recovery_raw)
+    extra["payload"]["operator_claim"] = "untrusted"
+    with pytest.raises(ContractViolation) as rejected_extra:
+        EventEnvelope.from_dict(extra)
+    assert rejected_extra.value.reason == "UNKNOWN_FIELD"
+
+
 def test_task_adjust_command_has_one_exact_bounded_payload() -> None:
     fixture = _load("critical_kernel.valid.json")
     raw = copy.deepcopy(fixture["command"])
@@ -1379,22 +1427,31 @@ def test_wave2_update_input_reason_and_constraints_enforce_utf8_bounds() -> None
     update_payload = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[0][1])
     update_payload["instruction"] = "界" * 1_365 + "a"
     assert len(update_payload["instruction"].encode("utf-8")) == 4_096
-    assert CommandEnvelope.from_dict(
-        _wave2_command_raw("task.update", update_payload)
-    ).payload["instruction"] == update_payload["instruction"]
+    assert (
+        CommandEnvelope.from_dict(
+            _wave2_command_raw("task.update", update_payload)
+        ).payload["instruction"]
+        == update_payload["instruction"]
+    )
 
     clear_payload = copy.deepcopy(update_payload)
     clear_payload.update({"instruction": None, "constraints": []})
-    assert CommandEnvelope.from_dict(
-        _wave2_command_raw("task.update", clear_payload)
-    ).payload == clear_payload
+    assert (
+        CommandEnvelope.from_dict(
+            _wave2_command_raw("task.update", clear_payload)
+        ).payload
+        == clear_payload
+    )
 
     invalid_updates = (
         {**clear_payload, "constraints": None},
         {**update_payload, "instruction": "界" * 1_366},
         {**update_payload, "instruction": "contains\x00nul"},
         {**update_payload, "instruction": "\ud800"},
-        {**update_payload, "constraints": [f"constraint-{index}" for index in range(17)]},
+        {
+            **update_payload,
+            "constraints": [f"constraint-{index}" for index in range(17)],
+        },
         {**update_payload, "constraints": ["duplicate", "duplicate"]},
         {**update_payload, "constraints": [""]},
         {**update_payload, "constraints": ["contains\x00nul"]},
@@ -1415,14 +1472,15 @@ def test_wave2_update_input_reason_and_constraints_enforce_utf8_bounds() -> None
         "c" * 1_024,
         "d" * 1_024,
     ]
-    assert CommandEnvelope.from_dict(
-        _wave2_command_raw("task.update", exact_constraints)
-    ).payload["constraints"] == exact_constraints["constraints"]
+    assert (
+        CommandEnvelope.from_dict(
+            _wave2_command_raw("task.update", exact_constraints)
+        ).payload["constraints"]
+        == exact_constraints["constraints"]
+    )
 
     sixteen_constraints = copy.deepcopy(update_payload)
-    sixteen_constraints["constraints"] = [
-        f"constraint-{index}" for index in range(16)
-    ]
+    sixteen_constraints["constraints"] = [f"constraint-{index}" for index in range(16)]
     CommandEnvelope.from_dict(_wave2_command_raw("task.update", sixteen_constraints))
 
     input_payload = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[1][1])
@@ -1445,9 +1503,7 @@ def test_wave2_update_input_reason_and_constraints_enforce_utf8_bounds() -> None
         for invalid_reason in ("界" * 342, "contains\x00nul", "\ud800"):
             rejected = {**reason_payload, "reason": invalid_reason}
             with pytest.raises(ContractViolation):
-                CommandEnvelope.from_dict(
-                    _wave2_command_raw(command_type, rejected)
-                )
+                CommandEnvelope.from_dict(_wave2_command_raw(command_type, rejected))
 
 
 def test_wave2_unsigned_enums_digest_and_successor_spec_are_closed() -> None:
@@ -1462,9 +1518,12 @@ def test_wave2_unsigned_enums_digest_and_successor_spec_are_closed() -> None:
     reprioritize = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[4][1])
     for priority in ("low", "normal", "high", "urgent"):
         candidate = {**reprioritize, "priority": priority}
-        assert CommandEnvelope.from_dict(
-            _wave2_command_raw("task.reprioritize", candidate)
-        ).payload["priority"] == priority
+        assert (
+            CommandEnvelope.from_dict(
+                _wave2_command_raw("task.reprioritize", candidate)
+            ).payload["priority"]
+            == priority
+        )
     for invalid_priority in ("critical", 1, None):
         with pytest.raises(ContractViolation):
             CommandEnvelope.from_dict(
@@ -1553,9 +1612,7 @@ def test_unread_and_ack_payloads_close_presentation_class_and_safe_integers() ->
         with pytest.raises(ContractViolation):
             QueryEnvelope.from_dict(_wave2_query_raw(invalid_payload))
 
-    wrong_capability = _wave2_query_raw(
-        {"presentation_class": "text", "limit": 10}
-    )
+    wrong_capability = _wave2_query_raw({"presentation_class": "text", "limit": 10})
     wrong_capability["required_capabilities"] = []
     with pytest.raises(ContractViolation) as capability:
         QueryEnvelope.from_dict(wrong_capability)
@@ -1586,9 +1643,7 @@ def test_unread_and_ack_payloads_close_presentation_class_and_safe_integers() ->
     ):
         rejected = {**ack, field: value}
         with pytest.raises(ContractViolation):
-            CommandEnvelope.from_dict(
-                _wave2_command_raw("task.ack_events", rejected)
-            )
+            CommandEnvelope.from_dict(_wave2_command_raw("task.ack_events", rejected))
 
 
 def _result_error(code: ErrorCode) -> ContractError:
@@ -1637,7 +1692,10 @@ def test_command_result_extension_is_exact_and_legacy_results_stay_unchanged() -
         observed_at="2026-08-19T12:00:01Z",
     )
     assert legacy.extensions == {}
-    assert ResultEnvelope.from_dict(legacy.to_dict(), owner=command).to_dict() == legacy.to_dict()
+    assert (
+        ResultEnvelope.from_dict(legacy.to_dict(), owner=command).to_dict()
+        == legacy.to_dict()
+    )
 
     query_result = ResultEnvelope.success(
         owner=query,
@@ -1660,10 +1718,7 @@ def test_command_result_extension_is_exact_and_legacy_results_stay_unchanged() -
     query_wire["extensions"] = _command_result_extension("applied")
     with pytest.raises(ContractViolation) as parsed_query_disposition:
         ResultEnvelope.from_dict(query_wire, owner=query)
-    assert (
-        parsed_query_disposition.value.reason
-        == "COMMAND_RESULT_EXTENSION_FORBIDDEN"
-    )
+    assert parsed_query_disposition.value.reason == "COMMAND_RESULT_EXTENSION_FORBIDDEN"
 
     malformed_extension = _command_result_extension("applied")
     malformed_extension["live_voice.command"]["extra"] = True
@@ -1723,9 +1778,7 @@ def test_negative_command_dispositions_require_their_error_family(
     assert result.extensions == _command_result_extension(disposition)
 
     wrong_code = (
-        ErrorCode.TIMEOUT
-        if disposition == "unknown"
-        else ErrorCode.RESULT_UNKNOWN
+        ErrorCode.TIMEOUT if disposition == "unknown" else ErrorCode.RESULT_UNKNOWN
     )
     with pytest.raises(ContractViolation) as mismatch:
         ResultEnvelope.failure(

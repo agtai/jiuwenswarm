@@ -28,6 +28,7 @@ from typing import Any, Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    CONTRACT_VERSION,
     CommandEnvelope,
     ErrorCode,
     InputCommitState,
@@ -44,6 +45,7 @@ from .formal_task_models import (
     FormalTaskViolation,
     FormalTaskSpec,
     PersistentTaskRecord,
+    PersistentTaskEvent,
     PersistedExecutorSelection,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
@@ -51,6 +53,7 @@ from .formal_task_models import (
     TaskResultRecord,
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
+    TaskUnreadPage,
     utc_now,
 )
 from .executor_capabilities import (
@@ -73,8 +76,10 @@ from .p3_confirmation import (
 from .p3_model_resolution import P3ModelResolver, ResolvedP3Model
 from .product_authority import (
     AuthorityResourceBinding,
+    ResolvedProductAuthority,
     TrustedAuthorityCandidate,
 )
+from .presentation_ledger import TaskPresentationDelivery
 from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     AttemptProjectExecutorLease,
@@ -87,6 +92,7 @@ from .task_event_subscription import TaskEventSubscription
 from .task_progress_return import (
     TaskEventAuthorityProgressSource,
     TaskProgressOriginBinding,
+    TaskProgressOriginKind,
 )
 from .task_store import SqliteTaskStore
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
@@ -112,6 +118,8 @@ P3_QUERY_OPERATIONS = frozenset(
 # class P3 operation, because dropping it here would silently disable the
 # mutation validation every retry admission depends on.
 P3_OPERATIONS = frozenset(P3_ROUTE_METHODS.values()) | P3_MUTATIONS
+P3_PRESENTATION_OPERATIONS = frozenset({"task.unread_events", "task.ack_events"})
+P3_PRODUCT_AUTHORITY_OPERATIONS = P3_OPERATIONS | P3_PRESENTATION_OPERATIONS
 
 _ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_ENABLED"
 _TOKEN_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN"
@@ -1135,6 +1143,7 @@ class P3AuthenticatedComposition:
         correlation_id: str,
         required_capabilities: frozenset[str],
         task_id: str | None = None,
+        consumer_task_access: bool = False,
     ) -> tuple[TrustedAuthorityCandidate, ResolvedTaskContext]:
         """Authenticate and resolve one product-composition candidate.
 
@@ -1150,7 +1159,7 @@ class P3AuthenticatedComposition:
                 "formal task route is unavailable",
                 ErrorCode.UNAVAILABLE,
             )
-        if operation not in P3_OPERATIONS | {_PRODUCT_P2_OPERATION}:
+        if operation not in P3_PRODUCT_AUTHORITY_OPERATIONS | {_PRODUCT_P2_OPERATION}:
             raise FormalTaskViolation(
                 "FORMAL_TASK_AUTHORIZATION_DENIED",
                 "formal product operation is unavailable",
@@ -1170,11 +1179,21 @@ class P3AuthenticatedComposition:
                 "formal product capability is unavailable",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if type(consumer_task_access) is not bool or (
+            consumer_task_access and operation != "task.events"
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_ROUTE_ARGUMENT",
+                "stable consumer access is limited to server progress activation",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         targeted = operation in {
             "task.get",
             "task.status",
             "task.events",
             "task.result",
+            "task.unread_events",
+            "task.ack_events",
             "task.cancel",
         }
         if targeted != bool(task_id):
@@ -1207,12 +1226,22 @@ class P3AuthenticatedComposition:
             now=now,
         )
         if targeted:
-            self._require_exact_task_context(
-                authority=authority,
-                operation=operation,
-                task_id=str(task_id),
-                now=now,
-            )
+            if operation in P3_PRESENTATION_OPERATIONS | {"task.result"} or (
+                operation == "task.events" and consumer_task_access
+            ):
+                self._require_consumer_task_context(
+                    authority=authority,
+                    operation=operation,
+                    task_id=str(task_id),
+                    now=now,
+                )
+            else:
+                self._require_exact_task_context(
+                    authority=authority,
+                    operation=operation,
+                    task_id=str(task_id),
+                    now=now,
+                )
 
         resource = (
             None
@@ -1387,6 +1416,13 @@ class P3AuthenticatedComposition:
             authorization=authorization,
             scope=binding.scope,
             task_id=binding.task_id,
+            consumer_scope=True,
+            presentation_class=(
+                "voice"
+                if binding.origin_kind is TaskProgressOriginKind.VOICE
+                else "text"
+            ),
+            clock=self._clock,
         )
 
     @property
@@ -1396,6 +1432,15 @@ class P3AuthenticatedComposition:
         core = getattr(self, "_core", None)
         return (
             core is not None and type(getattr(core, "store", None)) is SqliteTaskStore
+        )
+
+    @property
+    def product_presentation_consumption_available(self) -> bool:
+        """Whether this composition owns the canonical Core/Store ACK seam."""
+
+        core = getattr(self, "_core", None)
+        return isinstance(core, PersistentTaskCore) and isinstance(
+            getattr(core, "store", None), SqliteTaskStore
         )
 
     async def start(self) -> dict[str, int]:
@@ -1577,7 +1622,7 @@ class P3AuthenticatedComposition:
                 "formal task context no longer matches the authenticated project",
                 ErrorCode.PERMISSION_DENIED,
             )
-        if operation in P3_QUERY_OPERATIONS:
+        if operation in P3_QUERY_OPERATIONS | P3_PRESENTATION_OPERATIONS:
             # These are historical, read-only Task Core queries.  D-069 permits
             # a clean checkpoint to advance the same project's revision between
             # attempts; status/events must remain readable so the product can
@@ -2111,6 +2156,412 @@ class P3AuthenticatedComposition:
         finally:
             if entered:
                 await self._leave_operation()
+
+    async def read_product_unread_events(
+        self,
+        authority: ResolvedProductAuthority,
+        *,
+        presentation_class: str,
+        request_id: str,
+        limit: int = 500,
+    ) -> TaskUnreadPage:
+        """Read one exact durable consumer prefix through authenticated Core."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            return await self._run_blocking(
+                self._read_product_unread_events,
+                authority,
+                presentation_class=presentation_class,
+                request_id=request_id,
+                limit=limit,
+            )
+        finally:
+            if entered:
+                await self._leave_operation()
+
+    async def read_product_task_result(
+        self,
+        authority: ResolvedProductAuthority,
+        *,
+        request_id: str,
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None]:
+        """Read the exact legal result needed by a completed presentation."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            return await self._run_blocking(
+                self._read_product_task_result,
+                authority,
+                request_id=request_id,
+            )
+        finally:
+            if entered:
+                await self._leave_operation()
+
+    def prepare_product_presentation_ack(
+        self,
+        authority: ResolvedProductAuthority,
+        delivery: TaskPresentationDelivery,
+        *,
+        request_id: str,
+        command_id: str,
+        now: str | None = None,
+    ) -> tuple[CommandEnvelope, TaskAuthorizationGrant]:
+        """Build the sole server-presentation command and its exact fresh grant."""
+
+        observed_at = now or self._clock()
+        self._require_product_presentation_authority(
+            authority,
+            operation="task.ack_events",
+            task_id=delivery.task_id,
+            now=observed_at,
+        )
+        if delivery.scope != authority.scope:
+            raise FormalTaskViolation(
+                "TASK_PRESENTATION_AUTHORITY_MISMATCH",
+                "presentation delivery changed its authenticated scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        command = CommandEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": _required_text(request_id, "request_id", maximum=256),
+                "command_id": _required_text(command_id, "command_id", maximum=256),
+                "command_type": "task.ack_events",
+                "issued_at": observed_at,
+                "scope": authority.scope.to_dict(),
+                "correlation_id": authority.correlation_id,
+                "causation_id": delivery.event_id,
+                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+                "target_ref": {"kind": "task", "id": delivery.task_id},
+                "context_refs": [],
+                "required_capabilities": ["task.ack_events"],
+                "payload": {
+                    "presentation_class": delivery.presentation_class,
+                    "acked_through_seq": delivery.event_seq,
+                    "acked_event_id": delivery.event_id,
+                    "expected_event_head": delivery.expected_event_head,
+                },
+                "extensions": {},
+            }
+        )
+        return command, TaskAuthorizationGrant(
+            principal_id=authority.principal_id,
+            scope=authority.scope,
+            operation="task.ack_events",
+            command_id=command.command_id,
+            target_task_id=delivery.task_id,
+            allowed_capabilities=frozenset({"task.ack_events"}),
+            confirmation_id=None,
+            confirmed=False,
+            expires_at=authority.expires_at,
+            policy_bypass="server_task_presentation_v1",
+        )
+
+    def execute_product_presentation_ack(
+        self,
+        authority: ResolvedProductAuthority,
+        command: CommandEnvelope,
+        authorization: TaskAuthorizationGrant,
+        *,
+        now: str | None = None,
+    ) -> ResultEnvelope:
+        """Reread authority immediately before the only durable ACK mutation."""
+
+        observed_at = now or self._clock()
+        if not self._accepting:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal Task presentation route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            not isinstance(command, CommandEnvelope)
+            or not isinstance(authorization, TaskAuthorizationGrant)
+            or command.command_type != "task.ack_events"
+        ):
+            raise FormalTaskViolation(
+                "TASK_PRESENTATION_ACK_INVALID",
+                "presentation ACK invocation is not canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        self._require_product_presentation_authority(
+            authority,
+            operation="task.ack_events",
+            task_id=command.target_ref.id,
+            now=observed_at,
+        )
+        expected = TaskAuthorizationGrant(
+            principal_id=authority.principal_id,
+            scope=authority.scope,
+            operation="task.ack_events",
+            command_id=command.command_id,
+            target_task_id=command.target_ref.id,
+            allowed_capabilities=frozenset({"task.ack_events"}),
+            confirmation_id=None,
+            confirmed=False,
+            expires_at=authority.expires_at,
+            policy_bypass="server_task_presentation_v1",
+        )
+        if authorization != expected or command.scope != authority.scope:
+            raise FormalTaskViolation(
+                "TASK_PRESENTATION_AUTHORITY_MISMATCH",
+                "presentation ACK changed its fresh authorization binding",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return self._core.execute(command, authorization, now=observed_at)
+
+    def _read_product_unread_events(
+        self,
+        authority: ResolvedProductAuthority,
+        *,
+        presentation_class: str,
+        request_id: str,
+        limit: int,
+    ) -> TaskUnreadPage:
+        now = self._clock()
+        self._require_product_presentation_authority(
+            authority,
+            operation="task.unread_events",
+            task_id=(
+                authority.resource.resource_id if authority.resource is not None else ""
+            ),
+            now=now,
+        )
+        if presentation_class not in {"text", "voice"} or not 1 <= limit <= 500:
+            raise FormalTaskViolation(
+                "INVALID_PRESENTATION_CLASS",
+                "presentation unread query has invalid bounds",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        assert authority.resource is not None
+        task_id = authority.resource.resource_id
+        query = QueryEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": _required_text(request_id, "request_id", maximum=256),
+                "query_type": "task.unread_events",
+                "issued_at": now,
+                "scope": authority.scope.to_dict(),
+                "correlation_id": authority.correlation_id,
+                "causation_id": None,
+                "target_ref": {"kind": "task", "id": task_id},
+                "context_refs": [],
+                "required_capabilities": ["task.unread_events"],
+                "payload": {
+                    "presentation_class": presentation_class,
+                    "limit": limit,
+                },
+                "extensions": {},
+            }
+        )
+        grant = TaskAuthorizationGrant(
+            principal_id=authority.principal_id,
+            scope=authority.scope,
+            operation="task.unread_events",
+            command_id=None,
+            target_task_id=task_id,
+            allowed_capabilities=frozenset({"task.unread_events"}),
+            confirmation_id=None,
+            confirmed=False,
+            expires_at=authority.expires_at,
+        )
+        result = self._core.query(query, grant, now=now)
+        if not result.ok or result.result is None:
+            error = result.error
+            raise FormalTaskViolation(
+                (
+                    "TASK_UNREAD_EVENTS_UNAVAILABLE"
+                    if error is None or error.reason is None
+                    else error.reason
+                ),
+                "authenticated Task unread query failed",
+                ErrorCode.UNAVAILABLE if error is None else error.code,
+            )
+        return self._task_unread_page_from_result(result.result)
+
+    def _require_consumer_task_context(
+        self,
+        *,
+        authority: ResolvedAuthority,
+        operation: str,
+        task_id: str,
+        now: str,
+    ) -> None:
+        task = self._core.read_consumer_task(
+            scope=authority.scope,
+            task_id=task_id,
+        )
+        persisted = task.spec.context
+        persisted.require_usable(
+            scope=task.scope,
+            required_permissions=frozenset(),
+            destructive=False,
+            now=now,
+        )
+        current = authority.context
+        if (
+            (task.scope.subject_id, task.scope.project_id)
+            != (authority.scope.subject_id, authority.scope.project_id)
+            or persisted.stable_id != current.stable_id
+            or persisted.uri != current.uri
+            or persisted.redacted
+            or current.redacted
+        ):
+            raise FormalTaskViolation(
+                "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                f"{operation} no longer matches the authenticated consumer project",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    def _read_product_task_result(
+        self,
+        authority: ResolvedProductAuthority,
+        *,
+        request_id: str,
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None]:
+        now = self._clock()
+        task_id = (
+            authority.resource.resource_id if authority.resource is not None else ""
+        )
+        self._require_product_presentation_authority(
+            authority,
+            operation="task.result",
+            task_id=task_id,
+            now=now,
+        )
+        _required_text(request_id, "request_id", maximum=256)
+        availability, record, _reason = self._core.read_consumer_task_result(
+            scope=authority.scope,
+            task_id=task_id,
+        )
+        return availability, record
+
+    def _require_product_presentation_authority(
+        self,
+        authority: ResolvedProductAuthority,
+        *,
+        operation: str,
+        task_id: str,
+        now: str,
+    ) -> ResolvedAuthority:
+        if (
+            not isinstance(authority, ResolvedProductAuthority)
+            or operation not in P3_PRESENTATION_OPERATIONS | {"task.result"}
+            or authority.operation != operation
+            or authority.capabilities != frozenset({operation})
+            or authority.assurance is not Assurance.AUTHENTICATED
+            or authority.resource
+            != AuthorityResourceBinding(
+                kind="task",
+                resource_id=task_id,
+                fingerprint_sha256=hashlib.sha256(task_id.encode("utf-8")).hexdigest(),
+            )
+        ):
+            raise FormalTaskViolation(
+                "TASK_PRESENTATION_AUTHORITY_MISMATCH",
+                "presentation authority does not bind the exact Task operation",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if _parse_utc(authority.expires_at, "authority.expires_at") <= _parse_utc(
+            now, "now"
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_EXPIRED",
+                "presentation authority has expired",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        principal = AuthenticatedPrincipal(
+            principal_id=authority.principal_id,
+            allowed_project_ids=(
+                frozenset()
+                if authority.project_id is None
+                else frozenset({authority.project_id})
+            ),
+            allowed_operations=frozenset({operation}),
+            expires_at=authority.expires_at,
+        )
+        current = self._authority_resolver.resolve(
+            principal,
+            session_id=authority.session_id,
+            now=now,
+            require_clean=False,
+        )
+        if current.scope != authority.scope:
+            raise FormalTaskViolation(
+                "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                "presentation authority no longer matches the authenticated project",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        self._require_consumer_task_context(
+            authority=current,
+            operation=operation,
+            task_id=task_id,
+            now=now,
+        )
+        return current
+
+    @staticmethod
+    def _task_unread_page_from_result(payload: Mapping[str, object]) -> TaskUnreadPage:
+        try:
+            raw_events = payload["events"]
+            if not isinstance(raw_events, list):
+                raise TypeError("events")
+            events = tuple(
+                PersistentTaskEvent(
+                    event_id=str(item["event_id"]),
+                    task_id=str(item["task_id"]),
+                    attempt_id=str(item["attempt_id"]),
+                    scope=ScopeRef.from_dict(item["scope"]),
+                    seq=item["seq"],
+                    event_type=str(item["event_type"]),
+                    state=str(item["state"]),
+                    outcome=(None if item["outcome"] is None else str(item["outcome"])),
+                    producer=str(item["producer"]),
+                    source_event_id=(
+                        None
+                        if item["source_event_id"] is None
+                        else str(item["source_event_id"])
+                    ),
+                    causation_id=(
+                        None
+                        if item["causation_id"] is None
+                        else str(item["causation_id"])
+                    ),
+                    correlation_id=str(item["correlation_id"]),
+                    occurred_at=str(item["occurred_at"]),
+                    details=item["details"],
+                )
+                for item in raw_events
+                if isinstance(item, Mapping)
+            )
+            if len(events) != len(raw_events):
+                raise TypeError("event")
+            return TaskUnreadPage(
+                task_id=str(payload["task_id"]),
+                presentation_class=str(payload["presentation_class"]),
+                watermark=payload["watermark"],
+                acked_event_id=(
+                    None
+                    if payload["acked_event_id"] is None
+                    else str(payload["acked_event_id"])
+                ),
+                head_seq=payload["head_seq"],
+                events=events,
+                next_after_seq=payload["next_after_seq"],
+                has_more=payload["has_more"],
+            )
+        except (KeyError, TypeError, ValueError, FormalTaskViolation) as error:
+            raise FormalTaskViolation(
+                "INVALID_TASK_UNREAD_PAGE",
+                "authenticated Core returned a non-canonical unread page",
+                ErrorCode.PROTOCOL_VIOLATION,
+            ) from error
 
     async def _verify_confirmation(
         self,
@@ -3155,10 +3606,10 @@ def create_p3_composition_from_environment(
         principal_id=principal_id,
         allowed_project_ids=project_ids,
         allowed_operations=(
-            P3_OPERATIONS | {_PRODUCT_P2_OPERATION}
+            P3_PRODUCT_AUTHORITY_OPERATIONS | {_PRODUCT_P2_OPERATION}
             if _is_enabled(os.getenv(_PRODUCT_COMPOSITION_ENV))
             and _is_enabled(os.getenv(_PRODUCT_P2_ENV))
-            else P3_OPERATIONS
+            else P3_PRODUCT_AUTHORITY_OPERATIONS
         ),
         expires_at=expires_at,
     )

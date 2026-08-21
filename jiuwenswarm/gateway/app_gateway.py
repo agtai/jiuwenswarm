@@ -104,6 +104,7 @@ _LIVE_VOICE_WEB_ALPHA_CREDENTIAL_METHODS = frozenset(
         "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p2.presentation.failed",
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",

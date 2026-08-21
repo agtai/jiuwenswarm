@@ -2009,6 +2009,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
@@ -9182,6 +9183,12 @@ class AgentWebSocketServer:
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK:
                 result = await registry.handle_p2_presentation_ack(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED:
+                result = await registry.handle_p2_presentation_failed(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,

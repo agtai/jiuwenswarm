@@ -98,6 +98,16 @@ function progressEvent(overrides = {}) {
   };
 }
 
+function legacyProgressEvent(overrides = {}) {
+  const event = progressEvent(overrides);
+  delete event.presentation_class;
+  delete event.response_ref;
+  delete event.unit_id;
+  delete event.expected_event_head;
+  delete event.result_source_event_id;
+  return event;
+}
+
 test('DOM adoption owner ACKs only an exact connected rendered delivery', () => {
   const parsed = parseProductTextProgressEvent(progressEvent());
   assert.notEqual(parsed, null);
@@ -202,6 +212,101 @@ test('creates an exact credential-free Web UI delivery acknowledgement', () => {
     presentation_binding: createProductTextProgressDeliveryAck(parsed).presentation_binding,
   });
   assert.equal('auth_token' in createProductTextProgressDeliveryAck(parsed), false);
+});
+
+test('feature-off legacy progress keeps exact DOM adoption and never acquires presentation authority', async () => {
+  const parsed = parseProductTextProgressEvent(legacyProgressEvent());
+  assert.notEqual(parsed, null);
+  assert.equal(parsed.consumption_mode, 'legacy_delivery');
+  assert.equal(parsed.presentation_class, null);
+  assert.equal(parsed.response_ref, null);
+  assert.equal(parsed.unit_id, null);
+  assert.equal(parsed.expected_event_head, null);
+  const ack = createProductTextProgressDeliveryAck(parsed);
+  assert.deepEqual(ack, {
+    session_id: 'session-1',
+    task_id: 'task-1',
+    correlation_id: 'correlation-1',
+    origin_id: 'web-surface-1',
+    generation_id: 'web-generation-1',
+    generation: 1,
+    delivery_id: 'delivery-7',
+    source_event_id: 'source-7',
+    progress_event_id: 'progress-7',
+    seq: 7,
+    evidence_id: 'evidence-7',
+  });
+  for (const forbidden of [
+    'presentation_class',
+    'response_ref',
+    'unit_id',
+    'expected_event_head',
+    'result_source_event_id',
+    'presentation_binding',
+  ]) {
+    assert.equal(forbidden in ack, false, forbidden);
+  }
+
+  const retained = [];
+  const domOwner = new ProductTextProgressDomAdoptionOwner({
+    retain: event => {
+      retained.push(event);
+      return { status: 'pending' };
+    },
+  });
+  const attributes = {
+    'data-delivery-id': parsed.delivery_id,
+    'data-session-id': parsed.session_id,
+    'data-subject-id': parsed.source_event.scope.subject_id,
+    'data-project-id': parsed.project_id,
+    'data-task-id': parsed.task_id,
+    'data-attempt-id': parsed.attempt_id,
+    'data-event-id': parsed.source_event.event_id,
+    'data-event-seq': String(parsed.source_event.seq),
+    'data-generation-id': parsed.generation_id,
+    'data-generation': String(parsed.generation),
+  };
+  const legacyNode = {
+    isConnected: true,
+    getAttribute: name => attributes[name] ?? null,
+  };
+  assert.deepEqual(domOwner.adopt(parsed, legacyNode), { status: 'pending' });
+  assert.deepEqual(retained, [parsed]);
+  assert.throws(
+    () =>
+      domOwner.adopt(parsed, {
+        ...legacyNode,
+        getAttribute: name => (name === 'data-presentation-binding' ? productTextProgressPresentationBinding(parsed) : legacyNode.getAttribute(name)),
+      }),
+    /legacy DOM acquired presentation authority/,
+  );
+
+  const calls = [];
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 1000,
+    request: async (_method, params) => {
+      calls.push(params);
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: false,
+          attempt_id: 'attempt-1',
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
+  });
+  owner.setConnected(true);
+  owner.retain(parsed);
+  for (let attempt = 0; attempt < 50 && owner.status(parsed.delivery_id)?.status !== 'acknowledged'; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  assert.equal(owner.status(parsed.delivery_id)?.status, 'acknowledged');
+  assert.deepEqual(calls, [ack]);
+  owner.close();
 });
 
 test('rejects correlation, task, canonical scope, and causation mismatches', () => {

@@ -148,14 +148,19 @@ exact-source Alpha result.
   Minimum-intervention mode is active for task-scoped local work; every
   remote-ref update remains separately excluded until exact user approval.
 - **Source state:** D-088 Wave-2 P3-2/P3-3/P3-5A source and physical evidence
-  remain accepted on their exact sources. Schema remains v5 and the integrated
-  P3-4/P3-5B/P3-6 source is pending. No worker preparation, test harness,
-  corpus or pure asset currently grants Wave-3 product credit.
+  remain accepted on their exact sources. The W3 branch now contains the local
+  P3-4 schema-v6/Direct recovery integration and P3-6 resolver-policy commits;
+  P3-5B shared composition remains under Tier-3 repair, and P3-6 still lacks its
+  real classifier/authenticated Core invocation. No partial source, test
+  harness, corpus or pure asset currently grants final Wave-3 product credit.
 - **Execution:** worker branches are `codex/w3-p3-4`, `codex/w3-p3-5b` and
   `codex/w3-p3-6`. P3-4 has a narrow exclusive implementation lease for its
   frozen Core/Store/Executor seams; P3-5B and P3-6 own non-overlapping
   presentation and Resolver/Bridge surfaces. Main owns all shared composition,
-  schema semantics, integration history, Tier-3 verdict and evidence.
+  schema semantics, integration history, Tier-3 verdict and evidence. D-090
+  additionally reactivates a Main-owned P3-5A/Core Task-wide consumer cursor
+  read Port for P3-5B restart, rollover and bounded replay; it adds no schema or
+  second consumer authority.
 - **Next action:** finish lane RED/GREEN and affected evidence, integrate in
   P3-4 → P3-5B → P3-6 → shared-composition order, complete independent review,
   then run one final broad Gate and the minimum honest ACL-private physical

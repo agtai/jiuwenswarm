@@ -556,8 +556,12 @@ class ProductP3TextAdapter:
         generation_is_current: GenerationIsCurrent,
         arbiter: ProgressNotificationArbiter,
         foreground: ForegroundSupplier,
+        foreground_factory: (
+            Callable[[TaskProgressOriginBinding], ForegroundSupplier] | None
+        ) = None,
         text_sink: TextEventSink,
         voice_sink: VoiceIntentSink,
+        deferred_voice_sink: VoiceIntentSink | None = None,
         policy: FormalTaskPolicyAdapter | None = None,
         cleanup_capacity: int = 64,
         clock: Callable[[], str] = utc_now,
@@ -581,6 +585,10 @@ class ProductP3TextAdapter:
         ):
             if not callable(dependency):
                 raise ValueError(f"product P3 {name} is required")
+        if foreground_factory is not None and not callable(foreground_factory):
+            raise ValueError("product P3 foreground factory is invalid")
+        if deferred_voice_sink is not None and not callable(deferred_voice_sink):
+            raise ValueError("product P3 deferred voice sink is invalid")
         if not isinstance(arbiter, ProgressNotificationArbiter):
             raise ValueError("product P3 progress arbiter is required")
         if policy is not None and not isinstance(policy, FormalTaskPolicyAdapter):
@@ -600,8 +608,10 @@ class ProductP3TextAdapter:
         self._generation_is_current = generation_is_current
         self._arbiter = arbiter
         self._foreground = foreground
+        self._foreground_factory = foreground_factory
         self._text_sink = text_sink
         self._voice_sink = voice_sink
+        self._deferred_voice_sink = deferred_voice_sink
         self._policy = policy or FormalTaskPolicyAdapter()
         self._cleanup_capacity = cleanup_capacity
         self._cleanup_sequence = 0
@@ -923,6 +933,13 @@ class ProductP3TextAdapter:
             cleanup = self._retain_cleanup(binding, subscription)
             if not self._subscription_surface_valid(subscription):
                 raise TypeError("invalid product P3 subscription")
+            foreground = (
+                self._foreground
+                if self._foreground_factory is None
+                else self._foreground_factory(binding)
+            )
+            if not callable(foreground):
+                raise TypeError("product P3 foreground factory returned no supplier")
             bridge = TaskProgressReturnBridge(
                 enabled=True,
                 subscription=subscription,
@@ -931,8 +948,15 @@ class ProductP3TextAdapter:
                 binding=binding,
                 generation_is_current=self._generation_is_current,
                 arbiter=self._arbiter,
-                foreground=self._foreground,
+                foreground=foreground,
                 voice_sink=self._cleanup_guarded_voice_sink(cleanup),
+                deferred_voice_sink=(
+                    None
+                    if self._deferred_voice_sink is None
+                    else self._cleanup_guarded_voice_sink(
+                        cleanup, sink=self._deferred_voice_sink
+                    )
+                ),
                 text_sink=self._cleanup_guarded_text_sink(cleanup),
             )
             activation_task = asyncio.create_task(
@@ -989,12 +1013,17 @@ class ProductP3TextAdapter:
         return deliver
 
     def _cleanup_guarded_voice_sink(
-        self, cleanup: ProductP3ProgressCleanupHandle
+        self,
+        cleanup: ProductP3ProgressCleanupHandle,
+        *,
+        sink: VoiceIntentSink | None = None,
     ) -> VoiceIntentSink:
+        selected_sink = self._voice_sink if sink is None else sink
+
         async def deliver(intent: TaskProgressNotificationIntent) -> None:
             if not await cleanup.wait_effect_permission(intent.origin):
                 raise RuntimeError("product P3 voice activation effects are fenced")
-            await self._voice_sink(intent)
+            await selected_sink(intent)
 
         return deliver
 

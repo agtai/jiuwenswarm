@@ -3002,6 +3002,18 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
           eventType: 'task.accepted',
           seq: 0,
         });
+        for (const field of [
+          'presentation_class',
+          'response_ref',
+          'unit_id',
+          'expected_event_head',
+          'result_source_event_id',
+        ]) {
+          delete acceptedProgress[field];
+        }
+        const parsedLegacyAccepted = parseProductTextProgressEvent(acceptedProgress);
+        assert.notEqual(parsedLegacyAccepted, null);
+        assert.equal(parsedLegacyAccepted.consumption_mode, 'legacy_delivery');
         await act(async () => {
           progressListener(acceptedProgress);
           await waitForMounted(
@@ -3013,6 +3025,32 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
             'mounted origin panel did not attempt the accepted delivery ACK',
           );
         });
+        const legacyAck = calls.find(call => call.method === 'live_voice.composition.p3.progress.ack');
+        assert.ok(legacyAck);
+        const legacyNode = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-progress' });
+        assert.equal(legacyNode.props['data-delivery-id'], acceptedProgress.delivery_id);
+        for (const attribute of [
+          'data-presentation-binding',
+          'data-presentation-class',
+          'data-response-interaction-id',
+          'data-response-id',
+          'data-response-generation',
+          'data-unit-id',
+          'data-expected-event-head',
+          'data-result-source-event-id',
+        ]) {
+          assert.equal(legacyNode.props[attribute], undefined, `feature-off legacy DOM retained ${attribute}`);
+        }
+        for (const forbidden of [
+          'presentation_class',
+          'response_ref',
+          'unit_id',
+          'expected_event_head',
+          'result_source_event_id',
+          'presentation_binding',
+        ]) {
+          assert.equal(forbidden in legacyAck.params, false, `feature-off legacy ACK acquired ${forbidden}`);
+        }
       }
       const terminalProgress = mountedTerminalProgress(binding, exactProgressActivation, outcome);
       taskEventsIncludeTerminal = true;
@@ -3134,6 +3172,572 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
       }
       browser.restore();
     }
+  }
+});
+
+test('mounted Task AUDIO without a P1 owner reports one exact failure and never sends a presentation ACK', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-task-audio-owner-unavailable-session';
+  const calls = [];
+  const states = [];
+  let binding = null;
+  let delivered = false;
+  let renderer;
+  const browser = installP1BrowserEnvironment();
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      binding = { ...params };
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (delivered) return new Promise(() => {});
+      delivered = true;
+      return {
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'mounted-task-audio-owner-unavailable-response',
+            response_generation: 3,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'The background task is running.',
+            source_provenance: 'server.task_notification',
+          },
+          presentation_unit: {
+            surface: 'audio',
+            unit_id: 'mounted-task-audio-owner-unavailable-unit',
+            seq: 0,
+            content_ref: `sha256:${'e'.repeat(64)}`,
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p2.presentation.failed') {
+      return {
+        ok: true,
+        result: {
+          status: 'presentation_failed_fallback_text',
+          ...params,
+          fallback: 'text',
+          replayed: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    throw new Error(`unexpected Task AUDIO owner-unavailable request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedP3Element(i18n, sessionId, request, undefined, true, undefined, {
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.presentation.failed'),
+        'Task AUDIO without P1 did not report its exact failure',
+      );
+    });
+
+    const failures = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].params.response_id, 'mounted-task-audio-owner-unavailable-response');
+    assert.equal(failures[0].params.response_generation, 3);
+    assert.equal(failures[0].params.surface, 'audio');
+    assert.equal(failures[0].params.unit_id, 'mounted-task-audio-owner-unavailable-unit');
+    assert.equal(failures[0].params.failure_reason, 'task_audio_owner_unavailable');
+    assert.match(failures[0].requestId, /^live-voice-p2-presentation-failed-/);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+    assert.equal(states.at(-1)?.terminal_announcement_state, 'idle');
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted Task AUDIO ACK waits for successful P1 playout and never reports failure', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-task-audio-success-session';
+  const controlRef = { current: null };
+  const calls = [];
+  const states = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  let binding = null;
+  let activeMediaBinding = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const publishNotification = notification => {
+    const waiter = notificationWaiters.shift();
+    if (waiter) waiter(notification);
+    else queuedNotifications.push(notification);
+  };
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      binding = { ...params };
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      return new Promise(resolve => notificationWaiters.push(resolve));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      return {
+        ok: true,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 0,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p2.presentation.failed') {
+      throw new Error('successful Task AUDIO must not report presentation failure');
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-task-audio-success-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'S'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, 'Read the latest background task update.', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'round_accepted',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+          request_id: `mounted-task-audio-success-agent-${params.voice_claim_id}`,
+          round_id: `mounted-task-audio-success-round-${params.voice_claim_id}`,
+          response: {
+            interaction_id: params.interaction_id,
+            response_id: 'mounted-task-audio-success-response',
+            response_generation: 4,
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: `mounted-task-audio-success-receipt-${params.response_id}`,
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'wav_pcm16_mono',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            data_base64: mountedWavBase64(),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    throw new Error(`unexpected Task AUDIO success request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () => controlRef.current !== null && states.at(-1)?.available === true,
+        'Task AUDIO success P1 owner did not activate',
+      );
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'Task AUDIO success capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'Task AUDIO success capture did not become ready');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.unified.submit'),
+        'Task AUDIO success source turn was not committed',
+      );
+      await waitForMounted(() => notificationWaiters.length === 1, 'Task AUDIO exact notification poll did not start');
+      const notification = {
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'mounted-task-audio-success-response',
+            response_generation: 4,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'The background task is running.',
+            source_provenance: 'server.task_notification',
+          },
+          presentation_unit: {
+            surface: 'audio',
+            unit_id: 'mounted-task-audio-success-unit',
+            seq: 0,
+            content_ref: `sha256:${'f'.repeat(64)}`,
+          },
+        },
+      };
+      publishNotification(notification);
+      try {
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
+          'Task AUDIO did not reach the formal batch TTS owner',
+        );
+      } catch (error) {
+        assert.fail(
+          `${error.message}; states=${states
+            .slice(-12)
+            .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.terminal_announcement_state}`)
+            .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+        );
+      }
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'Task AUDIO did not start browser playout');
+    });
+
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 0);
+    await act(async () => {
+      browser.endLatestSource();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack'),
+        'Task AUDIO successful playout did not emit its exact ACK',
+      );
+    });
+    const acknowledgements = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0].params.response_id, 'mounted-task-audio-success-response');
+    assert.equal(acknowledgements[0].params.response_generation, 4);
+    assert.equal(acknowledgements[0].params.surface, 'audio');
+    assert.equal(acknowledgements[0].params.unit_id, 'mounted-task-audio-success-unit');
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
+    const p2Activations = calls.filter(call => call.method === 'live_voice.composition.p2.activate');
+    assert.equal(p2Activations.length, 2);
+    assert.deepEqual(p2Activations[1].params, p2Activations[0].params, 'media start must replay the exact P2 activation binding');
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 1);
+    const playoutReceiptIndex = calls.findIndex(call => call.method === 'live_voice.media.playout_receipt');
+    const presentationAckIndex = calls.findIndex(call => call.method === 'live_voice.composition.p2.presentation.ack');
+    assert.equal(playoutReceiptIndex >= 0 && playoutReceiptIndex < presentationAckIndex, true);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted Task AUDIO failure adopts the server TEXT fallback before its only progress ACK', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-task-audio-text-fallback-session';
+  const taskId = 'mounted-task-audio-text-fallback-task';
+  const controlRef = { current: null };
+  const calls = [];
+  const states = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  let p2Binding = null;
+  let taskBinding = null;
+  let progressActivation = null;
+  let progressListener = null;
+  let activeMediaBinding = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const progressSubscribe = listener => {
+    progressListener = listener;
+    return () => {
+      if (progressListener === listener) progressListener = null;
+    };
+  };
+  const publishNotification = notification => {
+    const waiter = notificationWaiters.shift();
+    if (waiter) waiter(notification);
+    else queuedNotifications.push(notification);
+  };
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Binding = { ...params };
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      return new Promise(resolve => notificationWaiters.push(resolve));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      throw new Error('failed Task AUDIO must never emit a presentation ACK');
+    }
+    if (method === 'live_voice.composition.p2.presentation.failed') {
+      assert.notEqual(taskBinding, null);
+      assert.notEqual(progressActivation, null);
+      assert.equal(typeof progressListener, 'function');
+      const fallback = mountedLifecycleProgress(taskBinding, progressActivation, {
+        state: 'running',
+        eventType: 'task.running',
+        seq: 1,
+        taskId,
+        attemptId: 'attempt-a',
+      });
+      Object.assign(fallback, {
+        origin_kind: 'voice',
+        requested_origin_kind: 'voice',
+        effective_origin_kind: 'text',
+        delivery_mode: 'text_fallback',
+        fallback_reason: 'TASK_PROGRESS_AUDIO_PLAYOUT_FAILED',
+      });
+      globalThis.queueMicrotask(() => progressListener?.(fallback));
+      return {
+        ok: true,
+        result: {
+          status: 'presentation_failed_fallback_text',
+          ...params,
+          fallback: 'text',
+          replayed: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.status') {
+      assert.notEqual(taskBinding, null);
+      return mountedP3Status(taskBinding, { taskId, state: 'running', eventHead: 1 });
+    }
+    if (method === 'live_voice.task.events') {
+      assert.notEqual(taskBinding, null);
+      return mountedP3Events(taskBinding, { taskId });
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      progressActivation = { ...params };
+      return {
+        ok: true,
+        result: mountedProgressActivation(params, {
+          origin_kind: 'voice',
+          requested_origin_kind: 'voice',
+          voice_progress: 'available',
+          voice_reason: null,
+          fallback_reason: null,
+        }),
+      };
+    }
+    if (method === 'live_voice.composition.p3.progress.ack') {
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          attempt_id: 'attempt-a',
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+          replayed: false,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-task-audio-text-fallback-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'F'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, 'Start a background task and read its progress.', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      taskBinding = {
+        subject_id: 'mounted-task-audio-text-fallback-subject',
+        session_id: params.session_id,
+        project_id: 'mounted-task-audio-text-fallback-project',
+        correlation_id: params.correlation_id,
+        generation: 1,
+      };
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'authoritative_presentation_accepted',
+          response: {
+            interaction_id: params.interaction_id,
+            response_id: 'mounted-task-audio-text-fallback-response',
+            response_generation: 2,
+          },
+          task_id: taskId,
+        },
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      throw Object.assign(new Error('mounted Task AUDIO provider unavailable'), {
+        reason: 'SPEECH_PROVIDER_UNAVAILABLE',
+      });
+    }
+    throw new Error(`unexpected Task AUDIO fallback request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          progressSubscribe,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () => controlRef.current !== null && states.at(-1)?.available === true,
+        'Task AUDIO fallback P1 owner did not activate',
+      );
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'Task AUDIO fallback capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'Task AUDIO fallback capture did not become ready');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => progressActivation?.task_id === taskId,
+        'voice-created Task did not activate its exact progress route',
+      );
+      await waitForMounted(() => notificationWaiters.length === 1, 'Task AUDIO fallback notification poll did not start');
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...p2Binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: p2Binding.interaction_id,
+            response_id: 'mounted-task-audio-text-fallback-response',
+            response_generation: 2,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'The background task is running.',
+            source_provenance: 'server.task_notification',
+          },
+          presentation_unit: {
+            surface: 'audio',
+            unit_id: 'mounted-task-audio-text-fallback-audio-unit',
+            seq: 0,
+            content_ref: `sha256:${'a'.repeat(64)}`,
+          },
+        },
+      });
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 1,
+        'failed Task AUDIO did not report its exact playout failure',
+      );
+      await waitForMounted(
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length === 1,
+        'server TEXT fallback did not reach a connected DOM node',
+      );
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 1,
+        'connected TEXT fallback did not emit its exact progress ACK',
+      );
+    });
+
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+    const failures = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].params.response_id, 'mounted-task-audio-text-fallback-response');
+    assert.equal(failures[0].params.surface, 'audio');
+    assert.equal(failures[0].params.failure_reason, 'task_audio_playout_failed');
+    const textAcks = calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack');
+    assert.equal(textAcks.length, 1);
+    assert.equal(textAcks[0].params.presentation_class, 'text');
+    assert.equal(textAcks[0].params.seq, 1);
+    assert.equal(textAcks[0].params.task_id, taskId);
+    const progressNode = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-progress' });
+    assert.equal(progressNode.props['data-delivery-id'], 'mounted-running-1-none');
+    assert.equal(progressNode.props['data-presentation-class'], 'text');
+    assert.equal(progressNode.props['data-event-seq'], '1');
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('TASK_PROGRESS_AUDIO_PLAYOUT_FAILED'), true);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
   }
 });
 
@@ -8460,7 +9064,7 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   }
 });
 
-test('mounted voice-created terminal notification suspends silent listening, plays once, ACKs once, and resumes', async () => {
+test('mounted voice-created Task AUDIO failure falls back without local replay or presentation ACK', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-idle-session';
   const taskId = 'mounted-terminal-idle-task';
@@ -8508,7 +9112,7 @@ test('mounted voice-created terminal notification suspends silent listening, pla
         ...(taskNotification ? { source_provenance: 'server.task_notification' } : {}),
       },
       presentation_unit: {
-        surface: 'text',
+        surface: taskNotification ? 'audio' : 'text',
         unit_id: `${responseId}-unit`,
         seq: 0,
         content_ref: `sha256:${String(responseGeneration).padStart(64, '0')}`,
@@ -8557,6 +9161,17 @@ test('mounted voice-created terminal notification suspends silent listening, pla
           replayed: false,
           history_records_written: 1,
           history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p2.presentation.failed') {
+      return {
+        ok: true,
+        result: {
+          status: 'presentation_failed_fallback_text',
+          ...params,
+          fallback: 'text',
+          replayed: false,
         },
       };
     }
@@ -8817,8 +9432,8 @@ test('mounted voice-created terminal notification suspends silent listening, pla
         'terminal notification did not reach its first P1 owner',
       );
       await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 5,
-        `terminal notification did not rebuild one P1 owner; states=${states
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 1,
+        `terminal notification did not report its failed AUDIO playout; states=${states
           .slice(-10)
           .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
           .join(',')}`,
@@ -8829,40 +9444,32 @@ test('mounted voice-created terminal notification suspends silent listening, pla
         0,
         'failed first terminal playout must not ACK',
       );
-      await browser.emitFirstFrame(0);
       await waitForMounted(
-        () => states.at(-1)?.p1_status === 'playing',
-        `terminal notification did not start playout; states=${states
-          .slice(-12)
-          .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
-          .join(',')}; methods=${calls
-          .slice(-20)
-          .map(call => call.method)
-          .join(',')}`,
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 5,
+        `accepted TEXT fallback did not resume one bounded capture owner; states=${states
+          .slice(-16)
+          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.terminal_announcement_state}`)
+          .join(',')}; methods=${calls.slice(-24).map(call => call.method).join(',')}`,
       );
-      await waitForMounted(() => browser.counts.sourceStarts === 2, 'terminal notification audio did not reach the browser');
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'TEXT fallback successor did not resume listening');
     });
 
+    const presentationFailures = calls.filter(
+      call => call.method === 'live_voice.composition.p2.presentation.failed' && call.params.response_id === 'mounted-terminal-idle-complete',
+    );
+    assert.equal(presentationFailures.length, 1);
+    assert.equal(presentationFailures[0].params.response_generation, 2);
+    assert.equal(presentationFailures[0].params.surface, 'audio');
+    assert.equal(presentationFailures[0].params.unit_id, 'mounted-terminal-idle-complete-unit');
+    assert.equal(presentationFailures[0].params.failure_reason, 'task_audio_playout_failed');
+    assert.match(presentationFailures[0].requestId, /^live-voice-p2-presentation-failed-/);
     assert.equal(
       calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-idle-complete').length,
       0,
-      'terminal notification ACK must wait for physical playout',
+      'failed Task AUDIO must never become a presentation ACK',
     );
-    await act(async () => {
-      browser.endLatestSource();
-      await waitForMounted(
-        () =>
-          calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-idle-complete')
-            .length === 1,
-        'terminal notification did not ACK exactly once after playout',
-      );
-      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'terminal notification did not resume listening');
-      await browser.emitFirstFrame(0);
-      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'terminal notification successor did not reach listening');
-    });
-
     assert.equal(states.at(-1)?.terminal_announcement_state, 'idle');
-    assert.notEqual(states.at(-1)?.text_status, 'waiting', 'a stale terminal ACK must not strand the response lane in waiting');
     const terminalTtsCount = calls.filter(
       call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete',
     ).length;
@@ -8889,19 +9496,13 @@ test('mounted voice-created terminal notification suspends silent listening, pla
     assert.equal(
       calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
         .length,
-      2,
-    );
-    assert.equal(
-      new Set(
-        calls
-          .filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
-          .map(call => JSON.stringify([call.params.response.response_id, call.params.response.response_generation, call.params.unit_id])),
-      ).size,
       1,
+      'failed Task AUDIO must not be replayed locally',
     );
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 1);
     assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 1);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 6);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 5);
     assert.equal(
       calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
       false,

@@ -739,7 +739,11 @@ class TaskAuthorizationGrant:
                 "authorization confirmed flag must be boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if self.policy_bypass not in {None, "trusted_demo_live_voice_v1"}:
+        if self.policy_bypass not in {
+            None,
+            "trusted_demo_live_voice_v1",
+            "server_task_presentation_v1",
+        }:
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_AUTHORIZATION",
                 "authorization policy bypass is unsupported",
@@ -751,6 +755,15 @@ class TaskAuthorizationGrant:
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_AUTHORIZATION",
                 "policy bypass cannot impersonate user confirmation",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            self.policy_bypass == "server_task_presentation_v1"
+            and self.operation != "task.ack_events"
+        ):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "server presentation authority is limited to task.ack_events",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if type(self.allowed_capabilities) is not frozenset or any(
@@ -815,7 +828,13 @@ class TaskAuthorizationGrant:
         bypass_boundary = (
             not self.confirmed
             and self.confirmation_id is None
-            and self.policy_bypass == "trusted_demo_live_voice_v1"
+            and (
+                self.policy_bypass == "trusted_demo_live_voice_v1"
+                or (
+                    self.policy_bypass == "server_task_presentation_v1"
+                    and operation == "task.ack_events"
+                )
+            )
         )
         if destructive and not (confirmed_boundary or bypass_boundary):
             raise FormalTaskViolation(
@@ -1716,6 +1735,239 @@ class TaskUnreadPage:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskEventConsumerCursorBaseline:
+    """Store-owned lifecycle/Attempt facts at one durable consumer watermark."""
+
+    task_id: str
+    scope: ScopeRef
+    correlation_id: str
+    watermark: int
+    acked_event_id: str | None
+    lifecycle_event: PersistentTaskEvent | None
+    attempt_boundary: PersistentTaskEvent | None
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task_event_consumer_cursor.task_id")
+        if (
+            not isinstance(self.scope, ScopeRef)
+            or self.scope.assurance is not Assurance.AUTHENTICATED
+            or self.scope.project_id is None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor requires one authenticated project scope",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        _require_text(
+            self.correlation_id,
+            "task_event_consumer_cursor.correlation_id",
+        )
+        if type(self.watermark) is not int or self.watermark < -1:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor watermark is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.watermark == -1:
+            if (
+                self.acked_event_id is not None
+                or self.lifecycle_event is not None
+                or self.attempt_boundary is not None
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                    "initial consumer cursor cannot carry prior lifecycle facts",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            return
+        _require_text(
+            self.acked_event_id,
+            "task_event_consumer_cursor.acked_event_id",
+        )
+        lifecycle = self.lifecycle_event
+        boundary = self.attempt_boundary
+        if (
+            not isinstance(lifecycle, PersistentTaskEvent)
+            or not isinstance(boundary, PersistentTaskEvent)
+            or not 0 <= boundary.seq <= lifecycle.seq <= self.watermark
+            or lifecycle.task_id != boundary.task_id
+            or lifecycle.task_id != self.task_id
+            or lifecycle.attempt_id != boundary.attempt_id
+            or lifecycle.scope != boundary.scope
+            or lifecycle.scope != self.scope
+            or lifecycle.correlation_id != boundary.correlation_id
+            or lifecycle.correlation_id != self.correlation_id
+            or lifecycle.event_type
+            not in {
+                "task.accepted",
+                "task.retry_accepted",
+                "task.recovery_accepted",
+                "task.running",
+                "task.blocked",
+                "task.decision_required",
+                "task.terminal",
+            }
+            or boundary.event_type
+            not in {
+                "task.accepted",
+                "task.retry_accepted",
+                "task.recovery_accepted",
+            }
+            or boundary.state != FormalTaskState.ACCEPTED.value
+            or boundary.outcome is not None
+            or boundary.producer != "task_core"
+            or boundary.source_event_id is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor lacks one exact lifecycle and Attempt boundary",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEventConsumerAuthorityPage:
+    """One Store-verified consumer cursor and bounded Task-wide suffix."""
+
+    task: PersistentTaskRecord
+    attempt: PersistentAttemptRecord
+    presentation_class: str
+    watermark: int
+    acked_event_id: str | None
+    cursor_baseline: TaskEventConsumerCursorBaseline
+    segment_start_seq: int
+    page_after_seq: int
+    start_seq: int
+    head_seq: int
+    events: tuple[PersistentTaskEvent, ...]
+    next_after_seq: int | None
+    has_more: bool
+    terminal_head_event: PersistentTaskEvent | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.task, PersistentTaskRecord)
+            or not isinstance(self.attempt, PersistentAttemptRecord)
+            or self.attempt.task_id != self.task.task_id
+            or self.attempt.attempt_id != self.task.attempt_id
+            or self.presentation_class not in {"text", "voice"}
+            or not isinstance(self.cursor_baseline, TaskEventConsumerCursorBaseline)
+            or self.cursor_baseline.watermark != self.watermark
+            or self.cursor_baseline.acked_event_id != self.acked_event_id
+            or self.cursor_baseline.task_id != self.task.task_id
+            or self.cursor_baseline.scope != self.task.scope
+            or self.cursor_baseline.correlation_id != self.task.correlation_id
+            or type(self.watermark) is not int
+            or self.watermark < -1
+            or type(self.segment_start_seq) is not int
+            or type(self.page_after_seq) is not int
+            or type(self.start_seq) is not int
+            or type(self.head_seq) is not int
+            or not 0 <= self.segment_start_seq <= self.head_seq + 1
+            or self.watermark > self.head_seq
+            or not max(self.segment_start_seq - 1, self.watermark)
+            <= self.page_after_seq
+            <= self.head_seq
+            or self.start_seq != self.page_after_seq + 1
+            or not self.segment_start_seq <= self.start_seq <= self.head_seq + 1
+            or self.task.event_head < self.head_seq
+            or type(self.events) is not tuple
+            or len(self.events) > 500
+            or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
+            or type(self.has_more) is not bool
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "consumer TaskEvent authority page is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        cursor_lifecycle = self.cursor_baseline.lifecycle_event
+        cursor_boundary = self.cursor_baseline.attempt_boundary
+        if self.watermark >= 0 and (
+            cursor_lifecycle is None
+            or cursor_boundary is None
+            or cursor_lifecycle.task_id != self.task.task_id
+            or cursor_lifecycle.scope != self.task.scope
+            or cursor_lifecycle.correlation_id != self.task.correlation_id
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "consumer cursor baseline crosses its Task authority",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        terminal = self.terminal_head_event
+        if self.task.state is FormalTaskState.TERMINAL:
+            if (
+                not isinstance(terminal, PersistentTaskEvent)
+                or terminal.event_type != "task.terminal"
+                or terminal.seq != self.task.event_head
+                or terminal.task_id != self.task.task_id
+                or terminal.attempt_id != self.task.attempt_id
+                or terminal.scope != self.task.scope
+                or terminal.correlation_id != self.task.correlation_id
+                or terminal.state != FormalTaskState.TERMINAL.value
+                or terminal.outcome
+                != (None if self.task.outcome is None else self.task.outcome.value)
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "terminal Task page lacks its canonical head event",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif terminal is not None:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "nonterminal Task page cannot carry terminal-head authority",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.watermark == -1:
+            if self.acked_event_id is not None:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "initial consumer cursor cannot bind an acknowledged event",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            _require_text(
+                self.acked_event_id,
+                "task_event_consumer_authority.acked_event_id",
+            )
+        for expected_seq, event in enumerate(self.events, self.start_seq):
+            if (
+                event.seq != expected_seq
+                or event.task_id != self.task.task_id
+                or event.scope != self.task.scope
+                or event.correlation_id != self.task.correlation_id
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "consumer TaskEvent page is not one exact Task suffix",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if self.has_more:
+            if (
+                not self.events
+                or self.next_after_seq != self.events[-1].seq
+                or self.events[-1].seq >= self.head_seq
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "truncated consumer TaskEvent page lacks its exact cursor",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif (
+            self.next_after_seq is not None
+            or (self.events and self.events[-1].seq != self.head_seq)
+            or (not self.events and self.start_seq != self.head_seq + 1)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "complete consumer TaskEvent page does not reach its frozen head",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskMutationResult:
     """Atomic mutation receipt pinned to one durable attempt epoch."""
 
@@ -2293,6 +2545,8 @@ __all__ = [
     "TaskAdjustmentState",
     "TaskCommandDisposition",
     "TaskEventAuthoritySnapshot",
+    "TaskEventConsumerAuthorityPage",
+    "TaskEventConsumerCursorBaseline",
     "TaskMutationDisposition",
     "TaskMutationResult",
     "TaskResultArtifact",

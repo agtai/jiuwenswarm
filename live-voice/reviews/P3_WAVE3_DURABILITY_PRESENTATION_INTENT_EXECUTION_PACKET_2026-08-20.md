@@ -42,6 +42,23 @@ Connect P3-5A unread facts to real text DOM adoption and Runtime-owned audio
 owns presentation/parser/ACK modules and product tests. It owns no Store,
 consumer schema, Task lifecycle, Result/Event truth or shared Registry/profile.
 
+### P3-5B shared cursor re-scope — Main/P3-5A/Core, Tier 3
+
+Independent review demonstrated that presentation consumption cannot truthfully
+reconnect from the durable watermark by subscribing only to the current Attempt.
+Under [D-090](../decisions/DECISIONS.md), Main therefore owns a narrow extension
+of the existing P3-5A/Core read protocol: one Task-wide, cross-Attempt, frozen and
+paged consumer suffix plus its Store-verified cursor/lifecycle/Attempt baseline.
+This is not a worker Store lease and adds no schema, ledger or consumer identity.
+
+The shared acceptance is executable: text and Runtime-AUDIO resume from a
+nonzero watermark in a fresh Session and fresh process; cancelled→retry and
+interrupted→recovery preserve exact order; terminal append during frozen paging
+cannot truncate the new suffix; more than 256 non-presentable and presentable
+events remain bounded; generic Arbiter behavior is unchanged; stale, foreign,
+forged and concurrent paths have zero forbidden effects. Main alone edits and
+reviews the Store/page/source/Arbiter/composition seams.
+
 ### P3-6 — multi-Task intent resolution, Tier 3
 
 Implement a production resolver and bounded clarification state that consume

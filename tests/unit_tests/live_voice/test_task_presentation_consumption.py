@@ -254,6 +254,64 @@ def test_text_requires_exact_dom_adoption_before_consumption_command() -> None:
     assert command_calls == [(command, grant)]
 
 
+def test_reservation_skips_only_a_closed_nonpresentable_prefix() -> None:
+    owner, runtime = _owner()
+    page = _page(
+        _event(
+            1,
+            event_type="attempt.accepted",
+            state="accepted",
+            source_event_id=None,
+        ),
+        _event(
+            2,
+            event_type="attempt.running",
+            state="running",
+            source_event_id="executor-attempt-running",
+        ),
+        _event(3, source_event_id="executor-task-running"),
+    )
+    delivery = owner.reserve_next(
+        page,
+        scope=SCOPE,
+        response_ref=RESPONSE,
+        delivery_id="delivery-after-nonpresentable-prefix",
+        unit_id="unit-after-nonpresentable-prefix",
+    )
+    assert delivery.event_seq == 3
+    assert delivery.event_id == "event-3"
+    owner.mark_text_adopted(
+        TextPresentationAdoptionAck.from_delivery(
+            delivery,
+            adopted_at="2026-08-20T12:00:02Z",
+        )
+    )
+    command, grant = _ack_command(delivery)
+    assert owner.consume(
+        delivery,
+        command,
+        grant,
+        lambda item, _authorization: _success(item, delivery),
+    ).ok
+
+    unknown = replace(page.events[0], event_type="task.unclassified_control")
+    with pytest.raises(TaskPresentationViolation) as rejected:
+        owner.reserve_next(
+            _page(unknown, page.events[1], page.events[2]),
+            scope=SCOPE,
+            response_ref=ResponseRef("interaction-1", "response-unknown", 1),
+            delivery_id="delivery-unknown-prefix",
+            unit_id="unit-unknown-prefix",
+        )
+    assert rejected.value.reason == "PRESENTATION_EVENT_APPLICABILITY_UNKNOWN"
+    assert (
+        runtime.calls.count(
+            (ResponseRef("interaction-1", "response-unknown", 1), None, "reserve")
+        )
+        == 0
+    )
+
+
 @pytest.mark.asyncio
 async def test_voice_accepts_only_exact_runtime_audio_presentation_ack() -> None:
     owner, _runtime = _owner()
@@ -567,6 +625,36 @@ def test_runtime_close_fences_dom_and_consume_and_releases_capacity() -> None:
         with pytest.raises(TaskPresentationViolation):
             late()
     assert command_calls == []
+
+
+def test_runtime_close_recycles_one_slot_across_more_than_global_bound() -> None:
+    responses = tuple(
+        ResponseRef("interaction-capacity", f"response-{index}", 1)
+        for index in range(257)
+    )
+    owner, runtime = _owner(*responses, capacity=1)
+
+    for index, response in enumerate(responses):
+        delivery = owner.reserve_next(
+            _page(_event(index)),
+            scope=SCOPE,
+            response_ref=response,
+            delivery_id=f"delivery-capacity-{index}",
+            unit_id=f"unit-capacity-{index}",
+        )
+        runtime.close(response)
+        assert (
+            owner.close_response(
+                response,
+                reservation_id=delivery.runtime_reservation_id,
+                reason="route_closed",
+            )
+            == 1
+        )
+
+    assert runtime.active == set()
+    assert sum(phase == "reserve" for _, _, phase in runtime.calls) == 257
+    assert sum(phase == "close" for _, _, phase in runtime.calls) == 257
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,7 @@ from .formal_task_models import (
     TaskMutationDisposition,
     TaskMutationResult,
     TaskResultAvailability,
+    TaskResultRecord,
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
     canonical_task_adjustment_rejection_reason,
@@ -286,6 +287,26 @@ class PersistentTaskCore:
         )
         if not isinstance(self._admission_policy, AdmissionPolicy):
             raise TypeError("admission_policy must be an AdmissionPolicy")
+
+    def read_consumer_task(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> PersistentTaskRecord:
+        """Read a Task for one stable authenticated subject/project consumer."""
+
+        return self.store.get_consumer_task(task_id, scope)
+
+    def read_consumer_task_result(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None, str]:
+        """Read result truth without making Session part of consumer identity."""
+
+        return self.store.consumer_task_result(task_id, scope)
 
     def read_current_retry_authority(
         self,

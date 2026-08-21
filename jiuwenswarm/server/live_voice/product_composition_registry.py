@@ -19,11 +19,12 @@ import secrets
 import threading
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CommandEnvelope,
     CONTRACT_VERSION,
     ContextRef,
     ContractViolation,
@@ -32,6 +33,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     OriginRef,
     ProducerRef,
     ResponseRef,
+    ResultEnvelope,
     ScopeRef,
     TurnCommit,
     TurnCommitLedger,
@@ -45,6 +47,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 from .agent_conversation_runtime import (
     AgentConversationRuntime,
     AuthoritativePresentationHandle,
+    PresentationAckResult,
 )
 from .critical_token_safety import (
     CommittedSpeechCandidate,
@@ -63,6 +66,7 @@ from .formal_task_models import (
     ResolvedTaskContext,
     TaskResultArtifact,
     TaskResultAvailability,
+    TaskResultRecord,
     TerminalOutcome,
     utc_now,
 )
@@ -139,7 +143,16 @@ from .product_p3_text_adapter import (
     ProductP3QueryRequest,
     ProductP3TextAdapter,
 )
-from .presentation_ledger import PresentationAck, PresentationSurface
+from .presentation_ledger import (
+    PresentationAck,
+    PresentationSurface,
+    TaskPresentationConsumptionOwner,
+    TaskPresentationDelivery,
+    TaskPresentationRuntimeReceipt,
+    TaskPresentationViolation,
+    TextPresentationAdoptionAck,
+    next_task_presentation_event,
+)
 from .progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
@@ -185,6 +198,9 @@ _FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES = frozenset(
     }
 )
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
+_PRODUCT_P2_PRESENTATION_FAILURE_OPERATION = (
+    "live_voice.composition.p2.presentation.failed"
+)
 # The only Agent profile whose facade implements the formal Live Voice seam.
 _FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
 _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
@@ -201,6 +217,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
         "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         _PRODUCT_P2_PRESENTATION_ACK_OPERATION,
+        _PRODUCT_P2_PRESENTATION_FAILURE_OPERATION,
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",
@@ -387,6 +404,11 @@ class _ProgressRoute:
     manifest: ProductCompositionManifest
     channel_id: str
     request_id: str
+    unread_authority: ResolvedProductAuthority | None = None
+    result_authority: ResolvedProductAuthority | None = None
+    pending_presentations: dict[tuple[str, str], "_PendingProgressPresentation"] = (
+        field(default_factory=dict)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,6 +439,39 @@ class _ProgressDelivery:
     evidence_id: str
     delivered: bool = False
     acknowledged: bool = False
+    closed: bool = False
+    presentation: TaskPresentationDelivery | None = None
+    command: CommandEnvelope | None = None
+    presentation_binding: str | None = None
+    runtime_ack: PresentationAck | None = None
+    text_adoption_ack: TextPresentationAdoptionAck | None = None
+    audio_ack_in_flight: bool = False
+    fallback_event: TaskProgressTextEvent | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingProgressPresentation:
+    event: TaskProgressTextEvent | TaskProgressNotificationIntent
+    presentation_class: str
+    fallback_reason: str | None = None
+
+
+class _ProgressPresentationDeferred(RuntimeError):
+    pass
+
+
+class _ProgressPresentationConsumed(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class _TaskPresentationFallback:
+    progress_delivery: _ProgressDelivery
+    presentation: TaskPresentationDelivery
+    event: TaskProgressTextEvent
+    failure_reason: str
+    audio_closed: bool = False
+    text_emitted: bool = False
 
 
 @dataclass(slots=True)
@@ -648,6 +703,11 @@ class AgentServerProductCompositionRegistry:
             raise ValueError("product text event sink is required")
         self._settings = settings
         self._p3_composition = p3_composition
+        self._p3_presentation_consumption_available = bool(
+            settings.p2_enabled
+            and settings.p3_text_enabled
+            and p3_composition.product_presentation_consumption_available
+        )
         self._agent_manager = agent_manager
         self._push_text_event = push_text_event
         self._observability_exporter = observability_exporter
@@ -675,6 +735,9 @@ class AgentServerProductCompositionRegistry:
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
         self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
         self._progress_routes: dict[tuple[str, str, str, str], _ProgressRoute] = {}
+        self._progress_route_adoptions: dict[
+            tuple[str, str, str, str], asyncio.Event
+        ] = {}
         self._closed_progress_routes: dict[
             tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
@@ -699,6 +762,30 @@ class AgentServerProductCompositionRegistry:
         # may therefore replace only the delivery binding without losing the
         # authoritative event that still needs presentation.
         self._terminal_notification_responses: dict[str, ResponseRef] = {}
+        self._task_presentation_state_lock = threading.RLock()
+        self._task_presentation_runtime_routes: dict[ResponseRef, _P2Route] = {}
+        self._task_presentation_deliveries: dict[
+            ResponseRef, tuple[_ProgressDelivery, TaskPresentationDelivery]
+        ] = {}
+        self._task_presentation_owner = TaskPresentationConsumptionOwner(
+            self._task_presentation_runtime_authority,
+            capacity=self._PROGRESS_DELIVERY_CAPACITY,
+        )
+        self._consumed_task_presentation_acks: dict[
+            ResponseRef,
+            tuple[
+                TaskPresentationDelivery,
+                PresentationAck,
+                PresentationAckResult,
+            ],
+        ] = {}
+        self._closed_task_presentations: dict[
+            ResponseRef, tuple[TaskPresentationDelivery, bool]
+        ] = {}
+        self._task_presentation_fallbacks: dict[
+            ResponseRef, _TaskPresentationFallback
+        ] = {}
+        self._presentation_drain_tasks: set[asyncio.Task[None]] = set()
         task_database = p3_composition.task_database_path
         self._unified_journal = unified_journal or (
             None
@@ -724,6 +811,9 @@ class AgentServerProductCompositionRegistry:
         self._consumed_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_presentation_failure_operations: dict[
+            str, _RetainedProductOperation
+        ] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
@@ -790,8 +880,10 @@ class AgentServerProductCompositionRegistry:
                 presentation=ForegroundFact.UNKNOWN,
                 speech_policy=SpeechPolicy.DISPLAY_ONLY,
             ),
+            foreground_factory=self._task_progress_foreground_supplier,
             text_sink=self._emit_text_progress,
             voice_sink=self._emit_voice_progress,
+            deferred_voice_sink=self._defer_voice_progress,
         )
 
     @property
@@ -968,6 +1060,11 @@ class AgentServerProductCompositionRegistry:
         )
         return self._progress_generations.get(key) == binding.generation
 
+    def _settle_progress_route_adoption(self, key: tuple[str, str, str, str]) -> None:
+        adoption = self._progress_route_adoptions.pop(key, None)
+        if adoption is not None:
+            adoption.set()
+
     def _retain_root_cleanup(self, cleanup: ProductCompositionLease | None) -> None:
         if cleanup is not None and all(
             retained is not cleanup for retained in self._root_orphan_cleanups
@@ -1037,7 +1134,7 @@ class AgentServerProductCompositionRegistry:
                     retained_key
                     for retained_key, retained in self._closed_progress_routes.items()
                     if all(
-                        delivery.acknowledged
+                        delivery.acknowledged or delivery.closed
                         for delivery in retained.deliveries.values()
                     )
                 ),
@@ -1056,6 +1153,14 @@ class AgentServerProductCompositionRegistry:
         retained: _ProgressRoute,
     ) -> bool:
         deliveries = self._progress_deliveries.get(key, {})
+        if self._p3_presentation_consumption_available:
+            try:
+                self._close_task_presentations_for_progress_route(
+                    deliveries,
+                    reason="progress_generation_archived",
+                )
+            except TaskPresentationViolation:
+                return False
         closed_key = (*key, retained.binding.generation)
         try:
             self._retain_closed_progress_route(
@@ -1092,7 +1197,7 @@ class AgentServerProductCompositionRegistry:
             )
             if any(
                 not all(
-                    delivery.acknowledged
+                    delivery.acknowledged or delivery.closed
                     for delivery in self._closed_progress_routes[
                         closed_key
                     ].deliveries.values()
@@ -1120,7 +1225,7 @@ class AgentServerProductCompositionRegistry:
                 (
                     delivery_id
                     for delivery_id, retained in deliveries.items()
-                    if retained.acknowledged
+                    if retained.acknowledged or retained.closed
                 ),
                 None,
             )
@@ -1131,6 +1236,118 @@ class AgentServerProductCompositionRegistry:
             deliveries.pop(acknowledged_id)
         deliveries[delivery.delivery_id] = delivery
         return delivery
+
+    def _defer_progress_presentation(
+        self,
+        retained: _ProgressRoute,
+        event: TaskProgressTextEvent | TaskProgressNotificationIntent,
+        *,
+        presentation_class: str,
+        fallback_reason: str | None = None,
+    ) -> None:
+        if presentation_class not in {"text", "voice"}:
+            raise RuntimeError("Task progress pending class is invalid")
+        if event.origin != retained.binding:
+            raise RuntimeError("Task progress pending event changed route binding")
+        key = (presentation_class, event.task_event.event_id)
+        pending = _PendingProgressPresentation(
+            event=event,
+            presentation_class=presentation_class,
+            fallback_reason=fallback_reason,
+        )
+        prior = retained.pending_presentations.get(key)
+        if prior is not None:
+            prior_event = prior.event
+            if (
+                type(prior_event) is not type(event)
+                or prior.presentation_class != presentation_class
+                or prior.fallback_reason != fallback_reason
+                or prior_event.origin != event.origin
+                or prior_event.task_event != event.task_event
+                or prior_event.source_event != event.source_event
+                or prior_event.progress_event != event.progress_event
+                or prior_event.evidence_id != event.evidence_id
+            ):
+                raise RuntimeError("Task progress pending event was rewritten")
+            # Arbiter decisions are ephemeral scheduling facts.  The same exact
+            # Store event may first arrive as DEFERRED and later as DISPLAY_NOW;
+            # its retained product identity is the authority/origin/event tuple
+            # above, not the transient decision object.
+            return
+        if len(retained.pending_presentations) >= self._PROGRESS_DELIVERY_CAPACITY:
+            raise RuntimeError("Task progress pending capacity has no safe eviction")
+        retained.pending_presentations[key] = pending
+
+    def _progress_key_for_delivery(
+        self, delivery: _ProgressDelivery
+    ) -> tuple[str, str, str, str] | None:
+        for key, deliveries in self._progress_deliveries.items():
+            if any(retained is delivery for retained in deliveries.values()):
+                return key
+        return None
+
+    def _schedule_progress_presentation_drain(
+        self,
+        delivery: _ProgressDelivery,
+        presentation_class: str,
+    ) -> None:
+        key = self._progress_key_for_delivery(delivery)
+        if key is None or key not in self._progress_routes or self._stopped:
+            return
+        task = asyncio.create_task(
+            self._drain_progress_presentation(key, presentation_class)
+        )
+        self._presentation_drain_tasks.add(task)
+
+        def settled(completed: asyncio.Task[None]) -> None:
+            self._presentation_drain_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.error(
+                    "[LiveVoiceProduct] Task progress drain remains pending",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(settled)
+
+    async def _drain_progress_presentation(
+        self,
+        key: tuple[str, str, str, str],
+        presentation_class: str,
+    ) -> None:
+        retained = self._progress_routes.get(key)
+        if retained is None or self._stopped:
+            return
+        candidates = sorted(
+            (
+                (pending.event.task_event.seq, pending_key, pending)
+                for pending_key, pending in retained.pending_presentations.items()
+                if pending.presentation_class == presentation_class
+            ),
+            key=lambda item: item[0],
+        )
+        if not candidates:
+            return
+        _seq, pending_key, pending = candidates[0]
+        retained.pending_presentations.pop(pending_key, None)
+        try:
+            if isinstance(pending.event, TaskProgressNotificationIntent):
+                await self._emit_voice_progress(pending.event)
+            else:
+                await self._emit_text_progress(
+                    pending.event,
+                    fallback_reason=pending.fallback_reason,
+                )
+        except _ProgressPresentationDeferred:
+            # The delivery method retained the exact immutable event again.
+            return
+        except BaseException:
+            current = self._progress_routes.get(key)
+            if current is retained:
+                current.pending_presentations.setdefault(pending_key, pending)
+            raise
 
     async def _emit_text_progress(
         self,
@@ -1211,6 +1428,95 @@ class AgentServerProductCompositionRegistry:
                 evidence_id=event.evidence_id,
             ),
         )
+        presentation_payload: dict[str, object] = {}
+        if self._p3_presentation_consumption_available:
+            retained_progress = self._progress_routes.get(key)
+            if retained_progress is None:
+                adoption = self._progress_route_adoptions.get(key)
+                if adoption is not None:
+                    try:
+                        await asyncio.wait_for(adoption.wait(), timeout=1.0)
+                    except TimeoutError:
+                        pass
+                    retained_progress = self._progress_routes.get(key)
+            retained_p2 = self._current_task_presentation_route(binding)
+            if retained_progress is None or retained_p2 is None:
+                if not previously_delivered and deliveries.get(delivery_id) is delivery:
+                    deliveries.pop(delivery_id, None)
+                raise RuntimeError("Task progress presentation route is unavailable")
+            try:
+                presentation = await self._prepare_progress_presentation(
+                    event,
+                    delivery,
+                    retained_progress=retained_progress,
+                    retained_p2=retained_p2,
+                    surface=PresentationSurface.TEXT,
+                )
+            except _ProgressPresentationConsumed:
+                if (
+                    delivery.presentation is None
+                    and not delivery.delivered
+                    and deliveries.get(delivery_id) is delivery
+                ):
+                    deliveries.pop(delivery_id, None)
+                return
+            except _ProgressPresentationDeferred:
+                if (
+                    delivery.presentation is None
+                    and not delivery.delivered
+                    and deliveries.get(delivery_id) is delivery
+                ):
+                    deliveries.pop(delivery_id, None)
+                self._defer_progress_presentation(
+                    retained_progress,
+                    event,
+                    presentation_class="text",
+                    fallback_reason=fallback_reason,
+                )
+                return
+            response_ref_payload = {
+                "interaction_id": presentation.response_ref.interaction_id,
+                "response_id": presentation.response_ref.response_id,
+                "response_generation": presentation.response_ref.response_generation,
+            }
+            delivery.presentation_binding = json.dumps(
+                {
+                    "correlation_id": binding.correlation_id,
+                    "delivery_id": delivery_id,
+                    "delivery_mode": delivery_mode,
+                    "effective_origin_kind": effective_origin_kind,
+                    "evidence_id": event.evidence_id,
+                    "expected_event_head": presentation.expected_event_head,
+                    "fallback_reason": fallback_reason,
+                    "generation": binding.generation,
+                    "generation_id": binding.generation_id,
+                    "generation_kind": binding.generation_kind,
+                    "origin_id": binding.origin_id,
+                    "origin_kind": reported_origin_kind,
+                    "presentation_class": presentation.presentation_class,
+                    "progress_event": progress_event,
+                    "project_id": binding.project_id,
+                    "requested_origin_kind": reported_origin_kind,
+                    "response_ref": response_ref_payload,
+                    "result_source_event_id": presentation.result_source_event_id,
+                    "session_id": binding.session_id,
+                    "source_event": source_event,
+                    "state": event.task_event.state,
+                    "task_id": binding.task_id,
+                    "unit_id": presentation.unit_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            presentation_payload = {
+                "presentation_class": presentation.presentation_class,
+                "response_ref": response_ref_payload,
+                "unit_id": presentation.unit_id,
+                "expected_event_head": presentation.expected_event_head,
+                "result_source_event_id": presentation.result_source_event_id,
+                "state": event.task_event.state,
+            }
         delivered = await self._push_text_event(
             {
                 "request_id": target.request_id,
@@ -1235,20 +1541,197 @@ class AgentServerProductCompositionRegistry:
                     "source_event": source_event,
                     "progress_event": progress_event,
                     "evidence_id": event.evidence_id,
+                    **presentation_payload,
                 },
                 "is_complete": False,
             }
         )
         if delivered is not True:
-            if not previously_delivered and deliveries.get(delivery_id) is delivery:
+            if (
+                not previously_delivered
+                and delivery.presentation is None
+                and deliveries.get(delivery_id) is delivery
+            ):
                 deliveries.pop(delivery_id, None)
             raise RuntimeError("text progress Web sink is unavailable")
         delivery.delivered = True
         if (
-            event.task_event.event_type == "task.terminal"
+            not self._p3_presentation_consumption_available
+            and event.task_event.event_type == "task.terminal"
             and target.requested_origin_kind is TaskProgressOriginKind.VOICE
         ):
             self._remember_terminal_notification(event)
+
+    async def _prepare_progress_presentation(
+        self,
+        event: TaskProgressTextEvent,
+        delivery: _ProgressDelivery,
+        *,
+        retained_progress: _ProgressRoute,
+        retained_p2: _P2Route,
+        surface: PresentationSurface,
+    ) -> TaskPresentationDelivery:
+        presentation_class = "text" if surface is PresentationSurface.TEXT else "voice"
+        if delivery.presentation is not None:
+            if delivery.presentation.presentation_class != presentation_class:
+                raise RuntimeError("Task progress presentation class changed")
+            return delivery.presentation
+        if (
+            retained_progress.binding.scope != retained_p2.binding.scope
+            or retained_progress.binding.task_id != event.task_event.task_id
+            or retained_progress.unread_authority is None
+            or retained_progress.result_authority is None
+        ):
+            raise RuntimeError("Task progress presentation scope changed")
+        page = await self._p3_composition.read_product_unread_events(
+            retained_progress.unread_authority,
+            presentation_class=presentation_class,
+            request_id=f"unread-{delivery.delivery_id}",
+            limit=500,
+        )
+        if event.task_event.seq <= page.watermark:
+            if (
+                event.task_event.seq == page.watermark
+                and page.acked_event_id != event.task_event.event_id
+            ):
+                raise RuntimeError(
+                    "Task progress consumed watermark does not bind its event"
+                )
+            raise _ProgressPresentationConsumed(
+                "Task progress event was already durably consumed"
+            )
+        selected_event = next_task_presentation_event(page)
+        if selected_event.seq < event.task_event.seq:
+            raise _ProgressPresentationDeferred(
+                "an earlier presentable Task event still awaits durable consumption"
+            )
+        if (
+            selected_event.event_id != event.task_event.event_id
+            or selected_event.attempt_id != event.task_event.attempt_id
+            or selected_event.seq != event.task_event.seq
+        ):
+            raise RuntimeError(
+                "Task progress event is not the next durable unread fact"
+            )
+        result_record: TaskResultRecord | None = None
+        if (
+            event.task_event.event_type == "task.terminal"
+            and event.task_event.outcome == TerminalOutcome.COMPLETED.value
+        ):
+            (
+                availability,
+                result_record,
+            ) = await self._p3_composition.read_product_task_result(
+                retained_progress.result_authority,
+                request_id=f"result-{delivery.delivery_id}",
+            )
+            if (
+                availability is not TaskResultAvailability.AVAILABLE
+                or result_record is None
+            ):
+                raise RuntimeError("completed Task presentation has no legal result")
+        outcome = event.task_event.outcome
+        if event.task_event.event_type != "task.terminal":
+            text = f"Background task update: {event.task_event.state}."
+        elif outcome == TerminalOutcome.COMPLETED.value:
+            text = "The background task is complete and its result is ready."
+        elif outcome == TerminalOutcome.CANCELLED.value:
+            text = "The background task was cancelled."
+        elif outcome == TerminalOutcome.FAILED.value:
+            text = "The background task failed."
+        elif outcome == TerminalOutcome.INTERRUPTED.value:
+            text = "The background task was interrupted."
+        else:
+            text = "The background task ended with an unknown outcome."
+        commit = TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": f"commit-task-progress-{delivery.delivery_id[:40]}",
+                "turn_id": f"turn-task-progress-{delivery.delivery_id[:40]}",
+                "interaction_id": retained_p2.binding.interaction_id,
+                "text": (
+                    f"Task presentation for {event.task_event.task_id} "
+                    f"event {event.task_event.event_id}"
+                ),
+                "hypothesis_provenance": {
+                    "source": "task_event",
+                    "task_id": event.task_event.task_id,
+                    "event_id": event.task_event.event_id,
+                },
+                "scope": retained_p2.binding.scope.to_dict(),
+                "context_refs": [],
+                "committed_at": event.task_event.occurred_at,
+            }
+        )
+        reserved: TaskPresentationDelivery | None = None
+
+        async def reserve_before_publish(
+            handle: AuthoritativePresentationHandle,
+        ) -> None:
+            nonlocal reserved
+            with self._task_presentation_state_lock:
+                self._task_presentation_runtime_routes[handle.response_ref] = (
+                    retained_p2
+                )
+                try:
+                    reserved = self._task_presentation_owner.reserve_next(
+                        page,
+                        scope=retained_p2.binding.scope,
+                        response_ref=handle.response_ref,
+                        delivery_id=delivery.delivery_id,
+                        unit_id=handle.presentation_unit.unit_id,
+                        result=result_record,
+                    )
+                except BaseException:
+                    self._task_presentation_runtime_routes.pop(
+                        handle.response_ref, None
+                    )
+                    raise
+                self._task_presentation_deliveries[handle.response_ref] = (
+                    delivery,
+                    reserved,
+                )
+
+        try:
+            handle = await retained_p2.activation_lease.present_task_notification(
+                retained_p2.binding,
+                request_id=f"task-progress-{delivery.delivery_id}",
+                response_id=f"response-task-progress-{delivery.delivery_id[:40]}",
+                correlation_id=retained_p2.binding.correlation_id,
+                commit=commit,
+                text=text,
+                channel_id=retained_progress.channel_id,
+                presentation_surface=surface,
+                publish_notification=surface is PresentationSurface.AUDIO,
+                before_publish=reserve_before_publish,
+            )
+            if (
+                reserved is None
+                or reserved.response_ref != handle.response_ref
+                or reserved.unit_id != handle.presentation_unit.unit_id
+            ):
+                raise RuntimeError("Runtime published without exact Task reservation")
+        except BaseException:
+            if reserved is not None:
+                with self._task_presentation_state_lock:
+                    try:
+                        self._task_presentation_owner.close_response(
+                            reserved.response_ref,
+                            reservation_id=reserved.runtime_reservation_id,
+                            reason="task_progress_publish_failed",
+                        )
+                    finally:
+                        self._task_presentation_runtime_routes.pop(
+                            reserved.response_ref,
+                            None,
+                        )
+                        self._task_presentation_deliveries.pop(
+                            reserved.response_ref,
+                            None,
+                        )
+            raise
+        delivery.presentation = reserved
+        return reserved
 
     def _remember_terminal_notification(self, event: TaskProgressTextEvent) -> None:
         event_id = event.task_event.event_id
@@ -1264,6 +1747,147 @@ class AgentServerProductCompositionRegistry:
             )
             return
         self._pending_terminal_notifications[event_id] = event
+
+    def _current_task_presentation_route(
+        self,
+        binding: TaskProgressOriginBinding,
+    ) -> _P2Route | None:
+        if binding.origin_kind is TaskProgressOriginKind.VOICE:
+            origin = self._voice_task_origins.get(binding.task_id)
+            exact = self._p2_routes.get((binding.session_id, binding.origin_id))
+            if (
+                origin is not None
+                and exact is not None
+                and origin.session_id == binding.session_id
+                and origin.interaction_id == binding.origin_id
+                and origin.correlation_id == binding.correlation_id
+                and origin.activation_id == exact.binding.activation_id
+                and origin.activation_generation == exact.binding.activation_generation
+                and exact.binding.scope == binding.scope
+                and exact.activation_lease.snapshot().state is P2LeaseState.OPEN
+            ):
+                return exact
+        candidates = tuple(
+            retained
+            for (session_id, _interaction_id), retained in self._p2_routes.items()
+            if session_id == binding.session_id
+            and retained.binding.scope == binding.scope
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _task_progress_foreground_supplier(
+        self, binding: TaskProgressOriginBinding
+    ) -> Callable[[], ForegroundSnapshot]:
+        """Bind arbiter foreground truth to the exact P2 Runtime route."""
+
+        def read() -> ForegroundSnapshot:
+            origin = self._voice_task_origins.get(binding.task_id)
+            retained = (
+                None
+                if origin is None
+                else self._p2_routes.get((origin.session_id, origin.interaction_id))
+            )
+            exact = bool(
+                binding.origin_kind is TaskProgressOriginKind.VOICE
+                and origin is not None
+                and retained is not None
+                and origin.session_id == binding.session_id
+                and origin.interaction_id == binding.origin_id
+                and origin.correlation_id == binding.correlation_id
+                and origin.activation_id == retained.binding.activation_id
+                and origin.activation_generation
+                == retained.binding.activation_generation
+                and retained.binding.scope == binding.scope
+            )
+            safe = False
+            if exact:
+                assert retained is not None
+                try:
+                    safe = retained.activation_lease.task_notification_foreground_safe(
+                        retained.binding
+                    )
+                except Exception:
+                    safe = False
+            fact = ForegroundFact.SAFE if safe else ForegroundFact.BUSY
+            return ForegroundSnapshot(
+                interaction=fact,
+                response=fact,
+                presentation=fact,
+                speech_policy=(
+                    SpeechPolicy.ALLOW_CANDIDATE if safe else SpeechPolicy.DISPLAY_ONLY
+                ),
+            )
+
+        return read
+
+    async def _drain_voice_progress_for_p2_binding(
+        self, binding: P2InteractionBinding
+    ) -> None:
+        """Wake only deferred Task voice owned by the acknowledged P2 route."""
+
+        async with self._lock:
+            routes = tuple(
+                (key, retained)
+                for key, retained in self._progress_routes.items()
+                if retained.binding.origin_kind is TaskProgressOriginKind.VOICE
+                and retained.binding.scope == binding.scope
+                and retained.binding.session_id == binding.session_id
+                and retained.binding.correlation_id == binding.correlation_id
+                and retained.binding.origin_id == binding.interaction_id
+                and (
+                    (origin := self._voice_task_origins.get(retained.binding.task_id))
+                    is not None
+                )
+                and origin.session_id == binding.session_id
+                and origin.interaction_id == binding.interaction_id
+                and origin.correlation_id == binding.correlation_id
+                and origin.activation_id == binding.activation_id
+                and origin.activation_generation == binding.activation_generation
+            )
+        for key, retained in routes:
+            await self._drain_progress_presentation(key, "voice")
+            await retained.progress_lease.drain_voice()
+
+    async def _defer_voice_progress(
+        self, intent: TaskProgressNotificationIntent
+    ) -> None:
+        """Retain every exact event while the P2 Runtime foreground is busy."""
+
+        if not self._p3_presentation_consumption_available:
+            return
+        binding = intent.origin
+        key = (
+            binding.session_id,
+            binding.task_id,
+            binding.origin_id,
+            binding.generation_id,
+        )
+        retained = self._progress_routes.get(key)
+        if retained is None:
+            adoption = self._progress_route_adoptions.get(key)
+            if adoption is not None:
+                try:
+                    await asyncio.wait_for(adoption.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+                retained = self._progress_routes.get(key)
+        target = self._progress_targets.get(key)
+        exact_p2 = self._current_task_presentation_route(binding)
+        if (
+            retained is None
+            or target is None
+            or exact_p2 is None
+            or target.requested_origin_kind is not TaskProgressOriginKind.VOICE
+            or target.correlation_id != binding.correlation_id
+            or target.generation != binding.generation
+        ):
+            raise RuntimeError("deferred voice progress route is no longer current")
+        self._defer_progress_presentation(
+            retained,
+            intent,
+            presentation_class="voice",
+        )
 
     def _current_terminal_notification_route(
         self, event: TaskProgressTextEvent
@@ -1292,6 +1916,430 @@ class AgentServerProductCompositionRegistry:
             return
         self._terminal_notification_responses.pop(event_id, None)
         self._pending_terminal_notifications.pop(event_id, None)
+
+    def _task_presentation_runtime_authority(
+        self,
+        response_ref: ResponseRef,
+        reservation_id: str | None,
+        phase: str,
+    ) -> TaskPresentationRuntimeReceipt:
+        with self._task_presentation_state_lock:
+            retained = self._task_presentation_runtime_routes.get(response_ref)
+            if retained is None:
+                raise TaskPresentationViolation(
+                    "RUNTIME_PRESENTATION_AUTHORITY_REJECTED",
+                    "Task presentation has no exact retained P2 Runtime route",
+                )
+            receipt = retained.activation_lease.task_presentation_runtime_authority(
+                retained.binding,
+                response_ref,
+                reservation_id,
+                phase,
+            )
+            if phase == "close" and receipt.active is False:
+                self._task_presentation_runtime_routes.pop(response_ref, None)
+            return receipt
+
+    def _record_closed_task_presentation(
+        self,
+        presentation: TaskPresentationDelivery,
+        *,
+        consumed: bool,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            response_ref = presentation.response_ref
+            prior = self._closed_task_presentations.get(response_ref)
+            if prior is not None:
+                if prior[0] != presentation:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_CLOSE_REWRITE",
+                        "closed Task response changed its presentation identity",
+                    )
+                self._closed_task_presentations[response_ref] = (
+                    presentation,
+                    prior[1] or consumed,
+                )
+                return
+            if len(self._closed_task_presentations) >= self._PROGRESS_DELIVERY_CAPACITY:
+                evictable = next(
+                    (
+                        retained_ref
+                        for retained_ref, (_delivery, was_consumed) in (
+                            self._closed_task_presentations.items()
+                        )
+                        if was_consumed
+                    ),
+                    None,
+                )
+                if evictable is None:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_CLOSE_CAPACITY_EXHAUSTED",
+                        "closed unconsumed Task responses have no safe eviction",
+                    )
+                self._closed_task_presentations.pop(evictable)
+            self._closed_task_presentations[response_ref] = (presentation, consumed)
+
+    def _retain_consumed_task_presentation_ack(
+        self,
+        presentation: TaskPresentationDelivery,
+        ack: PresentationAck,
+        outcome: PresentationAckResult,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            if (
+                ack.ref not in self._consumed_task_presentation_acks
+                and len(self._consumed_task_presentation_acks)
+                >= self._PROGRESS_DELIVERY_CAPACITY
+            ):
+                self._consumed_task_presentation_acks.pop(
+                    next(iter(self._consumed_task_presentation_acks))
+                )
+            self._consumed_task_presentation_acks[ack.ref] = (
+                presentation,
+                ack,
+                outcome,
+            )
+
+    @staticmethod
+    def _task_presentation_ack_command_id(
+        presentation: TaskPresentationDelivery,
+    ) -> str:
+        return (
+            "task-ack-"
+            + hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "scope": presentation.scope.to_dict(),
+                        "task_id": presentation.task_id,
+                        "presentation_class": presentation.presentation_class,
+                        "event_id": presentation.event_id,
+                        "event_seq": presentation.event_seq,
+                        "expected_event_head": presentation.expected_event_head,
+                        "delivery_id": presentation.delivery_id,
+                        "runtime_reservation_id": (presentation.runtime_reservation_id),
+                        "response_ref": {
+                            "interaction_id": presentation.response_ref.interaction_id,
+                            "response_id": presentation.response_ref.response_id,
+                            "response_generation": (
+                                presentation.response_ref.response_generation
+                            ),
+                        },
+                        "unit_id": presentation.unit_id,
+                    }
+                )
+            ).hexdigest()
+        )
+
+    def _close_task_presentations_for_p2_route(
+        self,
+        retained: _P2Route,
+        *,
+        reason: str,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            for response_ref, owner in tuple(
+                self._task_presentation_runtime_routes.items()
+            ):
+                if owner.binding != retained.binding:
+                    continue
+                mapped = self._task_presentation_deliveries.get(response_ref)
+                if mapped is None:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_DELIVERY_NOT_FOUND",
+                        "retained Runtime Task presentation lost its delivery",
+                    )
+                progress_delivery, presentation = mapped
+                if progress_delivery.audio_ack_in_flight:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_ACK_IN_FLIGHT",
+                        "Task presentation ACK owns the close race",
+                    )
+                self._task_presentation_owner.close_response(
+                    response_ref,
+                    reservation_id=presentation.runtime_reservation_id,
+                    reason=reason,
+                )
+                self._record_closed_task_presentation(
+                    presentation,
+                    consumed=False,
+                )
+                self._task_presentation_runtime_routes.pop(response_ref, None)
+                self._task_presentation_deliveries.pop(response_ref, None)
+
+    def _close_task_presentations_for_progress_route(
+        self,
+        deliveries: Mapping[str, _ProgressDelivery],
+        *,
+        reason: str,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            for progress_delivery in deliveries.values():
+                presentation = progress_delivery.presentation
+                if presentation is None or progress_delivery.closed:
+                    continue
+                if progress_delivery.audio_ack_in_flight:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_ACK_IN_FLIGHT",
+                        "Task presentation ACK owns the close race",
+                    )
+                self._task_presentation_owner.close_response(
+                    presentation.response_ref,
+                    reservation_id=presentation.runtime_reservation_id,
+                    reason=reason,
+                )
+                self._record_closed_task_presentation(
+                    presentation,
+                    consumed=False,
+                )
+                self._task_presentation_runtime_routes.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                self._task_presentation_deliveries.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                progress_delivery.closed = True
+
+    def _settle_consumed_task_presentation(
+        self,
+        progress_delivery: _ProgressDelivery,
+        presentation: TaskPresentationDelivery,
+        *,
+        audio_ack: PresentationAck | None = None,
+        audio_outcome: PresentationAckResult | None = None,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            progress_delivery.acknowledged = True
+            if audio_ack is not None and audio_outcome is not None:
+                self._retain_consumed_task_presentation_ack(
+                    presentation,
+                    audio_ack,
+                    audio_outcome,
+                )
+            try:
+                self._task_presentation_owner.close_response(
+                    presentation.response_ref,
+                    reservation_id=presentation.runtime_reservation_id,
+                    reason="task_progress_consumed",
+                )
+                self._record_closed_task_presentation(
+                    presentation,
+                    consumed=True,
+                )
+                self._task_presentation_runtime_routes.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                self._task_presentation_deliveries.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                progress_delivery.closed = True
+            except TaskPresentationViolation:
+                logger.exception(
+                    "[LiveVoiceProduct] consumed Task presentation cleanup pending"
+                )
+        self._schedule_progress_presentation_drain(
+            progress_delivery,
+            presentation.presentation_class,
+        )
+
+    async def _reauthorize_task_presentation_replay(
+        self,
+        presentation: TaskPresentationDelivery,
+        *,
+        params: Mapping[str, object],
+        route: AuthorityRouteContext,
+    ) -> None:
+        state = _AuthorityState()
+        authority = await self._authority_registration(
+            state=state,
+            bearer_token=params.get("auth_token"),
+            route=route,
+            operation="task.ack_events",
+            task_id=presentation.task_id,
+        )
+        if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
+            raise FormalTaskViolation(
+                state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                "fresh Task presentation replay authority is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            assert state.canonical is not None
+            if state.canonical.scope != presentation.scope:
+                raise FormalTaskViolation(
+                    "TASK_PRESENTATION_AUTHORITY_MISMATCH",
+                    "presentation replay changed its authenticated scope",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        finally:
+            if authority.lease is not None:
+                await authority.lease.close()
+
+    async def _acknowledge_task_voice_presentation(
+        self,
+        *,
+        retained: _P2Route,
+        ack: PresentationAck,
+        params: Mapping[str, object],
+        route: AuthorityRouteContext,
+        request_id: str,
+    ) -> PresentationAckResult | None:
+        with self._task_presentation_state_lock:
+            consumed = self._consumed_task_presentation_acks.get(ack.ref)
+        if consumed is not None:
+            presentation, prior_ack, prior_outcome = consumed
+            await self._reauthorize_task_presentation_replay(
+                presentation,
+                params=params,
+                route=route,
+            )
+            if prior_ack != ack:
+                raise FormalTaskViolation(
+                    "TASK_PROGRESS_PRESENTATION_MISMATCH",
+                    "consumed Task audio ACK cannot be rewritten",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return PresentationAckResult(
+                ack=ack,
+                accepted=True,
+                replayed=True,
+                history_records_written=0,
+                history_pending=prior_outcome.history_pending,
+            )
+        with self._task_presentation_state_lock:
+            closed = self._closed_task_presentations.get(ack.ref)
+        if closed is not None:
+            presentation, _was_consumed = closed
+            await self._reauthorize_task_presentation_replay(
+                presentation,
+                params=params,
+                route=route,
+            )
+            raise FormalTaskViolation(
+                "TASK_PROGRESS_PRESENTATION_CLOSED",
+                "Task presentation was closed before this audio ACK",
+                ErrorCode.STALE,
+            )
+        with self._task_presentation_state_lock:
+            mapped = self._task_presentation_deliveries.get(ack.ref)
+        if mapped is None:
+            return None
+        progress_delivery, presentation = mapped
+        if (
+            presentation.presentation_class != "voice"
+            or ack.surface is not PresentationSurface.AUDIO
+            or ack.unit_id != presentation.unit_id
+            or retained.binding.scope != presentation.scope
+        ):
+            raise TaskPresentationViolation(
+                "VOICE_PRESENTATION_ACK_MISMATCH",
+                "P2 ACK does not match the exact Task voice presentation",
+            )
+        accepted_outcome: PresentationAckResult | None = None
+
+        async def runtime_ack_port(item: PresentationAck) -> object:
+            nonlocal accepted_outcome
+            accepted_outcome = await retained.activation_lease.acknowledge_presentation(
+                retained.binding,
+                item,
+            )
+            return accepted_outcome
+
+        await self._task_presentation_owner.mark_voice_presented(
+            presentation,
+            ack,
+            runtime_ack_port,
+        )
+        if accepted_outcome is None or accepted_outcome.accepted is not True:
+            raise TaskPresentationViolation(
+                "RUNTIME_PRESENTATION_ACK_REJECTED",
+                "Runtime did not accept the exact Task audio presentation",
+            )
+        state = _AuthorityState()
+        authority = await self._authority_registration(
+            state=state,
+            bearer_token=params.get("auth_token"),
+            route=route,
+            operation="task.ack_events",
+            task_id=presentation.task_id,
+        )
+        if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
+            raise FormalTaskViolation(
+                state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                "fresh Task presentation authority is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            assert state.canonical is not None
+            issued_at = (
+                progress_delivery.command.issued_at
+                if progress_delivery.command is not None
+                else utc_now()
+            )
+            command_id = self._task_presentation_ack_command_id(presentation)
+            command, grant = self._p3_composition.prepare_product_presentation_ack(
+                state.canonical,
+                presentation,
+                request_id=(
+                    progress_delivery.command.request_id
+                    if progress_delivery.command is not None
+                    else request_id
+                ),
+                command_id=command_id,
+                now=issued_at,
+            )
+            if (
+                progress_delivery.command is not None
+                and progress_delivery.command != command
+            ):
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_COMMAND_REWRITE",
+                    "voice presentation ACK command changed across retry",
+                )
+            progress_delivery.command = command
+            result = await asyncio.to_thread(
+                self._task_presentation_owner.consume,
+                presentation,
+                command,
+                grant,
+                lambda item, authorization: (
+                    self._p3_composition.execute_product_presentation_ack(
+                        state.canonical,
+                        item,
+                        authorization,
+                    )
+                ),
+            )
+            if not isinstance(result, ResultEnvelope) or not result.ok:
+                raise FormalTaskViolation(
+                    (
+                        "TASK_PROGRESS_CONSUMPTION_FAILED"
+                        if not isinstance(result, ResultEnvelope)
+                        or result.error is None
+                        or result.error.reason is None
+                        else result.error.reason
+                    ),
+                    "Task voice presentation consumption failed",
+                    (
+                        ErrorCode.UNAVAILABLE
+                        if not isinstance(result, ResultEnvelope)
+                        or result.error is None
+                        else result.error.code
+                    ),
+                )
+            self._settle_consumed_task_presentation(
+                progress_delivery,
+                presentation,
+                audio_ack=ack,
+                audio_outcome=accepted_outcome,
+            )
+            return accepted_outcome
+        finally:
+            if authority.lease is not None:
+                await authority.lease.close()
 
     async def _terminal_notification_text(self, task_event: PersistentTaskEvent) -> str:
         try:
@@ -1444,15 +2492,176 @@ class AgentServerProductCompositionRegistry:
             and retained.binding.activation_generation == origin.activation_generation
             and retained.binding.scope == binding.scope
         )
+        voice_key: tuple[str, str, str, str] | None = None
+        voice_deliveries: dict[str, _ProgressDelivery] | None = None
+        voice_delivery: _ProgressDelivery | None = None
         if exact_live_origin:
             assert retained is not None
             assert origin is not None
             try:
-                await retained.activation_lease.deliver_task_progress(
-                    retained.binding, intent, origin.response_ref
+                if not self._p3_presentation_consumption_available:
+                    await retained.activation_lease.deliver_task_progress(
+                        retained.binding,
+                        intent,
+                        origin.response_ref,
+                    )
+                else:
+                    key = (
+                        binding.session_id,
+                        binding.task_id,
+                        binding.origin_id,
+                        binding.generation_id,
+                    )
+                    voice_key = key
+                    target = self._progress_targets.get(key)
+                    retained_progress = self._progress_routes.get(key)
+                    if retained_progress is None:
+                        adoption = self._progress_route_adoptions.get(key)
+                        if adoption is not None:
+                            try:
+                                await asyncio.wait_for(adoption.wait(), timeout=1.0)
+                            except TimeoutError:
+                                pass
+                            retained_progress = self._progress_routes.get(key)
+                    if (
+                        target is None
+                        or retained_progress is None
+                        or target.requested_origin_kind
+                        is not TaskProgressOriginKind.VOICE
+                        or target.correlation_id != binding.correlation_id
+                        or target.generation != binding.generation
+                    ):
+                        raise RuntimeError(
+                            "voice progress presentation route is no longer current"
+                        )
+                    source_event = intent.source_event.to_dict()
+                    progress_event = intent.progress_event.to_dict()
+                    source_event_id = _required_text(
+                        source_event.get("event_id"), "source_event.event_id"
+                    )
+                    progress_event_id = _required_text(
+                        progress_event.get("event_id"), "progress_event.event_id"
+                    )
+                    seq = source_event.get("seq")
+                    if (
+                        type(seq) is not int
+                        or seq < 0
+                        or progress_event.get("seq") != seq
+                    ):
+                        raise RuntimeError(
+                            "voice progress delivery sequence is invalid"
+                        )
+                    delivery_id = hashlib.sha256(
+                        canonical_json_bytes(
+                            {
+                                "session_id": binding.session_id,
+                                "task_id": binding.task_id,
+                                "attempt_id": intent.task_event.attempt_id,
+                                "correlation_id": binding.correlation_id,
+                                "origin_id": binding.origin_id,
+                                "origin_kind": "voice",
+                                "requested_origin_kind": "voice",
+                                "effective_origin_kind": "voice",
+                                "delivery_mode": "voice",
+                                "fallback_reason": None,
+                                "generation_id": binding.generation_id,
+                                "generation": binding.generation,
+                                "source_event_id": source_event_id,
+                                "progress_event_id": progress_event_id,
+                                "seq": seq,
+                                "evidence_id": intent.evidence_id,
+                            }
+                        )
+                    ).hexdigest()
+                    deliveries = self._progress_deliveries.setdefault(key, {})
+                    voice_deliveries = deliveries
+                    delivery = self._reserve_progress_delivery(
+                        deliveries,
+                        _ProgressDelivery(
+                            delivery_id=delivery_id,
+                            attempt_id=intent.task_event.attempt_id,
+                            source_event_id=source_event_id,
+                            progress_event_id=progress_event_id,
+                            seq=seq,
+                            evidence_id=intent.evidence_id,
+                        ),
+                    )
+                    voice_delivery = delivery
+                    fallback_event = TaskProgressTextEvent(
+                        origin=binding,
+                        task_event=intent.task_event,
+                        source_event=intent.source_event,
+                        progress_event=intent.progress_event,
+                        evidence_id=intent.evidence_id,
+                    )
+                    if (
+                        delivery.fallback_event is not None
+                        and delivery.fallback_event != fallback_event
+                    ):
+                        raise RuntimeError(
+                            "voice progress fallback event was rewritten"
+                        )
+                    delivery.fallback_event = fallback_event
+                    await self._prepare_progress_presentation(
+                        fallback_event,
+                        delivery,
+                        retained_progress=retained_progress,
+                        retained_p2=retained,
+                        surface=PresentationSurface.AUDIO,
+                    )
+                    delivery.delivered = True
+                return
+            except _ProgressPresentationConsumed:
+                assert voice_key is not None
+                assert voice_deliveries is not None
+                assert voice_delivery is not None
+                if (
+                    voice_delivery.presentation is None
+                    and not voice_delivery.delivered
+                    and voice_deliveries.get(voice_delivery.delivery_id)
+                    is voice_delivery
+                ):
+                    voice_deliveries.pop(voice_delivery.delivery_id, None)
+                return
+            except _ProgressPresentationDeferred:
+                assert voice_key is not None
+                assert voice_deliveries is not None
+                assert voice_delivery is not None
+                retained_progress = self._progress_routes.get(voice_key)
+                if retained_progress is None:
+                    raise RuntimeError(
+                        "voice progress route closed while presentation was deferred"
+                    )
+                if (
+                    voice_delivery.presentation is None
+                    and not voice_delivery.delivered
+                    and voice_deliveries.get(voice_delivery.delivery_id)
+                    is voice_delivery
+                ):
+                    voice_deliveries.pop(voice_delivery.delivery_id, None)
+                self._defer_progress_presentation(
+                    retained_progress,
+                    intent,
+                    presentation_class="voice",
                 )
                 return
             except Exception as exc:
+                if (
+                    voice_delivery is not None
+                    and voice_deliveries is not None
+                    and not voice_delivery.delivered
+                    and voice_deliveries.get(voice_delivery.delivery_id)
+                    is voice_delivery
+                ):
+                    if (
+                        voice_delivery.presentation is not None
+                        and not voice_delivery.closed
+                    ):
+                        self._close_task_presentations_for_progress_route(
+                            {voice_delivery.delivery_id: voice_delivery},
+                            reason="voice_progress_delivery_failed",
+                        )
+                    voice_deliveries.pop(voice_delivery.delivery_id, None)
                 # A route may close after the exact check.  Fall through to the
                 # explicit text projection; never synthesize a voice delivery.
                 fallback_reason = (
@@ -1471,12 +2680,17 @@ class AgentServerProductCompositionRegistry:
                     },
                 )
                 await self._emit_text_progress(
-                    TaskProgressTextEvent(
-                        origin=binding,
-                        task_event=intent.task_event,
-                        source_event=intent.source_event,
-                        progress_event=intent.progress_event,
-                        evidence_id=intent.evidence_id,
+                    (
+                        voice_delivery.fallback_event
+                        if voice_delivery is not None
+                        and voice_delivery.fallback_event is not None
+                        else TaskProgressTextEvent(
+                            origin=binding,
+                            task_event=intent.task_event,
+                            source_event=intent.source_event,
+                            progress_event=intent.progress_event,
+                            evidence_id=intent.evidence_id,
+                        )
                     ),
                     fallback_reason=fallback_reason,
                 )
@@ -1509,16 +2723,22 @@ class AgentServerProductCompositionRegistry:
         route: AuthorityRouteContext,
         operation: str,
         task_id: str | None,
+        consumer_task_access: bool = False,
     ) -> ProductSegmentActivation:
         try:
+            candidate_kwargs: dict[str, object] = {
+                "bearer_token": bearer_token,
+                "operation": operation,
+                "session_id": route.session_id,
+                "correlation_id": route.correlation_id,
+                "required_capabilities": frozenset({operation}),
+                "task_id": task_id,
+            }
+            if consumer_task_access:
+                candidate_kwargs["consumer_task_access"] = True
             candidate, resolved_context = await asyncio.to_thread(
                 self._p3_composition.resolve_product_authority_candidate,
-                bearer_token=bearer_token,
-                operation=operation,
-                session_id=route.session_id,
-                correlation_id=route.correlation_id,
-                required_capabilities=frozenset({operation}),
-                task_id=task_id,
+                **candidate_kwargs,
             )
         except FormalTaskViolation as exc:
             state.reason = exc.reason
@@ -5440,6 +6660,13 @@ class AgentServerProductCompositionRegistry:
                     "surface must be text or audio",
                     ErrorCode.INVALID_ARGUMENT,
                 ) from exc
+            ack = PresentationAck(
+                ref=ResponseRef(parsed[2], response_id, response_generation),
+                surface=surface,
+                unit_id=unit_id,
+                contiguous_cursor=cursor,
+                presented_at=presented_at,
+            )
             fingerprint = canonical_json_bytes(
                 {key: value for key, value in params.items() if key != "auth_token"}
             )
@@ -5487,19 +6714,36 @@ class AgentServerProductCompositionRegistry:
                             "bounded presentation ACK replay ledger is full",
                             ErrorCode.UNAVAILABLE,
                         )
-                    ack = PresentationAck(
-                        ref=ResponseRef(parsed[2], response_id, response_generation),
-                        surface=surface,
-                        unit_id=unit_id,
-                        contiguous_cursor=cursor,
-                        presented_at=presented_at,
-                    )
 
                     async def acknowledge() -> P3RouteResult:
+                        marked_delivery: _ProgressDelivery | None = None
                         try:
-                            outcome = await retained.activation_lease.acknowledge_presentation(
-                                retained.binding, ack
+                            async with self._lock:
+                                with self._task_presentation_state_lock:
+                                    mapped = self._task_presentation_deliveries.get(
+                                        ack.ref
+                                    )
+                                    if mapped is not None:
+                                        marked_delivery = mapped[0]
+                                        if marked_delivery.audio_ack_in_flight:
+                                            raise FormalTaskViolation(
+                                                "PRESENTATION_ACK_IN_FLIGHT",
+                                                "an exact Task audio ACK is already in flight",
+                                                ErrorCode.CONFLICT,
+                                            )
+                                        marked_delivery.audio_ack_in_flight = True
+                            outcome = await self._acknowledge_task_voice_presentation(
+                                retained=retained,
+                                ack=ack,
+                                params=params,
+                                route=parsed[5],
+                                request_id=request_id,
                             )
+                            if outcome is None:
+                                outcome = await retained.activation_lease.acknowledge_presentation(
+                                    retained.binding,
+                                    ack,
+                                )
                             if (
                                 outcome.accepted
                                 and ack.surface is PresentationSurface.TEXT
@@ -5537,6 +6781,11 @@ class AgentServerProductCompositionRegistry:
                                 message=str(exc),
                                 manifest=retained.manifest,
                             )
+                        finally:
+                            if marked_delivery is not None:
+                                async with self._lock:
+                                    with self._task_presentation_state_lock:
+                                        marked_delivery.audio_ack_in_flight = False
 
                     task = asyncio.create_task(
                         acknowledge(),
@@ -5548,7 +6797,349 @@ class AgentServerProductCompositionRegistry:
                         p2_binding=retained.binding,
                     )
                     self._p2_ack_operations[request_id] = entry
-            return await asyncio.shield(entry.task)
+            result = await asyncio.shield(entry.task)
+            error = result.payload.get("error")
+            error_code = error.get("code") if isinstance(error, Mapping) else None
+            with self._task_presentation_state_lock:
+                task_presentation_still_active = (
+                    ack.ref in self._task_presentation_deliveries
+                )
+            if (
+                not result.ok
+                and task_presentation_still_active
+                and error_code
+                in {
+                    ErrorCode.UNAVAILABLE.value,
+                    ErrorCode.TIMEOUT.value,
+                    ErrorCode.INTERNAL.value,
+                }
+            ):
+                async with self._lock:
+                    if self._p2_ack_operations.get(request_id) is entry:
+                        self._p2_ack_operations.pop(request_id, None)
+            accepted = result.payload.get("result")
+            if (
+                result.ok
+                and isinstance(accepted, Mapping)
+                and accepted.get("accepted") is True
+                and entry.p2_binding is not None
+            ):
+                await self._drain_voice_progress_for_p2_binding(entry.p2_binding)
+            return result
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+    async def handle_p2_presentation_failed(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Close one failed Task AUDIO attempt and emit an exact TEXT fallback."""
+
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "response_id",
+                        "response_generation",
+                        "surface",
+                        "unit_id",
+                        "failure_reason",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            response_id = _required_text(params.get("response_id"), "response_id")
+            response_generation = params.get("response_generation")
+            if (
+                type(response_generation) is not int
+                or response_generation < 0
+                or response_generation > MAX_SAFE_INTEGER
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "response_generation must be a non-negative safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if params.get("surface") != PresentationSurface.AUDIO.value:
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "only an AUDIO Task presentation may fail into text",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            unit_id = _required_text(params.get("unit_id"), "unit_id")
+            failure_reason = _required_text(
+                params.get("failure_reason"), "failure_reason", maximum=64
+            )
+            if failure_reason not in {
+                "task_audio_playout_failed",
+                "task_audio_owner_unavailable",
+            }:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_PRESENTATION_FAILURE",
+                    "Task presentation failure reason is not closed",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            response_ref = ResponseRef(parsed[2], response_id, response_generation)
+            fingerprint = canonical_json_bytes(
+                {key: value for key, value in params.items() if key != "auth_token"}
+            )
+            async with self._lock:
+                entry = self._p2_presentation_failure_operations.get(request_id)
+                if entry is not None:
+                    if entry.p2_binding is None:
+                        raise RuntimeError(
+                            "retained P2 presentation failure lost its binding"
+                        )
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=entry.p2_binding,
+                    )
+                    if entry.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "presentation failure request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    self._require_product_request_not_evicted(
+                        "p2.presentation.failed", request_id
+                    )
+                    if (
+                        len(self._p2_presentation_failure_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_presentation_failure_operations,
+                            namespace="p2.presentation.failed",
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded presentation failure replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+
+                    async def fail_presentation() -> P3RouteResult:
+                        fallback: _TaskPresentationFallback | None = None
+                        try:
+                            with self._task_presentation_state_lock:
+                                fallback = self._task_presentation_fallbacks.get(
+                                    response_ref
+                                )
+                                if fallback is None:
+                                    mapped = self._task_presentation_deliveries.get(
+                                        response_ref
+                                    )
+                                    if mapped is None:
+                                        raise FormalTaskViolation(
+                                            "TASK_PROGRESS_PRESENTATION_UNAVAILABLE",
+                                            "failed Task presentation is not active",
+                                            ErrorCode.STALE,
+                                        )
+                                    progress_delivery, presentation = mapped
+                                    if (
+                                        presentation.presentation_class != "voice"
+                                        or presentation.scope != retained.binding.scope
+                                        or presentation.unit_id != unit_id
+                                        or progress_delivery.fallback_event is None
+                                    ):
+                                        raise FormalTaskViolation(
+                                            "TASK_PROGRESS_PRESENTATION_MISMATCH",
+                                            "failed Task presentation changed identity",
+                                            ErrorCode.PERMISSION_DENIED,
+                                        )
+                                    if progress_delivery.audio_ack_in_flight:
+                                        raise FormalTaskViolation(
+                                            "PRESENTATION_SETTLEMENT_IN_FLIGHT",
+                                            "Task presentation already has a settlement owner",
+                                            ErrorCode.CONFLICT,
+                                        )
+                                    if (
+                                        len(self._task_presentation_fallbacks)
+                                        >= self._PROGRESS_DELIVERY_CAPACITY
+                                    ):
+                                        evictable = next(
+                                            (
+                                                ref
+                                                for ref, item in self._task_presentation_fallbacks.items()
+                                                if item.text_emitted
+                                            ),
+                                            None,
+                                        )
+                                        if evictable is None:
+                                            raise FormalTaskViolation(
+                                                "PRESENTATION_FALLBACK_CAPACITY_EXHAUSTED",
+                                                "failed Task presentations have no safe eviction",
+                                                ErrorCode.UNAVAILABLE,
+                                            )
+                                        self._task_presentation_fallbacks.pop(evictable)
+                                    fallback = _TaskPresentationFallback(
+                                        progress_delivery=progress_delivery,
+                                        presentation=presentation,
+                                        event=progress_delivery.fallback_event,
+                                        failure_reason=failure_reason,
+                                    )
+                                    self._task_presentation_fallbacks[response_ref] = (
+                                        fallback
+                                    )
+                                elif (
+                                    fallback.presentation.scope
+                                    != retained.binding.scope
+                                    or fallback.presentation.unit_id != unit_id
+                                    or fallback.failure_reason != failure_reason
+                                ):
+                                    raise FormalTaskViolation(
+                                        "TASK_PRESENTATION_FAILURE_REWRITE",
+                                        "failed Task presentation cannot change identity",
+                                        ErrorCode.CONFLICT,
+                                    )
+                                if fallback.progress_delivery.audio_ack_in_flight:
+                                    raise FormalTaskViolation(
+                                        "PRESENTATION_SETTLEMENT_IN_FLIGHT",
+                                        "Task presentation already has a settlement owner",
+                                        ErrorCode.CONFLICT,
+                                    )
+                                fallback.progress_delivery.audio_ack_in_flight = True
+
+                            fallback_close_reason = failure_reason
+                            fallback_delivery_reason = (
+                                "TASK_PROGRESS_AUDIO_OWNER_UNAVAILABLE"
+                                if failure_reason == "task_audio_owner_unavailable"
+                                else "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED"
+                            )
+                            if not fallback.audio_closed:
+                                await retained.activation_lease.fail_task_presentation(
+                                    retained.binding,
+                                    fallback.presentation.response_ref,
+                                    fallback.presentation.runtime_reservation_id,
+                                    reason=failure_reason,
+                                )
+                                with self._task_presentation_state_lock:
+                                    self._task_presentation_owner.close_response(
+                                        fallback.presentation.response_ref,
+                                        reservation_id=(
+                                            fallback.presentation.runtime_reservation_id
+                                        ),
+                                        reason=fallback_close_reason,
+                                    )
+                                    self._record_closed_task_presentation(
+                                        fallback.presentation,
+                                        consumed=False,
+                                    )
+                                    self._task_presentation_runtime_routes.pop(
+                                        fallback.presentation.response_ref, None
+                                    )
+                                    self._task_presentation_deliveries.pop(
+                                        fallback.presentation.response_ref, None
+                                    )
+                                    fallback.progress_delivery.closed = True
+                                    fallback.audio_closed = True
+                            replayed = fallback.text_emitted
+                            if not fallback.text_emitted:
+                                await self._emit_text_progress(
+                                    fallback.event,
+                                    fallback_reason=fallback_delivery_reason,
+                                )
+                                with self._task_presentation_state_lock:
+                                    fallback.text_emitted = True
+                            return _success_result(
+                                request_id,
+                                {
+                                    "status": "presentation_failed_fallback_text",
+                                    "session_id": retained.binding.session_id,
+                                    "correlation_id": retained.binding.correlation_id,
+                                    "interaction_id": retained.binding.interaction_id,
+                                    "activation_id": retained.binding.activation_id,
+                                    "activation_generation": (
+                                        retained.binding.activation_generation
+                                    ),
+                                    "response_id": response_ref.response_id,
+                                    "response_generation": (
+                                        response_ref.response_generation
+                                    ),
+                                    "surface": "audio",
+                                    "unit_id": unit_id,
+                                    "failure_reason": failure_reason,
+                                    "fallback": "text",
+                                    "replayed": replayed,
+                                },
+                                retained.manifest,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            return _error_result(
+                                request_id,
+                                reason=getattr(
+                                    exc,
+                                    "reason",
+                                    "PRODUCT_P2_PRESENTATION_FAILURE_FAILED",
+                                ),
+                                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                                message=str(exc),
+                                manifest=retained.manifest,
+                            )
+                        finally:
+                            if fallback is not None:
+                                with self._task_presentation_state_lock:
+                                    fallback.progress_delivery.audio_ack_in_flight = (
+                                        False
+                                    )
+
+                    task = asyncio.create_task(
+                        fail_presentation(),
+                        name=f"live-voice-product-p2-presentation-failed:{request_id}",
+                    )
+                    entry = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                    )
+                    self._p2_presentation_failure_operations[request_id] = entry
+            result = await asyncio.shield(entry.task)
+            error = result.payload.get("error")
+            error_code = error.get("code") if isinstance(error, Mapping) else None
+            if not result.ok and error_code in {
+                ErrorCode.UNAVAILABLE.value,
+                ErrorCode.TIMEOUT.value,
+                ErrorCode.INTERNAL.value,
+            }:
+                async with self._lock:
+                    if (
+                        self._p2_presentation_failure_operations.get(request_id)
+                        is entry
+                    ):
+                        self._p2_presentation_failure_operations.pop(request_id, None)
+            return result
         except FormalTaskViolation as exc:
             return _error_result(
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
@@ -5849,8 +7440,12 @@ class AgentServerProductCompositionRegistry:
                     code=ErrorCode.PERMISSION_DENIED,
                 )
             try:
+                self._close_task_presentations_for_p2_route(
+                    retained,
+                    reason="p2_route_closed",
+                )
                 await retained.lease.close()
-            except ProductCompositionLeaseCloseError:
+            except (ProductCompositionLeaseCloseError, TaskPresentationViolation):
                 return _error_result(
                     request_id,
                     reason="PRODUCT_P2_CLEANUP_PENDING",
@@ -7946,12 +9541,11 @@ class AgentServerProductCompositionRegistry:
                     effective_origin_kind = TaskProgressOriginKind.TEXT
                     fallback_reason = "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
                 else:
-                    # The current production composition has no audible
-                    # Task-progress consumer or drain for the CR-owned voice
-                    # notification.  Do not advertise a route that would defer
-                    # forever; project the exact event to visible Web text.
-                    effective_origin_kind = TaskProgressOriginKind.TEXT
-                    fallback_reason = "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
+                    if self._p3_presentation_consumption_available:
+                        effective_origin_kind = TaskProgressOriginKind.VOICE
+                    else:
+                        effective_origin_kind = TaskProgressOriginKind.TEXT
+                        fallback_reason = "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
 
             def log_progress_fallback() -> None:
                 if fallback_reason is None:
@@ -7982,6 +9576,7 @@ class AgentServerProductCompositionRegistry:
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
                 if (
                     preauthorized_authority.route_fact.truth
@@ -8019,12 +9614,14 @@ class AgentServerProductCompositionRegistry:
                     code=ErrorCode.CONFLICT,
                 )
             if existing is not None:
+                retained_target = self._progress_targets.get(key)
                 preauthorized_authority = await self._authority_registration(
                     state=state,
                     bearer_token=params.get("auth_token"),
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
                 if (
                     preauthorized_authority.route_fact.truth
@@ -8076,9 +9673,16 @@ class AgentServerProductCompositionRegistry:
                         )
                 if (
                     route_is_active
+                    and retained_target is not None
+                    and existing.channel_id == channel_id
+                    and retained_target.channel_id == channel_id
                     and existing.binding.generation == generation
                     and existing.binding.correlation_id == correlation_id
                     and existing.binding.origin_kind is effective_origin_kind
+                    and retained_target.correlation_id == correlation_id
+                    and retained_target.generation == generation
+                    and retained_target.requested_origin_kind is requested_origin_kind
+                    and retained_target.fallback_reason == fallback_reason
                 ):
                     if preauthorized_authority.lease is not None:
                         await preauthorized_authority.lease.close()
@@ -8088,24 +9692,28 @@ class AgentServerProductCompositionRegistry:
                         {
                             "status": "active",
                             "replayed": True,
-                            "session_id": routed_session,
-                            "correlation_id": correlation_id,
-                            "task_id": task_id,
-                            "origin_id": origin_id,
-                            "generation_id": generation_id,
-                            "generation": generation,
-                            "requested_origin_kind": requested_origin_kind.value,
-                            "origin_kind": effective_origin_kind.value,
-                            "fallback_reason": fallback_reason,
+                            "session_id": existing.binding.session_id,
+                            "correlation_id": retained_target.correlation_id,
+                            "task_id": existing.binding.task_id,
+                            "origin_id": existing.binding.origin_id,
+                            "generation_id": existing.binding.generation_id,
+                            "generation": retained_target.generation,
+                            "requested_origin_kind": (
+                                retained_target.requested_origin_kind.value
+                            ),
+                            "origin_kind": existing.binding.origin_kind.value,
+                            "fallback_reason": retained_target.fallback_reason,
                             "voice_progress": (
                                 "available"
-                                if effective_origin_kind is TaskProgressOriginKind.VOICE
+                                if existing.binding.origin_kind
+                                is TaskProgressOriginKind.VOICE
                                 else "unavailable"
                             ),
                             "voice_reason": (
                                 None
-                                if effective_origin_kind is TaskProgressOriginKind.VOICE
-                                else fallback_reason
+                                if existing.binding.origin_kind
+                                is TaskProgressOriginKind.VOICE
+                                else retained_target.fallback_reason
                                 or "TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE"
                             ),
                         },
@@ -8143,6 +9751,7 @@ class AgentServerProductCompositionRegistry:
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
                 if (
                     preauthorized_authority.route_fact.truth
@@ -8182,6 +9791,7 @@ class AgentServerProductCompositionRegistry:
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
 
             holder: dict[str, object] = {}
@@ -8290,6 +9900,7 @@ class AgentServerProductCompositionRegistry:
                     activate_progress,
                 )
             )
+            self._progress_route_adoptions[key] = asyncio.Event()
             try:
                 activation = await ProductCompositionRoot(
                     enabled=True,
@@ -8302,6 +9913,7 @@ class AgentServerProductCompositionRegistry:
                     self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
                 self._progress_deliveries.pop(key, None)
+                self._settle_progress_route_adoption(key)
                 self._retain_root_cleanup(exc.cleanup_lease)
                 logger.exception("[LiveVoiceProduct] P3 progress failed closed")
                 return _error_result(
@@ -8315,6 +9927,7 @@ class AgentServerProductCompositionRegistry:
                     self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
                 self._progress_deliveries.pop(key, None)
+                self._settle_progress_route_adoption(key)
                 logger.exception("[LiveVoiceProduct] P3 progress failed closed")
                 return _error_result(
                     request_id,
@@ -8333,6 +9946,7 @@ class AgentServerProductCompositionRegistry:
                     self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
                 self._progress_deliveries.pop(key, None)
+                self._settle_progress_route_adoption(key)
                 if activation.lease is not None:
                     try:
                         await activation.lease.close()
@@ -8346,6 +9960,53 @@ class AgentServerProductCompositionRegistry:
                     reason=state.reason or "PRODUCT_P3_PROGRESS_UNAVAILABLE",
                     manifest=activation.manifest,
                 )
+            presentation_authorities: dict[str, ResolvedProductAuthority] = {}
+            for presentation_operation in (
+                ("task.unread_events", "task.result")
+                if self._p3_presentation_consumption_available
+                else ()
+            ):
+                presentation_state = _AuthorityState()
+                presentation_activation = await self._authority_registration(
+                    state=presentation_state,
+                    bearer_token=params.get("auth_token"),
+                    route=route,
+                    operation=presentation_operation,
+                    task_id=task_id,
+                )
+                try:
+                    if (
+                        presentation_activation.route_fact.truth
+                        is not ProductRouteTruth.FORMAL
+                        or presentation_state.canonical is None
+                        or presentation_state.canonical.scope != binding.scope
+                    ):
+                        try:
+                            await activation.lease.close()
+                        except ProductCompositionLeaseCloseError as exc:
+                            self._retain_root_cleanup(exc.lease)
+                        self._progress_targets.pop(key, None)
+                        self._progress_deliveries.pop(key, None)
+                        self._settle_progress_route_adoption(key)
+                        if previous_generation is None:
+                            self._progress_generations.pop(key, None)
+                        else:
+                            self._progress_generations[key] = previous_generation
+                        return _error_result(
+                            request_id,
+                            reason=(
+                                presentation_state.reason
+                                or "TASK_PRESENTATION_AUTHORITY_UNAVAILABLE"
+                            ),
+                            code=ErrorCode.PERMISSION_DENIED,
+                            manifest=activation.manifest,
+                        )
+                    presentation_authorities[presentation_operation] = (
+                        presentation_state.canonical
+                    )
+                finally:
+                    if presentation_activation.lease is not None:
+                        await presentation_activation.lease.close()
             retained = _ProgressRoute(
                 binding=binding,
                 progress_lease=progress_lease,
@@ -8353,8 +10014,11 @@ class AgentServerProductCompositionRegistry:
                 manifest=activation.manifest,
                 channel_id=channel_id,
                 request_id=request_id,
+                unread_authority=presentation_authorities.get("task.unread_events"),
+                result_authority=presentation_authorities.get("task.result"),
             )
             self._progress_routes[key] = retained
+            self._settle_progress_route_adoption(key)
             log_progress_fallback()
             return _success_result(
                 request_id,
@@ -8403,6 +10067,21 @@ class AgentServerProductCompositionRegistry:
 
         if not self._settings.p3_text_enabled:
             return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
+        presentation_enabled = self._p3_presentation_consumption_available
+        presentation_fields = (
+            frozenset(
+                {
+                    "presentation_class",
+                    "response_ref",
+                    "unit_id",
+                    "expected_event_head",
+                    "result_source_event_id",
+                    "presentation_binding",
+                }
+            )
+            if presentation_enabled
+            else frozenset()
+        )
         try:
             _require_exact_params(
                 params,
@@ -8423,7 +10102,8 @@ class AgentServerProductCompositionRegistry:
                         "claimed_user_id",
                         "claimed_project_id",
                     }
-                ),
+                )
+                | presentation_fields,
             )
             self._ensure_running()
             routed_session = _required_text(session_id, "routed_session_id")
@@ -8461,6 +10141,79 @@ class AgentServerProductCompositionRegistry:
                 params.get("progress_event_id"), "progress_event_id"
             )
             evidence_id = _required_text(params.get("evidence_id"), "evidence_id")
+            presentation_class: str | None = None
+            response_ref: ResponseRef | None = None
+            unit_id: str | None = None
+            expected_event_head: int | None = None
+            result_source_event_id: str | None = None
+            presentation_binding: str | None = None
+            if presentation_enabled:
+                presentation_class = _required_text(
+                    params.get("presentation_class"), "presentation_class"
+                )
+                if presentation_class != "text":
+                    raise FormalTaskViolation(
+                        "INVALID_PRESENTATION_CLASS",
+                        "Web DOM adoption can acknowledge only text",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                raw_response_ref = params.get("response_ref")
+                if not isinstance(raw_response_ref, Mapping) or set(
+                    raw_response_ref
+                ) != {
+                    "interaction_id",
+                    "response_id",
+                    "response_generation",
+                }:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "response_ref must be one exact Runtime tuple",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                response_generation = raw_response_ref.get("response_generation")
+                if type(response_generation) is not int or response_generation < 0:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "response_generation must be a non-negative integer",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                response_ref = ResponseRef(
+                    _required_text(
+                        raw_response_ref.get("interaction_id"),
+                        "response_ref.interaction_id",
+                    ),
+                    _required_text(
+                        raw_response_ref.get("response_id"),
+                        "response_ref.response_id",
+                    ),
+                    response_generation,
+                )
+                unit_id = _required_text(params.get("unit_id"), "unit_id")
+                raw_event_head = params.get("expected_event_head")
+                if (
+                    type(raw_event_head) is not int
+                    or raw_event_head < 0
+                    or raw_event_head < seq
+                ):
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "expected_event_head must contain the acknowledged event",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                expected_event_head = raw_event_head
+                raw_result_source_event_id = params.get("result_source_event_id")
+                result_source_event_id = (
+                    None
+                    if raw_result_source_event_id is None
+                    else _required_text(
+                        raw_result_source_event_id, "result_source_event_id"
+                    )
+                )
+                presentation_binding = _required_text(
+                    params.get("presentation_binding"),
+                    "presentation_binding",
+                    maximum=131_072,
+                )
             route = self._route_context(
                 session_id=routed_session,
                 correlation_id=correlation_id,
@@ -8479,7 +10232,9 @@ class AgentServerProductCompositionRegistry:
                 state=state,
                 bearer_token=params.get("auth_token"),
                 route=route,
-                operation="task.events",
+                operation=(
+                    "task.ack_events" if presentation_enabled else "task.events"
+                ),
                 task_id=task_id,
             )
             if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
@@ -8564,8 +10319,204 @@ class AgentServerProductCompositionRegistry:
                         reason="TASK_PROGRESS_DELIVERY_MISMATCH",
                         code=ErrorCode.PERMISSION_DENIED,
                     )
-                replayed = delivery.acknowledged
-                delivery.acknowledged = True
+                if not presentation_enabled:
+                    replayed = delivery.acknowledged
+                    delivery.acknowledged = True
+                    return _success_result(
+                        request_id,
+                        {
+                            "status": "acknowledged",
+                            "replayed": replayed,
+                            "session_id": routed_session,
+                            "task_id": task_id,
+                            "attempt_id": delivery.attempt_id,
+                            "correlation_id": correlation_id,
+                            "origin_id": origin_id,
+                            "generation_id": generation_id,
+                            "generation": generation,
+                            "delivery_id": delivery_id,
+                            "source_event_id": source_event_id,
+                            "progress_event_id": progress_event_id,
+                            "seq": seq,
+                            "evidence_id": evidence_id,
+                            "acknowledgement": "web_ui_text_consumed",
+                        },
+                        manifest,
+                    )
+                assert presentation_class is not None
+                assert response_ref is not None
+                assert unit_id is not None
+                assert expected_event_head is not None
+                assert presentation_binding is not None
+                presentation = delivery.presentation
+                if (
+                    presentation is None
+                    or presentation.presentation_class != presentation_class
+                    or presentation.response_ref != response_ref
+                    or presentation.unit_id != unit_id
+                    or presentation.expected_event_head != expected_event_head
+                    or presentation.result_source_event_id != result_source_event_id
+                    or delivery.presentation_binding != presentation_binding
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_PRESENTATION_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                if delivery.acknowledged:
+                    return _success_result(
+                        request_id,
+                        {
+                            "status": "acknowledged",
+                            "replayed": True,
+                            "session_id": routed_session,
+                            "task_id": task_id,
+                            "attempt_id": delivery.attempt_id,
+                            "correlation_id": correlation_id,
+                            "origin_id": origin_id,
+                            "generation_id": generation_id,
+                            "generation": generation,
+                            "delivery_id": delivery_id,
+                            "source_event_id": source_event_id,
+                            "progress_event_id": progress_event_id,
+                            "seq": seq,
+                            "evidence_id": evidence_id,
+                            "presentation_class": presentation_class,
+                            "response_ref": {
+                                "interaction_id": response_ref.interaction_id,
+                                "response_id": response_ref.response_id,
+                                "response_generation": (
+                                    response_ref.response_generation
+                                ),
+                            },
+                            "unit_id": unit_id,
+                            "expected_event_head": expected_event_head,
+                            "result_source_event_id": result_source_event_id,
+                            "presentation_binding": presentation_binding,
+                            "acknowledgement": "web_ui_text_consumed",
+                        },
+                        manifest,
+                    )
+                if delivery.closed:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_PRESENTATION_CLOSED",
+                        code=ErrorCode.STALE,
+                    )
+                with self._task_presentation_state_lock:
+                    retained_p2 = self._task_presentation_runtime_routes.get(
+                        response_ref
+                    )
+                if retained_p2 is None:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_PRESENTATION_UNAVAILABLE",
+                        code=ErrorCode.STALE,
+                    )
+                try:
+                    adoption_ack = delivery.text_adoption_ack
+                    if adoption_ack is None:
+                        adoption_ack = TextPresentationAdoptionAck.from_delivery(
+                            presentation,
+                            adopted_at=utc_now(),
+                        )
+                        delivery.text_adoption_ack = adoption_ack
+                    self._task_presentation_owner.mark_text_adopted(adoption_ack)
+                    runtime_ack = delivery.runtime_ack
+                    if runtime_ack is None:
+                        runtime_ack = PresentationAck(
+                            ref=response_ref,
+                            surface=PresentationSurface.TEXT,
+                            unit_id=unit_id,
+                            contiguous_cursor=0,
+                            presented_at=adoption_ack.adopted_at,
+                        )
+                        delivery.runtime_ack = runtime_ack
+                    runtime_outcome = (
+                        await retained_p2.activation_lease.acknowledge_presentation(
+                            retained_p2.binding,
+                            runtime_ack,
+                        )
+                    )
+                    if runtime_outcome.accepted is not True:
+                        raise TaskPresentationViolation(
+                            "RUNTIME_PRESENTATION_ACK_REJECTED",
+                            "Runtime rejected the exact DOM presentation",
+                        )
+                    issued_at = (
+                        delivery.command.issued_at
+                        if delivery.command is not None
+                        else utc_now()
+                    )
+                    command_id = self._task_presentation_ack_command_id(presentation)
+                    command, grant = (
+                        self._p3_composition.prepare_product_presentation_ack(
+                            state.canonical,
+                            presentation,
+                            request_id=(
+                                delivery.command.request_id
+                                if delivery.command is not None
+                                else request_id
+                            ),
+                            command_id=command_id,
+                            now=issued_at,
+                        )
+                    )
+                    if delivery.command is not None and delivery.command != command:
+                        raise TaskPresentationViolation(
+                            "CONSUMPTION_COMMAND_REWRITE",
+                            "presentation ACK command changed across retry",
+                        )
+                    delivery.command = command
+                    result = await asyncio.to_thread(
+                        self._task_presentation_owner.consume,
+                        presentation,
+                        command,
+                        grant,
+                        lambda item, authorization: (
+                            self._p3_composition.execute_product_presentation_ack(
+                                state.canonical,
+                                item,
+                                authorization,
+                            )
+                        ),
+                    )
+                    if not isinstance(result, ResultEnvelope) or not result.ok:
+                        reason = (
+                            "TASK_PROGRESS_CONSUMPTION_FAILED"
+                            if not isinstance(result, ResultEnvelope)
+                            or result.error is None
+                            or result.error.reason is None
+                            else result.error.reason
+                        )
+                        return _error_result(
+                            request_id,
+                            reason=reason,
+                            code=(
+                                ErrorCode.UNAVAILABLE
+                                if not isinstance(result, ResultEnvelope)
+                                or result.error is None
+                                else result.error.code
+                            ),
+                        )
+                except (FormalTaskViolation, TaskPresentationViolation) as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=getattr(exc, "code", ErrorCode.PERMISSION_DENIED),
+                        message=str(exc),
+                    )
+                except Exception:
+                    logger.exception(
+                        "[LiveVoiceProduct] Task text consumption failed closed"
+                    )
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_CONSUMPTION_UNAVAILABLE",
+                        code=ErrorCode.UNAVAILABLE,
+                    )
+                replayed = False
+                self._settle_consumed_task_presentation(delivery, presentation)
                 return _success_result(
                     request_id,
                     {
@@ -8583,6 +10534,16 @@ class AgentServerProductCompositionRegistry:
                         "progress_event_id": progress_event_id,
                         "seq": seq,
                         "evidence_id": evidence_id,
+                        "presentation_class": presentation_class,
+                        "response_ref": {
+                            "interaction_id": response_ref.interaction_id,
+                            "response_id": response_ref.response_id,
+                            "response_generation": (response_ref.response_generation),
+                        },
+                        "unit_id": unit_id,
+                        "expected_event_head": expected_event_head,
+                        "result_source_event_id": result_source_event_id,
+                        "presentation_binding": presentation_binding,
                         "acknowledgement": "web_ui_text_consumed",
                     },
                     manifest,
@@ -8726,8 +10687,13 @@ class AgentServerProductCompositionRegistry:
                     code=ErrorCode.PERMISSION_DENIED,
                 )
             try:
+                if self._p3_presentation_consumption_available:
+                    self._close_task_presentations_for_progress_route(
+                        self._progress_deliveries.get(key, {}),
+                        reason="progress_route_closed",
+                    )
                 await retained.lease.close()
-            except ProductCompositionLeaseCloseError:
+            except (ProductCompositionLeaseCloseError, TaskPresentationViolation):
                 return _error_result(
                     request_id,
                     reason="PRODUCT_P3_PROGRESS_CLEANUP_PENDING",
@@ -8764,6 +10730,11 @@ class AgentServerProductCompositionRegistry:
                 tuple(self._progress_routes.items())
             ):
                 try:
+                    if self._p3_presentation_consumption_available:
+                        self._close_task_presentations_for_progress_route(
+                            self._progress_deliveries.get(progress_key, {}),
+                            reason="gateway_progress_route_closed",
+                        )
                     await progress_retained.lease.close()
                 except Exception:
                     failures = True
@@ -8778,6 +10749,10 @@ class AgentServerProductCompositionRegistry:
                     )
             for p2_key, p2_retained in reversed(tuple(self._p2_routes.items())):
                 try:
+                    self._close_task_presentations_for_p2_route(
+                        p2_retained,
+                        reason="gateway_route_closed",
+                    )
                     await p2_retained.lease.close()
                 except Exception:
                     failures = True
@@ -8819,7 +10794,13 @@ class AgentServerProductCompositionRegistry:
 
     async def stop(self) -> None:
         self._stopped = True
+        for adoption in tuple(self._progress_route_adoptions.values()):
+            adoption.set()
+        self._progress_route_adoptions.clear()
         await self.close_active_routes()
+        drain_tasks = tuple(self._presentation_drain_tasks)
+        if drain_tasks:
+            await asyncio.shield(asyncio.gather(*drain_tasks, return_exceptions=True))
         retained_tasks = tuple(
             entry.task
             for ledger in (
@@ -8827,6 +10808,7 @@ class AgentServerProductCompositionRegistry:
                 self._unified_operations,
                 self._p2_notification_operations,
                 self._p2_ack_operations,
+                self._p2_presentation_failure_operations,
                 self._p2_barge_operations,
                 self._p3_issue_operations,
                 self._p3_mutation_operations,

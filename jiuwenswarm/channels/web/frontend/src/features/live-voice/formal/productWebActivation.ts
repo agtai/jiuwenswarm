@@ -3,6 +3,7 @@ export const PRODUCT_P2_CLOSE_METHOD = 'live_voice.composition.p2.close' as cons
 export const PRODUCT_P2_SUBMIT_METHOD = 'live_voice.composition.p2.submit' as const;
 export const PRODUCT_P2_NOTIFICATION_NEXT_METHOD = 'live_voice.composition.p2.notification.next' as const;
 export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.presentation.ack' as const;
+export const PRODUCT_P2_PRESENTATION_FAILED_METHOD = 'live_voice.composition.p2.presentation.failed' as const;
 export const PRODUCT_P2_BARGE_IN_METHOD = 'live_voice.composition.p2.barge_in' as const;
 export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
 export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
@@ -422,7 +423,13 @@ function requireResult(value: unknown, expectedStatus: 'active' | 'closed', bind
 
 function requireP2BoundOperationResult(
   value: unknown,
-  expectedStatus: 'round_accepted' | 'task_origin_accepted' | 'notification' | 'presentation_acknowledged' | 'barge_in_applied',
+  expectedStatus:
+    | 'round_accepted'
+    | 'task_origin_accepted'
+    | 'notification'
+    | 'presentation_acknowledged'
+    | 'presentation_failed_fallback_text'
+    | 'barge_in_applied',
   binding: Readonly<ProductWebP2ActivationBinding>,
 ): JsonObject {
   const payload = objectValue(value);
@@ -769,9 +776,11 @@ export class ProductWebP2ActivationOwner {
   private readonly closeRetryObservers = new Set<ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>>();
   private readonly submissions = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly presentationAcks = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
+  private readonly presentationFailures = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly bargeIns = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly submissionReplayFence = new ProductReplayFence();
   private readonly presentationAckReplayFence = new ProductReplayFence();
+  private readonly presentationFailureReplayFence = new ProductReplayFence();
   private readonly bargeInReplayFence = new ProductReplayFence();
   private notificationRequestId: string | null = null;
   private notificationPromise: Promise<JsonObject> | null = null;
@@ -945,6 +954,10 @@ export class ProductWebP2ActivationOwner {
 
   hasPendingPresentationAck(): boolean {
     return [...this.presentationAcks.values()].some(entry => entry.result === undefined);
+  }
+
+  hasPendingPresentationFailure(): boolean {
+    return [...this.presentationFailures.values()].some(entry => entry.result === undefined);
   }
 
   hasPendingBargeIn(): boolean {
@@ -1141,7 +1154,7 @@ export class ProductWebP2ActivationOwner {
       if (this.presentationAckReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed presentation ACK replay has expired'));
       }
-      if (this.hasPendingPresentationAck()) {
+      if (this.hasPendingPresentationAck() || this.hasPendingPresentationFailure()) {
         return Promise.reject(new Error('a previous presentation ACK is still unresolved'));
       }
       if (this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.presentationAcks, this.presentationAckReplayFence)) {
@@ -1166,6 +1179,80 @@ export class ProductWebP2ActivationOwner {
           this.durableOperationJournal?.settleOperation(operation);
           this.presentationAcks.delete(fingerprint);
         }
+        throw error;
+      })
+      .finally(() => {
+        if (entry.promise === promise) entry.promise = undefined;
+      });
+    entry.promise = promise;
+    return promise;
+  }
+
+  async failTaskPresentation(input: {
+    response_id: string;
+    response_generation: number;
+    surface: 'audio';
+    unit_id: string;
+    failure_reason: 'task_audio_playout_failed' | 'task_audio_owner_unavailable';
+  }): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    if (
+      !Number.isSafeInteger(input.response_generation) ||
+      input.response_generation < 0 ||
+      input.surface !== 'audio' ||
+      (input.failure_reason !== 'task_audio_playout_failed' && input.failure_reason !== 'task_audio_owner_unavailable')
+    ) {
+      return Promise.reject(new Error('presentation failure binding is invalid'));
+    }
+    const params = {
+      ...binding,
+      response_id: requiredText(input.response_id, 'response_id'),
+      response_generation: input.response_generation,
+      surface: input.surface,
+      unit_id: requiredText(input.unit_id, 'unit_id'),
+      failure_reason: input.failure_reason,
+    };
+    const fingerprint = JSON.stringify(params);
+    let retained = this.presentationFailures.get(fingerprint);
+    if (retained?.result) return Promise.resolve(retained.result);
+    if (retained?.promise) return retained.promise;
+    if (!retained) {
+      if (this.presentationFailureReplayFence.has(fingerprint)) {
+        return Promise.reject(new Error('completed presentation failure replay has expired'));
+      }
+      if (this.hasPendingPresentationAck() || this.hasPendingPresentationFailure()) {
+        return Promise.reject(new Error('a previous presentation settlement is still unresolved'));
+      }
+      if (
+        this.presentationFailures.size >= PRODUCT_OPERATION_CAPACITY &&
+        !evictCompletedProductOperation(this.presentationFailures, this.presentationFailureReplayFence)
+      ) {
+        return Promise.reject(new Error('bounded presentation failure ledger is full'));
+      }
+      retained = { requestId: allocateProductRequestId('live-voice-p2-presentation-failed') };
+      this.presentationFailures.set(fingerprint, retained);
+    }
+    const entry = retained;
+    let promise: Promise<JsonObject>;
+    promise = this.request(PRODUCT_P2_PRESENTATION_FAILED_METHOD, params, entry.requestId)
+      .then(value => {
+        const result = requireP2BoundOperationResult(value, 'presentation_failed_fallback_text', binding);
+        if (
+          result.response_id !== params.response_id ||
+          result.response_generation !== params.response_generation ||
+          result.surface !== 'audio' ||
+          result.unit_id !== params.unit_id ||
+          result.failure_reason !== params.failure_reason ||
+          result.fallback !== 'text' ||
+          typeof result.replayed !== 'boolean'
+        ) {
+          throw new Error('product P2 presentation failure result binding is invalid');
+        }
+        entry.result = result;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) this.presentationFailures.delete(fingerprint);
         throw error;
       })
       .finally(() => {

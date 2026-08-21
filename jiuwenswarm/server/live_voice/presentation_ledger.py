@@ -22,9 +22,14 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 
 from .formal_task_models import (
+    PersistentTaskEvent,
     TaskAuthorizationGrant,
     TaskResultRecord,
     TaskUnreadPage,
+)
+from .task_progress_return import (
+    TASK_PROGRESS_NON_PRESENTABLE_EVENTS,
+    TASK_PROGRESS_PRESENTABLE_EVENTS,
 )
 
 
@@ -641,6 +646,28 @@ class TaskPresentationDelivery:
         )
 
 
+def next_task_presentation_event(page: TaskUnreadPage) -> PersistentTaskEvent:
+    """Select the first applicable event after a proven non-presentable prefix."""
+
+    if not isinstance(page, TaskUnreadPage) or not page.events:
+        raise TaskPresentationViolation(
+            "PRESENTATION_UNREAD_EVENT_REQUIRED",
+            "presentation selection requires a non-empty unread page",
+        )
+    for event in page.events:
+        if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS:
+            return event
+        if event.event_type not in TASK_PROGRESS_NON_PRESENTABLE_EVENTS:
+            raise TaskPresentationViolation(
+                "PRESENTATION_EVENT_APPLICABILITY_UNKNOWN",
+                "unread prefix contains an event with no closed presentation policy",
+            )
+    raise TaskPresentationViolation(
+        "PRESENTATION_APPLICABLE_EVENT_UNAVAILABLE",
+        "bounded unread prefix contains no applicable presentation event",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TextPresentationAdoptionAck:
     """Web-owner evidence that one exact text fact exists in the live DOM."""
@@ -744,12 +771,7 @@ class TaskPresentationConsumptionOwner:
                 "PRESENTATION_AUTHENTICATION_REQUIRED",
                 "presentation reservation requires a fresh authenticated scope",
             )
-        event = page.events[0]
-        if event.seq != page.watermark + 1:
-            raise TaskPresentationViolation(
-                "PRESENTATION_PREFIX_GAP",
-                "only the next contiguous unread event may be reserved",
-            )
+        event = next_task_presentation_event(page)
         if (
             event.task_id != page.task_id
             or event.scope.subject_id != scope.subject_id

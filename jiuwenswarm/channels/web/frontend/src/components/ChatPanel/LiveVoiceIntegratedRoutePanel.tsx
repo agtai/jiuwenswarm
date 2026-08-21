@@ -210,6 +210,8 @@ export type ProductPresentationAckInput = {
   contiguous_cursor: number;
 };
 
+type ProductTaskPresentationFailureReason = 'task_audio_playout_failed' | 'task_audio_owner_unavailable';
+
 function sameProductPresentation(
   left: ProductPresentationAckInput,
   right: ProductPresentationAckInput,
@@ -1074,6 +1076,8 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
   const event = recordValue(notification.agent_event);
   const unit = recordValue(notification.presentation_unit);
   const response = recordValue(notification.response);
+  const taskNotification = event?.source_provenance === 'server.task_notification';
+  const presentationSurface = unit?.surface === 'text' || (unit?.surface === 'audio' && taskNotification) ? unit.surface : null;
   const errorReason =
     typeof notification.error_reason === 'string' ? notification.error_reason : typeof event?.error_reason === 'string' ? event.error_reason : null;
   const responseBinding =
@@ -1097,7 +1101,8 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
   if (
     notification.kind === 'agent.output' &&
     typeof event?.text === 'string' &&
-    unit?.surface === 'text' &&
+    presentationSurface !== null &&
+    unit !== null &&
     typeof unit.unit_id === 'string' &&
     Number.isSafeInteger(unit.seq) &&
     typeof response?.interaction_id === 'string' &&
@@ -1119,14 +1124,14 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
       history_message_id:
         contentDigest === null
           ? null
-          : `live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}:text:${unit.seq}:${unit.seq}:${contentDigest}`,
+          : `live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}:${presentationSurface}:${unit.seq}:${unit.seq}:${contentDigest}`,
       replayed: hasPresentedOutput,
-      task_notification: event.source_provenance === 'server.task_notification',
+      task_notification: taskNotification,
       adjustment_notification: event.source_provenance === 'server.background.adjustment',
       ack: {
         response_id: response.response_id,
         response_generation: response.response_generation as number,
-        surface: 'text',
+        surface: presentationSurface,
         unit_id: unit.unit_id,
         contiguous_cursor: unit.seq as number,
       },
@@ -1379,6 +1384,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       retry_count: number;
       retry_pending: boolean;
     } | null;
+    failure_reason?: ProductTaskPresentationFailureReason;
     settlement?: Promise<void>;
   } | null>(null);
   const retryTerminalAnnouncementHandlerRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
@@ -1574,6 +1580,131 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (voiceLoopP2RefreshAfterGenerationRef.current === null || voiceLoopP2RefreshInFlightRef.current) return;
     voiceLoopP2RefreshInFlightRef.current = true;
     setP2RecoveryEpoch(epoch => epoch + 1);
+  };
+
+  const settleTaskPresentationFailure = (
+    retained: NonNullable<typeof pendingPresentationAttemptRef.current>,
+    failureReason: ProductTaskPresentationFailureReason,
+  ): Promise<void> => {
+    const taskNotification = retained.task_notification;
+    if (taskNotification === null || retained.input.surface !== 'audio') {
+      return Promise.reject(new Error('only Task AUDIO presentation can report playout failure'));
+    }
+    if (retained.failure_reason !== undefined && retained.failure_reason !== failureReason) {
+      return Promise.reject(new Error('Task presentation failure reason cannot be rewritten'));
+    }
+    retained.failure_reason = failureReason;
+    retained.markPlayoutSettled();
+    if (retained.settlement) return retained.settlement;
+    const owner = retained.owner;
+    const ownerSession = owner.snapshot().binding?.session_id;
+    const isCurrentOwner = () =>
+      mountedRef.current &&
+      activationOwnerRef.current === owner &&
+      ownerSession !== undefined &&
+      activeSessionRef.current === ownerSession &&
+      pendingPresentationAttemptRef.current === retained;
+    let settlement: Promise<void>;
+    settlement = Promise.resolve()
+      .then(() =>
+        retryRetainedProductOperation({
+          operation: async () => {
+            try {
+              return await owner.failTaskPresentation({
+                response_id: retained.input.response_id,
+                response_generation: retained.input.response_generation,
+                surface: 'audio',
+                unit_id: retained.input.unit_id,
+                failure_reason: failureReason,
+              });
+            } catch (error) {
+              if (isCurrentOwner() && isRetriableProductOperationError(error)) {
+                const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
+                setProductTextReason(reason);
+                setProductTextStatus('failed');
+                publishProductRecoveryDiagnostic({
+                  seam: 'tts',
+                  disposition: 'retrying',
+                  reason,
+                  binding: owner.snapshot().binding,
+                  response: retained.response,
+                });
+              }
+              throw error;
+            }
+          },
+          is_current: isCurrentOwner,
+        }),
+      )
+      .then(() => {
+        if (!isCurrentOwner()) return;
+        if (activeVoiceResponseRef.current?.response_id === retained.response.response_id) {
+          activeVoiceResponseRef.current = null;
+        }
+        pendingPresentationAttemptRef.current = null;
+        setPendingPresentationAck(null);
+        if (taskNotification.task_id) {
+          terminalNotificationTaskIdRef.current = taskNotification.task_id;
+          terminalNotificationCheckRequiredRef.current = false;
+        }
+        terminalAnnouncementSpeechOwnerRef.current = null;
+        updateTerminalAnnouncementState('idle', null);
+        clearProductRecoveryDiagnostic({
+          seam: 'tts',
+          binding: owner.snapshot().binding,
+          response: retained.response,
+        });
+        if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+      })
+      .catch(error => {
+        if (!isCurrentOwner()) return;
+        const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
+        if (!owner.hasPendingPresentationFailure()) {
+          if (activeVoiceResponseRef.current?.response_id === retained.response.response_id) {
+            activeVoiceResponseRef.current = null;
+          }
+          pendingPresentationAttemptRef.current = null;
+          setPendingPresentationAck(null);
+          terminalAnnouncementSpeechOwnerRef.current = null;
+          updateTerminalAnnouncementState('idle', null);
+          if (isStaleProductResponseError(error)) {
+            setProductTextReason(null);
+            setProductTextStatus(foregroundPresentationPendingRef.current ? 'waiting' : 'acknowledged');
+            clearProductRecoveryDiagnostic({
+              seam: 'tts',
+              binding: owner.snapshot().binding,
+              response: retained.response,
+            });
+          } else {
+            setProductTextReason(reason);
+            setProductTextStatus('failed');
+            publishProductRecoveryDiagnostic({
+              seam: 'tts',
+              disposition: 'terminal',
+              reason,
+              binding: owner.snapshot().binding,
+              response: retained.response,
+            });
+          }
+          if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+          return;
+        }
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'tts',
+          disposition: 'retrying',
+          reason,
+          binding: owner.snapshot().binding,
+          response: retained.response,
+        });
+        setP2RecoveryEpoch(epoch => epoch + 1);
+      })
+      .finally(() => {
+        if (retained.settlement === settlement) retained.settlement = undefined;
+      });
+    retained.settlement = settlement;
+    return settlement;
   };
 
   const settleProductPresentationAck = (retained: NonNullable<typeof pendingPresentationAttemptRef.current>): Promise<void> => {
@@ -1916,6 +2047,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         })
         .catch(error => {
           presentationAttempt.markPlayoutSettled();
+          if (disposition.task_notification && disposition.ack.surface === 'audio') {
+            if (!isCurrentPresentationAttempt()) return;
+            if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
+            const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
+            setProductTextReason(reason);
+            setProductTextStatus('failed');
+            publishProductRecoveryDiagnostic({
+              seam: 'tts',
+              disposition: 'retrying',
+              reason,
+              binding: presentationBinding,
+              response: disposition.response,
+            });
+            updateTerminalAnnouncementState('recovering');
+            void settleTaskPresentationFailure(presentationAttempt, 'task_audio_playout_failed');
+            return;
+          }
           if (!isCurrentVoicePlayout()) {
             if (isCurrentPresentationAttempt()) retainAck();
             return;
@@ -1944,6 +2092,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             retainAck(true);
           }
         });
+    } else if (disposition.task_notification && disposition.ack.surface === 'audio') {
+      const reason = 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED';
+      presentationAttempt.markPlayoutSettled();
+      setProductTextReason(reason);
+      setProductTextStatus('failed');
+      publishProductRecoveryDiagnostic({
+        seam: 'tts',
+        disposition: 'retrying',
+        reason,
+        binding: presentationBinding,
+        response: disposition.response,
+      });
+      updateTerminalAnnouncementState('recovering');
+      void settleTaskPresentationFailure(presentationAttempt, 'task_audio_owner_unavailable');
     } else if (disposition.task_notification) {
       const reason = 'PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED';
       setProductTextReason(reason);
@@ -2011,12 +2173,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const pendingPresentation = pendingPresentationAttemptRef.current;
     if (pendingPresentation?.owner === owner) {
       await pendingPresentation.playoutSettlement;
-      // Normal playout settlement and P2 recovery share one exact ACK
-      // operation.  A recovery pass must never start a second request for the
-      // same presentation while the normal path is still in flight.
-      await settleProductPresentationAck(pendingPresentation);
-      if (pendingPresentationAttemptRef.current === pendingPresentation && owner.hasPendingPresentationAck()) {
-        throw new Error('presentation ACK result remains unknown');
+      // Normal playout settlement and P2 recovery share one exact retained
+      // operation. A failed Task AUDIO playout reports failure; it must never
+      // be converted into an accepted Presentation ACK during recovery.
+      if (pendingPresentation.failure_reason !== undefined) {
+        await settleTaskPresentationFailure(pendingPresentation, pendingPresentation.failure_reason);
+        if (pendingPresentationAttemptRef.current === pendingPresentation && owner.hasPendingPresentationFailure()) {
+          throw new Error('presentation failure result remains unknown');
+        }
+      } else {
+        await settleProductPresentationAck(pendingPresentation);
+        if (pendingPresentationAttemptRef.current === pendingPresentation && owner.hasPendingPresentationAck()) {
+          throw new Error('presentation ACK result remains unknown');
+        }
       }
     }
     const pendingBargeIn = pendingBargeInRef.current;
@@ -3002,6 +3171,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingBargeInRef.current?.owner === closing ||
         closing.hasPendingSubmission() ||
         closing.hasPendingPresentationAck() ||
+        closing.hasPendingPresentationFailure() ||
         closing.hasPendingBargeIn(),
       );
       if (recoveryBarrier) {
@@ -3048,6 +3218,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         productTextStatus === 'waiting' ||
         activationOwnerRef.current?.hasPendingSubmission() ||
         activationOwnerRef.current?.hasPendingPresentationAck() ||
+        activationOwnerRef.current?.hasPendingPresentationFailure() ||
         activationOwnerRef.current?.hasPendingBargeIn(),
       ),
       speech_active: owner !== null && terminalAnnouncementSpeechOwnerRef.current === owner,
@@ -3218,6 +3389,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             journal.snapshot().pending_operation === null &&
             !retained.hasPendingSubmission() &&
             !retained.hasPendingPresentationAck() &&
+            !retained.hasPendingPresentationFailure() &&
             !retained.hasPendingBargeIn()
           ) {
             if (activationOwnerRef.current === retained) {
@@ -3488,6 +3660,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingBargeInRef.current !== null ||
         owner.hasPendingSubmission() ||
         owner.hasPendingPresentationAck() ||
+        owner.hasPendingPresentationFailure() ||
         owner.hasPendingBargeIn()
       ) {
         setProductTextStatus('failed');
@@ -3802,6 +3975,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationOwnerRef.current?.hasPendingSubmission() ||
       (terminalNotificationCheckRequiredRef.current && activationOwnerRef.current?.hasPendingNotification()) ||
       activationOwnerRef.current?.hasPendingPresentationAck() ||
+      activationOwnerRef.current?.hasPendingPresentationFailure() ||
       activationOwnerRef.current?.hasPendingBargeIn()
     )
       return;
@@ -4057,6 +4231,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (terminal === null || pendingPresentationAttemptRef.current !== retained || terminal.retry_pending || terminal.retry_count >= 1) {
       return;
     }
+    if (retained.failure_reason !== undefined) {
+      void settleTaskPresentationFailure(retained, retained.failure_reason);
+      return;
+    }
     if (
       !mountedRef.current ||
       !voiceLoopEnabledRef.current ||
@@ -4291,6 +4469,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingBargeInRef.current !== null ||
       owner.hasPendingSubmission() ||
       owner.hasPendingPresentationAck() ||
+      owner.hasPendingPresentationFailure() ||
       owner.hasPendingBargeIn()
     )
       return null;
@@ -5134,6 +5313,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingBargeInRef.current ||
     activationOwnerRef.current?.hasPendingSubmission() ||
     activationOwnerRef.current?.hasPendingPresentationAck() ||
+    activationOwnerRef.current?.hasPendingPresentationFailure() ||
     activationOwnerRef.current?.hasPendingBargeIn(),
   );
   const productOperationRetained = Boolean(recognizedSpeechConfirmation || editedVoiceDraftConfirmation || productTextTransportRetained);
@@ -5147,6 +5327,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingBargeInRef.current ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
+      owner?.hasPendingPresentationFailure() ||
       owner?.hasPendingBargeIn()
     )
       return;
@@ -5166,6 +5347,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingBargeInRef.current ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
+      owner?.hasPendingPresentationFailure() ||
       owner?.hasPendingBargeIn() ||
       taskIntentSnapshot.retained_transport
     )
@@ -6166,7 +6348,9 @@ export function LiveVoiceIntegratedRoutePanelView({
             aria-label={t('liveVoice.integrated.progress.title')}
             data-testid="live-voice-integrated-product-progress"
             data-delivery-id={progress.delivery_id}
-            data-presentation-binding={productTextProgressPresentationBinding(progress)}
+            data-presentation-binding={
+              progress.consumption_mode === 'presentation' ? productTextProgressPresentationBinding(progress) : undefined
+            }
             data-session-id={progress.session_id}
             data-subject-id={progress.source_event.scope.subject_id}
             data-project-id={progress.project_id}
@@ -6176,13 +6360,13 @@ export function LiveVoiceIntegratedRoutePanelView({
             data-event-seq={String(progress.source_event.seq)}
             data-generation-id={progress.generation_id}
             data-generation={String(progress.generation)}
-            data-presentation-class={progress.presentation_class}
-            data-response-interaction-id={progress.response_ref.interaction_id}
-            data-response-id={progress.response_ref.response_id}
-            data-response-generation={String(progress.response_ref.response_generation)}
-            data-unit-id={progress.unit_id}
-            data-expected-event-head={String(progress.expected_event_head)}
-            data-result-source-event-id={progress.result_source_event_id ?? ''}
+            data-presentation-class={progress.presentation_class ?? undefined}
+            data-response-interaction-id={progress.response_ref?.interaction_id}
+            data-response-id={progress.response_ref?.response_id}
+            data-response-generation={progress.response_ref ? String(progress.response_ref.response_generation) : undefined}
+            data-unit-id={progress.unit_id ?? undefined}
+            data-expected-event-head={progress.expected_event_head === null ? undefined : String(progress.expected_event_head)}
+            data-result-source-event-id={progress.consumption_mode === 'presentation' ? progress.result_source_event_id ?? '' : undefined}
           >
             <strong>{t('liveVoice.integrated.progress.title')}</strong>
             <span className="live-voice-integrated__progress-note">{t('liveVoice.integrated.progress.disclosure')}</span>

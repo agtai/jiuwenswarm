@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import threading
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CONTRACT_VERSION,
     ErrorCode,
+    ProducerRef,
+    ResponseRef,
     ScopeRef,
     TerminalOutcome,
     TurnCommit,
@@ -40,6 +43,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskRecord,
     ReconciliationState,
     ResolvedTaskContext,
+    TaskAuthorizationGrant,
     TaskAdjustmentDeliveryResult,
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
@@ -54,6 +58,7 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     P3AuthenticatedComposition,
     P3_MUTATIONS,
     P3_OPERATIONS,
+    P3_PRODUCT_AUTHORITY_OPERATIONS,
     P3_ROUTE_METHODS,
     P3_TARGETED_MUTATIONS,
     P3RouteTelemetry,
@@ -63,6 +68,15 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     _DirectP3RuntimeOwner,
     _resolve_database_path,
     create_p3_composition_from_environment,
+)
+from jiuwenswarm.server.live_voice.presentation_ledger import (
+    TaskPresentationDelivery,
+)
+from jiuwenswarm.server.live_voice.product_authority import (
+    AuthorityDecisionStatus,
+    AuthorityRouteContext,
+    ProductAuthorityRequest,
+    ProductAuthorityService,
 )
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     P3ConfirmationBinding,
@@ -81,6 +95,10 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     ProjectExecutionBinding,
 )
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.live_voice.task_progress_return import (
+    TaskProgressOriginBinding,
+    TaskProgressOriginKind,
+)
 from jiuwenswarm.server.live_voice.voice_task_policy import FormalTaskPolicyAdapter
 
 NOW = "2026-08-05T12:00:00Z"
@@ -5040,6 +5058,301 @@ async def test_product_authority_candidate_requires_exact_cancel_target(
             )
         assert missing.value.reason == "INVALID_P3_ROUTE_ARGUMENT"
     finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_product_presentation_uses_fresh_unread_and_server_ack_authorities(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-presentation-task"),
+            request_id="request-presentation-task",
+            session_id="session-1",
+        )
+        assert created.ok is True
+        task_id = str(created.payload["result"]["task_id"])
+
+        def resolve(operation: str):
+            candidate, _context = (
+                harness.composition.resolve_product_authority_candidate(
+                    bearer_token=TOKEN,
+                    operation=operation,
+                    session_id="session-1",
+                    correlation_id=f"correlation:{operation}",
+                    required_capabilities=frozenset({operation}),
+                    task_id=task_id,
+                )
+            )
+
+            class Resolver:
+                @staticmethod
+                def resolve(_lookup):
+                    return (candidate,)
+
+            route = AuthorityRouteContext(
+                session_id="session-1",
+                correlation_id=f"correlation:{operation}",
+                claimed_user_id="user-1",
+                claimed_project_id="project-1",
+                claimed_scope=_scope(),
+            )
+            decision = ProductAuthorityService(
+                enabled=True,
+                resolver=Resolver(),
+                clock=lambda: datetime(2026, 8, 5, 12, tzinfo=UTC),
+            ).resolve(
+                ProductAuthorityRequest(
+                    route=route,
+                    operation=operation,
+                    required_capabilities=frozenset({operation}),
+                    resource=candidate.resource,
+                )
+            )
+            assert decision.status is AuthorityDecisionStatus.AUTHORIZED
+            assert decision.authority is not None
+            return decision.authority
+
+        unread_authority = resolve("task.unread_events")
+        page = await harness.composition.read_product_unread_events(
+            unread_authority,
+            presentation_class="text",
+            request_id="request-unread-presentation",
+        )
+        assert page.events and page.events[0].seq == page.watermark + 1
+        event = page.events[0]
+        delivery = TaskPresentationDelivery(
+            scope=unread_authority.scope,
+            presentation_class="text",
+            task_id=task_id,
+            attempt_id=event.attempt_id,
+            event_id=event.event_id,
+            event_seq=event.seq,
+            expected_event_head=page.head_seq,
+            result_source_event_id=None,
+            response_ref=ResponseRef("interaction-1", "response-presentation-1", 1),
+            runtime_reservation_id="runtime-reservation-1",
+            delivery_id="delivery-presentation-1",
+            unit_id="unit-presentation-1",
+        )
+        ack_authority = resolve("task.ack_events")
+        command, grant = harness.composition.prepare_product_presentation_ack(
+            ack_authority,
+            delivery,
+            request_id="request-ack-presentation",
+            command_id="command-ack-presentation",
+            now="2026-08-05T12:00:01Z",
+        )
+        result = harness.composition.execute_product_presentation_ack(
+            ack_authority,
+            command,
+            grant,
+            now="2026-08-05T12:00:01Z",
+        )
+        assert result.ok is True
+        assert result.result is not None
+        assert result.result["acked_through_seq"] == event.seq
+        after = await harness.composition.read_product_unread_events(
+            unread_authority,
+            presentation_class="text",
+            request_id="request-unread-presentation-after",
+        )
+        assert after.watermark == event.seq
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_presentation_consumer_reconnects_in_a_fresh_session(
+    tmp_path: Path,
+) -> None:
+    contexts = {
+        "session-1": _context(tmp_path, session_id="session-1"),
+        "session-2": _context(tmp_path, session_id="session-2"),
+        "session-foreign": _context(
+            tmp_path,
+            project_id="project-2",
+            session_id="session-foreign",
+        ),
+    }
+    harness = _harness(
+        tmp_path,
+        contexts=contexts,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    source = None
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-reconnect-task"),
+            request_id="request-reconnect-task",
+            session_id="session-1",
+        )
+        assert created.ok is True
+        task_id = str(created.payload["result"]["task_id"])
+
+        with pytest.raises(FormalTaskViolation) as exact_session_query:
+            harness.composition.resolve_product_authority_candidate(
+                bearer_token=TOKEN,
+                operation="task.events",
+                session_id="session-2",
+                correlation_id="correlation:ordinary-events",
+                required_capabilities=frozenset({"task.events"}),
+                task_id=task_id,
+            )
+        assert exact_session_query.value.reason == "TASK_NOT_FOUND"
+
+        candidate, _context_2 = harness.composition.resolve_product_authority_candidate(
+            bearer_token=TOKEN,
+            operation="task.events",
+            session_id="session-2",
+            correlation_id="correlation:consumer-events",
+            required_capabilities=frozenset({"task.events"}),
+            task_id=task_id,
+            consumer_task_access=True,
+        )
+        assert candidate.scope == _scope(session_id="session-2")
+        grant = TaskAuthorizationGrant(
+            principal_id="user-1",
+            scope=candidate.scope,
+            operation="task.events",
+            command_id=None,
+            target_task_id=task_id,
+            allowed_capabilities=frozenset({"task.events"}),
+            confirmation_id=None,
+            confirmed=False,
+            expires_at=EXPIRY,
+        )
+        binding = TaskProgressOriginBinding(
+            scope=candidate.scope,
+            task_id=task_id,
+            session_id="session-2",
+            project_id="project-1",
+            correlation_id="correlation:consumer-events",
+            origin_kind=TaskProgressOriginKind.TEXT,
+            origin_id="web-progress-reconnect",
+            generation_kind="web_task_progress_generation",
+            generation_id="generation-reconnect",
+            generation=1,
+            source_instance_id="agent_server.p3_core",
+            progress_producer=ProducerRef(
+                component="product_p3_text",
+                instance_id="session-2:web-progress-reconnect:1",
+                authority="adapter",
+            ),
+            progress_adapter="agent_server.product_p3_text.v1",
+        )
+        source = harness.composition.create_product_progress_source(grant, binding)
+        assert await source.start() is True
+        replayed = await asyncio.wait_for(source.next_event(), timeout=1)
+        assert replayed.task_id == task_id
+        assert replayed.seq == 0
+
+        def resolve_presentation(operation: str, session_id: str):
+            resolved_candidate, _ = (
+                harness.composition.resolve_product_authority_candidate(
+                    bearer_token=TOKEN,
+                    operation=operation,
+                    session_id=session_id,
+                    correlation_id=f"correlation:{operation}:{session_id}",
+                    required_capabilities=frozenset({operation}),
+                    task_id=task_id,
+                )
+            )
+
+            class Resolver:
+                @staticmethod
+                def resolve(_lookup):
+                    return (resolved_candidate,)
+
+            route_scope = contexts[session_id].scope
+            service = ProductAuthorityService(
+                enabled=True,
+                resolver=Resolver(),
+                clock=lambda: datetime(2026, 8, 5, 12, tzinfo=UTC),
+            )
+            decision = service.resolve(
+                ProductAuthorityRequest(
+                    route=AuthorityRouteContext(
+                        session_id=session_id,
+                        correlation_id=f"correlation:{operation}:{session_id}",
+                        claimed_user_id="user-1",
+                        claimed_project_id=route_scope.project_id,
+                        claimed_scope=route_scope,
+                    ),
+                    operation=operation,
+                    required_capabilities=frozenset({operation}),
+                    resource=resolved_candidate.resource,
+                )
+            )
+            assert decision.status is AuthorityDecisionStatus.AUTHORIZED
+            assert decision.authority is not None
+            return decision.authority
+
+        unread_authority = resolve_presentation("task.unread_events", "session-2")
+        page = await harness.composition.read_product_unread_events(
+            unread_authority,
+            presentation_class="text",
+            request_id="request-reconnect-unread",
+        )
+        event = page.events[0]
+        delivery = TaskPresentationDelivery(
+            scope=unread_authority.scope,
+            presentation_class="text",
+            task_id=task_id,
+            attempt_id=event.attempt_id,
+            event_id=event.event_id,
+            event_seq=event.seq,
+            expected_event_head=page.head_seq,
+            result_source_event_id=None,
+            response_ref=ResponseRef("interaction-reconnect", "response-reconnect", 1),
+            runtime_reservation_id="runtime-reservation-reconnect",
+            delivery_id="delivery-reconnect",
+            unit_id="unit-reconnect",
+        )
+        ack_authority = resolve_presentation("task.ack_events", "session-2")
+        command, ack_grant = harness.composition.prepare_product_presentation_ack(
+            ack_authority,
+            delivery,
+            request_id="request-reconnect-ack",
+            command_id="command-reconnect-ack",
+            now="2026-08-05T12:00:01Z",
+        )
+        result = harness.composition.execute_product_presentation_ack(
+            ack_authority,
+            command,
+            ack_grant,
+            now="2026-08-05T12:00:01Z",
+        )
+        assert result.ok is True
+        assert result.result is not None
+        assert result.result["acked_through_seq"] == event.seq
+
+        before = await _effects(harness)
+        with pytest.raises(FormalTaskViolation) as foreign:
+            harness.composition.resolve_product_authority_candidate(
+                bearer_token=TOKEN,
+                operation="task.unread_events",
+                session_id="session-foreign",
+                correlation_id="correlation:foreign-unread",
+                required_capabilities=frozenset({"task.unread_events"}),
+                task_id=task_id,
+            )
+        assert foreign.value.reason == "TASK_NOT_FOUND"
+        assert await _effects(harness) == before
+    finally:
+        if source is not None:
+            await source.close()
         await harness.composition.stop()
 
 

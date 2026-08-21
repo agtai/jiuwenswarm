@@ -62,8 +62,6 @@ class _Composition:
         return P3RouteResult(True, {"ok": True, "result": {"task_id": "task-1"}})
 
 
-
-
 class _LifecycleComposition:
     def __init__(self, *, fail_start: bool = False) -> None:
         self.fail_start = fail_start
@@ -135,6 +133,10 @@ class _ProductRegistry:
 
     async def handle_p2_presentation_ack(self, **kwargs):
         self.calls.append(("p2.presentation.ack", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
+    async def handle_p2_presentation_failed(self, **kwargs):
+        self.calls.append(("p2.presentation.failed", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
 
     async def handle_p2_barge_in(self, **kwargs):
@@ -320,8 +322,6 @@ class _RoundAcceptedRegistry(_ProductRegistry):
         )
 
 
-
-
 class _ConnectionCleanupRegistry:
     def __init__(self) -> None:
         self.calls = 0
@@ -449,8 +449,6 @@ async def test_formal_route_passes_only_rpc_context_to_composition() -> None:
     assert wire["body"]["result"]["result"]["task_id"] == "task-1"
 
 
-
-
 @pytest.mark.asyncio
 async def test_formal_route_is_fail_closed_when_composition_is_not_ready() -> None:
     server = _server(None)
@@ -506,6 +504,7 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p2.presentation.failed",
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",
@@ -822,6 +821,11 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
             False,
         ),
         (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED,
+            "p2.presentation.failed",
+            False,
+        ),
+        (
             ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
             "p2.barge_in",
             False,
@@ -933,7 +937,9 @@ def _intent_observation_route_result(
 
 
 @pytest.mark.asyncio
-async def test_product_intent_observation_uses_validated_result_not_client_hint() -> None:
+async def test_product_intent_observation_uses_validated_result_not_client_hint() -> (
+    None
+):
     request_id = "request-observed-intent"
     registry = _ProductRegistry(
         intent_result=_intent_observation_route_result(
@@ -1137,7 +1143,9 @@ async def test_product_text_intent_and_voice_activation_fallback_are_explicit() 
 
 
 @pytest.mark.asyncio
-async def test_task_observability_does_not_relabel_rejection_or_query_as_fallback_command() -> None:
+async def test_task_observability_does_not_relabel_rejection_or_query_as_fallback_command() -> (
+    None
+):
     request_id = "request-observed-non-fallback"
     server = _server(object())
     observer = LiveVoiceObservabilityCollector()
@@ -1315,12 +1323,6 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
     assert json.loads(ws.sent[0])["status"] == "succeeded"
 
 
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_product_route_is_fail_closed_when_registry_is_disabled() -> None:
     server = _server(object())
@@ -1372,8 +1374,6 @@ async def test_agentserver_owns_formal_composition_start_and_stop(
     assert server._live_voice_p3_confirmation_owner is None
     assert server._live_voice_p3_confirmation_forwarder is None
     assert server._live_voice_turn_commit_ledger is None
-
-
 
 
 @pytest.mark.asyncio

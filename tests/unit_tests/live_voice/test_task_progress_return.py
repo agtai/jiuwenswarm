@@ -26,11 +26,15 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorResolution,
     FormalAttemptState,
     FormalTaskSpec,
+    FormalTaskViolation,
     PersistentTaskEvent,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
     TaskRetryProductRequestFingerprint,
     TaskRetryAuthoritySnapshot,
+)
+from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+    ExecutorRecoveryFacts,
 )
 from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     ForegroundFact,
@@ -42,6 +46,7 @@ from jiuwenswarm.server.live_voice.task_event_subscription import (
     TaskEventSubscription,
 )
 from jiuwenswarm.server.live_voice.task_progress_return import (
+    TASK_PROGRESS_PRESENTABLE_EVENTS,
     TaskProgressHandoffKind,
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
@@ -439,6 +444,234 @@ def _finish_authority_task(store: SqliteTaskStore, task_id: str) -> None:
     )
 
 
+def _append_authority_adjustments(
+    store: SqliteTaskStore, task_id: str, *, count: int
+) -> None:
+    task = store.get_task(task_id, _scope())
+    for ordinal in range(count):
+        command_id = f"command-authority-adjust-{ordinal}"
+        command = CommandEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": f"request-authority-adjust-{ordinal}",
+                "command_id": command_id,
+                "command_type": "task.adjust",
+                "issued_at": NOW,
+                "scope": task.scope.to_dict(),
+                "correlation_id": task.correlation_id,
+                "causation_id": None,
+                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+                "target_ref": {"kind": "task", "id": task_id},
+                "context_refs": [],
+                "required_capabilities": ["task.adjust"],
+                "payload": {"adjustment": f"Adjustment {ordinal}."},
+                "extensions": {},
+            }
+        )
+        admitted = store.adjust(command, observed_at=NOW)
+        assert admitted.ok
+
+
+def _ack_authority_task_head(
+    store: SqliteTaskStore,
+    task_id: str,
+    *,
+    presentation_class: str,
+) -> None:
+    task = store.get_task(task_id, _scope())
+    terminal = store.events(task_id, task.scope)[-1]
+    assert terminal.seq == task.event_head
+    command = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-authority-consume-head",
+            "command_id": "command-authority-consume-head",
+            "command_type": "task.ack_events",
+            "issued_at": NOW,
+            "scope": task.scope.to_dict(),
+            "correlation_id": task.correlation_id,
+            "causation_id": terminal.event_id,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.ack_events"],
+            "payload": {
+                "presentation_class": presentation_class,
+                "acked_through_seq": terminal.seq,
+                "acked_event_id": terminal.event_id,
+                "expected_event_head": terminal.seq,
+            },
+            "extensions": {},
+        }
+    )
+    acknowledged = store.ack_events(
+        command,
+        observed_at="2026-08-06T10:00:01Z",
+    )
+    assert acknowledged.ok
+
+
+def _ack_authority_task_through(
+    store: SqliteTaskStore,
+    task_id: str,
+    *,
+    presentation_class: str,
+    through_seq: int,
+) -> None:
+    task = store.get_task(task_id, _scope())
+    event = store.events(task_id, task.scope)[through_seq]
+    assert event.seq == through_seq
+    command = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": f"request-authority-consume-{presentation_class}-{through_seq}",
+            "command_id": f"command-authority-consume-{presentation_class}-{through_seq}",
+            "command_type": "task.ack_events",
+            "issued_at": NOW,
+            "scope": task.scope.to_dict(),
+            "correlation_id": task.correlation_id,
+            "causation_id": event.event_id,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.ack_events"],
+            "payload": {
+                "presentation_class": presentation_class,
+                "acked_through_seq": event.seq,
+                "acked_event_id": event.event_id,
+                "expected_event_head": task.event_head,
+            },
+            "extensions": {},
+        }
+    )
+    acknowledged = store.ack_events(
+        command,
+        observed_at="2026-08-06T10:00:01Z",
+    )
+    assert acknowledged.ok
+
+
+def _append_authority_presentable_cycles(
+    store: SqliteTaskStore,
+    task_id: str,
+    *,
+    count: int,
+) -> None:
+    """Build a verifier-clean Store fixture for the closed Task state machine."""
+
+    task = store.get_task(task_id, _scope())
+    assert task.state.value == "running"
+    with store._transaction() as connection:
+        row = store._require_task_row_by_id(connection, task_id)
+        state = "running"
+        for ordinal in range(count):
+            state = (
+                "blocked"
+                if state == "decision_required" or ordinal == 0
+                else "decision_required"
+            )
+            store._append_event(
+                connection,
+                row,
+                event_type=f"task.{state}",
+                state=state,
+                outcome=None,
+                producer="task_core",
+                source_event_id=None,
+                causation_id=f"authority-presentable-cycle-{ordinal}",
+                occurred_at=NOW,
+                details={"summary": f"bounded lifecycle cycle {ordinal}"},
+                update_task=True,
+            )
+            row = store._require_task_row_by_id(connection, task_id)
+    store.consumer_progress_authority_page(
+        task_id,
+        task.scope,
+        presentation_class="voice",
+        limit=1,
+    )
+
+
+def _recovery_authority_task(
+    tmp_path: Path,
+) -> tuple[SqliteTaskStore, str, ScopeRef, str]:
+    from tests.unit_tests.live_voice.test_p3_4_durability_store import (
+        EXPIRY as RECOVERY_EXPIRY,
+        NOW as RECOVERY_NOW,
+        _observations,
+        _recovery_authorization,
+        _safe_recovery_prefix,
+        _selected_task,
+    )
+
+    store, selection, task, binding = _selected_task(tmp_path)
+    checkpoint_prefix = _safe_recovery_prefix(store, task, binding)
+    item = store.claim_outbox("recovery-progress-producer", observed_at=RECOVERY_NOW)
+    assert item is not None
+    observations = tuple(
+        replace(
+            observation,
+            adapter_id=selection.adapter_id,
+            capability_profile_digest=selection.capability_profile_digest,
+            occurred_at=RECOVERY_NOW,
+        )
+        for observation in _observations(item, outcome=TerminalOutcome.INTERRUPTED)
+    )
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=observations,
+    )
+    authority = store.read_durable_recovery_authority(
+        scope=task.scope,
+        task_id=task.task_id,
+    )
+    claim = store.claim_durability_mutator(
+        scope=task.scope,
+        task_id=task.task_id,
+        owner_id="recovery-progress-worker",
+        observed_at=RECOVERY_NOW,
+        expires_at=RECOVERY_EXPIRY,
+    )
+    assert claim is not None
+    effects = store.read_durability_effects(binding)
+    facts = ExecutorRecoveryFacts.create(
+        scope=task.scope,
+        task_id=task.task_id,
+        producer_attempt_id=task.attempt_id,
+        candidate_recovery_attempt_id="attempt-progress-recovery",
+        profile=binding.profile,
+        recovery_generation=1,
+        executor_epoch_id="direct-progress-epoch",
+        executor_owner_generation=1,
+        observed_at=RECOVERY_NOW,
+        expires_at=RECOVERY_EXPIRY,
+        evidence_digest="9" * 64,
+    )
+    recovered = store.recover_durable_attempt(
+        authority,
+        recovery_id="recovery-progress-1",
+        recovery_facts=facts,
+        checkpoint_head=checkpoint_prefix.head,
+        checkpoint_prefix_digest=checkpoint_prefix.prefix_digest,
+        effect_head=effects.head,
+        effect_prefix_digest=effects.prefix_digest,
+        authorization=_recovery_authorization(
+            store,
+            binding,
+            facts,
+            recovery_id="recovery-progress-1",
+            owner_id="recovery-progress-worker",
+            claim=claim,
+        ),
+        observed_at=RECOVERY_NOW,
+    )
+    assert recovered.attempt_id == "attempt-progress-recovery"
+    current = store.get_task(task.task_id, task.scope)
+    assert current.attempt_id == recovered.attempt_id
+    return store, task.task_id, task.scope, task.correlation_id
+
+
 def _retry_authority_task(store: SqliteTaskStore, task_id: str) -> str:
     task = store.get_task(task_id, _scope())
     assert task.outcome is TerminalOutcome.COMPLETED
@@ -475,6 +708,63 @@ def _retry_authority_task(store: SqliteTaskStore, task_id: str) -> str:
     return str(result.result["attempt_id"])
 
 
+def _cancel_and_retry_authority_task(store: SqliteTaskStore, task_id: str) -> str:
+    task = store.get_task(task_id, _scope())
+    cancel = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-authority-cancel-before-retry",
+            "command_id": "command-authority-cancel-before-retry",
+            "command_type": "task.cancel",
+            "issued_at": NOW,
+            "scope": task.scope.to_dict(),
+            "correlation_id": task.correlation_id,
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": task.task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.cancel"],
+            "payload": {},
+            "extensions": {},
+        }
+    )
+    cancelled = store.cancel(cancel, observed_at=NOW)
+    assert cancelled.ok
+    predecessor = store.get_task(task_id, _scope())
+    assert predecessor.outcome is TerminalOutcome.CANCELLED
+    retry = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-authority-retry-cancelled",
+            "command_id": "command-authority-retry-cancelled",
+            "command_type": "task.retry",
+            "issued_at": NOW,
+            "scope": predecessor.scope.to_dict(),
+            "correlation_id": predecessor.correlation_id,
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": predecessor.task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.retry"],
+            "payload": {
+                "previous_attempt_id": predecessor.attempt_id,
+                "previous_outcome": "cancelled",
+                "attempt_number": 2,
+            },
+            "extensions": TaskRetryProductRequestFingerprint("b" * 64).to_extensions(),
+        }
+    )
+    spec = replace(
+        predecessor.spec,
+        context=replace(predecessor.spec.context, revision_value="revision-2"),
+    )
+    authority = store.read_retry_authority(retry)
+    assert isinstance(authority, TaskRetryAuthoritySnapshot)
+    result = store.retry(retry, spec, authority, observed_at=NOW)
+    assert result.ok and result.result is not None
+    return str(result.result["attempt_id"])
+
+
 def _bridge(
     *,
     origin_kind: TaskProgressOriginKind,
@@ -488,6 +778,7 @@ def _bridge(
     voice_events: list[TaskProgressNotificationIntent] | None = None,
     text_events: list[TaskProgressTextEvent] | None = None,
     allow_package_contract_handoff: bool = False,
+    validation_capacity: int = 256,
     clock=lambda: NOW,
 ) -> TaskProgressReturnBridge:
     selected_binding = binding or _binding(origin_kind)
@@ -516,6 +807,7 @@ def _bridge(
         voice_sink=voice_sink,
         text_sink=text_sink,
         allow_package_contract_handoff=allow_package_contract_handoff,
+        validation_capacity=validation_capacity,
         clock=clock,
     )
 
@@ -1201,6 +1493,676 @@ async def test_concrete_authority_source_replays_store_prefix_for_text_projectio
     assert store.counts() == before
     await activation.lease.close()
     assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("presentation_class", ["text", "voice"])
+async def test_consumer_authority_source_skips_consumed_prefix_beyond_queue_capacity(
+    tmp_path: Path,
+    presentation_class: str,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _append_authority_adjustments(store, task_id, count=127)
+    _finish_authority_task(store, task_id)
+    terminal = store.get_task(task_id, _scope())
+    assert terminal.event_head >= 256
+    _ack_authority_task_head(store, task_id, presentation_class=presentation_class)
+    reconnect_scope = _scope(session_id="session-consumer-reconnect")
+    grant = _grant(task_id=task_id, scope=reconnect_scope)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=reconnect_scope,
+        task_id=task_id,
+        queue_capacity=16,
+        validation_capacity=64,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+        consumer_scope=True,
+        presentation_class=presentation_class,
+    )
+
+    assert await source.start() is True
+    with pytest.raises(StopAsyncIteration):
+        await source.next_event()
+    snapshot = source.subscription.snapshot()
+    assert snapshot.start_head_seq == terminal.event_head
+    assert snapshot.segment_start_seq == terminal.event_head + 1
+    assert snapshot.source_reads == 1
+    assert snapshot.tracked_events == 0
+    assert snapshot.state.name == "CLOSED"
+    assert correlation_id == terminal.correlation_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("presentation_class", ["text", "voice"])
+async def test_consumer_authority_source_pages_one_frozen_unread_suffix(
+    tmp_path: Path,
+    presentation_class: str,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _ack_authority_task_head(store, task_id, presentation_class=presentation_class)
+    _append_authority_adjustments(store, task_id, count=257)
+    running = store.get_task(task_id, _scope())
+    assert running.event_head == 260
+    reconnect_scope = _scope(session_id="session-consumer-paged")
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=_grant(task_id=task_id, scope=reconnect_scope),
+        scope=reconnect_scope,
+        task_id=task_id,
+        queue_capacity=32,
+        validation_capacity=300,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+        consumer_scope=True,
+        presentation_class=presentation_class,
+    )
+
+    assert await source.start() is True
+    replayed = [await source.next_event() for _ in range(257)]
+    assert [event.seq for event in replayed] == list(range(4, 261))
+    snapshot = source.subscription.snapshot()
+    assert snapshot.start_head_seq == running.event_head
+    assert snapshot.segment_start_seq == 4
+    assert snapshot.source_reads == 9
+    assert snapshot.tracked_events == 257
+    assert snapshot.queued_events == 0
+    assert correlation_id == running.correlation_id
+    await source.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("presentation_class", ["text", "voice"])
+async def test_consumer_frozen_page_follows_terminal_appended_after_start(
+    tmp_path: Path,
+    presentation_class: str,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _append_authority_adjustments(store, task_id, count=12)
+    frozen = store.get_task(task_id, _scope())
+    consumer_scope = _scope(session_id="session-consumer-terminal-race")
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=_grant(task_id=task_id, scope=consumer_scope),
+        scope=consumer_scope,
+        task_id=task_id,
+        queue_capacity=4,
+        validation_capacity=8,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class=presentation_class,
+        clock=lambda: NOW,
+    )
+
+    assert await source.start() is True
+    assert source.subscription.snapshot().start_head_seq == frozen.event_head
+    _finish_authority_task(store, task_id)
+    terminal = store.get_task(task_id, _scope())
+    assert terminal.event_head > frozen.event_head
+    before_read = store.counts()
+
+    replayed: list[PersistentTaskEvent] = []
+    for _ in range(terminal.event_head + 2):
+        try:
+            replayed.append(await source.next_event())
+        except StopAsyncIteration:
+            break
+
+    assert [event.seq for event in replayed] == list(range(terminal.event_head + 1))
+    assert replayed[-1].event_type == "task.terminal"
+    assert replayed[-1].seq == terminal.event_head
+    assert source.subscription.snapshot().terminal_event_delivered is True
+    assert store.counts() == before_read
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin_kind",
+    [TaskProgressOriginKind.TEXT, TaskProgressOriginKind.VOICE],
+)
+async def test_consumer_bridge_resumes_fresh_process_from_nonzero_watermark(
+    tmp_path: Path,
+    origin_kind: TaskProgressOriginKind,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    presentation_class = (
+        "voice" if origin_kind is TaskProgressOriginKind.VOICE else "text"
+    )
+    _ack_authority_task_through(
+        store,
+        task_id,
+        presentation_class=presentation_class,
+        through_seq=0,
+    )
+    consumer_scope = _scope(session_id="session-consumer-process-restart")
+    grant = _grant(task_id=task_id, scope=consumer_scope)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=consumer_scope,
+        task_id=task_id,
+        queue_capacity=4,
+        validation_capacity=8,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class=presentation_class,
+        clock=lambda: NOW,
+    )
+    delivered_voice: list[TaskProgressNotificationIntent] = []
+    delivered_text: list[TaskProgressTextEvent] = []
+    before = store.counts()
+    bridge = _bridge(
+        origin_kind=origin_kind,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=_binding(
+            origin_kind,
+            task_id=task_id,
+            scope=consumer_scope,
+            correlation_id="correlation-consumer-process-restart",
+        ),
+        arbiter=ProgressNotificationArbiter(events_per_stream=2),
+        voice_events=delivered_voice,
+        text_events=delivered_text,
+        validation_capacity=8,
+        clock=lambda: NOW,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active
+    for _ in range(500):
+        delivered = delivered_voice or delivered_text
+        if delivered or bridge.snapshot().state is not TaskProgressReturnState.ACTIVE:
+            break
+        await asyncio.sleep(0.001)
+    delivered = delivered_voice or delivered_text
+    assert [item.task_event.seq for item in delivered] == [3]
+    assert bridge.snapshot().state is TaskProgressReturnState.ACTIVE
+    assert bridge.snapshot().unprojected_events == 2
+    assert store.counts() == before
+    assert activation.lease is not None
+    await activation.lease.close()
+
+
+@pytest.mark.asyncio
+async def test_consumer_source_accepts_only_known_monotonic_cursor_advance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=_grant(task_id=task_id),
+        scope=_scope(),
+        task_id=task_id,
+        queue_capacity=8,
+        validation_capacity=16,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+        consumer_scope=True,
+        presentation_class="text",
+    )
+    assert await source.start()
+    initial = tuple([await source.next_event() for _ in range(4)])
+    assert [event.seq for event in initial] == [0, 1, 2, 3]
+    _ack_authority_task_through(
+        store,
+        task_id,
+        presentation_class="text",
+        through_seq=3,
+    )
+    after_ack_counts = store.counts()
+    real_page = store.consumer_progress_authority_page
+    followup_reads = 0
+
+    def read_page(*args: object, **kwargs: object):
+        nonlocal followup_reads
+        page = real_page(*args, **kwargs)
+        followup_reads += 1
+        if followup_reads == 1:
+            return page
+        lifecycle = page.cursor_baseline.lifecycle_event
+        assert lifecycle is not None
+        return replace(
+            page,
+            cursor_baseline=replace(
+                page.cursor_baseline,
+                lifecycle_event=replace(lifecycle, occurred_at=AFTER_EXPIRY),
+            ),
+        )
+
+    monkeypatch.setattr(store, "consumer_progress_authority_page", read_page)
+    with pytest.raises(FormalTaskViolation) as raised:
+        await asyncio.wait_for(source.next_event(), timeout=1)
+
+    assert raised.value.reason == "TASK_EVENT_CONSUMER_CURSOR_STALE"
+    assert followup_reads == 2
+    assert source.subscription.snapshot().failure_reason == (
+        "TASK_EVENT_CONSUMER_CURSOR_STALE"
+    )
+    assert store.counts() == after_ack_counts
+    await source.close()
+
+
+@pytest.mark.asyncio
+async def test_consumer_source_accepts_delayed_ack_after_validation_rollover(
+    tmp_path: Path,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _append_authority_adjustments(store, task_id, count=8)
+    task = store.get_task(task_id, _scope())
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=_grant(task_id=task_id),
+        scope=_scope(),
+        task_id=task_id,
+        queue_capacity=4,
+        validation_capacity=4,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+        consumer_scope=True,
+        presentation_class="text",
+    )
+    assert await source.start()
+    replayed = tuple([await source.next_event() for _ in range(task.event_head + 1)])
+    assert [event.seq for event in replayed] == list(range(task.event_head + 1))
+    assert source.subscription.snapshot().tracked_events == 4
+    _ack_authority_task_through(
+        store,
+        task_id,
+        presentation_class="text",
+        through_seq=0,
+    )
+    after_ack_counts = store.counts()
+    reads_before = source.subscription.snapshot().source_reads
+
+    pending = asyncio.create_task(source.next_event())
+    for _ in range(500):
+        if source.subscription.snapshot().source_reads > reads_before or pending.done():
+            break
+        await asyncio.sleep(0.001)
+    assert source.subscription.snapshot().source_reads > reads_before or pending.done()
+    await asyncio.sleep(0.01)
+
+    assert not pending.done()
+    assert source.subscription.snapshot().state.value == "active"
+    assert source.subscription.snapshot().failure_reason is None
+    assert source.subscription.snapshot().tracked_events == 4
+    assert store.counts() == after_ack_counts
+    await source.close()
+    with pytest.raises(StopAsyncIteration):
+        await pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin_kind",
+    [TaskProgressOriginKind.TEXT, TaskProgressOriginKind.VOICE],
+)
+async def test_consumer_bridge_projects_real_store_recovery_attempt_boundary(
+    tmp_path: Path,
+    origin_kind: TaskProgressOriginKind,
+) -> None:
+    store, task_id, task_scope, _correlation_id = _recovery_authority_task(tmp_path)
+    task = store.get_task(task_id, task_scope)
+    consumer_scope = ScopeRef(
+        task.scope.subject_id,
+        task.scope.project_id,
+        "session-consumer-recovery",
+        Assurance.AUTHENTICATED,
+    )
+    grant = _grant(task_id=task_id, scope=consumer_scope)
+    presentation_class = (
+        "voice" if origin_kind is TaskProgressOriginKind.VOICE else "text"
+    )
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=consumer_scope,
+        task_id=task_id,
+        queue_capacity=4,
+        validation_capacity=8,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class=presentation_class,
+        clock=lambda: NOW,
+    )
+    delivered_voice: list[TaskProgressNotificationIntent] = []
+    delivered_text: list[TaskProgressTextEvent] = []
+    before = store.counts()
+    bridge = _bridge(
+        origin_kind=origin_kind,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=_binding(
+            origin_kind,
+            task_id=task_id,
+            scope=consumer_scope,
+            correlation_id="correlation-consumer-recovery",
+        ),
+        arbiter=ProgressNotificationArbiter(),
+        voice_events=delivered_voice,
+        text_events=delivered_text,
+        validation_capacity=8,
+        clock=lambda: NOW,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active
+    expected = [
+        event.seq
+        for event in store.events(task_id, task.scope)
+        if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+    ]
+    for _ in range(1000):
+        delivered = delivered_voice or delivered_text
+        if (
+            len(delivered) == len(expected)
+            or bridge.snapshot().state is not TaskProgressReturnState.ACTIVE
+        ):
+            break
+        await asyncio.sleep(0.001)
+    delivered = delivered_voice or delivered_text
+    assert [item.task_event.seq for item in delivered] == expected
+    assert delivered[-1].task_event.event_type == "task.recovery_accepted"
+    assert bridge.snapshot().state is TaskProgressReturnState.ACTIVE
+    assert store.counts() == before
+    assert activation.lease is not None
+    await activation.lease.close()
+
+
+@pytest.mark.asyncio
+async def test_consumer_voice_rolls_more_than_256_presentable_store_events(
+    tmp_path: Path,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _append_authority_presentable_cycles(store, task_id, count=257)
+    task = store.get_task(task_id, _scope())
+    consumer_scope = _scope(session_id="session-consumer-presentable-window")
+    grant = _grant(task_id=task_id, scope=consumer_scope)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=consumer_scope,
+        task_id=task_id,
+        queue_capacity=32,
+        validation_capacity=32,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class="voice",
+        clock=lambda: NOW,
+    )
+    delivered: list[TaskProgressNotificationIntent] = []
+    arbiter = ProgressNotificationArbiter(events_per_stream=16)
+    before = store.counts()
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.VOICE,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=_binding(
+            TaskProgressOriginKind.VOICE,
+            task_id=task_id,
+            scope=consumer_scope,
+            correlation_id="correlation-consumer-presentable-window",
+        ),
+        arbiter=arbiter,
+        voice_events=delivered,
+        validation_capacity=32,
+        clock=lambda: NOW,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active
+    expected_count = sum(
+        event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+        for event in store.events(task_id, _scope())
+    )
+    for _ in range(4000):
+        if (
+            len(delivered) == expected_count
+            or bridge.snapshot().state is not TaskProgressReturnState.ACTIVE
+        ):
+            break
+        await asyncio.sleep(0.001)
+
+    assert len(delivered) == expected_count
+    assert delivered[-1].task_event.seq == task.event_head
+    assert bridge.snapshot().state is TaskProgressReturnState.ACTIVE
+    assert len(bridge._seen_ids) <= 32
+    assert source.subscription.snapshot().tracked_events <= 32
+    assert arbiter.snapshot().accepted_events == expected_count
+    assert store.counts() == before
+    assert activation.lease is not None
+    await activation.lease.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin_kind",
+    [TaskProgressOriginKind.TEXT, TaskProgressOriginKind.VOICE],
+)
+async def test_consumer_bridge_replays_unread_across_cancelled_retry_attempts(
+    tmp_path: Path,
+    origin_kind: TaskProgressOriginKind,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    attempt_b = _cancel_and_retry_authority_task(store, task_id)
+    authority_events = store.events(task_id, _scope())
+    assert authority_events[-1].event_type == "task.retry_accepted"
+    assert authority_events[-1].attempt_id == attempt_b
+    expected = [
+        event.seq
+        for event in authority_events
+        if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+    ]
+    assert len({event.attempt_id for event in authority_events}) == 2
+    consumer_scope = _scope(session_id="session-consumer-retry-reconnect")
+    grant = _grant(task_id=task_id, scope=consumer_scope)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=consumer_scope,
+        task_id=task_id,
+        queue_capacity=4,
+        validation_capacity=8,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class=(
+            "voice" if origin_kind is TaskProgressOriginKind.VOICE else "text"
+        ),
+        clock=lambda: NOW,
+    )
+    delivered_voice: list[TaskProgressNotificationIntent] = []
+    delivered_text: list[TaskProgressTextEvent] = []
+    before = store.counts()
+    bridge = _bridge(
+        origin_kind=origin_kind,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=_binding(
+            origin_kind,
+            task_id=task_id,
+            scope=consumer_scope,
+            correlation_id="correlation-consumer-retry-reconnect",
+        ),
+        voice_events=delivered_voice,
+        text_events=delivered_text,
+        validation_capacity=8,
+        clock=lambda: NOW,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active
+    for _ in range(1000):
+        delivered = delivered_voice or delivered_text
+        if (
+            len(delivered) == len(expected)
+            or bridge.snapshot().state is not TaskProgressReturnState.ACTIVE
+        ):
+            break
+        await asyncio.sleep(0.001)
+    delivered = delivered_voice or delivered_text
+    assert [item.task_event.seq for item in delivered] == expected
+    assert bridge.snapshot().state is TaskProgressReturnState.ACTIVE
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.ACTIVATED
+    assert store.counts() == before
+    assert activation.lease is not None
+    await activation.lease.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin_kind",
+    [TaskProgressOriginKind.TEXT, TaskProgressOriginKind.VOICE],
+)
+async def test_consumer_bridge_rolls_validation_across_large_unread_gap(
+    tmp_path: Path,
+    origin_kind: TaskProgressOriginKind,
+) -> None:
+    store, task_id, _correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _append_authority_adjustments(store, task_id, count=257)
+    running = store.get_task(task_id, _scope())
+    assert running.event_head == 260
+    consumer_scope = _scope(session_id="session-consumer-large-gap")
+    grant = _grant(task_id=task_id, scope=consumer_scope)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=consumer_scope,
+        task_id=task_id,
+        queue_capacity=32,
+        validation_capacity=32,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class=(
+            "voice" if origin_kind is TaskProgressOriginKind.VOICE else "text"
+        ),
+        clock=lambda: NOW,
+    )
+    delivered_voice: list[TaskProgressNotificationIntent] = []
+    delivered_text: list[TaskProgressTextEvent] = []
+    before = store.counts()
+    bridge = _bridge(
+        origin_kind=origin_kind,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=_binding(
+            origin_kind,
+            task_id=task_id,
+            scope=consumer_scope,
+            correlation_id="correlation-consumer-large-gap",
+        ),
+        voice_events=delivered_voice,
+        text_events=delivered_text,
+        validation_capacity=32,
+        clock=lambda: NOW,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active
+    for _ in range(2000):
+        snapshot = bridge.snapshot()
+        if (
+            snapshot.source_events == running.event_head + 1
+            or snapshot.state is not TaskProgressReturnState.ACTIVE
+        ):
+            break
+        await asyncio.sleep(0.001)
+    snapshot = bridge.snapshot()
+    assert snapshot.source_events == running.event_head + 1
+    assert snapshot.state is TaskProgressReturnState.ACTIVE
+    delivered = delivered_voice or delivered_text
+    assert [item.task_event.seq for item in delivered] == [0, 3]
+    assert len(bridge._seen_ids) <= 32
+    assert source.subscription.snapshot().tracked_events <= 32
+    assert store.counts() == before
+    assert activation.lease is not None
+    await activation.lease.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin_kind",
+    [TaskProgressOriginKind.TEXT, TaskProgressOriginKind.VOICE],
+)
+async def test_consumer_authority_rebinds_delivery_without_rewriting_store_event(
+    tmp_path: Path,
+    origin_kind: TaskProgressOriginKind,
+) -> None:
+    store, task_id, original_correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    before = store.counts()
+    consumer_scope = _scope(session_id="session-reconnected")
+    binding = _binding(
+        origin_kind,
+        task_id=task_id,
+        scope=consumer_scope,
+        correlation_id="correlation-reconnected",
+    )
+    grant = _grant(task_id=task_id, scope=consumer_scope)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=consumer_scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        consumer_scope=True,
+        presentation_class=(
+            "voice" if origin_kind is TaskProgressOriginKind.VOICE else "text"
+        ),
+        clock=lambda: NOW,
+    )
+    voice_events: list[TaskProgressNotificationIntent] = []
+    text_events: list[TaskProgressTextEvent] = []
+    arbiter = ProgressNotificationArbiter()
+    bridge = _bridge(
+        origin_kind=origin_kind,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=binding,
+        arbiter=arbiter,
+        voice_events=voice_events,
+        text_events=text_events,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active
+    await _wait_until(lambda: len(voice_events or text_events) == 2)
+    delivered = voice_events or text_events
+    assert [item.task_event.seq for item in delivered] == [0, 3]
+    for item in delivered:
+        assert item.origin.scope == consumer_scope
+        assert item.task_event.scope == _scope()
+        assert item.task_event.correlation_id == original_correlation_id
+        assert item.source_event.scope == consumer_scope
+        assert item.source_event.correlation_id == "correlation-reconnected"
+        assert item.progress_event.scope == consumer_scope
+        assert item.progress_event.correlation_id == "correlation-reconnected"
+        extension = item.source_event.extensions["jiuwenswarm.task_progress_return"]
+        assert extension["persistent_scope"] == _scope().to_dict()
+        assert extension["persistent_correlation_id"] == original_correlation_id
+        assert extension["consumer_scope_rebound"] is True
+    if origin_kind is TaskProgressOriginKind.VOICE:
+        assert arbiter.snapshot().no_projection_advances == 2
+        assert arbiter.snapshot().accepted_events == 2
+    assert store.counts() == before
+    assert activation.lease is not None
+    await activation.lease.close()
 
 
 @pytest.mark.asyncio

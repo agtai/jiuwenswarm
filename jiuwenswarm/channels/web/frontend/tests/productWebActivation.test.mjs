@@ -6,6 +6,7 @@ import {
   PRODUCT_P2_CLOSE_METHOD,
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_PRESENTATION_ACK_METHOD,
+  PRODUCT_P2_PRESENTATION_FAILED_METHOD,
   PRODUCT_P2_BARGE_IN_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
@@ -1150,6 +1151,59 @@ test('unresolved presentation ACK blocks a second turn and preserves exact retry
   assert.equal(acks[0][2], acks[1][2]);
   assert.equal(owner.hasPendingPresentationAck(), false);
   assert.equal(calls.filter(([method]) => method === PRODUCT_P2_SUBMIT_METHOD).length, 0);
+});
+
+test('Task AUDIO failure retains one exact fallback request and never becomes a presentation ACK', async () => {
+  const calls = [];
+  let failureUnavailable = true;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_PRESENTATION_FAILED_METHOD && failureUnavailable) {
+        throw webError('failure outcome unknown', 'UNAVAILABLE', true);
+      }
+      if (method === PRODUCT_P2_PRESENTATION_FAILED_METHOD) {
+        return response('presentation_failed_fallback_text', {
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          surface: params.surface,
+          unit_id: params.unit_id,
+          failure_reason: params.failure_reason,
+          fallback: 'text',
+          replayed: false,
+        });
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  await owner.start(binding);
+  const failure = {
+    response_id: 'response-task-audio-failed',
+    response_generation: 4,
+    surface: 'audio',
+    unit_id: 'unit-task-audio-failed',
+    failure_reason: 'task_audio_playout_failed',
+  };
+
+  await assert.rejects(owner.failTaskPresentation(failure), /outcome unknown/);
+  assert.equal(owner.hasPendingPresentationFailure(), true);
+  await assert.rejects(
+    owner.failTaskPresentation({ ...failure, failure_reason: 'task_audio_owner_unavailable' }),
+    /previous presentation settlement/,
+  );
+  failureUnavailable = false;
+  const accepted = await owner.failTaskPresentation(failure);
+  assert.equal(accepted.fallback, 'text');
+  assert.equal(owner.hasPendingPresentationFailure(), false);
+  assert.deepEqual(await owner.failTaskPresentation(failure), accepted);
+
+  const failures = calls.filter(([method]) => method === PRODUCT_P2_PRESENTATION_FAILED_METHOD);
+  assert.equal(failures.length, 2);
+  assert.equal(failures[0][2], failures[1][2]);
+  assert.deepEqual(failures[0][1], failures[1][1]);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_PRESENTATION_ACK_METHOD).length, 0);
 });
 
 test('stale presentation ACK is definitive and releases the next turn', async () => {

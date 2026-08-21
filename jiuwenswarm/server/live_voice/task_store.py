@@ -59,6 +59,8 @@ from .formal_task_models import (
     TaskAdjustmentState,
     TaskCommandDisposition,
     TaskEventAuthoritySnapshot,
+    TaskEventConsumerAuthorityPage,
+    TaskEventConsumerCursorBaseline,
     TaskMutationDisposition,
     TaskMutationResult,
     TaskResultArtifact,
@@ -11970,36 +11972,49 @@ class SqliteTaskStore:
 
         with self._reader() as connection:
             task_row = self._require_task_row(connection, task_id, scope)
-            task = self._task_from_row(task_row)
-            if task.state is not FormalTaskState.TERMINAL:
-                return (
-                    TaskResultAvailability.NOT_READY,
-                    None,
-                    "TASK_RESULT_NOT_READY",
-                )
-            if task.outcome is not TerminalOutcome.COMPLETED:
-                reason = {
-                    TerminalOutcome.CANCELLED: "TASK_CANCELLED",
-                    TerminalOutcome.FAILED: "TASK_FAILED",
-                    TerminalOutcome.INTERRUPTED: "TASK_INTERRUPTED",
-                }.get(task.outcome, "TASK_RESULT_UNAVAILABLE")
-                return TaskResultAvailability.UNAVAILABLE, None, reason
-            rows = connection.execute(
-                """
-                SELECT * FROM task_results
-                WHERE task_id=? AND attempt_id=?
-                ORDER BY completed_at, source_event_id
-                """,
-                (task.task_id, task.attempt_id),
-            ).fetchall()
-            if len(rows) != 1:
-                return (
-                    TaskResultAvailability.UNAVAILABLE,
-                    None,
-                    "TASK_RESULT_NOT_CAPTURED",
-                )
-            result = self._task_result_from_row(rows[0])
-            return TaskResultAvailability.AVAILABLE, result, "TASK_RESULT_AVAILABLE"
+            return self._task_result_for_row(connection, task_row)
+
+    def consumer_task_result(
+        self, task_id: str, scope: ScopeRef
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None, str]:
+        """Read result truth for one stable authenticated subject/project."""
+
+        with self._reader() as connection:
+            task_row = self._require_consumer_task_row(connection, task_id, scope)
+            return self._task_result_for_row(connection, task_row)
+
+    @classmethod
+    def _task_result_for_row(
+        cls,
+        connection: sqlite3.Connection,
+        task_row: sqlite3.Row,
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None, str]:
+        task = cls._task_from_row(task_row)
+        if task.state is not FormalTaskState.TERMINAL:
+            return TaskResultAvailability.NOT_READY, None, "TASK_RESULT_NOT_READY"
+        if task.outcome is not TerminalOutcome.COMPLETED:
+            reason = {
+                TerminalOutcome.CANCELLED: "TASK_CANCELLED",
+                TerminalOutcome.FAILED: "TASK_FAILED",
+                TerminalOutcome.INTERRUPTED: "TASK_INTERRUPTED",
+            }.get(task.outcome, "TASK_RESULT_UNAVAILABLE")
+            return TaskResultAvailability.UNAVAILABLE, None, reason
+        rows = connection.execute(
+            """
+            SELECT * FROM task_results
+            WHERE task_id=? AND attempt_id=?
+            ORDER BY completed_at, source_event_id
+            """,
+            (task.task_id, task.attempt_id),
+        ).fetchall()
+        if len(rows) != 1:
+            return (
+                TaskResultAvailability.UNAVAILABLE,
+                None,
+                "TASK_RESULT_NOT_CAPTURED",
+            )
+        result = cls._task_result_from_row(rows[0])
+        return TaskResultAvailability.AVAILABLE, result, "TASK_RESULT_AVAILABLE"
 
     @classmethod
     def _mutation_result(
@@ -12390,6 +12405,14 @@ class SqliteTaskStore:
                 self._require_task_row(connection, task_id, scope)
             )
 
+    def get_consumer_task(self, task_id: str, scope: ScopeRef) -> PersistentTaskRecord:
+        """Read one Task through the stable consumer scope, not Session identity."""
+
+        with self._reader() as connection:
+            return self._task_from_row(
+                self._require_consumer_task_row(connection, task_id, scope)
+            )
+
     def _task_read_snapshot_from_rows(
         self, task: sqlite3.Row, attempt: sqlite3.Row
     ) -> _TaskReadSnapshot:
@@ -12637,6 +12660,41 @@ class SqliteTaskStore:
         after_seq: int = -1,
         attempt_id: str | None = None,
     ) -> tuple[PersistentTaskEvent, ...]:
+        return self._events(
+            task_id,
+            scope,
+            after_seq=after_seq,
+            attempt_id=attempt_id,
+            consumer_scope=False,
+        )
+
+    def consumer_events(
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        after_seq: int = -1,
+        attempt_id: str | None = None,
+    ) -> tuple[PersistentTaskEvent, ...]:
+        """Read Task events for the stable authenticated consumer identity."""
+
+        return self._events(
+            task_id,
+            scope,
+            after_seq=after_seq,
+            attempt_id=attempt_id,
+            consumer_scope=True,
+        )
+
+    def _events(
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        after_seq: int,
+        attempt_id: str | None,
+        consumer_scope: bool,
+    ) -> tuple[PersistentTaskEvent, ...]:
         if type(after_seq) is not int or after_seq < -1:
             raise FormalTaskViolation(
                 "INVALID_EVENT_CURSOR",
@@ -12644,7 +12702,10 @@ class SqliteTaskStore:
                 ErrorCode.INVALID_ARGUMENT,
             )
         with self._reader() as connection:
-            self._require_task_row(connection, task_id, scope)
+            if consumer_scope:
+                self._require_consumer_task_row(connection, task_id, scope)
+            else:
+                self._require_task_row(connection, task_id, scope)
             if attempt_id is None:
                 rows = connection.execute(
                     """
@@ -12781,6 +12842,184 @@ class SqliteTaskStore:
                 events=events,
                 next_after_seq=events[-1].seq if has_more and events else None,
                 has_more=has_more,
+            )
+
+    def consumer_progress_authority_page(
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        presentation_class: str,
+        limit: int,
+        after_seq: int | None = None,
+        through_seq: int | None = None,
+    ) -> TaskEventConsumerAuthorityPage:
+        """Read one Store-verified, watermark-resumed Task-wide page."""
+
+        if type(presentation_class) is not str or presentation_class not in {
+            "text",
+            "voice",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_PRESENTATION_CLASS",
+                "TaskEvent consumer presentation class must be text or voice",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(limit) is not int or not 1 <= limit <= _MAX_EVENT_PAGE_LIMIT:
+            raise FormalTaskViolation(
+                "INVALID_EVENT_PAGE_LIMIT",
+                f"TaskEvent consumer limit must be between 1 and {_MAX_EVENT_PAGE_LIMIT}",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if after_seq is not None and (type(after_seq) is not int or after_seq < -1):
+            raise FormalTaskViolation(
+                "INVALID_EVENT_CURSOR",
+                "TaskEvent consumer cursor must be an integer at least -1",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if through_seq is not None and (
+            type(through_seq) is not int or through_seq < 0
+        ):
+            raise FormalTaskViolation(
+                "INVALID_EVENT_CURSOR",
+                "TaskEvent frozen head must be a non-negative integer",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._snapshot_reader() as connection:
+            task_row = self._require_consumer_task_row(connection, task_id, scope)
+            self._verify_durable_lineage(connection, task_row)
+            task = self._task_from_row(task_row)
+            attempt_row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (task.attempt_id,)
+            ).fetchone()
+            if attempt_row is None:
+                raise FormalTaskViolation(
+                    "TASK_STORE_CORRUPT",
+                    "formal Task Store is missing the consumer Attempt",
+                    ErrorCode.INTERNAL,
+                )
+            attempt = self._attempt_from_row(attempt_row)
+            consumer = connection.execute(
+                """SELECT acked_through_seq, acked_event_id
+                   FROM task_event_consumption
+                   WHERE subject_id=? AND project_id=? AND task_id=?
+                     AND presentation_class=?""",
+                (
+                    scope.subject_id,
+                    scope.project_id,
+                    task.task_id,
+                    presentation_class,
+                ),
+            ).fetchone()
+            watermark = -1 if consumer is None else int(consumer["acked_through_seq"])
+            acked_event_id = None if consumer is None else consumer["acked_event_id"]
+            cursor_lifecycle_row = None
+            cursor_boundary_row = None
+            if watermark >= 0:
+                acknowledged_row = connection.execute(
+                    "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                    (task.task_id, watermark),
+                ).fetchone()
+                cursor_lifecycle_row = connection.execute(
+                    """SELECT * FROM task_events
+                       WHERE task_id=? AND seq<=? AND event_type IN (
+                         'task.accepted', 'task.retry_accepted',
+                         'task.recovery_accepted', 'task.running', 'task.blocked',
+                         'task.decision_required', 'task.terminal'
+                       )
+                       ORDER BY seq DESC LIMIT 1""",
+                    (task.task_id, watermark),
+                ).fetchone()
+                cursor_boundary_row = connection.execute(
+                    """SELECT * FROM task_events
+                       WHERE task_id=? AND seq<=? AND event_type IN (
+                         'task.accepted', 'task.retry_accepted',
+                         'task.recovery_accepted'
+                       )
+                       ORDER BY seq DESC LIMIT 1""",
+                    (task.task_id, watermark),
+                ).fetchone()
+                if (
+                    acknowledged_row is None
+                    or acknowledged_row["event_id"] != acked_event_id
+                    or cursor_lifecycle_row is None
+                    or cursor_boundary_row is None
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_STORE_CORRUPT",
+                        "consumer watermark lacks exact Task lifecycle authority",
+                        ErrorCode.INTERNAL,
+                    )
+            terminal_head_row = (
+                connection.execute(
+                    "SELECT * FROM task_events WHERE task_id=? AND seq=?",
+                    (task.task_id, task.event_head),
+                ).fetchone()
+                if task.state is FormalTaskState.TERMINAL
+                else None
+            )
+            segment_start_seq = watermark + 1
+            minimum_after = watermark
+            page_after_seq = minimum_after if after_seq is None else after_seq
+            frozen_head = task.event_head if through_seq is None else through_seq
+            if (
+                page_after_seq < minimum_after
+                or page_after_seq > frozen_head
+                or frozen_head > task.event_head
+            ):
+                raise FormalTaskViolation(
+                    "TASK_EVENT_CONSUMER_CURSOR_STALE",
+                    "TaskEvent consumer page no longer binds its frozen cursor",
+                    ErrorCode.STALE,
+                )
+            rows = connection.execute(
+                """SELECT * FROM task_events
+                   WHERE task_id=? AND seq>? AND seq<=?
+                   ORDER BY seq LIMIT ?""",
+                (
+                    task.task_id,
+                    page_after_seq,
+                    frozen_head,
+                    limit + 1,
+                ),
+            ).fetchall()
+            has_more = len(rows) > limit
+            events = tuple(self._event_from_row(row) for row in rows[:limit])
+            return TaskEventConsumerAuthorityPage(
+                task=task,
+                attempt=attempt,
+                presentation_class=presentation_class,
+                watermark=watermark,
+                acked_event_id=acked_event_id,
+                cursor_baseline=TaskEventConsumerCursorBaseline(
+                    task_id=task.task_id,
+                    scope=task.scope,
+                    correlation_id=task.correlation_id,
+                    watermark=watermark,
+                    acked_event_id=acked_event_id,
+                    lifecycle_event=(
+                        None
+                        if cursor_lifecycle_row is None
+                        else self._event_from_row(cursor_lifecycle_row)
+                    ),
+                    attempt_boundary=(
+                        None
+                        if cursor_boundary_row is None
+                        else self._event_from_row(cursor_boundary_row)
+                    ),
+                ),
+                segment_start_seq=segment_start_seq,
+                page_after_seq=page_after_seq,
+                start_seq=page_after_seq + 1,
+                head_seq=frozen_head,
+                events=events,
+                next_after_seq=events[-1].seq if has_more and events else None,
+                has_more=has_more,
+                terminal_head_event=(
+                    None
+                    if terminal_head_row is None
+                    else self._event_from_row(terminal_head_row)
+                ),
             )
 
     def ack_events(
@@ -13019,6 +13258,33 @@ class SqliteTaskStore:
     def event_authority_snapshot(
         self, task_id: str, scope: ScopeRef, *, max_events: int
     ) -> TaskEventAuthoritySnapshot:
+        return self._event_authority_snapshot(
+            task_id,
+            scope,
+            max_events=max_events,
+            consumer_scope=False,
+        )
+
+    def consumer_event_authority_snapshot(
+        self, task_id: str, scope: ScopeRef, *, max_events: int
+    ) -> TaskEventAuthoritySnapshot:
+        """Read one atomic event prefix for a stable presentation consumer."""
+
+        return self._event_authority_snapshot(
+            task_id,
+            scope,
+            max_events=max_events,
+            consumer_scope=True,
+        )
+
+    def _event_authority_snapshot(
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        max_events: int,
+        consumer_scope: bool,
+    ) -> TaskEventAuthoritySnapshot:
         """Read task, attempt, and the exact durable prefix in one SQLite snapshot."""
 
         if type(max_events) is not int or max_events <= 0:
@@ -13032,7 +13298,11 @@ class SqliteTaskStore:
             # WAL snapshot. Concurrent appends are recovered later from cursor;
             # they can neither leak into nor create a hole inside this prefix.
             connection.execute("BEGIN")
-            task_row = self._require_task_row(connection, task_id, scope)
+            task_row = (
+                self._require_consumer_task_row(connection, task_id, scope)
+                if consumer_scope
+                else self._require_task_row(connection, task_id, scope)
+            )
             self._verify_durable_lineage(connection, task_row)
             task = self._task_from_row(task_row)
             attempt_row = connection.execute(
