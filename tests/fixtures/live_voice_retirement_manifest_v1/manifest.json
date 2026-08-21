@@ -1,9 +1,21 @@
 {
   "schema_version": "live-voice.retirement-manifest.v1",
-  "phase": "inventory",
+  "phase": "b2_scoped_retirement_executed",
   "deletion_authorized": false,
-  "deleted_paths": [],
+  "deleted_paths": ["scripts/live_voice_snapshot.ps1"],
   "baseline": "965fc827fb409b97d791f64febc7d32f0aaf71d3",
+  "b2_execution_baseline": "cc42098163bf6e9d7cec303f37551d3526997eb4",
+  "retirement_commits": [
+    "4e207faa",
+    "ddde7b87",
+    "7b283898"
+  ],
+  "accepted_interface_freeze": {
+    "p3_7_implementation_commit": "98e063f084c140cb6eb0042de32f3695c89c7279",
+    "p3_7_freeze_commit": "d9a18c06f02b293b1aed4625a7ed84665f475b57",
+    "review": "live-voice/reviews/P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md",
+    "evidence": "live-voice/evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md"
+  },
   "source_audits": [
     "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md",
     "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md",
@@ -12,7 +24,11 @@
   "explicit_exclusions": [
     "Generic non-Live-Voice project scheduling remains owned by the existing project scheduler and is not a retirement target.",
     "P3-8A observability codec, adapter, exporter and privacy assets remain accepted inputs to second-stage integration, not retirement targets.",
-    "No deletion, production composition, backend selection or migration is authorized in B1."
+    "B1 authorized no deletion; B2 executed only the three explicitly reviewed snapshot, W2-dotenv-symbol and ticket-in-path-symbol retirements recorded below.",
+    "ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are current P3-7 formal carrier/composition surfaces, not legacy-lane deletion candidates.",
+    ".env.production remains the ordinary-production default-off owner and production_task_intent.py remains active generalized intent authority.",
+    "formalTaskResultRoute.ts remains the current immutable TaskResult parser/owner.",
+    "S7/S8 and Wave2 evidence runners remain while unique safety/private-oracle consumers are live; TESTING.md alone is not their replacement oracle."
   ],
   "b1_add_only_files": [
     "jiuwenswarm/server/live_voice/observability_correlation_contract.py",
@@ -91,26 +107,26 @@
     {
       "path": "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py",
       "whole_file_deletion_target": false,
-      "candidate_symbols": ["MEDIA_ROUTE_PREFIX", "legacy_path_ticket_compat"],
+      "candidate_symbols": [],
       "retained_symbols": ["MEDIA_ROUTE_PATH", "DedicatedMediaProductRegistry", "_parse_media_auth_frame", "handle_registered_media_socket"],
       "retained_owner": "Current dedicated media authority, fixed route, first-frame media.auth, origin/session/expiry/single-use enforcement",
-      "delete_precondition": "Only legacy ticket-in-path branches are caller-free and all current media authority positive/negative tests pass."
+      "delete_precondition": "Completed in 7b283898: only MEDIA_ROUTE_PREFIX and legacy_path_ticket_compat were removed after fixed-route, first-frame authentication, privacy and zero-effect oracles passed."
     },
     {
       "path": "jiuwenswarm/gateway/channel_manager/web/web_connect.py",
       "whole_file_deletion_target": false,
-      "candidate_symbols": ["_DEDICATED_MEDIA_ROUTE_PREFIX"],
-      "retained_symbols": ["_DEDICATED_MEDIA_ROUTE_PATH", "_is_dedicated_media_route", "WebChannel"],
+      "candidate_symbols": [],
+      "retained_symbols": ["_DEDICATED_MEDIA_ROUTE_PATH", "_DEDICATED_MEDIA_REDACTION_PREFIX", "_is_dedicated_media_route", "_redacted_websocket_path", "WebChannel"],
       "retained_owner": "Generic WebChannel plus current fixed Live Voice media transport",
-      "delete_precondition": "Legacy prefix acceptance is removed without changing generic WebChannel or fixed media route authority."
+      "delete_precondition": "Completed in 7b283898: _DEDICATED_MEDIA_ROUTE_PREFIX authority was removed while hostile ticket-like paths remain redacted and generic/fixed-route WebChannel behaviour remains covered."
     },
     {
       "path": "jiuwenswarm/dotenv_early.py",
       "whole_file_deletion_target": false,
-      "candidate_symbols": ["W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG", "W2_GATEWAY_PUBLIC_AGENT_ENV_KEYS", "W2_GATEWAY_AGENT_SECRET_ENV_KEYS", "W2_AGENT_PRIVATE_ENV_FLAG", "W2_AGENT_PRIVATE_ENV_KEYS"],
+      "candidate_symbols": [],
       "retained_symbols": ["DESKTOP_PRESERVED_ENV_KEYS", "_should_preserve_session_ports", "load_dotenv_runtime"],
       "retained_owner": "Desktop and ordinary/current dotenv loading",
-      "delete_precondition": "Both W2 flags have zero source/test/doc/launcher callers and ordinary dotenv regressions pass."
+      "delete_precondition": "Completed in ddde7b87: the five W2-only flag/key tuples and their branches were removed after zero-caller and ordinary dotenv/startup oracles passed."
     },
     {
       "path": "jiuwenswarm/server/live_voice/voice_task_bridge.py",
@@ -178,11 +194,11 @@
     }
   ],
   "audit_object_mappings": [
-    {"id": "branch_w2_dotenv", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "W2 dotenv preservation flags", "current_disposition": "symbol_scoped_remove_candidate", "manifest_entry_ids": ["w2_dotenv_preservation_flags"], "retained_owner": "ordinary/current dotenv", "excluded_scope": "whole dotenv_early.py"},
-    {"id": "branch_ticket_path", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Legacy ticket-in-path dedicated-media routing", "current_disposition": "symbol_scoped_remove_candidate", "manifest_entry_ids": ["legacy_ticket_media"], "retained_owner": "current fixed-route media authority", "excluded_scope": "whole dedicated-media and WebChannel files"},
-    {"id": "branch_snapshot", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "scripts/live_voice_snapshot.ps1", "current_disposition": "remove_candidate_after_link_audit", "manifest_entry_ids": ["legacy_demo_entrypoints"], "retained_owner": "README/STATUS Git bootstrap", "excluded_scope": "plain Git bootstrap"},
-    {"id": "branch_s7", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "s7_alpha_verification.py", "current_disposition": "transplant_then_remove", "manifest_entry_ids": ["retired_s7_s8_runners"], "retained_owner": "capability tests", "excluded_scope": "unique privacy/security/media/benchmark/Agent regressions"},
-    {"id": "branch_s8", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "test_s8_readiness_cli.py", "current_disposition": "transplant_then_remove", "manifest_entry_ids": ["retired_s7_s8_runners"], "retained_owner": "capability tests", "excluded_scope": "isolation/source-ref/defect regressions"},
+    {"id": "branch_w2_dotenv", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "W2 dotenv preservation flags", "current_disposition": "retired_exact_symbols_ddde7b87", "manifest_entry_ids": ["w2_dotenv_preservation_flags"], "retained_owner": "ordinary/current dotenv", "excluded_scope": "whole dotenv_early.py"},
+    {"id": "branch_ticket_path", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Legacy ticket-in-path dedicated-media routing", "current_disposition": "retired_exact_symbols_7b283898", "manifest_entry_ids": ["legacy_ticket_media"], "retained_owner": "current fixed-route media authority", "excluded_scope": "whole dedicated-media and WebChannel files"},
+    {"id": "branch_snapshot", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "scripts/live_voice_snapshot.ps1", "current_disposition": "retired_path_4e207faa", "manifest_entry_ids": ["retired_snapshot_helper"], "retained_owner": "README/STATUS Git bootstrap", "excluded_scope": "plain Git bootstrap"},
+    {"id": "branch_s7", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "s7_alpha_verification.py", "current_disposition": "retain_until_unique_oracles_migrate", "manifest_entry_ids": ["retired_s7_s8_runners"], "retained_owner": "current S7 capability probes and tests", "excluded_scope": "unique privacy/security/media/benchmark/Agent regressions"},
+    {"id": "branch_s8", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "test_s8_readiness_cli.py", "current_disposition": "retain_until_unique_oracles_migrate", "manifest_entry_ids": ["retired_s7_s8_runners"], "retained_owner": "current S8 isolation/readiness tests", "excluded_scope": "isolation/source-ref/defect regressions"},
     {"id": "backend_alpha_benchmark", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "alpha_benchmark.py", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["test_support_rehome"], "retained_owner": "benchmark tests/tools", "excluded_scope": "active benchmark oracle"},
     {"id": "backend_alpha_privacy", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "alpha_privacy_conformance.py", "current_disposition": "retained_by_p3_8a_rebaseline", "manifest_entry_ids": ["p3_8a_accepted_observability_assets"], "retained_owner": "P3-8A privacy conformance", "excluded_scope": "accepted privacy oracle"},
     {"id": "backend_exporter", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "observability_exporter.py", "current_disposition": "retained_by_p3_8a_rebaseline", "manifest_entry_ids": ["p3_8a_accepted_observability_assets"], "retained_owner": "P3-8A/B observability", "excluded_scope": "accepted exporter"},
@@ -192,7 +208,7 @@
     {"id": "backend_realtime_media", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "realtime_media.py", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["test_support_rehome"], "retained_owner": "media tests/fakes", "excluded_scope": "supported runtime consumer if found"},
     {"id": "frontend_runtime_replica", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "conversationRuntimeReplica.ts", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "frontend runtime tests", "excluded_scope": "real runtime truth"},
     {"id": "frontend_fake_vertical", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "fakeP1Vertical.ts", "current_disposition": "rehome_or_remove_fake", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "frontend test support", "excluded_scope": "formal product truth"},
-    {"id": "frontend_task_result", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "formalTaskResultRoute.ts", "current_disposition": "integrate_or_remove", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "formal route", "excluded_scope": "required product route behaviour"},
+    {"id": "frontend_task_result", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "formalTaskResultRoute.ts", "current_disposition": "retain_current_immutable_result_owner", "manifest_entry_ids": ["formal_task_result_route_retained"], "retained_owner": "P3-7 formal TaskResult route", "excluded_scope": "whole current parser/owner"},
     {"id": "frontend_v2_contract", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "liveVoiceContractV2.ts", "current_disposition": "retain", "manifest_entry_ids": ["duplicate_frontend_validators"], "retained_owner": "cross-language trust boundary", "excluded_scope": "backend/frontend parity"},
     {"id": "frontend_observability", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "liveVoiceObservability.ts", "current_disposition": "retain_product_subset_rehome_support", "manifest_entry_ids": ["duplicate_frontend_validators", "frontend_formal_test_support"], "retained_owner": "formal Web observability", "excluded_scope": "product-consumed subset"},
     {"id": "frontend_product_contract", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "productCompositionContract.ts", "current_disposition": "retain_trust_boundary", "manifest_entry_ids": ["product_composition_contract_retained_boundary"], "retained_owner": "Web/backend contract parity", "excluded_scope": "whole validator before generated replacement"},
@@ -200,7 +216,7 @@
     {"id": "replace_legacy_web", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Legacy `useLiveVoiceDemo`", "current_disposition": "replace_then_remove", "manifest_entry_ids": ["legacy_web_task_lane"], "retained_owner": "compatibility path until formal default", "excluded_scope": "formal ChatPanel route"},
     {"id": "replace_task_core", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Old `task_core.py`", "current_disposition": "replace_then_remove", "manifest_entry_ids": ["legacy_task_models"], "retained_owner": "formal persistent Task", "excluded_scope": "canonical Task state machine"},
     {"id": "replace_executor", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "`ProjectCodeExecutorAdapter`", "current_disposition": "symbol_scoped_replace_then_remove", "manifest_entry_ids": ["legacy_project_scheduler_adapter"], "retained_owner": "Direct adapter and generic scheduler callers", "excluded_scope": "whole project_code_executor.py"},
-    {"id": "replace_demo_profile", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": ".env.production", "current_disposition": "rebaselined_default_off_retain", "manifest_entry_ids": ["exact_demo_profile_and_fixtures"], "retained_owner": "ordinary production default-off", "excluded_scope": "explicit Live Voice profile"},
+    {"id": "replace_demo_profile", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": ".env.production", "current_disposition": "retain_current_default_off_owner", "manifest_entry_ids": ["current_configuration_and_intent_retained"], "retained_owner": "ordinary production default-off", "excluded_scope": "whole .env.production and generalized production intent"},
     {"id": "replace_launcher", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "start_hands_free_demo.ps1", "current_disposition": "retain_until_physical_replacement", "manifest_entry_ids": ["legacy_demo_entrypoints"], "retained_owner": "bounded physical Demo", "excluded_scope": "generalized production launcher"},
     {"id": "replace_demo_fixture", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Three-day-itinerary prompt/file fixture", "current_disposition": "symbol_scoped_replace_then_remove", "manifest_entry_ids": ["exact_demo_profile_and_fixtures"], "retained_owner": "general task input/confirmation/policy", "excluded_scope": "whole shared composition/Executor files"},
     {"id": "replace_w2_rehearsal", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "scripts/live_voice/w2_rehearsal/", "current_disposition": "transplant_then_remove", "manifest_entry_ids": ["w2_rehearsal_assets"], "retained_owner": "capability defect/audio regressions", "excluded_scope": "needed WAV oracle"},
@@ -396,8 +412,6 @@
       "disposition": "retain_until_replacement",
       "deletion_authorized": false,
       "paths": [
-        "jiuwenswarm/channels/web/frontend/src/components/ChatPanel/index.tsx",
-        "jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceDemoBar.tsx",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceCore.ts",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceStreamingSpeech.ts",
@@ -407,7 +421,7 @@
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskMonitor.ts"
       ],
       "replacement_owner": "P3-7 formal panel route and task lifecycle owners",
-      "oracle_migration": ["Formal panel route owns committed-text submission, task projection and presentation acknowledgement."],
+      "oracle_migration": ["Formal panel route owns committed-text submission, task projection and presentation acknowledgement; current ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are retained formal carrier/composition surfaces, not members of this legacy lane."],
       "delete_preconditions": ["P3-7 Gate PASS", "Mounted formal-route and physical browser/device evidence pass without the legacy bridge."],
       "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceCore.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceStreamingSpeech.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskAdapter.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskBridge.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskClient.test.mjs"],
       "rollback": "Restore the retained files and disable the formal profile."
@@ -415,13 +429,13 @@
     {
       "id": "w2_dotenv_preservation_flags",
       "category": "legacy_configuration",
-      "phase": "inventory",
-      "disposition": "remove_candidate_after_flag_audit",
-      "deletion_authorized": false,
+      "phase": "retired",
+      "disposition": "exact_symbols_removed_ddde7b87",
+      "deletion_authorized": true,
       "paths": ["jiuwenswarm/dotenv_early.py"],
       "replacement_owner": "Ordinary production configuration and explicit Live Voice profile owners",
-      "oracle_migration": ["Default/current dotenv loading remains unchanged while retired W2-only preservation flags have zero source, test, documentation and launcher callers."],
-      "delete_preconditions": ["Exact flag-name caller audit is empty", "Default/current dotenv loading regression tests pass."],
+      "oracle_migration": ["The five W2-only flag/key tuples, preservation branches, exports and two W2-only tests were removed; default/current dotenv and Desktop/CLI port preservation remain owned by dotenv_early.py."],
+      "delete_preconditions": ["Completed: exact W2 flag-name caller audit is empty", "Completed: default/current dotenv and startup regressions pass 24/24."],
       "affected_tests": ["tests/unit_tests/test_desktop_port_resolve.py", "tests/unit_tests/test_start_services_ready_hint.py"],
       "rollback": "Restore the isolated preservation branches without enabling Live Voice in ordinary production."
     },
@@ -470,12 +484,25 @@
       "phase": "inventory",
       "disposition": "rehome_or_integrate_by_owner",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskResultRoute.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts"],
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts"],
       "replacement_owner": "P3-7 formal Web route and frontend test-support owners",
       "oracle_migration": ["Integrate product-owned route behaviour; move replicas, fakes and recorders to test support only after consumers migrate."],
       "delete_preconditions": ["Runtime caller classification is complete", "Formal route and isolated support tests pass from replacement ownership."],
-      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceConversationRuntime.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceFakeP1Vertical.test.mjs", "jiuwenswarm/channels/web/frontend/tests/formalTaskResultRoute.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceWebLifecycleObservationRecorder.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceObservability.test.mjs"],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceConversationRuntime.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceFakeP1Vertical.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceWebLifecycleObservationRecorder.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceObservability.test.mjs"],
       "rollback": "Restore original source locations and formal-route imports."
+    },
+    {
+      "id": "formal_task_result_route_retained",
+      "category": "retained_current_owner",
+      "phase": "inventory",
+      "disposition": "retain_current_immutable_result_owner",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskResultRoute.ts"],
+      "replacement_owner": "P3-7 formal TaskResult route owner",
+      "oracle_migration": ["No migration is authorized: the route remains the current complete immutable TaskResult parser and replay owner."],
+      "delete_preconditions": ["A separately accepted replacement preserves exact result/replay/error semantics", "P3-7 result-route and mounted regressions pass against that replacement."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/formalTaskResultRoute.test.mjs"],
+      "rollback": "Retain the current route; never delete it as frontend test support."
     },
     {
       "id": "duplicate_exact_object_validators",
@@ -493,28 +520,41 @@
     {
       "id": "legacy_ticket_media",
       "category": "legacy_entrypoint",
-      "phase": "inventory",
-      "disposition": "symbol_scoped_remove_candidate",
-      "deletion_authorized": false,
-      "paths": ["jiuwenswarm/gateway/live_voice/dedicated_media_registration.py", "jiuwenswarm/gateway/channel_manager/web/web_connect.py"],
+      "phase": "retired",
+      "disposition": "exact_symbols_removed_7b283898",
+      "deletion_authorized": true,
+      "paths": ["jiuwenswarm/gateway/live_voice/dedicated_media_registration.py", "jiuwenswarm/gateway/channel_manager/web/web_connect.py", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserDedicatedMediaRoute.ts"],
       "replacement_owner": "Current fixed-route DedicatedMediaProductRegistry and WebChannel authority",
-      "oracle_migration": ["Remove only MEDIA_ROUTE_PREFIX, legacy_path_ticket_compat and _DEDICATED_MEDIA_ROUTE_PREFIX after fixed MEDIA_ROUTE_PATH registration, handle_registered_media_socket and _is_dedicated_media_route exact-path dispatch remain authoritative."],
-      "delete_preconditions": ["Legacy ticket-prefix compatibility has no supported caller", "Fixed-route registry/auth/lifecycle and WebChannel handshake/dispatcher oracles pass", "Ordinary WebChannel behaviour is unaffected."],
-      "affected_tests": ["tests/unit_tests/gateway/test_dedicated_media_registration.py", "tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py"],
+      "oracle_migration": ["MEDIA_ROUTE_PREFIX, legacy_path_ticket_compat, _DEDICATED_MEDIA_ROUTE_PREFIX and the frontend optional compatibility branch were removed; fixed MEDIA_ROUTE_PATH, Registry, handler, exact WebChannel predicate, redaction and first-frame media.auth remain authoritative."],
+      "delete_preconditions": ["Completed: legacy ticket-prefix compatibility has no supported caller", "Completed: fixed-route registry/auth/lifecycle, WebChannel/privacy and frontend oracles pass", "Completed: ordinary WebChannel and feature-off behaviour are unaffected."],
+      "affected_tests": ["tests/unit_tests/gateway/test_dedicated_media_registration.py", "tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py", "jiuwenswarm/channels/web/frontend/tests/liveVoiceBrowserDedicatedMediaRoute.test.mjs"],
       "rollback": "Restore only legacy prefix compatibility symbols; never replace fixed-route registry or WebChannel authority."
     },
     {
       "id": "legacy_demo_entrypoints",
       "category": "legacy_entrypoint",
       "phase": "inventory",
-      "disposition": "retain_as_reference_only",
+      "disposition": "retain_current_physical_launcher",
       "deletion_authorized": false,
-      "paths": ["scripts/live_voice/start_hands_free_demo.ps1", "scripts/live_voice/start_hands_free_demo.cmd", "scripts/live_voice_snapshot.ps1"],
-      "replacement_owner": "P3-7 formal profile and physical acceptance owners",
-      "oracle_migration": ["General validated configuration and formal physical acceptance replace demo-only launch truth."],
-      "delete_preconditions": ["Formal launcher/profile is documented and tested", "Snapshot links are migrated to current evidence."],
+      "paths": ["scripts/live_voice/start_hands_free_demo.ps1", "scripts/live_voice/start_hands_free_demo.cmd"],
+      "replacement_owner": "Current bounded physical Demo launcher and future P3-9 physical acceptance owner",
+      "oracle_migration": ["The current physical launcher remains required; it may retire only after a replacement owns device/browser/profile startup and all physical oracles."],
+      "delete_preconditions": ["Replacement physical launcher/profile is documented and tested", "Current launcher, device and private-runtime consumers are migrated."],
       "affected_tests": ["tests/unit_tests/live_voice/test_s7_alpha_verification.py"],
       "rollback": "Restore scripts from the inventory commit; they do not become production authority."
+    },
+    {
+      "id": "retired_snapshot_helper",
+      "category": "retired_entrypoint",
+      "phase": "retired",
+      "disposition": "path_removed_4e207faa",
+      "deletion_authorized": true,
+      "paths": ["scripts/live_voice_snapshot.ps1"],
+      "replacement_owner": "README/STATUS plain Git bootstrap",
+      "oracle_migration": ["REFERENCE_INDEX now directs orientation to Git status/HEAD/upstream and STATUS; historical disposition remains in the branch-content audit."],
+      "delete_preconditions": ["Completed: no current README/runbook/caller invokes the helper", "Completed: 491 current Markdown links resolve."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py"],
+      "rollback": "Recover the helper from cc420981 only if a separately accepted orientation owner requires it; never restore stale Resume-capsule authority."
     },
     {
       "id": "exact_demo_profile_and_fixtures",
@@ -522,7 +562,7 @@
       "phase": "inventory",
       "disposition": "replace_before_generalized_claim",
       "deletion_authorized": false,
-      "paths": ["jiuwenswarm/channels/web/frontend/.env.production", "jiuwenswarm/server/live_voice/demo_fixture_contract.py", "jiuwenswarm/server/live_voice/batch_speech.py", "jiuwenswarm/server/live_voice/production_task_intent.py", "jiuwenswarm/server/live_voice/fake_verticals.py"],
+      "paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py", "jiuwenswarm/server/live_voice/batch_speech.py", "jiuwenswarm/server/live_voice/fake_verticals.py"],
       "replacement_owner": "Explicit formal profile, general task input/confirmation and Provider owners",
       "oracle_migration": ["Ordinary production stays default-off; generalized task input, confirmation/policy and selected Provider configuration replace exact-demo assumptions."],
       "delete_preconditions": ["Explicit formal profile and physical candidate pass", "General input/confirmation/policy positive and fail-closed negative scenarios pass."],
@@ -530,15 +570,28 @@
       "rollback": "Restore bounded Demo fixtures under explicit Demo-only ownership; do not call them generalized production support."
     },
     {
+      "id": "current_configuration_and_intent_retained",
+      "category": "retained_current_owner",
+      "phase": "inventory",
+      "disposition": "retain_current_default_off_and_intent_owners",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/.env.production", "jiuwenswarm/server/live_voice/production_task_intent.py"],
+      "replacement_owner": "Ordinary-production default-off profile and generalized production-intent owners",
+      "oracle_migration": ["No migration is authorized: .env.production remains default-off and production_task_intent.py remains active generalized intent authority."],
+      "delete_preconditions": ["A separately accepted profile owner preserves ordinary default-off", "A separately accepted intent owner preserves exact P3-6 classification/confirmation semantics."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceBuildProfiles.test.mjs", "tests/unit_tests/live_voice/test_production_task_intent_classifier.py"],
+      "rollback": "Retain both current owners; never classify them as exact-Demo whole-file candidates."
+    },
+    {
       "id": "retired_s7_s8_runners",
       "category": "legacy_runner",
       "phase": "inventory",
-      "disposition": "retain_as_historical_reference",
+      "disposition": "retain_until_unique_oracles_migrate",
       "deletion_authorized": false,
       "paths": ["scripts/live_voice/s7_alpha_verification.py", "scripts/live_voice/s7_real_probe_support.py", "scripts/live_voice/s7_probe_agent_executor.py", "scripts/live_voice/s7_probe_benchmark_fault.py", "scripts/live_voice/s7_probe_privacy.py", "scripts/live_voice/s7_probe_secure_deployment.py", "scripts/live_voice/s7_probe_speech_media.py", "scripts/live_voice/s8_readiness.py", "tests/unit_tests/live_voice/test_s7_alpha_verification.py", "tests/unit_tests/live_voice/test_s7_real_probes.py", "tests/unit_tests/live_voice/test_s8_readiness.py", "tests/integration/live_voice/test_s8_readiness_cli.py"],
-      "replacement_owner": "Root TESTING.md D-032/D-046/D-074 process owner",
-      "oracle_migration": ["Current risk-tier scenario and review evidence replaces historical stage runner verdicts."],
-      "delete_preconditions": ["No current review links depend on runner output", "Historical provenance remains recoverable in Git."],
+      "replacement_owner": "Current S7/S8 probe, isolation, privacy, media, benchmark and readiness oracle owners",
+      "oracle_migration": ["TESTING.md defines process only; every unique probe/isolation/privacy/media/benchmark/Agent oracle must first move to a capability-owned test before a runner can retire."],
+      "delete_preconditions": ["Every unique oracle has an explicit replacement test and no current review/runbook caller", "Historical provenance remains recoverable in Git."],
       "affected_tests": ["tests/unit_tests/live_voice/test_s7_alpha_verification.py", "tests/unit_tests/live_voice/test_s7_real_probes.py", "tests/unit_tests/live_voice/test_s8_readiness.py", "tests/integration/live_voice/test_s8_readiness_cli.py"],
       "rollback": "Recover the historical runners from Git without treating them as current gates."
     },
@@ -546,12 +599,12 @@
       "id": "retired_wave2_evidence_gate",
       "category": "legacy_validator_runner",
       "phase": "inventory",
-      "disposition": "retain_retired_do_not_recreate",
+      "disposition": "retain_live_private_oracle_support",
       "deletion_authorized": false,
       "paths": ["scripts/live_voice/p3_wave2_real_evidence_producer.py", "scripts/live_voice/p3_wave2_real_evidence_validator.py", "scripts/live_voice/p3_wave2_real_evidence.schema.json"],
-      "replacement_owner": "D-071/D-072 retirement decision and current TESTING.md process",
-      "oracle_migration": ["Current source tests and scoped review evidence replace the retired signed W2 evidence Gate."],
-      "delete_preconditions": ["No active packet references the W2 producer/validator", "D-071/D-072 retirement history remains indexed."],
+      "replacement_owner": "Current Wave2/3 private evidence producer/validator/schema test owners",
+      "oracle_migration": ["The signed W2 Gate verdict is retired, but these files remain live test/private-oracle support until every import and capability-owned replacement is proven."],
+      "delete_preconditions": ["AgentServer and test imports are zero and every private oracle has a capability-owned replacement", "D-071/D-072 retirement history remains indexed."],
       "affected_tests": ["tests/unit_tests/live_voice/test_p3_wave2_real_evidence_producer.py", "tests/unit_tests/live_voice/test_p3_wave2_real_evidence_validator.py"],
       "rollback": "Recover historical artifacts only for an explicitly authorized new audit; do not reactivate by default."
     },

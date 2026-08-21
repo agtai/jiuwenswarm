@@ -22,13 +22,15 @@ EXPECTED_B1_FILES = {
     "tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py",
     "live-voice/reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md",
 }
-REQUIRED_INVENTORY_IDS = {
+REQUIRED_MANIFEST_IDS = {
     "legacy_web_task_lane",
     "legacy_project_scheduler_adapter",
     "legacy_task_models",
     "legacy_ticket_media",
     "legacy_demo_entrypoints",
+    "retired_snapshot_helper",
     "exact_demo_profile_and_fixtures",
+    "current_configuration_and_intent_retained",
     "w2_dotenv_preservation_flags",
     "w2_rehearsal_assets",
     "retired_s7_s8_runners",
@@ -37,6 +39,7 @@ REQUIRED_INVENTORY_IDS = {
     "duplicate_exact_object_validators",
     "duplicate_operation_allowlists",
     "frontend_formal_test_support",
+    "formal_task_result_route_retained",
     "test_support_rehome",
     "p3_8a_accepted_observability_assets",
     "product_composition_contract_retained_boundary",
@@ -141,12 +144,33 @@ def _git_object_exists(tree: str, path: str) -> bool:
     return result.returncode == 0
 
 
-def test_manifest_is_add_only_inventory_with_exact_b1_scope() -> None:
+def test_manifest_records_exact_b1_scope_and_b2_scoped_retirement() -> None:
     manifest = _load()
     assert manifest["schema_version"] == "live-voice.retirement-manifest.v1"
-    assert manifest["phase"] == "inventory"
+    assert manifest["phase"] == "b2_scoped_retirement_executed"
     assert manifest["deletion_authorized"] is False
-    assert manifest["deleted_paths"] == []
+    assert manifest["deleted_paths"] == ["scripts/live_voice_snapshot.ps1"]
+    assert manifest["b2_execution_baseline"] == (
+        "cc42098163bf6e9d7cec303f37551d3526997eb4"
+    )
+    assert manifest["retirement_commits"] == [
+        "4e207faa",
+        "ddde7b87",
+        "7b283898",
+    ]
+    assert manifest["accepted_interface_freeze"] == {
+        "p3_7_implementation_commit": ("98e063f084c140cb6eb0042de32f3695c89c7279"),
+        "p3_7_freeze_commit": "d9a18c06f02b293b1aed4625a7ed84665f475b57",
+        "review": (
+            "live-voice/reviews/"
+            "P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md"
+        ),
+        "evidence": (
+            "live-voice/evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md"
+        ),
+    }
+    _assert_existing_relative_path(manifest["accepted_interface_freeze"]["review"])
+    _assert_existing_relative_path(manifest["accepted_interface_freeze"]["evidence"])
     assert set(manifest["b1_add_only_files"]) == EXPECTED_B1_FILES
     for path in manifest["source_audits"] + manifest["b1_add_only_files"]:
         _assert_existing_relative_path(path)
@@ -159,7 +183,7 @@ def test_every_retirement_item_has_owner_oracle_preconditions_tests_and_rollback
     None
 ):
     entries = _load()["entries"]
-    assert {entry["id"] for entry in entries}.issuperset(REQUIRED_INVENTORY_IDS)
+    assert {entry["id"] for entry in entries}.issuperset(REQUIRED_MANIFEST_IDS)
     assert len(entries) == len({entry["id"] for entry in entries})
     expected_keys = {
         "id",
@@ -176,8 +200,8 @@ def test_every_retirement_item_has_owner_oracle_preconditions_tests_and_rollback
     }
     for entry in entries:
         assert set(entry) == expected_keys
-        assert entry["phase"] == "inventory"
-        assert entry["deletion_authorized"] is False
+        assert entry["phase"] in {"inventory", "retired"}
+        assert entry["deletion_authorized"] is (entry["phase"] == "retired")
         for field in (
             "paths",
             "oracle_migration",
@@ -187,7 +211,13 @@ def test_every_retirement_item_has_owner_oracle_preconditions_tests_and_rollback
             assert entry[field], (entry["id"], field)
         assert entry["replacement_owner"]
         assert entry["rollback"]
-        for path in entry["paths"] + entry["affected_tests"]:
+        for path in entry["paths"]:
+            if path in _load()["deleted_paths"]:
+                assert not (ROOT / path).exists()
+                assert _git_object_exists(_load()["b2_execution_baseline"], path)
+            else:
+                _assert_existing_relative_path(path)
+        for path in entry["affected_tests"]:
             _assert_existing_relative_path(path)
 
 
@@ -269,10 +299,16 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
     assert {boundary["path"] for boundary in boundaries} == required_paths
     for boundary in boundaries:
         assert boundary["whole_file_deletion_target"] is False
-        assert boundary["candidate_symbols"]
         assert boundary["retained_symbols"]
         assert boundary["retained_owner"]
         assert boundary["delete_precondition"]
+        if not boundary["candidate_symbols"]:
+            assert boundary["path"] in {
+                "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py",
+                "jiuwenswarm/gateway/channel_manager/web/web_connect.py",
+                "jiuwenswarm/dotenv_early.py",
+            }
+            assert "Completed in" in boundary["delete_precondition"]
         path = ROOT / boundary["path"]
         source = path.read_text(encoding="utf-8")
         for symbol in boundary["candidate_symbols"] + boundary["retained_symbols"]:
@@ -310,16 +346,13 @@ def test_legacy_ticket_media_targets_only_prefix_compatibility_symbols() -> None
         "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py"
     ]
     web_channel = boundaries["jiuwenswarm/gateway/channel_manager/web/web_connect.py"]
-    assert set(registration["candidate_symbols"]) == {
-        "MEDIA_ROUTE_PREFIX",
-        "legacy_path_ticket_compat",
-    }
+    assert registration["candidate_symbols"] == []
     assert {
         "MEDIA_ROUTE_PATH",
         "DedicatedMediaProductRegistry",
         "handle_registered_media_socket",
     }.issubset(registration["retained_symbols"])
-    assert set(web_channel["candidate_symbols"]) == {"_DEDICATED_MEDIA_ROUTE_PREFIX"}
+    assert web_channel["candidate_symbols"] == []
     assert {
         "_DEDICATED_MEDIA_ROUTE_PATH",
         "_is_dedicated_media_route",
@@ -328,21 +361,86 @@ def test_legacy_ticket_media_targets_only_prefix_compatibility_symbols() -> None
     entry = next(
         item for item in manifest["entries"] if item["id"] == "legacy_ticket_media"
     )
-    assert entry["disposition"] == "symbol_scoped_remove_candidate"
+    assert entry["phase"] == "retired"
+    assert entry["deletion_authorized"] is True
+    assert entry["disposition"] == "exact_symbols_removed_7b283898"
     assert entry["replacement_owner"] == (
         "Current fixed-route DedicatedMediaProductRegistry and WebChannel authority"
     )
     assert set(entry["affected_tests"]) == {
         "tests/unit_tests/gateway/test_dedicated_media_registration.py",
         "tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py",
+        "jiuwenswarm/channels/web/frontend/tests/liveVoiceBrowserDedicatedMediaRoute.test.mjs",
     }
-    assert all(
-        symbol not in " ".join(registration["candidate_symbols"])
-        for symbol in (
-            "MEDIA_ROUTE_PATH",
-            "DedicatedMediaProductRegistry",
-            "handle_registered_media_socket",
-        )
+    combined_source = "\n".join(
+        (ROOT / path).read_text(encoding="utf-8") for path in entry["paths"]
+    )
+    for retired in (
+        "MEDIA_ROUTE_PREFIX",
+        "legacy_path_ticket_compat",
+        "_DEDICATED_MEDIA_ROUTE_PREFIX",
+    ):
+        assert retired not in combined_source
+
+
+def test_executed_retirements_and_retained_current_owners_are_exact() -> None:
+    manifest = _load()
+    entries = {entry["id"]: entry for entry in manifest["entries"]}
+
+    snapshot = entries["retired_snapshot_helper"]
+    assert snapshot["phase"] == "retired"
+    assert snapshot["deletion_authorized"] is True
+    assert snapshot["paths"] == ["scripts/live_voice_snapshot.ps1"]
+    assert not (ROOT / snapshot["paths"][0]).exists()
+    assert _git_object_exists(manifest["b2_execution_baseline"], snapshot["paths"][0])
+    assert (
+        "scripts/live_voice_snapshot.ps1"
+        not in entries["legacy_demo_entrypoints"]["paths"]
+    )
+
+    dotenv = entries["w2_dotenv_preservation_flags"]
+    assert dotenv["phase"] == "retired"
+    assert dotenv["deletion_authorized"] is True
+    dotenv_source = (ROOT / dotenv["paths"][0]).read_text(encoding="utf-8")
+    for retired in (
+        "W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG",
+        "W2_GATEWAY_PUBLIC_AGENT_ENV_KEYS",
+        "W2_GATEWAY_AGENT_SECRET_ENV_KEYS",
+        "W2_AGENT_PRIVATE_ENV_FLAG",
+        "W2_AGENT_PRIVATE_ENV_KEYS",
+    ):
+        assert retired not in dotenv_source
+    for retained in (
+        "DESKTOP_PRESERVED_ENV_KEYS",
+        "_should_preserve_session_ports",
+        "load_dotenv_runtime",
+    ):
+        assert retained in dotenv_source
+
+    legacy_web_paths = set(entries["legacy_web_task_lane"]["paths"])
+    assert not {
+        "jiuwenswarm/channels/web/frontend/src/components/ChatPanel/index.tsx",
+        "jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceDemoBar.tsx",
+    }.intersection(legacy_web_paths)
+    retained_config_paths = set(
+        entries["current_configuration_and_intent_retained"]["paths"]
+    )
+    assert retained_config_paths == {
+        "jiuwenswarm/channels/web/frontend/.env.production",
+        "jiuwenswarm/server/live_voice/production_task_intent.py",
+    }
+    assert not retained_config_paths.intersection(
+        entries["exact_demo_profile_and_fixtures"]["paths"]
+    )
+    assert entries["formal_task_result_route_retained"]["paths"] == [
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/"
+        "formalTaskResultRoute.ts"
+    ]
+    assert entries["retired_s7_s8_runners"]["disposition"] == (
+        "retain_until_unique_oracles_migrate"
+    )
+    assert entries["retired_wave2_evidence_gate"]["disposition"] == (
+        "retain_live_private_oracle_support"
     )
 
 
