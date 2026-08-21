@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import struct
+import subprocess
 import sys
 import wave
 from dataclasses import replace
@@ -234,6 +235,32 @@ class EarlyEotThenProtocolProvider(FakeProvider):
         return await super().next_recognition_event(ref, timeout_seconds=timeout_seconds)
 
 
+class FaultEventProvider(FakeProvider):
+    def __init__(self, case, threshold_ms: int, fault: str) -> None:
+        super().__init__(case, threshold_ms)
+        self.fault = fault
+        self.rewritten = False
+
+    async def send_recognition_audio(self, frame) -> None:
+        await super().send_recognition_audio(frame)
+        if self.emitted and not self.rewritten:
+            self.rewritten = True
+            events = []
+            while not self.events.empty():
+                events.append(self.events.get_nowait())
+            if self.fault == "wrong_ref":
+                events[0] = replace(
+                    events[0], ref=replace(self.ref, session_generation=2)
+                )
+            elif self.fault == "wrong_item":
+                events[1] = replace(events[1], provider_item_id="other-item")
+            elif self.fault == "duplicate_start":
+                events.insert(1, replace(events[0], seq=1))
+                events = [replace(event, seq=index) for index, event in enumerate(events)]
+            for event in events:
+                await self.events.put(event)
+
+
 def test_config_is_closed_and_freezes_sequence(tmp_path: Path) -> None:
     pilot = _config(tmp_path / "pilot")
     formal = _config(tmp_path / "formal", mode="run")
@@ -242,6 +269,8 @@ def test_config_is_closed_and_freezes_sequence(tmp_path: Path) -> None:
     assert formal.attempts_per_case == 5
     with pytest.raises(ValueError, match="VAD_BENCHMARK_CONFIG_INVALID"):
         replace(pilot, source_clean=False)
+    with pytest.raises(ValueError, match="VAD_BENCHMARK_CONFIG_INVALID"):
+        replace(pilot, output_path=Path("/tmp/private\npath"))
 
 
 def test_result_invariants_reject_attractive_failed_latency(tmp_path: Path) -> None:
@@ -258,7 +287,7 @@ def test_result_invariants_reject_attractive_failed_latency(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_attempt_paces_contiguous_frames_and_accepts_one_exact_turn(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _, manifest = _corpus(tmp_path / "second")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
     case = manifest.cases[0]
     clock = ManualClock()
     providers = []
@@ -289,7 +318,7 @@ async def test_attempt_paces_contiguous_frames_and_accepts_one_exact_turn(tmp_pa
 @pytest.mark.asyncio
 async def test_incomplete_transcript_is_failed_without_latency_credit(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _, manifest = _corpus(tmp_path / "second")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
     case = manifest.cases[0]
     clock = ManualClock()
 
@@ -308,7 +337,7 @@ async def test_incomplete_transcript_is_failed_without_latency_credit(tmp_path: 
 @pytest.mark.asyncio
 async def test_provider_failure_cancels_collector_and_closes_owner(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _, manifest = _corpus(tmp_path / "second")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
     case = manifest.cases[0]
     clock = ManualClock()
     provider = FakeProvider(case, 1200)
@@ -333,7 +362,7 @@ async def test_provider_failure_cancels_collector_and_closes_owner(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_observed_early_eot_remains_turn_failure_when_tail_protocol_fails(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _, manifest = _corpus(tmp_path / "second")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
     case = manifest.cases[-1]
     clock = ManualClock()
     provider = EarlyEotThenProtocolProvider(case, 1200)
@@ -350,6 +379,200 @@ async def test_observed_early_eot_remains_turn_failure_when_tail_protocol_fails(
     assert result.final_voiced_frame_to_eot_ms is None
     assert result.pacing_valid is True
     assert provider.closed is True
+
+
+@pytest.mark.asyncio
+async def test_early_eot_with_invalid_pacing_is_infrastructure_invalid(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[-1]
+    clock = ManualClock()
+    provider = EarlyEotThenProtocolProvider(case, 1200)
+
+    async def slow_sleep(delay: float) -> None:
+        clock.value += max(0.0, delay) + 0.100
+        await asyncio.sleep(0)
+
+    async def factory(_turn_detection):
+        return provider
+
+    result = await runner.run_vad_attempt(
+        config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+        provider_factory=factory, monotonic=clock.now, sleep=slow_sleep,
+    )
+    assert result.outcome is runner.VadAttemptOutcome.INVALID
+    assert result.reason is runner.VadAttemptReason.PACING_INVALID
+
+
+@pytest.mark.asyncio
+async def test_blocked_provider_send_returns_bounded_timeout(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    provider = FakeProvider(case, 1200)
+
+    async def blocked_send(_frame) -> None:
+        await asyncio.Event().wait()
+
+    provider.send_recognition_audio = blocked_send
+
+    async def factory(_turn_detection):
+        return provider
+
+    result = await asyncio.wait_for(
+        runner.run_vad_attempt(
+            config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+            provider_factory=factory, operation_timeout_seconds=0.01,
+            close_timeout_seconds=0.01,
+        ),
+        timeout=0.2,
+    )
+    assert result.outcome is runner.VadAttemptOutcome.UNKNOWN
+    assert result.reason is runner.VadAttemptReason.TIMEOUT
+    assert provider.closed is True
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_closes_exact_provider(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    provider = FakeProvider(case, 1200)
+    entered = asyncio.Event()
+
+    async def blocked_send(_frame) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    provider.send_recognition_audio = blocked_send
+
+    async def factory(_turn_detection):
+        return provider
+
+    task = asyncio.create_task(
+        runner.run_vad_attempt(
+            config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+            provider_factory=factory,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert provider.closed is True
+
+
+@pytest.mark.parametrize("fault", ("wrong_ref", "wrong_item", "duplicate_start"))
+@pytest.mark.asyncio
+async def test_wrong_or_duplicate_turn_identity_never_completes(
+    tmp_path: Path, fault: str
+) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    clock = ManualClock()
+
+    async def factory(_turn_detection):
+        return FaultEventProvider(case, 1200, fault)
+
+    result = await runner.run_vad_attempt(
+        config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+        provider_factory=factory, monotonic=clock.now, sleep=clock.sleep,
+    )
+    assert result.outcome is not runner.VadAttemptOutcome.COMPLETED
+    assert result.final_voiced_frame_to_eot_ms is None
+
+
+@pytest.mark.asyncio
+async def test_nonserver_commit_disposition_is_failed_without_latency(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    clock = ManualClock()
+    provider = FakeProvider(case, 1200)
+
+    async def client_commit(_ref):
+        return RecognitionCommitDisposition.CLIENT_COMMIT_SENT
+
+    provider.commit_recognition = client_commit
+
+    async def factory(_turn_detection):
+        return provider
+
+    result = await runner.run_vad_attempt(
+        config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+        provider_factory=factory, monotonic=clock.now, sleep=clock.sleep,
+    )
+    assert result.outcome is runner.VadAttemptOutcome.FAILED
+    assert result.reason is runner.VadAttemptReason.PROVIDER_PROTOCOL
+    assert result.final_voiced_frame_to_eot_ms is None
+
+
+@pytest.mark.asyncio
+async def test_incomplete_cleanup_is_unknown_and_aborts_screening(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    clock = ManualClock()
+    provider = FakeProvider(case, 1200)
+    provider.cleanup_snapshot = TransportCleanupSnapshot(1, 0, ("recognition",))
+
+    async def factory(_turn_detection):
+        return provider
+
+    result = await runner.run_vad_attempt(
+        config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+        provider_factory=factory, monotonic=clock.now, sleep=clock.sleep,
+    )
+    assert result.outcome is runner.VadAttemptOutcome.UNKNOWN
+    assert result.reason is runner.VadAttemptReason.CLEANUP_INCOMPLETE
+
+
+@pytest.mark.asyncio
+async def test_screening_aborts_after_first_invalid_attempt(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    calls = 0
+
+    async def invalid_attempt(_config, case, attempt_index, **kwargs):
+        nonlocal calls
+        calls += 1
+        return runner.VadAttemptResult.failed(
+            kwargs["configuration_id"], kwargs["silence_duration_ms"],
+            case.case_id, attempt_index, runner.VadAttemptReason.PACING_INVALID,
+            outcome=runner.VadAttemptOutcome.INVALID,
+        )
+
+    with pytest.raises(ValueError, match="INFRASTRUCTURE_INVALID"):
+        await runner.run_screening(
+            config, manifest, provider_factory=lambda _: None,
+            attempt_runner=invalid_attempt,
+        )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_revalidates_manifest_and_wav_before_provider(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    payload = bytearray(case.wav_path.read_bytes())
+    payload[100] ^= 1
+    case.wav_path.write_bytes(payload)
+    case.wav_path.chmod(0o600)
+    calls = 0
+
+    async def factory(_turn_detection):
+        nonlocal calls
+        calls += 1
+        return FakeProvider(case, 1200)
+
+    result = await runner.run_vad_attempt(
+        config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+        provider_factory=factory,
+    )
+    assert result.outcome is runner.VadAttemptOutcome.UNKNOWN
+    assert calls == 0
 
 
 @pytest.mark.asyncio
@@ -384,6 +607,43 @@ async def test_real_factory_passes_only_existing_speech_configuration(monkeypatc
     assert seen is not None
     assert "UNRELATED_PRIVATE_VALUE" not in seen
     assert seen["LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_real_factory_requires_explicit_model_before_selector(monkeypatch) -> None:
+    calls = 0
+
+    async def selector(**_kwargs):
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", selector)
+    with pytest.raises(ValueError, match="PROVIDER_UNAVAILABLE"):
+        await runner.create_real_streaming_provider(
+            {
+                "LIVE_VOICE_SPEECH_PROVIDER": "openai",
+                "LIVE_VOICE_SPEECH_API_BASE": "https://api.openai.com/v1",
+                "LIVE_VOICE_SPEECH_API_KEY": "private-provider-sentinel",
+            }
+        )
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_real_factory_rejects_nonstreaming_selection(monkeypatch) -> None:
+    async def selector(**_kwargs):
+        return SimpleNamespace(tier=runner.SpeechRouteTier.TEXT, provider=None)
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", selector)
+    with pytest.raises(ValueError, match="PROVIDER_UNAVAILABLE"):
+        await runner.create_real_streaming_provider(
+            {
+                "LIVE_VOICE_SPEECH_PROVIDER": "openai",
+                "LIVE_VOICE_SPEECH_API_BASE": "https://api.openai.com/v1",
+                "LIVE_VOICE_SPEECH_API_KEY": "private-provider-sentinel",
+                "LIVE_VOICE_SPEECH_STT_MODEL": "gpt-4o-mini-transcribe-2025-12-15",
+            }
+        )
 
 
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
@@ -425,10 +685,35 @@ def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) ->
         runner.write_vad_benchmark_report(config.output_path, report)
 
 
+def test_report_reparse_is_deep_and_failure_atomic(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    report = runner.build_report(
+        config,
+        corpus_id="vad-en-v1",
+        corpus_manifest_sha256="b" * 64,
+        provider_id="openai",
+        provider_class="OpenAIStreamingSpeechProvider",
+        stt_model="gpt-4o-mini-transcribe-2025-12-15",
+        attempts=(),
+        decision="INCONCLUSIVE",
+    )
+    real_loads = runner.json.loads
+
+    def tampered_loads(payload):
+        loaded = real_loads(payload)
+        loaded["decision"] = "READY_FOR_SCREENING"
+        return loaded
+
+    monkeypatch.setattr(runner.json, "loads", tampered_loads)
+    with pytest.raises(ValueError, match="VAD_BENCHMARK_REPORT_INVALID"):
+        runner.write_vad_benchmark_report(config.output_path, report)
+    assert not config.output_path.exists()
+
+
 @pytest.mark.asyncio
 async def test_screening_order_is_exact(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _, manifest = _corpus(tmp_path / "second")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
     calls = []
 
     async def attempt(config, case, attempt_index, **kwargs):
@@ -452,6 +737,114 @@ async def test_screening_order_is_exact(tmp_path: Path) -> None:
     assert report.decision == "READY_FOR_SCREENING"
 
 
+def test_formal_decision_rejects_lower_threshold_integrity_failures(tmp_path: Path) -> None:
+    config = _config(tmp_path, mode="run")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    attempts = []
+    for configuration_id, threshold in runner.CONFIGURATION_SEQUENCE:
+        for case in manifest.cases:
+            for attempt_index in range(5):
+                if configuration_id in {"E1", "E2"} and case.pause_ms == 1000:
+                    attempts.append(
+                        runner.VadAttemptResult.failed(
+                            configuration_id, threshold, case.case_id, attempt_index,
+                            runner.VadAttemptReason.EARLY_EOT,
+                        )
+                    )
+                else:
+                    attempts.append(
+                        runner.VadAttemptResult.completed(
+                            configuration_id, threshold, case.case_id, attempt_index,
+                            final_voiced_frame_to_eot_ms=float(threshold),
+                            eot_to_final_ms=100.0,
+                            final_voiced_frame_to_final_ms=float(threshold + 100),
+                            provider_reported_speech_end_ms=None,
+                            pacing_p50_ms=0.0, pacing_p95_ms=0.0, pacing_max_ms=0.0,
+                        )
+                    )
+    assert runner._decision(config, tuple(attempts)) == "FIXED_THRESHOLD_REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_screening_rejects_corpus_mutated_before_report(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    calls = 0
+
+    async def attempt(_config, case, attempt_index, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 16:
+            payload = bytearray(case.wav_path.read_bytes())
+            payload[100] ^= 1
+            case.wav_path.write_bytes(payload)
+            case.wav_path.chmod(0o600)
+        return runner.VadAttemptResult.completed(
+            kwargs["configuration_id"], kwargs["silence_duration_ms"],
+            case.case_id, attempt_index,
+            final_voiced_frame_to_eot_ms=float(kwargs["silence_duration_ms"]),
+            eot_to_final_ms=10.0,
+            final_voiced_frame_to_final_ms=float(kwargs["silence_duration_ms"] + 10),
+            provider_reported_speech_end_ms=None,
+            pacing_p50_ms=0.0, pacing_p95_ms=0.0, pacing_max_ms=0.0,
+        )
+
+    with pytest.raises(ValueError, match="MANIFEST_INVALID"):
+        await runner.run_screening(
+            config, manifest, provider_factory=lambda _: None,
+            attempt_runner=attempt,
+        )
+
+
+@pytest.mark.asyncio
+async def test_injected_main_writes_exact_model_and_rechecks_source(
+    tmp_path: Path, capsys
+) -> None:
+    manifest_path, manifest = _corpus(tmp_path)
+    output = tmp_path / "main-report.json"
+    clock = ManualClock()
+    provider_calls = 0
+
+    async def factory(turn_detection):
+        nonlocal provider_calls
+        case = manifest.cases[provider_calls % len(manifest.cases)]
+        provider_calls += 1
+        return FakeProvider(
+            case, turn_detection.server_vad.silence_duration_ms
+        )
+
+    source_checks = 0
+
+    def source_state():
+        nonlocal source_checks
+        source_checks += 1
+        return "a" * 40, True
+
+    exit_code = await runner._main(
+        [
+            "pilot", "--manifest", str(manifest_path),
+            "--output", str(output), "--run-id", "vad-main-test",
+            "--git-commit", "a" * 40,
+        ],
+        environ={
+            "LIVE_VOICE_SPEECH_STT_MODEL":
+                "gpt-4o-mini-transcribe-2025-12-15"
+        },
+        provider_factory=factory,
+        monotonic=clock.now,
+        sleep=clock.sleep,
+        source_state_factory=source_state,
+    )
+    assert exit_code == 0
+    assert source_checks == 2
+    assert provider_calls == 16
+    loaded = json.loads(output.read_text())
+    assert loaded["stt_model"] == "gpt-4o-mini-transcribe-2025-12-15"
+    assert capsys.readouterr().out == (
+        '{"run_id":"vad-main-test","decision":"READY_FOR_SCREENING"}\n'
+    )
+
+
 def test_cli_rejects_dirty_or_existing_output_before_provider(tmp_path: Path) -> None:
     manifest_path, _ = _corpus(tmp_path)
     argv = [
@@ -465,3 +858,18 @@ def test_cli_rejects_dirty_or_existing_output_before_provider(tmp_path: Path) ->
     (tmp_path / "report.json").write_text("occupied")
     with pytest.raises(ValueError, match="VAD_BENCHMARK_CONFIG_INVALID"):
         runner.parse_args(argv, source_commit="a" * 40, source_clean=True)
+
+
+def test_cli_unknown_secret_argument_is_never_echoed(tmp_path: Path) -> None:
+    sentinel = "PRIVATE_CLI_SENTINEL"
+    completed = subprocess.run(
+        [sys.executable, str(RUNNER_PATH), "pilot", "--api-key", sentinel],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert completed.stderr == "VAD_EOT_BENCHMARK_FAILED\n"
+    assert sentinel not in completed.stderr

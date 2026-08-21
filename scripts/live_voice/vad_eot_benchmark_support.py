@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import struct
@@ -222,13 +223,8 @@ def _validate_source(
         raise ValueError("VAD_CORPUS_SPLIT_INVALID")
     if len(samples) < 96_000 or any(samples[-96_000:]):
         raise ValueError("VAD_CORPUS_FINAL_SILENCE_INVALID")
-    final_voiced = 0
+    final_voiced = _detect_final_voiced(samples)
     speech_area = len(samples) - 96_000
-    threshold_energy = VOICE_RMS_THRESHOLD * VOICE_RMS_THRESHOLD
-    for offset in range(0, speech_area, VOICE_WINDOW_SAMPLES):
-        window = samples[offset : min(offset + VOICE_WINDOW_SAMPLES, speech_area)]
-        if window and sum(sample * sample for sample in window) / len(window) > threshold_energy:
-            final_voiced = offset + len(window)
     if final_voiced <= split:
         raise ValueError("VAD_CORPUS_SPLIT_INVALID")
     boundary_start = split
@@ -242,13 +238,32 @@ def _validate_source(
     return decoded, final_voiced, boundary_start, boundary_end
 
 
+def _detect_final_voiced(samples: tuple[int, ...]) -> int:
+    final_voiced = 0
+    speech_area = max(0, len(samples) - 96_000)
+    threshold_energy = VOICE_RMS_THRESHOLD * VOICE_RMS_THRESHOLD
+    for offset in range(0, speech_area, VOICE_WINDOW_SAMPLES):
+        window = samples[offset : min(offset + VOICE_WINDOW_SAMPLES, speech_area)]
+        if window and sum(sample * sample for sample in window) / len(window) > threshold_energy:
+            final_voiced = offset + len(window)
+    return final_voiced
+
+
 def _write_wav(path: Path, samples: tuple[int, ...]) -> None:
-    with wave.open(str(path), "wb") as output:
-        output.setnchannels(CHANNEL_COUNT)
-        output.setsampwidth(SAMPLE_WIDTH_BYTES)
-        output.setframerate(SAMPLE_RATE_HZ)
-        output.writeframes(struct.pack(f"<{len(samples)}h", *samples))
-    path.chmod(0o600)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as raw_output:
+            descriptor = -1
+            with wave.open(raw_output, "wb") as output:
+                output.setnchannels(CHANNEL_COUNT)
+                output.setsampwidth(SAMPLE_WIDTH_BYTES)
+                output.setframerate(SAMPLE_RATE_HZ)
+                output.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
 
 
 def prepare_vad_corpus(request: PrepareVadCorpusRequest) -> VadCorpusManifest:
@@ -296,11 +311,13 @@ def prepare_vad_corpus(request: PrepareVadCorpusRequest) -> VadCorpusManifest:
             "cases": cases,
         }
         manifest_path = request.output_root / "manifest.json"
-        with manifest_path.open("x", encoding="utf-8", newline="\n") as output:
+        descriptor = os.open(
+            manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        created.append(manifest_path)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
             json.dump(manifest_raw, output, ensure_ascii=False, separators=(",", ":"))
             output.write("\n")
-        manifest_path.chmod(0o600)
-        created.append(manifest_path)
         return load_vad_corpus_manifest(manifest_path)
     except BaseException:
         for path in reversed(created):
@@ -355,6 +372,7 @@ def load_vad_corpus_manifest(path: Path) -> VadCorpusManifest:
     if any(not token or " " in token for token in tokens) or len(set(tokens)) != len(tokens):
         raise ValueError(reason)
     cases: list[VadCorpusCase] = []
+    decoded_cases: list[tuple[int, ...]] = []
     for index, raw_case in enumerate(raw_cases):
         case = _require_exact_dict(raw_case, _CASE_KEYS, reason)
         case_id = case["case_id"]
@@ -385,6 +403,9 @@ def load_vad_corpus_manifest(path: Path) -> VadCorpusManifest:
         )
         if any(decoded.samples[-96_000:]):
             raise ValueError(reason)
+        if final_voiced != _detect_final_voiced(decoded.samples):
+            raise ValueError(reason)
+        decoded_cases.append(decoded.samples)
         cases.append(
             VadCorpusCase(
                 case_id=case_id,
@@ -397,6 +418,22 @@ def load_vad_corpus_manifest(path: Path) -> VadCorpusManifest:
                 required_post_pause_tokens=tokens,
             )
         )
+    baseline = cases[0]
+    baseline_samples = decoded_cases[0]
+    boundary = baseline.second_clause_first_frame
+    if not 0 < boundary < baseline.final_voiced_frame:
+        raise ValueError(reason)
+    for case, samples in zip(cases, decoded_cases, strict=True):
+        pause_samples = case.pause_ms * 48
+        if (
+            case.second_clause_first_frame != boundary + pause_samples
+            or case.final_voiced_frame != baseline.final_voiced_frame + pause_samples
+            or samples
+            != baseline_samples[:boundary]
+            + (0,) * pause_samples
+            + baseline_samples[boundary:]
+        ):
+            raise ValueError(reason)
     return VadCorpusManifest(
         schema_version=CORPUS_SCHEMA_VERSION,
         corpus_id=record["corpus_id"],

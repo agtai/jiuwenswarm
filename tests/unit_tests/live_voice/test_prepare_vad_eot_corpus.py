@@ -151,8 +151,22 @@ def test_manifest_is_closed_hash_bound_and_path_confined(tmp_path: Path) -> None
     ):
         invalid = tmp_path / f"invalid-{len(list(tmp_path.glob('invalid-*')))}.json"
         invalid.write_text(json.dumps(mutation), encoding="utf-8")
+        invalid.chmod(0o600)
         with pytest.raises(ValueError, match="VAD_CORPUS_MANIFEST_INVALID"):
             support.load_vad_corpus_manifest(invalid)
+
+    false_facts = {
+        **raw,
+        "cases": [
+            {**raw["cases"][0], "final_voiced_frame": raw["cases"][0]["final_voiced_frame"] - 480},
+            *raw["cases"][1:],
+        ],
+    }
+    false_manifest = request.output_root / "false-facts.json"
+    false_manifest.write_text(json.dumps(false_facts), encoding="utf-8")
+    false_manifest.chmod(0o600)
+    with pytest.raises(ValueError, match="VAD_CORPUS_MANIFEST_INVALID"):
+        support.load_vad_corpus_manifest(false_manifest)
 
 
 @pytest.mark.parametrize(
@@ -268,3 +282,16 @@ def test_wrong_source_hash_or_non_low_energy_split_creates_nothing(tmp_path: Pat
         with pytest.raises(ValueError):
             support.prepare_vad_corpus(request)
         assert not output_root.exists()
+
+
+def test_wav_exclusive_writer_removes_partial_artifact(tmp_path: Path, monkeypatch) -> None:
+    support = _load(SUPPORT_PATH, "vad_support_atomic_wav")
+    output = tmp_path / "partial.wav"
+
+    def fail_open(_target, _mode):
+        raise RuntimeError("private-write-sentinel")
+
+    monkeypatch.setattr(support.wave, "open", fail_open)
+    with pytest.raises(RuntimeError, match="private-write-sentinel"):
+        support._write_wav(output, (0,) * 960)
+    assert not output.exists()

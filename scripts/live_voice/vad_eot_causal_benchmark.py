@@ -58,9 +58,16 @@ CONFIGURATION_SEQUENCE = (("A1", 1200), ("E1", 900), ("E2", 800), ("A2", 1200))
 FRAME_SAMPLES = 960
 FRAME_SECONDS = 0.020
 EVENT_TIMEOUT_SECONDS = 20.0
+OPERATION_TIMEOUT_SECONDS = 30.0
+CLOSE_TIMEOUT_SECONDS = 5.0
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _has_control(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 class VadAttemptOutcome(StrEnum):
@@ -99,8 +106,10 @@ class VadBenchmarkConfig:
             or self.mode not in {"pilot", "run"}
             or not isinstance(self.manifest_path, Path)
             or not self.manifest_path.is_absolute()
+            or _has_control(str(self.manifest_path))
             or not isinstance(self.output_path, Path)
             or not self.output_path.is_absolute()
+            or _has_control(str(self.output_path))
             or self.output_path.exists()
             or type(self.git_commit) is not str
             or not _GIT_SHA.fullmatch(self.git_commit)
@@ -412,14 +421,35 @@ def write_vad_benchmark_report(path: Path, report: VadBenchmarkReport) -> None:
     if not isinstance(path, Path) or not path.is_absolute() or not isinstance(report, VadBenchmarkReport):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    payload = json.dumps(_jsonable(report), separators=(",", ":"), sort_keys=True) + "\n"
-    with path.open("x", encoding="utf-8", newline="\n") as output:
-        output.write(payload)
-    path.chmod(0o600)
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    if type(loaded) is not dict or set(loaded) != set(report.__dataclass_fields__):
-        path.unlink(missing_ok=True)
-        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    expected = _jsonable(report)
+    payload = json.dumps(expected, separators=(",", ":"), sort_keys=True) + "\n"
+    created = False
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if loaded != expected:
+            raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    except BaseException:
+        if created:
+            path.unlink(missing_ok=True)
+        raise
+
+
+def _contains_timeout(error: BaseException) -> bool:
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    return isinstance(error, BaseExceptionGroup) and any(
+        _contains_timeout(nested) for nested in error.exceptions
+    )
+
+
+def _pacing_is_valid(lateness: Sequence[float]) -> bool:
+    return bool(lateness) and (_nearest_rank(lateness, 0.95) or 0.0) <= 20.0 and max(lateness) <= 50.0
 
 
 async def run_vad_attempt(
@@ -432,8 +462,9 @@ async def run_vad_attempt(
     provider_factory: ProviderFactory,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    operation_timeout_seconds: float = OPERATION_TIMEOUT_SECONDS,
+    close_timeout_seconds: float = CLOSE_TIMEOUT_SECONDS,
 ) -> VadAttemptResult:
-    del config
     provider: VadRecognitionProvider | None = None
     started = stopped = committed = final = 0
     exact_identity = transcript_complete = False
@@ -464,10 +495,22 @@ async def run_vad_attempt(
     final_text = ""
     disposition: RecognitionCommitDisposition | None = None
     try:
-        provider = await provider_factory(turn_detection)
-        await provider.open_recognition(
-            RecognitionStreamRequest(ref, turn_detection),
-            timeout_seconds=10.0,
+        current_manifest = load_vad_corpus_manifest(config.manifest_path)
+        current_case = next(
+            (candidate for candidate in current_manifest.cases if candidate.case_id == case.case_id),
+            None,
+        )
+        if current_case != case:
+            raise ValueError("corpus")
+        provider = await asyncio.wait_for(
+            provider_factory(turn_detection), timeout=operation_timeout_seconds
+        )
+        await asyncio.wait_for(
+            provider.open_recognition(
+                RecognitionStreamRequest(ref, turn_detection),
+                timeout_seconds=10.0,
+            ),
+            timeout=operation_timeout_seconds,
         )
         decoded = read_pcm16_mono_wav(case.wav_path)
         epoch = monotonic()
@@ -483,18 +526,23 @@ async def run_vad_attempt(
                 lateness.append(max(0.0, (monotonic() - deadline) * 1000.0))
                 samples = decoded.samples[offset : offset + FRAME_SAMPLES]
                 floats = tuple(sample / 32768.0 for sample in samples)
-                await provider.send_recognition_audio(
-                    RecognitionAudioFrame(
-                        ref,
-                        seq,
-                        offset,
-                        len(samples),
-                        struct.pack(f"<{len(floats)}f", *floats),
-                    )
+                await asyncio.wait_for(
+                    provider.send_recognition_audio(
+                        RecognitionAudioFrame(
+                            ref,
+                            seq,
+                            offset,
+                            len(samples),
+                            struct.pack(f"<{len(floats)}f", *floats),
+                        )
+                    ),
+                    timeout=operation_timeout_seconds,
                 )
                 sent_cursor = offset + len(samples)
                 await asyncio.sleep(0)
-            disposition = await provider.commit_recognition(ref)
+            disposition = await asyncio.wait_for(
+                provider.commit_recognition(ref), timeout=operation_timeout_seconds
+            )
             commit_checked.set()
 
         async def collector() -> None:
@@ -502,8 +550,11 @@ async def run_vad_attempt(
             nonlocal transcript_complete, eot_at, final_at, provider_end_ms
             nonlocal item_id, early_eot, final_text
             while final == 0:
-                event = await provider.next_recognition_event(
-                    ref, timeout_seconds=EVENT_TIMEOUT_SECONDS
+                event = await asyncio.wait_for(
+                    provider.next_recognition_event(
+                        ref, timeout_seconds=EVENT_TIMEOUT_SECONDS
+                    ),
+                    timeout=operation_timeout_seconds,
                 )
                 if event.ref != ref:
                     exact_identity = False
@@ -549,9 +600,9 @@ async def run_vad_attempt(
         p50 = statistics.median(lateness) if lateness else 0.0
         p95 = _nearest_rank(lateness, 0.95) or 0.0
         maximum = max(lateness, default=0.0)
-        pacing_valid = p95 <= 20.0 and maximum <= 50.0
+        pacing_valid = _pacing_is_valid(lateness)
         del final_text
-        await provider.close()
+        await asyncio.wait_for(provider.close(), timeout=close_timeout_seconds)
         clean = provider.cleanup_snapshot.clean
         if not clean:
             reason = VadAttemptReason.CLEANUP_INCOMPLETE
@@ -591,7 +642,13 @@ async def run_vad_attempt(
             case.case_id,
             attempt_index,
             reason,
-            outcome=(VadAttemptOutcome.INVALID if reason is VadAttemptReason.PACING_INVALID else VadAttemptOutcome.FAILED),
+            outcome=(
+                VadAttemptOutcome.INVALID
+                if reason is VadAttemptReason.PACING_INVALID
+                else VadAttemptOutcome.UNKNOWN
+                if reason is VadAttemptReason.CLEANUP_INCOMPLETE
+                else VadAttemptOutcome.FAILED
+            ),
             speech_started_count=started,
             speech_stopped_count=stopped,
             committed_count=committed,
@@ -601,26 +658,47 @@ async def run_vad_attempt(
             cleanup_complete=clean,
             pacing_valid=pacing_valid,
         )
-    except asyncio.TimeoutError:
-        reason = VadAttemptReason.TIMEOUT
-        outcome = VadAttemptOutcome.UNKNOWN
     except asyncio.CancelledError:
         raise
     except (KeyboardInterrupt, SystemExit):
         raise
-    except Exception:
-        reason = VadAttemptReason.PROVIDER_PROTOCOL
+    except Exception as error:
+        reason = (
+            VadAttemptReason.TIMEOUT
+            if _contains_timeout(error)
+            else VadAttemptReason.PROVIDER_PROTOCOL
+        )
         outcome = VadAttemptOutcome.UNKNOWN
     finally:
         commit_checked.set()
         if provider is not None and not getattr(provider, "closed", False):
             try:
-                await provider.close()
+                await asyncio.wait_for(provider.close(), timeout=close_timeout_seconds)
             except Exception:
                 pass
     cleanup = bool(provider is not None and provider.cleanup_snapshot.clean)
+    pacing_valid = _pacing_is_valid(lateness)
+    if not cleanup:
+        return VadAttemptResult.failed(
+            configuration_id, silence_duration_ms, case.case_id, attempt_index,
+            VadAttemptReason.CLEANUP_INCOMPLETE,
+            outcome=VadAttemptOutcome.UNKNOWN,
+            speech_started_count=started, speech_stopped_count=stopped,
+            committed_count=committed, final_count=final,
+            exact_identity=exact_identity, transcript_complete=transcript_complete,
+            cleanup_complete=False, pacing_valid=pacing_valid,
+        )
+    if lateness and not pacing_valid:
+        return VadAttemptResult.failed(
+            configuration_id, silence_duration_ms, case.case_id, attempt_index,
+            VadAttemptReason.PACING_INVALID,
+            outcome=VadAttemptOutcome.INVALID,
+            speech_started_count=started, speech_stopped_count=stopped,
+            committed_count=committed, final_count=final,
+            exact_identity=exact_identity, transcript_complete=transcript_complete,
+            cleanup_complete=True, pacing_valid=False,
+        )
     if early_eot and cleanup:
-        pacing_valid = bool(lateness) and (_nearest_rank(lateness, 0.95) or 0.0) <= 20.0 and max(lateness) <= 50.0
         return VadAttemptResult.failed(
             configuration_id,
             silence_duration_ms,
@@ -664,6 +742,8 @@ async def create_real_streaming_provider(environ: Mapping[str, str]) -> OpenAISt
             "LIVE_VOICE_SPEECH_STT_MODEL",
         )
     }
+    if any(not allowed[key].strip() for key in allowed):
+        raise ValueError("PROVIDER_UNAVAILABLE")
     allowed["LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED"] = "1"
     selected = await select_environment_streaming_speech(
         environ=allowed,
@@ -750,6 +830,9 @@ async def run_screening(
                 if result.outcome in {VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID}:
                     raise ValueError("VAD_EOT_BENCHMARK_INFRASTRUCTURE_INVALID")
     frozen = tuple(attempts)
+    settled_manifest = load_vad_corpus_manifest(config.manifest_path)
+    if settled_manifest != manifest:
+        raise ValueError("VAD_EOT_BENCHMARK_INFRASTRUCTURE_INVALID")
     digest = hashlib.sha256(config.manifest_path.read_bytes()).hexdigest()
     return build_report(
         config,
@@ -765,13 +848,15 @@ async def run_screening(
 
 def _source_state() -> tuple[str, bool]:
     commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+        cwd=REPOSITORY_ROOT,
     ).stdout.strip()
     dirty = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         check=True,
         capture_output=True,
         text=True,
+        cwd=REPOSITORY_ROOT,
     ).stdout
     return commit, not bool(dirty)
 
@@ -782,7 +867,11 @@ def parse_args(
     source_commit: str | None = None,
     source_clean: bool | None = None,
 ) -> VadBenchmarkConfig:
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    class ClosedParser(argparse.ArgumentParser):
+        def error(self, _message: str) -> None:
+            raise ValueError("VAD_BENCHMARK_CONFIG_INVALID")
+
+    parser = ClosedParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("mode", choices=("pilot", "run"))
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -809,21 +898,39 @@ async def _main(
     environ: Mapping[str, str],
     source_commit: str | None = None,
     source_clean: bool | None = None,
+    provider_factory: ProviderFactory | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    source_state_factory: Callable[[], tuple[str, bool]] = _source_state,
 ) -> int:
+    if source_commit is None or source_clean is None:
+        source_commit, source_clean = source_state_factory()
     config = parse_args(
         argv, source_commit=source_commit, source_clean=source_clean
     )
     manifest = load_vad_corpus_manifest(config.manifest_path)
+    stt_model = str(environ.get("LIVE_VOICE_SPEECH_STT_MODEL") or "").strip()
+    if not stt_model or not _SAFE_LABEL.fullmatch(stt_model):
+        raise ValueError("PROVIDER_UNAVAILABLE")
 
-    async def factory(_turn_detection):
-        return await create_real_streaming_provider(environ)
+    if provider_factory is None:
+        async def factory(_turn_detection):
+            return await create_real_streaming_provider(environ)
+        selected_factory = factory
+    else:
+        selected_factory = provider_factory
 
     report = await run_screening(
         config,
         manifest,
-        provider_factory=factory,
-        stt_model=str(environ.get("LIVE_VOICE_SPEECH_STT_MODEL") or "gpt-4o-mini-transcribe"),
+        provider_factory=selected_factory,
+        monotonic=monotonic,
+        sleep=sleep,
+        stt_model=stt_model,
     )
+    final_commit, final_clean = source_state_factory()
+    if final_commit != config.git_commit or final_clean is not True:
+        raise ValueError("VAD_EOT_BENCHMARK_INFRASTRUCTURE_INVALID")
     write_vad_benchmark_report(config.output_path, report)
     print(json.dumps({"run_id": config.run_id, "decision": report.decision}, separators=(",", ":")))
     return 0
