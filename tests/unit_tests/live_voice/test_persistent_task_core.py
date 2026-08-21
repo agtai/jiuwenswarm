@@ -2132,6 +2132,144 @@ def test_repeat_cancel_without_a_second_event_or_outbox_reopens(
     assert SqliteTaskStore(database).get_task(task_id, _scope()).cancel_requested
 
 
+def test_preconditioned_repeat_cancel_is_a_durable_conflict_without_new_effect(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "preconditioned-repeat-cancel.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path, identity_suffix="-repeat-precondition")
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    dispatch = store.claim_outbox("repeat-precondition-dispatch")
+    assert dispatch is not None
+    store.complete_outbox(
+        dispatch,
+        executor_ref=f"legacy:{dispatch.attempt_id}",
+        observations=_observations(dispatch),
+    )
+    current = store.get_task(dispatch.task_id, _scope())
+    first_command, first_grant = _wave2_command(
+        current.task_id,
+        "task.cancel",
+        {},
+        command_id="command-repeat-precondition-first",
+    )
+    first_precondition = TaskMutationPrecondition(
+        task_id=current.task_id,
+        attempt_id=current.attempt_id,
+        expected_event_head=current.event_head,
+    )
+    first = core.execute(
+        first_command,
+        first_grant,
+        now=NOW,
+        mutation_precondition=first_precondition,
+    )
+    assert first.ok
+    after_first = store.get_task(dispatch.task_id, _scope())
+    second_command, second_grant = _wave2_command(
+        after_first.task_id,
+        "task.cancel",
+        {},
+        command_id="command-repeat-precondition-second",
+    )
+    second_precondition = TaskMutationPrecondition(
+        task_id=after_first.task_id,
+        attempt_id=after_first.attempt_id,
+        expected_event_head=after_first.event_head,
+    )
+    before_counts = store.counts()
+    before_executor = (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    )
+
+    rejected = core.execute(
+        second_command,
+        second_grant,
+        now=NOW,
+        mutation_precondition=second_precondition,
+    )
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_CANCEL_ALREADY_REQUESTED"
+    assert store.counts()["commands"] == before_counts["commands"] + 1
+    assert {
+        key: value for key, value in store.counts().items() if key != "commands"
+    } == {key: value for key, value in before_counts.items() if key != "commands"}
+    assert (
+        tuple(executor.dispatches),
+        tuple(executor.cancels),
+        tuple(executor.adjustments),
+    ) == before_executor
+    exact_replay = core.execute(
+        replace(second_command, request_id="request-repeat-precondition-replay"),
+        second_grant,
+        now=NOW,
+        mutation_precondition=second_precondition,
+    )
+    assert exact_replay.error == rejected.error
+    changed = core.execute(
+        second_command,
+        second_grant,
+        now=NOW,
+        mutation_precondition=replace(
+            second_precondition,
+            expected_event_head=second_precondition.expected_event_head - 1,
+        ),
+    )
+    assert not changed.ok and changed.error is not None
+    assert changed.error.reason == "IDEMPOTENCY_CONFLICT"
+    pending_reopen = SqliteTaskStore(database)
+    pending_replay = PersistentTaskCore(pending_reopen, _Executor()).execute(
+        replace(second_command, request_id="request-repeat-precondition-reopen"),
+        second_grant,
+        now=NOW,
+        mutation_precondition=second_precondition,
+    )
+    assert pending_replay.error == rejected.error
+    cancel_item = pending_reopen.claim_outbox("repeat-precondition-cancel")
+    assert cancel_item is not None and cancel_item.kind is OutboxKind.ATTEMPT_CANCEL
+    pending_reopen.apply_observations(
+        _observations(cancel_item, outcome=TerminalOutcome.CANCELLED)
+    )
+    settled_reopen = SqliteTaskStore(database)
+    settled_replay = PersistentTaskCore(settled_reopen, _Executor()).execute(
+        replace(second_command, request_id="request-repeat-precondition-settled"),
+        second_grant,
+        now=NOW,
+        mutation_precondition=second_precondition,
+    )
+    assert settled_replay.error == rejected.error
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint FROM commands WHERE command_id=?",
+            (second_command.command_id,),
+        ).fetchone()
+        assert row is not None
+        binding = json.loads(row[0])
+        assert binding["binding_type"] == "live_voice.task_business_decision"
+        binding["authority"]["mutation_precondition"]["expected_event_head"] -= 1
+        connection.execute(
+            "UPDATE commands SET fingerprint=? WHERE command_id=?",
+            (canonical_json_bytes(binding), second_command.command_id),
+        )
+        connection.commit()
+    tampered = _database_dump(database)
+    with pytest.raises(FormalTaskViolation) as corrupt:
+        SqliteTaskStore(database)
+    assert corrupt.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == tampered
+
+
 def test_cancel_request_is_accepted_until_authoritative_cancelled_settlement(
     tmp_path: Path,
 ) -> None:

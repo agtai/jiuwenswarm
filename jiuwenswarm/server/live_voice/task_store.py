@@ -176,6 +176,10 @@ _CANCEL_BUSINESS_DECISIONS = {
         TaskCommandDisposition.CONFLICT,
         frozenset({ErrorCode.STALE}),
     ),
+    "TASK_CANCEL_ALREADY_REQUESTED": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.CONFLICT}),
+    ),
 }
 _ADJUST_BUSINESS_DECISIONS = {
     "TASK_ADJUSTMENT_STATE_CONFLICT": (
@@ -5268,6 +5272,22 @@ class SqliteTaskStore:
                     observed_at=observed_at,
                 )
             if bool(task["cancel_requested"]):
+                if mutation_precondition is not None:
+                    # A different command cannot claim a positive no-op without
+                    # a new immutable event that proves its command-time head.
+                    # Preserve exact-command replay, but record a fresh request
+                    # as a sanitized durable conflict bound to the current Store
+                    # authority instead of inferring history during reopen.
+                    return self._persist_business_decision(
+                        connection,
+                        command,
+                        fingerprint,
+                        disposition=TaskCommandDisposition.CONFLICT,
+                        code=ErrorCode.CONFLICT,
+                        reason="TASK_CANCEL_ALREADY_REQUESTED",
+                        message="task cancellation has already been requested",
+                        observed_at=observed_at,
+                    )
                 result = ResultEnvelope.success(
                     owner=command,
                     result={
@@ -7297,7 +7317,10 @@ class SqliteTaskStore:
             command,
             reason=reason,
         )
-        if reason == "TASK_MUTATION_PRECONDITION_STALE":
+        if reason in {
+            "TASK_MUTATION_PRECONDITION_STALE",
+            "TASK_CANCEL_ALREADY_REQUESTED",
+        }:
             try:
                 replay_payload = json.loads(replay_fingerprint)
                 if (
@@ -7455,7 +7478,11 @@ class SqliteTaskStore:
                     "mutation_precondition" in authority
                     and (
                         binding["command_type"] not in {"task.cancel", "task.adjust"}
-                        or result.error.reason != "TASK_MUTATION_PRECONDITION_STALE"
+                        or result.error.reason
+                        not in {
+                            "TASK_MUTATION_PRECONDITION_STALE",
+                            "TASK_CANCEL_ALREADY_REQUESTED",
+                        }
                         or type(mutation_precondition_snapshot) is not dict
                     )
                 )
@@ -8233,6 +8260,18 @@ class SqliteTaskStore:
                 valid_reason = precondition.task_id == task["task_id"] and (
                     precondition.attempt_id != task["attempt_id"]
                     or precondition.expected_event_head != task["event_head"]
+                )
+            elif reason == "TASK_CANCEL_ALREADY_REQUESTED":
+                precondition = TaskMutationPrecondition.from_dict(
+                    binding["authority"].get("mutation_precondition")
+                )
+                valid_reason = (
+                    bool(task["cancel_requested"])
+                    and precondition.task_id == task["task_id"]
+                    and precondition.attempt_id == task["attempt_id"]
+                    and precondition.expected_event_head == task["event_head"]
+                    and head["attempt_id"] == task["attempt_id"]
+                    and head["seq"] == task["event_head"]
                 )
             else:
                 valid_reason = (
