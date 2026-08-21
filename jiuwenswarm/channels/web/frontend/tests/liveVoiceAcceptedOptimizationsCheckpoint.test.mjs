@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -13,7 +17,15 @@ import {
   compareCheckpointReports,
   runCheckpointAttempt,
 } from '../node_modules/.cache/live-voice-accepted-checkpoint/acceptedOptimizationsCheckpoint.js';
-import { runControlledOwnerAttempt } from '../scripts/liveVoiceAcceptedOptimizationsCheckpoint.mjs';
+import {
+  comparePrivateCheckpointReports,
+  parseAcceptedCheckpointArgs,
+  readPrivateCheckpointReport,
+  renderCheckpointComparisonMarkdown,
+  runAcceptedCheckpointPopulation,
+  runControlledOwnerAttempt,
+  writePrivateCheckpointReport,
+} from '../scripts/liveVoiceAcceptedOptimizationsCheckpoint.mjs';
 
 class ManualClock {
   #time;
@@ -375,4 +387,169 @@ test('malformed P2 evidence fails closed before P1 and still closes its real own
     result.events.map(event => event.point),
     ['speech_end', 'stt_final', 'admission_accepted', 'model_complete_and_notifications_enqueued'],
   );
+});
+
+test('checkpoint CLI parser is closed and never echoes an unknown private value', () => {
+  const output = '/tmp/accepted-checkpoint-report.json';
+  assert.deepEqual(
+    parseAcceptedCheckpointArgs([
+      'run',
+      '--population',
+      'B',
+      '--mode',
+      'optimized',
+      '--samples',
+      '5',
+      '--git-commit',
+      'a'.repeat(40),
+      '--run-id',
+      'accepted-checkpoint-b',
+      '--output',
+      output,
+    ]),
+    {
+      command: 'run',
+      population: 'B',
+      mode: 'optimized',
+      samples: 5,
+      git_commit: 'a'.repeat(40),
+      run_id: 'accepted-checkpoint-b',
+      output,
+    },
+  );
+  const sentinel = 'PRIVATE_SENTINEL_VALUE';
+  assert.throws(
+    () => parseAcceptedCheckpointArgs(['run', '--unknown', sentinel]),
+    error => error instanceof Error && error.message === 'CHECKPOINT_ARGUMENT_INVALID' && !error.message.includes(sentinel),
+  );
+  assert.deepEqual(
+    parseAcceptedCheckpointArgs([
+      'compare-a-b-a',
+      '--baseline-before',
+      '/tmp/a1.json',
+      '--candidate',
+      '/tmp/b.json',
+      '--baseline-after',
+      '/tmp/a2.json',
+      '--output',
+      '/tmp/comparison.json',
+    ]),
+    {
+      command: 'compare-a-b-a',
+      baseline_before: '/tmp/a1.json',
+      candidate: '/tmp/b.json',
+      baseline_after: '/tmp/a2.json',
+      output: '/tmp/comparison.json',
+    },
+  );
+});
+
+test('checkpoint CLI help is side-effect free and executable without source checks', () => {
+  const result = spawnSync(process.execPath, ['scripts/liveVoiceAcceptedOptimizationsCheckpoint.mjs', '--help'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Usage: liveVoiceAcceptedOptimizationsCheckpoint/m);
+  assert.equal(result.stderr, '');
+});
+
+test('private report writer installs one mode-0600 deep-reparsed report without partial files', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'accepted-checkpoint-'));
+  const output = path.join(root, 'report.json');
+  const attempts = Object.keys(CHECKPOINT_WORKLOADS).map((workloadId, index) => literalCompletedAttempt('B', workloadId, 0, 200 + index * 10));
+  const report = buildCheckpointReport(reportConfig('B', { samples_per_workload: 1 }), attempts);
+
+  await writePrivateCheckpointReport(output, report);
+  assert.equal((await fs.stat(output)).mode & 0o077, 0);
+  assert.deepEqual(await readPrivateCheckpointReport(output), report);
+  await assert.rejects(writePrivateCheckpointReport(output, report), /CHECKPOINT_OUTPUT_EXISTS/);
+  assert.deepEqual(await readPrivateCheckpointReport(output), report);
+
+  const cyclicOutput = path.join(root, 'cyclic.json');
+  const cyclic = {};
+  cyclic.self = cyclic;
+  await assert.rejects(writePrivateCheckpointReport(cyclicOutput, cyclic), /CHECKPOINT_REPORT_INVALID/);
+  await assert.rejects(fs.stat(cyclicOutput), error => error?.code === 'ENOENT');
+  assert.deepEqual((await fs.readdir(root)).sort(), ['report.json']);
+});
+
+test('one-sample optimized population runs all real-owner workloads with stable fingerprints and zero forbidden effects', async () => {
+  const report = await runAcceptedCheckpointPopulation({
+    population: 'B',
+    mode: 'optimized',
+    samples: 1,
+    git_commit: 'a'.repeat(40),
+    run_id: 'checkpoint-b-smoke',
+  });
+
+  assert.equal(report.attempts.length, 3);
+  assert.ok(report.attempts.every(attempt => attempt.outcome === 'completed'));
+  assert.deepEqual(
+    report.attempts.map(attempt => attempt.p2.notification_rpc_count),
+    [1, 4, 8],
+  );
+  assert.match(report.runner_fingerprint, /^[0-9a-f]{64}$/);
+  assert.match(report.fixture_fingerprint, /^[0-9a-f]{64}$/);
+  assert.match(report.timing_fingerprint, /^[0-9a-f]{64}$/);
+  assert.deepEqual(report.forbidden_effects, {
+    agent: 0,
+    tool: 0,
+    task: 0,
+    history: 0,
+    network: 0,
+    provider: 0,
+    microphone: 0,
+  });
+});
+
+test('private A1/B/A2 compare writes absolute deltas and renders milliseconds before percentages', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'accepted-checkpoint-compare-'));
+  const make = population => {
+    const value = population === 'B' ? 170 : population === 'A2' ? 210 : 200;
+    return buildCheckpointReport(
+      reportConfig(population),
+      Object.keys(CHECKPOINT_WORKLOADS).flatMap(workloadId =>
+        Array.from({ length: 5 }, (_, index) => literalCompletedAttempt(population, workloadId, index, value)),
+      ),
+    );
+  };
+  const a1Path = path.join(root, 'a1.json');
+  const bPath = path.join(root, 'b.json');
+  const a2Path = path.join(root, 'a2.json');
+  const comparisonPath = path.join(root, 'comparison.json');
+  await writePrivateCheckpointReport(a1Path, make('A1'));
+  await writePrivateCheckpointReport(bPath, make('B'));
+  await writePrivateCheckpointReport(a2Path, make('A2'));
+
+  const comparison = await comparePrivateCheckpointReports({
+    baseline_before: a1Path,
+    candidate: bPath,
+    baseline_after: a2Path,
+    output: comparisonPath,
+  });
+  const markdown = renderCheckpointComparisonMarkdown(comparison);
+
+  assert.equal((await fs.stat(comparisonPath)).mode & 0o077, 0);
+  assert.equal(comparison.decision, 'accepted');
+  assert.match(markdown, /\| W1 \| round_total \| 200\.000 \| 170\.000 \| 210\.000 \| -30\.000 \| -40\.000 \|/);
+  assert.ok(markdown.indexOf('B−A1 ms') < markdown.indexOf('B−A1 %'));
+});
+
+test('comparison remains inconclusive when one attempted candidate round is unknown', () => {
+  const make = population =>
+    buildCheckpointReport(
+      reportConfig(population),
+      Object.keys(CHECKPOINT_WORKLOADS).flatMap(workloadId =>
+        Array.from({ length: 5 }, (_, index) => literalCompletedAttempt(population, workloadId, index, population === 'B' ? 170 : 200)),
+      ),
+    );
+  const a1 = make('A1');
+  const bAttempts = make('B').attempts.map((attempt, index) =>
+    index === 0 ? { ...attempt, outcome: 'unknown', reason: 'CHECKPOINT_DEPENDENCY_FAILED', events: [] } : attempt,
+  );
+  const b = buildCheckpointReport(reportConfig('B'), bAttempts);
+  const a2 = make('A2');
+
+  assert.equal(compareCheckpointReports(a1, b, a2).decision, 'inconclusive');
 });

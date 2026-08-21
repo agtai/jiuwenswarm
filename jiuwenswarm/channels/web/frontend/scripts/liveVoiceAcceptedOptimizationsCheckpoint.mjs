@@ -1,6 +1,16 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 import {
   CHECKPOINT_CONTROLLED_TARGETS,
   CHECKPOINT_WORKLOADS,
+  buildCheckpointReport,
+  compareCheckpointReports,
+  parseCheckpointComparison,
+  parseCheckpointReport,
   runCheckpointAttempt,
 } from '../node_modules/.cache/live-voice-accepted-checkpoint/acceptedOptimizationsCheckpoint.js';
 import {
@@ -29,6 +39,252 @@ class ControlledMonotonicClock {
 
 function fail(reason) {
   throw new Error(reason);
+}
+
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const GIT_COMMIT = /^[0-9a-f]{40}$/;
+
+function canonicalInteger(value, minimum, maximum) {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
+}
+
+function closedFlags(argv, allowed) {
+  if (!Array.isArray(argv) || argv.length !== allowed.size * 2) fail('CHECKPOINT_ARGUMENT_INVALID');
+  const values = new Map();
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if (!allowed.has(key) || values.has(key) || typeof value !== 'string' || value.length === 0) fail('CHECKPOINT_ARGUMENT_INVALID');
+    values.set(key, value);
+  }
+  return values;
+}
+
+export function parseAcceptedCheckpointArgs(argv) {
+  if (!Array.isArray(argv) || argv.length === 0) fail('CHECKPOINT_ARGUMENT_INVALID');
+  const [command, ...tail] = argv;
+  if (command === 'run') {
+    const values = closedFlags(tail, new Set(['--population', '--mode', '--samples', '--git-commit', '--run-id', '--output']));
+    const population = values.get('--population');
+    const mode = values.get('--mode');
+    const samples = canonicalInteger(values.get('--samples'), 1, 30);
+    const gitCommit = values.get('--git-commit');
+    const runId = values.get('--run-id');
+    const output = values.get('--output');
+    const populationModeValid = (population === 'B' && mode === 'optimized') || ((population === 'A1' || population === 'A2') && mode === 'baseline');
+    if (
+      !populationModeValid ||
+      samples === null ||
+      !GIT_COMMIT.test(gitCommit ?? '') ||
+      !RUN_ID.test(runId ?? '') ||
+      typeof output !== 'string' ||
+      !path.isAbsolute(output) ||
+      output.includes('\n') ||
+      output.includes('\r')
+    )
+      fail('CHECKPOINT_ARGUMENT_INVALID');
+    return Object.freeze({
+      command: 'run',
+      population,
+      mode,
+      samples,
+      git_commit: gitCommit,
+      run_id: runId,
+      output,
+    });
+  }
+  if (command === 'compare-a-b-a') {
+    const values = closedFlags(tail, new Set(['--baseline-before', '--candidate', '--baseline-after', '--output']));
+    const result = {
+      command: 'compare-a-b-a',
+      baseline_before: values.get('--baseline-before'),
+      candidate: values.get('--candidate'),
+      baseline_after: values.get('--baseline-after'),
+      output: values.get('--output'),
+    };
+    const paths = [result.baseline_before, result.candidate, result.baseline_after, result.output];
+    if (
+      paths.some(value => typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\n') || value.includes('\r')) ||
+      new Set(paths).size !== paths.length
+    )
+      fail('CHECKPOINT_ARGUMENT_INVALID');
+    return Object.freeze(result);
+  }
+  fail('CHECKPOINT_ARGUMENT_INVALID');
+}
+
+export async function writePrivateCheckpointReport(output, report) {
+  return writePrivateJson(output, report, parseCheckpointReport, 'CHECKPOINT_REPORT_INVALID');
+}
+
+async function writePrivateJson(output, value, parser, invalidReason) {
+  if (typeof output !== 'string' || !path.isAbsolute(output) || output.includes('\n') || output.includes('\r')) fail(invalidReason);
+  let serialized;
+  try {
+    serialized = `${JSON.stringify(parser(value))}\n`;
+  } catch {
+    fail(invalidReason);
+  }
+  const temporary = `${output}.tmp-${process.pid}-${randomUUID()}`;
+  let handle = null;
+  try {
+    handle = await fs.open(temporary, 'wx', 0o600);
+    await handle.writeFile(serialized, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    parser(JSON.parse(await fs.readFile(temporary, 'utf8')));
+    await fs.link(temporary, output);
+  } catch (error) {
+    if (error?.code === 'EEXIST') fail('CHECKPOINT_OUTPUT_EXISTS');
+    if (error instanceof Error && error.message.startsWith('CHECKPOINT_')) throw error;
+    fail(invalidReason);
+  } finally {
+    if (handle !== null) await handle.close().catch(() => undefined);
+    await fs.unlink(temporary).catch(() => undefined);
+  }
+}
+
+export async function readPrivateCheckpointReport(input) {
+  try {
+    return parseCheckpointReport(JSON.parse(await fs.readFile(input, 'utf8')));
+  } catch (error) {
+    if (error instanceof Error && error.message === 'CHECKPOINT_REPORT_INVALID') throw error;
+    fail('CHECKPOINT_REPORT_INVALID');
+  }
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+export async function runAcceptedCheckpointPopulation(input) {
+  const optimizationMode =
+    input.mode === 'optimized'
+      ? Object.freeze({ p2_notification_batch_size: 16, tts_successor_ack_overlap: true })
+      : Object.freeze({ p2_notification_batch_size: 1, tts_successor_ack_overlap: false });
+  if (
+    !['A1', 'B', 'A2'].includes(input.population) ||
+    !((input.population === 'B' && input.mode === 'optimized') || (input.population !== 'B' && input.mode === 'baseline')) ||
+    !Number.isSafeInteger(input.samples) ||
+    input.samples < 1 ||
+    input.samples > 30 ||
+    !GIT_COMMIT.test(input.git_commit ?? '') ||
+    !RUN_ID.test(input.run_id ?? '')
+  )
+    fail('CHECKPOINT_RUN_INPUT_INVALID');
+  const runnerBytes = await fs.readFile(new URL(import.meta.url));
+  const runnerFingerprint = sha256(runnerBytes);
+  const fixtureFingerprint = sha256(JSON.stringify(CHECKPOINT_WORKLOADS));
+  const timingFingerprint = sha256(JSON.stringify(CHECKPOINT_CONTROLLED_TARGETS));
+  const attempts = [];
+  for (const workloadId of Object.keys(CHECKPOINT_WORKLOADS)) {
+    for (let attemptIndex = 0; attemptIndex < input.samples; attemptIndex += 1) {
+      attempts.push(
+        await runControlledOwnerAttempt({
+          population: input.population,
+          workload_id: workloadId,
+          attempt_index: attemptIndex,
+          source_commit: input.git_commit,
+          runner_fingerprint: runnerFingerprint,
+          fixture_fingerprint: fixtureFingerprint,
+          timing_fingerprint: timingFingerprint,
+          optimization_mode: optimizationMode,
+        }),
+      );
+    }
+  }
+  return buildCheckpointReport(
+    {
+      run_id: input.run_id,
+      population: input.population,
+      source_commit: input.git_commit,
+      source_clean: true,
+      runner_fingerprint: runnerFingerprint,
+      fixture_fingerprint: fixtureFingerprint,
+      timing_fingerprint: timingFingerprint,
+      samples_per_workload: input.samples,
+      optimization_mode: optimizationMode,
+    },
+    attempts,
+  );
+}
+
+export async function comparePrivateCheckpointReports(input) {
+  const [a1, b, a2] = await Promise.all([
+    readPrivateCheckpointReport(input.baseline_before),
+    readPrivateCheckpointReport(input.candidate),
+    readPrivateCheckpointReport(input.baseline_after),
+  ]);
+  const comparison = compareCheckpointReports(a1, b, a2);
+  await writePrivateJson(input.output, comparison, parseCheckpointComparison, 'CHECKPOINT_COMPARISON_INVALID');
+  return comparison;
+}
+
+function fixed(value) {
+  return value.toFixed(3);
+}
+
+export function renderCheckpointComparisonMarkdown(comparison) {
+  const parsed = parseCheckpointComparison(comparison);
+  const lines = [
+    '# Accepted Optimizations Latency Checkpoint',
+    '',
+    `Decision: **${parsed.decision}**`,
+    '',
+    '| Workload | Stage | A1 p50 ms | B p50 ms | A2 p50 ms | B−A1 ms | B−A2 ms | B−A1 % | B−A2 % | A drift % | Truth |',
+    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|',
+  ];
+  for (const [workloadId, workload] of Object.entries(parsed.workloads)) {
+    for (const [segment, row] of Object.entries(workload.segments)) {
+      lines.push(
+        `| ${workloadId} | ${segment} | ${fixed(row.a1_p50_ms)} | ${fixed(row.b_p50_ms)} | ${fixed(row.a2_p50_ms)} | ${fixed(row.b_minus_a1_ms)} | ${fixed(row.b_minus_a2_ms)} | ${fixed(row.b_minus_a1_percent)} | ${fixed(row.b_minus_a2_percent)} | ${fixed(row.baseline_drift_percent)} | DERIVED |`,
+      );
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+const USAGE = `Usage: liveVoiceAcceptedOptimizationsCheckpoint <command> [options]
+
+Commands:
+  run --population A1|B|A2 --mode baseline|optimized --samples N --git-commit SHA --run-id ID --output PATH
+  compare-a-b-a --baseline-before PATH --candidate PATH --baseline-after PATH --output PATH
+`;
+
+function assertExactCleanSource(expectedCommit) {
+  const actualCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+  if (actualCommit !== expectedCommit || status !== '') fail('CHECKPOINT_SOURCE_NOT_CLEAN');
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  if (argv.length === 1 && argv[0] === '--help') {
+    process.stdout.write(USAGE);
+    return;
+  }
+  const args = parseAcceptedCheckpointArgs(argv);
+  if (args.command === 'run') {
+    assertExactCleanSource(args.git_commit);
+    const report = await runAcceptedCheckpointPopulation(args);
+    await writePrivateCheckpointReport(args.output, report);
+    const completed = report.attempts.filter(attempt => attempt.outcome === 'completed').length;
+    process.stdout.write(`${JSON.stringify({ run_id: report.run_id, completed, intended: report.attempts.length })}\n`);
+    if (completed !== report.attempts.length) fail('CHECKPOINT_POPULATION_INCOMPLETE');
+    return;
+  }
+  const comparison = await comparePrivateCheckpointReports(args);
+  process.stdout.write(`${JSON.stringify({ decision: comparison.decision })}\n`);
+}
+
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  main().catch(() => {
+    process.stderr.write('ACCEPTED_CHECKPOINT_FAILED\n');
+    process.exitCode = 1;
+  });
 }
 
 function bindingFor(config) {

@@ -305,14 +305,14 @@ Voice P1/P2 owners and latency contracts.
 - `compare-a-b-a` writes
   `live-voice.accepted-optimizations-checkpoint-comparison.v0`.
 
-- [ ] **Step 1: Write RED CLI and privacy tests**
+- [x] **Step 1: Write RED CLI and privacy tests**
 
   Invoke the real subprocess with valid and adversarial arguments. Require
   40-hex clean source, population, optimization mode, output path, five samples
   and the exact workload matrix. Unknown arguments, private sentinels, existing
   output and dirty source return stable tokens without echo.
 
-- [ ] **Step 2: Implement closed argument parsing and source checks**
+- [x] **Step 2: Implement closed argument parsing and source checks**
 
   Use no shell, no abbreviation and no environment dump. `run` verifies HEAD
   and clean status before and after attempts. The population-mode map is exact:
@@ -322,32 +322,32 @@ Voice P1/P2 owners and latency contracts.
   B:     p2_batch_size=16, tts_mode=successor_ack_overlap
   ```
 
-- [ ] **Step 3: Write RED private-writer tests**
+- [x] **Step 3: Write RED private-writer tests**
 
   Prove exclusive mode-0600 creation, failure cleanup, deep reparse, maximum
   size, no symlink/overwrite and no private fields. Inject write/link failures
   and assert no final/temporary file survives.
 
-- [ ] **Step 4: Implement atomic private report writing**
+- [x] **Step 4: Implement atomic private report writing**
 
   Canonically serialize to a same-directory exclusive temporary file, fsync,
   deep-parse the complete model, then install without overwrite. Only the
   task-owned temporary file may be removed on failure.
 
-- [ ] **Step 5: Write RED comparison tests**
+- [x] **Step 5: Write RED comparison tests**
 
   Cover compatible improvement, regression, baseline drift over 10%, source
   mismatch, runner/fixture mismatch, missing workload, failed denominator and
   unapproved optimization difference. Assert totals are summarized from direct
   attempt totals.
 
-- [ ] **Step 6: Implement comparison and Markdown renderer**
+- [x] **Step 6: Implement comparison and Markdown renderer**
 
   Render absolute stage/total p50/p95, B−A1/B−A2 milliseconds, percentages,
   drift and truth class. Render measured residual/proven headroom separately
   from estimated historical hypotheses. Never interpolate raw prompt or PCM.
 
-- [ ] **Step 7: Run CLI smoke and static checks**
+- [x] **Step 7: Run CLI smoke and static checks**
 
   ```bash
   cd jiuwenswarm/channels/web/frontend
@@ -358,7 +358,7 @@ Voice P1/P2 owners and latency contracts.
   git diff --check
   ```
 
-- [ ] **Step 8: Commit runner closure**
+- [x] **Step 8: Commit runner closure**
 
   ```bash
   git add \

@@ -68,6 +68,15 @@ export const CHECKPOINT_CONTROLLED_TARGETS = Object.freeze({
 });
 
 export const CHECKPOINT_B_BATCH_BOUND = 16;
+export const CHECKPOINT_FORBIDDEN_EFFECTS = Object.freeze({
+  agent: 0,
+  tool: 0,
+  task: 0,
+  history: 0,
+  network: 0,
+  provider: 0,
+  microphone: 0,
+});
 
 export interface CheckpointClock {
   nowMs(): number;
@@ -278,6 +287,7 @@ export interface CheckpointReport {
   readonly timing_fingerprint: string;
   readonly samples_per_workload: number;
   readonly optimization_mode: CheckpointOptimizationMode;
+  readonly forbidden_effects: typeof CHECKPOINT_FORBIDDEN_EFFECTS;
   readonly attempts: readonly CheckpointAttempt[];
   readonly summaries: Readonly<Record<CheckpointWorkloadId, CheckpointWorkloadSummary>>;
 }
@@ -376,9 +386,67 @@ export function buildCheckpointReport(config: CheckpointReportConfig, attempts: 
     lane: 'deterministic_owner_checkpoint',
     ...config,
     optimization_mode: Object.freeze({ ...config.optimization_mode }),
+    forbidden_effects: CHECKPOINT_FORBIDDEN_EFFECTS,
     attempts: Object.freeze([...attempts]),
     summaries: Object.freeze(summaries),
   });
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === [...expected].sort()[index]);
+}
+
+export function parseCheckpointReport(value: unknown): CheckpointReport {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) reportViolation('CHECKPOINT_REPORT_INVALID');
+  const raw = value as Record<string, unknown>;
+  if (
+    !exactKeys(raw, [
+      'schema_version',
+      'lane',
+      'run_id',
+      'population',
+      'source_commit',
+      'source_clean',
+      'runner_fingerprint',
+      'fixture_fingerprint',
+      'timing_fingerprint',
+      'samples_per_workload',
+      'optimization_mode',
+      'forbidden_effects',
+      'attempts',
+      'summaries',
+    ]) ||
+    raw.schema_version !== 'live-voice.accepted-optimizations-checkpoint.v0' ||
+    raw.lane !== 'deterministic_owner_checkpoint' ||
+    JSON.stringify(raw.forbidden_effects) !== JSON.stringify(CHECKPOINT_FORBIDDEN_EFFECTS) ||
+    !Array.isArray(raw.attempts) ||
+    raw.optimization_mode === null ||
+    typeof raw.optimization_mode !== 'object' ||
+    Array.isArray(raw.optimization_mode)
+  )
+    reportViolation('CHECKPOINT_REPORT_INVALID');
+  let rebuilt: CheckpointReport;
+  try {
+    rebuilt = buildCheckpointReport(
+      {
+        run_id: raw.run_id as string,
+        population: raw.population as CheckpointPopulation,
+        source_commit: raw.source_commit as string,
+        source_clean: raw.source_clean as boolean,
+        runner_fingerprint: raw.runner_fingerprint as string,
+        fixture_fingerprint: raw.fixture_fingerprint as string,
+        timing_fingerprint: raw.timing_fingerprint as string,
+        samples_per_workload: raw.samples_per_workload as number,
+        optimization_mode: raw.optimization_mode as unknown as CheckpointOptimizationMode,
+      },
+      raw.attempts as unknown as readonly CheckpointAttempt[],
+    );
+  } catch {
+    reportViolation('CHECKPOINT_REPORT_INVALID');
+  }
+  if (JSON.stringify(rebuilt.summaries) !== JSON.stringify(raw.summaries)) reportViolation('CHECKPOINT_REPORT_INVALID');
+  return rebuilt;
 }
 
 export interface CheckpointComparisonRow {
@@ -425,7 +493,23 @@ function assertComparable(a1: CheckpointReport, b: CheckpointReport, a2: Checkpo
 export function compareCheckpointReports(a1: CheckpointReport, b: CheckpointReport, a2: CheckpointReport): CheckpointComparison {
   assertComparable(a1, b, a2);
   const workloads = {} as Record<CheckpointWorkloadId, { segments: Record<CheckpointSegment, CheckpointComparisonRow> }>;
-  let decision: CheckpointComparison['decision'] = 'accepted';
+  const populationsComplete = [a1, b, a2].every(
+    report =>
+      report.samples_per_workload === 5 &&
+      (Object.keys(CHECKPOINT_WORKLOADS) as CheckpointWorkloadId[]).every(workloadId => {
+        const outcomes = report.summaries[workloadId].outcomes;
+        return (
+          outcomes.intended === 5 &&
+          outcomes.attempts === 5 &&
+          outcomes.completed === 5 &&
+          outcomes.invalid === 0 &&
+          outcomes.failed === 0 &&
+          outcomes.unknown === 0 &&
+          outcomes.missing === 0
+        );
+      }),
+  );
+  let decision: CheckpointComparison['decision'] = populationsComplete ? 'accepted' : 'inconclusive';
   for (const workloadId of Object.keys(CHECKPOINT_WORKLOADS) as CheckpointWorkloadId[]) {
     const segments = {} as Record<CheckpointSegment, CheckpointComparisonRow>;
     for (const segment of Object.keys(CHECKPOINT_SEGMENTS) as CheckpointSegment[]) {
@@ -450,7 +534,7 @@ export function compareCheckpointReports(a1: CheckpointReport, b: CheckpointRepo
         baseline_drift_percent: driftPercent,
       });
       segments[segment] = row;
-      if (Math.abs(driftPercent) > 10 || bValue > Math.max(a1Value, a2Value)) decision = 'rejected';
+      if (decision !== 'inconclusive' && (Math.abs(driftPercent) > 10 || bValue > Math.max(a1Value, a2Value))) decision = 'rejected';
     }
     workloads[workloadId] = Object.freeze({ segments: Object.freeze(segments) });
   }
@@ -459,4 +543,50 @@ export function compareCheckpointReports(a1: CheckpointReport, b: CheckpointRepo
     decision,
     workloads: Object.freeze(workloads),
   });
+}
+
+export function parseCheckpointComparison(value: unknown): CheckpointComparison {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  const raw = value as Record<string, unknown>;
+  if (
+    !exactKeys(raw, ['schema_version', 'decision', 'workloads']) ||
+    raw.schema_version !== 'live-voice.accepted-optimizations-checkpoint-comparison.v0' ||
+    !['accepted', 'rejected', 'inconclusive'].includes(raw.decision as string) ||
+    raw.workloads === null ||
+    typeof raw.workloads !== 'object' ||
+    Array.isArray(raw.workloads)
+  )
+    reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  const workloads = raw.workloads as Record<string, unknown>;
+  if (!exactKeys(workloads, Object.keys(CHECKPOINT_WORKLOADS))) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  for (const workloadId of Object.keys(CHECKPOINT_WORKLOADS)) {
+    const workload = workloads[workloadId];
+    if (workload === null || typeof workload !== 'object' || Array.isArray(workload) || !exactKeys(workload as Record<string, unknown>, ['segments']))
+      reportViolation('CHECKPOINT_COMPARISON_INVALID');
+    const segments = (workload as { segments: unknown }).segments;
+    if (segments === null || typeof segments !== 'object' || Array.isArray(segments)) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+    for (const row of Object.values(segments as Record<string, unknown>)) {
+      if (
+        row === null ||
+        typeof row !== 'object' ||
+        Array.isArray(row) ||
+        !exactKeys(row as Record<string, unknown>, [
+          'truth_class',
+          'a1_p50_ms',
+          'b_p50_ms',
+          'a2_p50_ms',
+          'b_minus_a1_ms',
+          'b_minus_a2_ms',
+          'b_minus_a1_percent',
+          'b_minus_a2_percent',
+          'baseline_drift_ms',
+          'baseline_drift_percent',
+        ]) ||
+        (row as { truth_class?: unknown }).truth_class !== 'derived' ||
+        Object.entries(row as Record<string, unknown>).some(([key, item]) => key !== 'truth_class' && (typeof item !== 'number' || !Number.isFinite(item)))
+      )
+        reportViolation('CHECKPOINT_COMPARISON_INVALID');
+    }
+  }
+  return Object.freeze(value as CheckpointComparison);
 }
