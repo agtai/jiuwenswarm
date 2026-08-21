@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
 import hashlib
+import pathlib
+import re
 import weakref
 from collections.abc import Callable
 
 import pytest
 import pytest_asyncio
 
+import jiuwenswarm
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ContractViolation,
@@ -27,6 +31,10 @@ from jiuwenswarm.server.live_voice.conversation_runtime import (
     ResponseState,
 )
 from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+    _BARGE_CONTROL_SCOPE,
+    _MAX_CONTROL_FAILURE_MESSAGE_CHARS,
+    _MAX_CONTROL_FAILURE_REASON_CHARS,
+    MAX_RETAINED_CONTROL_COMMANDS,
     ConversationRuntimeLoop,
     ConversationRuntimeLoopViolation,
     EffectState,
@@ -1500,3 +1508,609 @@ async def test_retained_control_failure_releases_the_raw_exception_object(
     assert replay.value.reason == "STALE_RESPONSE_REFERENCE"
     assert replay.value.code is ErrorCode.STALE
     assert str(replay.value) == "response operation requires the exact response tuple"
+
+
+# --- SRR-27 / B42 oracles: each claimed safety property, made falsifiable ----
+#
+# Everything below was previously argued only in comments and in the review
+# packet: the identity match that keeps a subclass out of the retained text,
+# the caps that bound it, the per-lane fence scopes, the exact-before-fence
+# order, and the unfinished-command outcome.  Each test here fails when its
+# property is inverted in the source.
+
+FIELD_NAME_SENTINEL = "SRR27-ORACLE-FIELD-VALUE-71ba09"
+SUBCLASS_SENTINEL = "SRR27-ORACLE-SUBCLASS-TEXT-3e6d42"
+OVERSIZED_SENTINEL = "SRR27-ORACLE-OVERSIZED-TEXT-c05f18"
+
+RETAINED_VIOLATION_FAMILIES = frozenset(
+    {
+        "ConversationRuntimeLoopViolation",
+        "ConversationRuntimeViolation",
+        "PresentationLedgerViolation",
+    }
+)
+# The only names any construction point of those families interpolates.  `name`
+# is the module-authored field name a validator was called with, never that
+# field's value; `expected_seq` and `expected_start` are the ledger's own next
+# cursor and next UTF-8 offset.  Nothing on this list can carry caller content,
+# and anything added to it has to earn its place the same way.
+STATIC_MESSAGE_INTERPOLATIONS = frozenset({"name", "expected_seq", "expected_start"})
+STABLE_REASON_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+MINIMUM_CONSTRUCTION_POINTS = 80
+
+
+def package_calls() -> list[tuple[str, ast.Call, ast.FunctionDef | None]]:
+    """Every call in a shipped module that names a retained violation family."""
+
+    root = pathlib.Path(jiuwenswarm.__file__).parent
+    found: list[tuple[str, ast.Call, ast.FunctionDef | None]] = []
+
+    def descend(node: ast.AST, function: ast.FunctionDef | None, origin: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                descend(child, child, origin)
+                continue
+            if isinstance(child, ast.Call):
+                found.append((origin, child, function))
+            descend(child, function, origin)
+
+    for path in sorted(root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if not any(family in source for family in RETAINED_VIOLATION_FAMILIES):
+            continue
+        descend(ast.parse(source, filename=str(path)), None, path.name)
+    return found
+
+
+def constructed_family(call: ast.Call) -> str | None:
+    """Name the retained violation family this call constructs, if any."""
+
+    func = call.func
+    if isinstance(func, ast.Name) and func.id in RETAINED_VIOLATION_FAMILIES:
+        return func.id
+    if isinstance(func, ast.Attribute) and func.attr in RETAINED_VIOLATION_FAMILIES:
+        return func.attr
+    return None
+
+
+def called_name(call: ast.Call) -> str | None:
+    """Name the function this call names, ignoring how it is qualified."""
+
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def literal_texts(node: ast.expr, function: ast.FunctionDef | None) -> list[str] | None:
+    """Every string literal the expression can evaluate to, or None if dynamic."""
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.IfExp):
+        body = literal_texts(node.body, function)
+        orelse = literal_texts(node.orelse, function)
+        if body is None or orelse is None:
+            return None
+        return body + orelse
+    if isinstance(node, ast.Name) and function is not None:
+        bound: list[str] = []
+        for assignment in ast.walk(function):
+            if not isinstance(assignment, ast.Assign) or not any(
+                isinstance(target, ast.Name) and target.id == node.id
+                for target in assignment.targets
+            ):
+                continue
+            texts = literal_texts(assignment.value, function)
+            if texts is None:
+                return None
+            bound.extend(texts)
+        return bound or None
+    return None
+
+
+def interpolated_names(node: ast.expr) -> list[str] | None:
+    """Name every f-string interpolation, or None if one is not a bare name."""
+
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    names: list[str] = []
+    for part in node.values:
+        if isinstance(part, ast.Constant):
+            continue
+        if isinstance(part, ast.FormattedValue) and isinstance(part.value, ast.Name):
+            names.append(part.value.id)
+            continue
+        return None
+    return names
+
+
+def parameter_index(function: ast.FunctionDef, name: str) -> int | None:
+    """Argument position callers use for the named positional parameter."""
+
+    params = [arg.arg for arg in function.args.posonlyargs + function.args.args]
+    if name not in params:
+        return None
+    index = params.index(name)
+    return index - 1 if params[0] in {"self", "cls"} else index
+
+
+def fence_colliders(runtime: ConversationRuntimeLoop, target: str) -> tuple[str, ...]:
+    """Identifiers whose retirement sets every replay-fence bit of `target`.
+
+    The fence is a membership sketch whose bits are only ever set, so retiring
+    enough other identities can make it report an identifier it never retired.
+    Asking the loop's own index function for the collision is the only way to
+    reach that false positive on purpose, and it keeps the search honest: if
+    the sketch changes shape the colliders follow it instead of going stale.
+    """
+
+    wanted = runtime._control_fence_indices(_BARGE_CONTROL_SCOPE, target)
+    colliders: list[str] = []
+    for row, index in enumerate(wanted):
+        for candidate in range(1 << 20):
+            key = f"fence-collider-{row}-{candidate}"
+            probe = runtime._control_fence_indices(_BARGE_CONTROL_SCOPE, key)
+            if probe[row] == index:
+                colliders.append(key)
+                break
+    assert len(colliders) == len(wanted)
+    return tuple(colliders)
+
+
+class _SubclassedLoopViolation(ConversationRuntimeLoopViolation):
+    """A caller-defined subclass of a safe family, carrying attacker text."""
+
+
+class _SubclassedRuntimeViolation(ConversationRuntimeViolation):
+    """A caller-defined subclass of a safe family, carrying attacker text."""
+
+
+class _SubclassedLedgerViolation(PresentationLedgerViolation):
+    """A caller-defined subclass of a safe family, carrying attacker text."""
+
+
+class _EscapingControlError(BaseException):
+    """A control failure that is not an `Exception`, so no handler sees it."""
+
+
+class _NamedFieldValue:
+    """A caller value whose formatting hooks leak if a message uses the value."""
+
+    def __str__(self) -> str:
+        return FIELD_NAME_SENTINEL
+
+    def __repr__(self) -> str:
+        return FIELD_NAME_SENTINEL
+
+
+class _ReadmittingResponseRef:
+    """A reference that re-posts its own in-flight command from `__eq__`.
+
+    The loop runs a control command to completion without yielding, so the only
+    way a caller can ask for a command whose outcome is not yet recorded is to
+    ask from inside that command.  Comparing the reference is the first thing
+    the barge-in body does, which makes this the exact mid-flight instant.
+    """
+
+    def __init__(self, runtime: ConversationRuntimeLoop, action_id: str) -> None:
+        self._runtime = runtime
+        self._action_id = action_id
+        self.executions = 0
+        self.readmission: asyncio.Future[object] | None = None
+        self.readmission_error: BaseException | None = None
+        self.queued_control_at_readmission: int | None = None
+
+    def __eq__(self, other: object) -> bool:
+        self.executions += 1
+        if self.executions == 1:
+            try:
+                self.readmission = self._runtime.post_barge_in(self._action_id, self)
+            except ConversationRuntimeLoopViolation as error:
+                self.readmission_error = error
+            self.queued_control_at_readmission = (
+                self._runtime.snapshot().pending_control
+            )
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+
+async def test_retained_violation_families_carry_only_static_messages() -> None:
+    """B42 privacy invariant: the basis the whole projection stands on.
+
+    `_control_failure` keeps a safe family's own `reason` and `message` word for
+    word.  That is only sound while every construction point of those three
+    families writes module-authored text; the moment one interpolates a caller
+    value, the retained record starts replaying it to every later caller.
+    """
+
+    calls = package_calls()
+    sites = [
+        (origin, call, function)
+        for origin, call, function in calls
+        if constructed_family(call) is not None
+    ]
+    assert len(sites) >= MINIMUM_CONSTRUCTION_POINTS
+    assert {constructed_family(call) for _, call, _ in sites} == (
+        RETAINED_VIOLATION_FAMILIES
+    )
+
+    dynamic: list[str] = []
+    validators: dict[str, tuple[str, int]] = {}
+    for origin, call, function in sites:
+        where = f"{origin}:{call.lineno}"
+        if len(call.args) != 3 or call.keywords:
+            dynamic.append(f"{where}: unexpected constructor shape")
+            continue
+        reasons = literal_texts(call.args[0], function)
+        if reasons is None:
+            dynamic.append(f"{where}: reason is not module-authored text")
+        else:
+            for reason in reasons:
+                assert STABLE_REASON_PATTERN.fullmatch(reason), where
+                assert len(reason) <= _MAX_CONTROL_FAILURE_REASON_CHARS, where
+        messages = literal_texts(call.args[1], function)
+        if messages is not None:
+            for message in messages:
+                assert len(message) <= _MAX_CONTROL_FAILURE_MESSAGE_CHARS, where
+            continue
+        names = interpolated_names(call.args[1])
+        if names is None:
+            dynamic.append(f"{where}: message is neither a literal nor a named join")
+            continue
+        for name in names:
+            if name not in STATIC_MESSAGE_INTERPOLATIONS:
+                dynamic.append(f"{where}: message interpolates {name}")
+                continue
+            if function is None:
+                continue
+            index = parameter_index(function, name)
+            if index is not None:
+                validators[function.name] = (name, index)
+    assert dynamic == []
+
+    # Every validator that names a field in its message must be called with the
+    # field's *name*, never its value: `_require_text(unit.content_ref, ...)`
+    # passes "content_ref", so the message describes the field and not what the
+    # caller put in it.
+    assert validators != {}
+    valued: list[str] = []
+    for origin, call, _function in calls:
+        binding = validators.get(called_name(call) or "")
+        if binding is None:
+            continue
+        name, index = binding
+        argument: ast.expr | None = None
+        if index < len(call.args):
+            argument = call.args[index]
+        for keyword in call.keywords:
+            if keyword.arg == name:
+                argument = keyword.value
+        if not isinstance(argument, ast.Constant) or not isinstance(
+            argument.value, str
+        ):
+            valued.append(f"{origin}:{call.lineno}: names a value, not a field")
+    assert valued == []
+
+
+async def test_static_messages_describe_the_field_never_the_sent_value(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 privacy invariant: the three allowed interpolations, driven live.
+
+    The walk above proves the interpolations are `name`, `expected_seq` and
+    `expected_start`; these are the paths that prove what those names hold.
+    """
+
+    runtime, ref = await prepared(loop_factory)
+
+    with pytest.raises(ConversationRuntimeLoopViolation) as named:
+        runtime.post_barge_in(_NamedFieldValue(), ref)
+    assert named.value.reason == "INVALID_ID"
+    assert str(named.value) == "action_id must be non-empty"
+    assert FIELD_NAME_SENTINEL not in str(named.value)
+
+    with pytest.raises(PresentationLedgerViolation) as sequence:
+        await runtime.produce_unit(
+            unit(ref, PresentationSurface.TEXT, "static-0", 987654, 0, 6, "sha256:a")
+        )
+    assert sequence.value.reason == "NON_CONTIGUOUS_PRESENTATION_SEQUENCE"
+    assert str(sequence.value) == "expected presentation sequence 0"
+
+    first = unit(ref, PresentationSurface.TEXT, "static-0", 0, 0, 6, "sha256:a")
+    assert await runtime.produce_unit(first) is True
+    with pytest.raises(PresentationLedgerViolation) as span:
+        await runtime.produce_unit(
+            unit(ref, PresentationSurface.TEXT, "static-1", 1, 987654, 999999, "sha:b")
+        )
+    assert span.value.reason == "NON_CONTIGUOUS_SOURCE_SPAN"
+    assert str(span.value) == "expected UTF-8 source byte offset 6"
+
+    for failure in (named.value, sequence.value, span.value):
+        assert len(failure.reason) <= _MAX_CONTROL_FAILURE_REASON_CHARS
+        assert len(str(failure)) <= _MAX_CONTROL_FAILURE_MESSAGE_CHARS
+
+
+@pytest.mark.parametrize(
+    "family",
+    (_SubclassedLoopViolation, _SubclassedRuntimeViolation, _SubclassedLedgerViolation),
+)
+async def test_safe_family_subclass_never_replays_its_own_text(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+    family: type[Exception],
+) -> None:
+    """B42 privacy: only the exact families may keep their reason and message.
+
+    A subclass is caller-shaped: it satisfies every field check the projection
+    makes while its reason and message are whatever its author chose.  Matching
+    on physical type identity is what keeps that text out of the record, so an
+    `isinstance` match here would replay attacker text verbatim to every later
+    caller of the same command identifier.
+    """
+
+    runtime, _ref = await prepared(loop_factory)
+    disguised = family(
+        f"LEAKED_{SUBCLASS_SENTINEL}",
+        f"subclass failure carrying {SUBCLASS_SENTINEL}",
+        ErrorCode.STALE,
+    )
+    hostile_ref = _HostileResponseRef(disguised)
+    effects_before = runtime.snapshot().effects
+    conversation_before = runtime.snapshot().conversation
+
+    first = await settled(runtime.post_barge_in("subclass-barge", hostile_ref))
+    assert first.exception() is disguised
+
+    retained = runtime.post_barge_in("subclass-barge", hostile_ref).exception()
+    assert retained is not disguised
+    assert type(retained) is ConversationRuntimeLoopViolation
+    assert retained.reason == "CONTROL_COMMAND_FAILED"
+    assert retained.code is ErrorCode.INTERNAL
+    assert str(retained) == "conversation runtime control command failed"
+    assert SUBCLASS_SENTINEL not in retained.reason
+    assert retained_sentinel_paths(retained, SUBCLASS_SENTINEL) == []
+    assert runtime.snapshot().effects == effects_before
+    assert runtime.snapshot().conversation == conversation_before
+
+
+async def test_control_failure_text_beyond_the_caps_is_downgraded(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 bounds: the retained record keeps only short, contracted text.
+
+    The caps are the second half of the privacy argument: identity matching
+    decides which failures may keep text at all, and these bounds decide how
+    much.  They must hold at exactly 128 and 256 characters, so a family that
+    ever grew a long, content-bearing message is rejected instead of retained.
+    """
+
+    runtime, _ref = await prepared(loop_factory)
+    at_cap = ConversationRuntimeLoopViolation(
+        "A" * _MAX_CONTROL_FAILURE_REASON_CHARS,
+        "B" * _MAX_CONTROL_FAILURE_MESSAGE_CHARS,
+        ErrorCode.STALE,
+    )
+    over_reason = ConversationRuntimeLoopViolation(
+        (OVERSIZED_SENTINEL + "R" * _MAX_CONTROL_FAILURE_REASON_CHARS)[
+            : _MAX_CONTROL_FAILURE_REASON_CHARS + 1
+        ],
+        "short contracted message",
+        ErrorCode.STALE,
+    )
+    over_message = ConversationRuntimeLoopViolation(
+        "SHORT_CONTRACTED_REASON",
+        (OVERSIZED_SENTINEL + "M" * _MAX_CONTROL_FAILURE_MESSAGE_CHARS)[
+            : _MAX_CONTROL_FAILURE_MESSAGE_CHARS + 1
+        ],
+        ErrorCode.STALE,
+    )
+    effects_before = runtime.snapshot().effects
+
+    for index, failure in enumerate((at_cap, over_reason, over_message)):
+        hostile_ref = _HostileResponseRef(failure)
+        action_id = f"capped-barge-{index}"
+        first = await settled(runtime.post_barge_in(action_id, hostile_ref))
+        assert first.exception() is failure
+        retained = runtime.post_barge_in(action_id, hostile_ref).exception()
+        assert isinstance(retained, ConversationRuntimeLoopViolation)
+        if failure is at_cap:
+            # Exactly at the bound the contracted text is still the truth the
+            # caller needs, so it survives untouched.
+            assert retained.reason == "A" * _MAX_CONTROL_FAILURE_REASON_CHARS
+            assert str(retained) == "B" * _MAX_CONTROL_FAILURE_MESSAGE_CHARS
+            assert retained.code is ErrorCode.STALE
+            continue
+        assert retained.reason == "CONTROL_COMMAND_FAILED"
+        assert retained.code is ErrorCode.INTERNAL
+        assert str(retained) == "conversation runtime control command failed"
+        assert retained_sentinel_paths(retained, OVERSIZED_SENTINEL) == []
+    assert runtime.snapshot().effects == effects_before
+
+
+async def test_unfinished_control_command_is_unknown_and_never_readmitted(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 at-most-once: a command with no recorded outcome must not re-run.
+
+    The loop retains a command identity *before* running it, so a caller that
+    abandons the future and asks again can only be told the outcome is unknown.
+    Reporting it as a result or admitting a second run would both break
+    at-most-once on a command that may already have moved conversation state.
+    """
+
+    runtime, ref = await prepared(loop_factory)
+    probe = _ReadmittingResponseRef(runtime, "unfinished-barge")
+    # Earlier-ingress observation work keeps the worker busy for a turn, so the
+    # abandoned future's callback releases the identifier before the control
+    # command starts.  Without that the caller is simply handed its own future.
+    fillers = [
+        runtime.post_presentation_ack(
+            ack(ref, PresentationSurface.TEXT, f"never-produced-{index}", 0)
+        )
+        for index in range(4)
+    ]
+    abandoned = runtime.post_barge_in("unfinished-barge", probe)
+    abandoned.cancel()
+    rejected = await asyncio.gather(*fillers, return_exceptions=True)
+    assert [type(item) for item in rejected] == [PresentationLedgerViolation] * 4
+    for _index in range(8):
+        await asyncio.sleep(0)
+
+    assert probe.readmission_error is None
+    readmission = probe.readmission
+    assert readmission is not None
+    # An already-failed future is the whole point: nothing was queued, so the
+    # command cannot run a second time.
+    assert readmission.done() is True
+    assert probe.queued_control_at_readmission == 0
+    unknown = readmission.exception()
+    assert isinstance(unknown, ConversationRuntimeLoopViolation)
+    assert unknown.reason == "CONTROL_COMMAND_RESULT_UNKNOWN"
+    assert unknown.code is ErrorCode.RESULT_UNKNOWN
+    assert probe.executions == 1
+    assert runtime.snapshot().effects == ()
+    assert runtime.snapshot().conversation.responses[0].cancel_state is CancelState.NONE
+
+    # The loop keeps serving: only the one unfinished identity is spent.
+    barrier = await runtime.barge_in("barrier-barge", ref)
+    assert barrier.applied is True
+    assert [item.effect.effect_id for item in runtime.snapshot().effects] == list(
+        barrier.effect_ids
+    )
+    assert probe.executions == 1
+
+
+async def test_control_command_that_escapes_the_worker_keeps_its_identity(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 at-most-once: a failure no handler sees still spends the identity.
+
+    `_barge_in` guards only `Exception`, so a `BaseException` from caller code
+    leaves the command with no recorded outcome at all.  The identity has to be
+    retained before the body runs, or the loop forgets a command that may have
+    already changed conversation state.
+    """
+
+    runtime, _ref = await prepared(loop_factory)
+    escaping = _EscapingControlError("escaped the control command body")
+    hostile_ref = _HostileResponseRef(escaping)
+    effects_before = runtime.snapshot().effects
+    conversation_before = runtime.snapshot().conversation
+
+    future = runtime.post_barge_in("escaping-barge", hostile_ref)
+    for _index in range(8):
+        await asyncio.sleep(0)
+
+    assert runtime.snapshot().retained_control_commands == 1
+    assert runtime.snapshot().effects == effects_before
+    assert runtime.snapshot().conversation == conversation_before
+    # Fail closed: the loop stops admitting work rather than guessing what the
+    # escaped command did, so the identity can never be re-run here.
+    assert runtime.snapshot().accepting is False
+    assert runtime.snapshot().closed is True
+    # Characterization, not a claim: the teardown leaves this caller's own
+    # future unresolved, which is the one part of this path still worth fixing.
+    assert future.done() is False
+    with pytest.raises(ConversationRuntimeLoopViolation) as refused:
+        runtime.post_barge_in("escaping-barge", hostile_ref)
+    assert refused.value.reason == "RUNTIME_LOOP_CLOSED"
+    assert runtime._worker is not None
+    assert runtime._worker.exception() is escaping
+
+
+async def test_a_retired_identity_never_fences_the_other_control_lane(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 isolation: barge-in and response-cancel keep separate fence scopes.
+
+    The two lanes carry unrelated identifier spaces, and callers routinely
+    derive both from the same request id.  A shared fence scope would silently
+    refuse a cancel that this loop never issued, so retiring one lane's
+    identity must leave the other lane's identical identity fresh.
+    """
+
+    shared = "shared-control-identity"
+    runtime, ref = await prepared(loop_factory, control_capacity=8)
+    for index in range(CONTROL_RETENTION_PROBE):
+        await runtime.barge_in(f"{shared}-{index}" if index else shared, ref)
+    with pytest.raises(ConversationRuntimeLoopViolation) as retired_barge:
+        await runtime.barge_in(shared, ref)
+    assert retired_barge.value.reason == "BARGE_IN_ACTION_RETIRED"
+
+    cancelled = await runtime.request_response_cancel(shared, ref)
+    assert cancelled.applied is True
+    assert cancelled.replayed is False
+    assert runtime.snapshot().conversation.responses[0].cancel_state is (
+        CancelState.REQUESTED
+    )
+    assert cancelled.effect_id in {
+        item.effect.effect_id for item in runtime.snapshot().effects
+    }
+
+    successor, successor_ref = await prepared(loop_factory, control_capacity=8)
+    stale = ResponseRef(successor_ref.interaction_id, "missing", 1)
+    for index in range(CONTROL_RETENTION_PROBE):
+        pending = await settled(
+            successor.post_response_cancel(
+                f"{shared}-{index}" if index else shared, stale
+            )
+        )
+        assert isinstance(pending.exception(), ConversationRuntimeViolation)
+    with pytest.raises(ConversationRuntimeLoopViolation) as retired_cancel:
+        await successor.request_response_cancel(shared, stale)
+    assert retired_cancel.value.reason == "RESPONSE_CANCEL_COMMAND_RETIRED"
+
+    barged = await successor.barge_in(shared, successor_ref)
+    assert barged.applied is True
+    assert barged.replayed is False
+
+
+async def test_an_exact_retained_command_outranks_a_fence_false_positive(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 ordering: the exact ledger answers before the sketch may refuse.
+
+    The fence is a lossy sketch, so it can report an identifier this loop never
+    retired.  While the exact record is still held it is the truth, and it has
+    to be consulted first: otherwise a collision turns a completed command's
+    replay into a refusal, and the caller can never learn what its command did.
+    """
+
+    target = "outranking-barge"
+    runtime, ref = await prepared(loop_factory, control_capacity=8)
+    colliders = fence_colliders(runtime, target)
+    for key in colliders:
+        await runtime.barge_in(key, ref)
+    applied = await runtime.barge_in(target, ref, cancel_response=True)
+    assert applied.applied is True
+    assert applied.effect_ids != ()
+    # Retire exactly the colliders: the target stays in the exact ledger while
+    # their retirement sets every one of its fence bits.
+    for index in range(MAX_RETAINED_CONTROL_COMMANDS - 1):
+        await runtime.barge_in(f"outranking-filler-{index}", ref)
+    assert runtime.snapshot().fenced_control_commands == len(colliders)
+    effects_before = runtime.snapshot().effects
+
+    replayed = await runtime.barge_in(target, ref, cancel_response=True)
+    assert replayed.replayed is True
+    assert replayed.applied is applied.applied
+    assert replayed.effect_ids == applied.effect_ids
+    assert runtime.snapshot().effects == effects_before
+
+    # Control arm, same fence bits and same identifier, but never admitted: the
+    # collision really does make the sketch claim this identifier, so the replay
+    # above came from the exact record and not from an inert fence.
+    successor, successor_ref = await prepared(loop_factory, control_capacity=8)
+    for key in colliders:
+        await successor.barge_in(key, successor_ref)
+    for index in range(MAX_RETAINED_CONTROL_COMMANDS):
+        await successor.barge_in(f"outranking-filler-{index}", successor_ref)
+    assert successor.snapshot().fenced_control_commands == len(colliders)
+    with pytest.raises(ConversationRuntimeLoopViolation) as collided:
+        successor.post_barge_in(target, successor_ref, cancel_response=True)
+    assert collided.value.reason == "BARGE_IN_ACTION_RETIRED"
+    assert collided.value.code is ErrorCode.CONFLICT
