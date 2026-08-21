@@ -1615,6 +1615,65 @@ def test_released_response_identity_still_refuses_reuse_and_stale_generation() -
     assert_zero_authority_effects(runtime)
 
 
+def test_response_identity_capacity_fails_closed_while_every_id_is_live() -> None:
+    """Both response ledgers must fail closed while their only id is live.
+
+    `activate_response` is the one capacity path that consults two identity
+    ledgers, derives both live sets from `self._synthesis` and interleaves
+    them with `_make_response_capacity`, so each refusal branch needs its own
+    oracle rather than one shared RESPONSE_IDENTITY_CAPACITY_EXHAUSTED check.
+    """
+
+    runtime = StreamingSpeechConformance(
+        native_capability(),
+        enabled=True,
+        max_identity_tombstones=1,
+    )
+    live_response = response()
+    runtime.activate_response(live_response)
+    live = synthesis_request(response_ref=live_response)
+    runtime.start_synthesis(live)
+    # One live stream pins the interaction ledger and the response id ledger
+    # at once, because both live sets read `self._synthesis`.
+    assert runtime.snapshot().retained_identity_tombstones == 3
+
+    # A new interaction id is refused by the interaction generation ledger,
+    # which `activate_response` consults first.
+    foreign = ResponseRef("interaction-2", "response-2", 0)
+    with pytest.raises(StreamingSpeechViolation) as interactions_full:
+        runtime.activate_response(foreign)
+    assert interactions_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
+    assert "interaction identity ledger" in str(interactions_full.value)
+
+    # Superseding the live interaction clears that first check, so only the
+    # response id ledger can refuse and the second branch is reached exactly.
+    superseding = ResponseRef("interaction-1", "response-3", 1)
+    with pytest.raises(StreamingSpeechViolation) as response_ids_full:
+        runtime.activate_response(superseding)
+    assert response_ids_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
+    assert "response identifier ledger" in str(response_ids_full.value)
+
+    # Neither refusal released a retained identity, and the refused
+    # supersession never fenced the stream it would have superseded.
+    refused = runtime.snapshot()
+    assert refused.retained_identity_tombstones == 3
+    assert refused.retained_synthesis == 1
+    assert refused.pending_provider_controls == 0
+
+    # The refused ids stayed unknown instead of being admitted and released,
+    # so retiring the stream that pinned the ledgers admits them rather than
+    # refusing them off the bounded fence as reused.
+    runtime.provider_closed_synthesis(live.ref)
+    assert runtime.reap_terminal() == (0, 1)
+    runtime.activate_response(superseding)
+    runtime.activate_response(foreign)
+    assert runtime.snapshot().retained_identity_tombstones == 3
+    with pytest.raises(StreamingSpeechViolation) as reused:
+        runtime.activate_response(ResponseRef("interaction-2", "response-2", 1))
+    assert reused.value.reason == "RESPONSE_ID_REUSED"
+    assert_zero_authority_effects(runtime)
+
+
 def test_close_fences_new_work_and_retains_both_provider_sessions() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     recognition = recognition_ref()
