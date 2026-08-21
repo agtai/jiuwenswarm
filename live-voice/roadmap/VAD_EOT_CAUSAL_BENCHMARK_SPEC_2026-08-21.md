@@ -2,7 +2,7 @@
 
 > Date: 2026-08-21
 >
-> Review state: proposed implementation contract, awaiting written-spec review
+> Review state: approved for implementation planning on 2026-08-21
 >
 > Exact design base: `465a21625bf253729f00b7c84e6cc08e9bd746a2`
 
@@ -297,6 +297,7 @@ are explicit experiment units.
 
 Planned files:
 
+- add `scripts/live_voice/vad_eot_benchmark_support.py`;
 - add `scripts/live_voice/prepare_vad_eot_corpus.py`;
 - add `scripts/live_voice/vad_eot_causal_benchmark.py`;
 - add `tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py`;
