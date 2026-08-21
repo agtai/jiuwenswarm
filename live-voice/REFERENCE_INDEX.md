@@ -84,9 +84,9 @@ git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
 git rev-list --left-right --count 'HEAD...@{upstream}'
 ```
 
-The Git commands above and current [STATUS](STATUS.md) are the orientation path.
-Do not use `scripts/live_voice_snapshot.ps1` as current authority: the
-[2026-08-17 cleanup audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md)
-records that its Resume-capsule/Verified-code-base model is stale and that the
-script is a retirement candidate. Update a worktree with `git pull --ff-only`
-only when the user explicitly requests an update and the worktree is safe.
+The Git commands above and current [STATUS](STATUS.md) are the only current
+orientation path. The retired Resume-capsule/Verified-code-base helper has been
+removed; its historical disposition remains in the
+[2026-08-17 cleanup audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md).
+Update a worktree with `git pull --ff-only` only when the user explicitly
+requests an update and the worktree is safe.
