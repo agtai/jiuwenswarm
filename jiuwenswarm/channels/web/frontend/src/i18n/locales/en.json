@@ -78,7 +78,6 @@
     "collapseView": "Collapse view",
     "expandView": "Expand view",
     "expand": "Expand",
-    "runningMode": "Mode: {{mode}}",
     "taskFallback": "Task {{id}}",
     "memberStatus": {
       "running": "Running",
@@ -305,7 +304,6 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
-      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
@@ -465,6 +463,9 @@
   "plan": {
     "toolbarTag": "Plan",
     "closeTag": "Exit plan mode",
+    "closeTagDisabled": "You can exit plan mode once the reply finishes or you cancel it",
+    "toolbarUnavailableGoal": "A goal is already in progress, so Plan isn't available",
+    "toolbarUnavailableProcessing": "A reply is in progress, so Plan isn't available",
     "approvalPrompt": "The plan is ready. Choose what to do next.",
     "executePrompt": "The plan is approved. Start executing it.",
     "approvalExecute": "Execute",
@@ -472,12 +473,16 @@
     "approvalNext": "Next",
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
+  "persistSession": {
+    "textRequired": "Enter a task after /persist"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
     "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
+    "toolbarUnavailablePlan": "Plan mode is in progress, so Goal isn't available",
     "closeTag": "Cancel goal",
     "badge": "Goal",
     "status": {
@@ -898,8 +903,7 @@
       "githubToken": "GitHub personal access token for repository or GitHub-related features.",
       "freeSearchDdg": "Enable free DuckDuckGo search (including DDG via Jina). Disable to turn off this source.",
       "freeSearchBing": "Enable free Bing search. Disable to stop using Bing.",
-      "evolutionAutoScan": "Automatically detect signals that a skill can be evolved and suggest creating/updating skills.",
-      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling automatic skill-creation suggestions.",
+      "skillEvolution": "Learn from tasks and suggest capturing experience or creating new skills.",
       "memoryForbiddenDescription": "Describe sensitive types or rules that must not be written to memory, e.g. passwords, ID numbers, secrets.",
       "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path.",
@@ -1065,8 +1069,7 @@
       }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "Auto-detect evolution signals",
-      "skillCreate": "Auto-suggest new skill creation",
+      "skillEvolution": "Enable automatic skill learning",
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
@@ -1467,7 +1470,7 @@
     }
   },
   "skills": {
-    "title": "Skill Management",
+    "title": "Skills",
     "subtitle": "Manage and install skills available to the agent.",
     "tabs": {
       "mySkills": "My Skills",
@@ -1480,7 +1483,29 @@
       "enabled": "Enabled",
       "disabled": "Disabled"
     },
+    "publishFilter": {
+      "all": "All",
+      "published": "Published",
+      "unpublished": "Unpublished"
+    },
+    "skillTypes": {
+      "skill": "Skill Pack",
+      "team": "Team Skills",
+      "multimodal": "Multimodal"
+    },
+    "marketplaceCategories": {
+      "all": "All",
+      "software-development": "Software Development",
+      "office-productivity": "Office Productivity",
+      "content-creation": "Content Creation",
+      "multimodal-media": "Multimodal & Media",
+      "data-science-research": "Data & Research",
+      "compliance-legal": "Legal & Compliance",
+      "lifestyle-health": "Lifestyle & Health",
+      "finance-wealth": "Finance"
+    },
     "enable": "Enable",
+    "disable": "Disable",
     "noDisabledSkills": "No disabled skills",
     "noEnabledSkills": "No enabled skills",
     "setEnabledError": "Failed to set skill enabled status",
@@ -1517,10 +1542,76 @@
       "uninstall": "Uninstall",
       "importLocal": "Import Local Skill",
       "sourceManager": "Source Manager",
+      "create": "Create",
+      "uploadLocalSkill": "Upload Skill",
+      "documentToSkill": "Knowledge to Skill",
+      "createViaChat": "Create via Chat",
       "backToList": "Back to List",
       "viewEvolution": "View Skill Experience",
+      "evolutionTooltip": "This skill has new experience, ready to synthesize a new version",
       "enabling": "Enabling...",
-      "disabling": "Disabling..."
+      "disabling": "Disabling...",
+      "pinSkill": "Pin Skill",
+      "pinSkillPackage": "Pin Skill Package",
+      "unpinSkill": "Unpin Skill",
+      "unpinSkillPackage": "Unpin Skill Package",
+      "edit": "Edit",
+      "refresh": "Refresh",
+      "goToChat": "Go to Chat",
+      "goTry": "Try It",
+      "publish": "Publish",
+      "rebuild": "Rebuild",
+      "synthesizeNewVersion": "Rebuild Skill",
+      "synthesizeTooltip": "Synthesize accumulated skill experience with the original skill to generate a new version"
+    },
+    "publishForm": {
+      "title": "Publish Skill",
+      "name": "Name",
+      "skillName": "Skill Name",
+      "version": "Version",
+      "displayName": "Display Name",
+      "description": "Description",
+      "descriptionOptional": "Description (optional)",
+      "tags": "Tags",
+      "tagsOptional": "Tags (optional)",
+      "skillIcon": "Skill Icon",
+      "skillIconOptional": "Skill Icon (optional)",
+      "skillIconHint": "PNG file, max 5MB",
+      "sha256": "SHA-256 Checksum",
+      "versionNote": "Version Note",
+      "versionNoteOptional": "Version Note (Swarm Skill, optional)",
+      "confirm": "Confirm Publish",
+      "cancel": "Cancel",
+      "publish": "Publish",
+      "placeholderSelect": "Please select",
+      "placeholderSha256": "64-digit lowercase hex displayed after packaging",
+      "noticeText": "The skill will be published to JiuwenHub.",
+      "noticeView": "View",
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+    },
+    "uploadSkillModal": {
+      "title": "Upload Skill",
+      "pathLabel": "Local Skill Path",
+      "pathPlaceholder": "Enter skill file/directory path",
+      "notice": "Folders or .zip files must contain a SKILL.md file. The .md file must include skill name and description in YAML format.",
+      "dropHint": "Click or drag a compressed file or folder here",
+      "confirm": "Import",
+      "cancel": "Cancel"
+    },
+    "docToSkillModal": {
+      "title": "Knowledge to Skill",
+      "subtitle": "Extract knowledge, generate skills",
+      "sourceLabel": "Source",
+      "sourceLocal": "Local Upload",
+      "sourceLink": "Link",
+      "dropHint": "Click or drag a document here\nUpload a compressed file",
+      "linkLabel": "Link",
+      "linkTooltip": "Supports web links and video links",
+      "linkPlaceholder": "Please enter",
+      "descLabel": "Skill Description (optional)",
+      "descPlaceholder": "Please enter",
+      "confirm": "Confirm",
+      "cancel": "Cancel"
     },
     "builtIn": "Built-in",
     "status": {
@@ -1549,6 +1640,8 @@
     "searchPlaceholder": "Search skill names, descriptions, or tags",
     "totalCount": "{{count}} total",
     "listError": "Failed to load skills. Please check the backend service.",
+    "featuredTeamSkills": "Featured Team Skills",
+    "featuredSkills": "Featured Skills",
     "noMatches": "No matching skills",
     "viewMode": {
       "list": "List view",
@@ -1556,6 +1649,34 @@
     },
     "detailLoading": "Loading details...",
     "detailError": "Failed to load details",
+    "detail": {
+      "basicInfo": "Basic Info",
+      "versionManage": "Version Management",
+      "versionsLoadFailed": "Failed to load versions",
+      "noVersions": "No version records",
+      "fileTree": "File Tree",
+      "filesLoadFailed": "Failed to load file list",
+      "noFiles": "No files",
+      "binaryFileDownload": "This file cannot be previewed as text. Please download it.",
+      "noPreview": "Unable to preview this file",
+      "contentPreview": "Content Preview",
+      "selectFileToPreview": "Select a file on the left to preview",
+      "tabs": {
+        "contentDetail": "Content Details",
+        "filePreview": "File Preview",
+        "skillExperience": "Skill Experience"
+      }
+    },
+    "hubDetail": {
+      "loadFailed": "Failed to load skill detail",
+      "installs": "{{count}} installs",
+      "views": "{{count}} views",
+      "likes": "{{count}} likes",
+      "rating": "Rating {{rating}}",
+      "publisher": "Publisher",
+      "description": "Content Details",
+      "changelog": "Changelog"
+    },
     "retrieval": {
       "title": "Local Skill Retrieval",
       "disabled": "Retrieval disabled",
@@ -1676,13 +1797,13 @@
       "actions": {
         "read": "Read score",
         "incrementalBuild": "Incremental build",
-        "pauseBuild": "Pause build",
+        "cancelBuild": "Cancel build",
         "fullRebuild": "Full rebuild",
         "fitView": "Fit view"
       },
       "status": {
         "refreshing": "Refreshing skill score",
-        "paused": "Skill score build paused",
+        "cancelled": "Skill score build cancelled",
         "reading": "Reading skill score",
         "noBuildLogs": "No build logs",
         "waitingBuildLogs": "Waiting for build logs...",
@@ -1692,21 +1813,22 @@
       "errors": {
         "readFailed": "Unable to read the skill score. Refresh the score first.",
         "refreshFailed": "Failed to refresh the skill score",
-        "pauseFailed": "Failed to pause the skill score build",
+        "cancelFailed": "Failed to cancel the skill score build",
         "buildFailedWithDetail": "Symphony score build failed: {{detail}}"
       },
       "serverDetails": {
         "noRunningBuild": "No skill score build is currently running.",
-        "pauseRequested": "Skill score build pause requested. Completed cache and checkpoints will be kept.",
-        "buildRunning": "A skill score build is already running. Wait for it to finish or pause the current build first.",
-        "buildPaused": "Skill score build paused. Run an incremental build again to continue.",
-        "scoreMissing": "The skill score is missing or incomplete. Build the score first."
+        "buildStarted": "Skill score background build started.",
+        "cancelRequested": "Skill score build cancelled. Completed cache and checkpoints will be kept.",
+        "buildRunning": "A skill score build is already running in the background.",
+        "buildCancelled": "Skill score build cancelled. Run an incremental build again to continue.",
+        "graphMissing": "The skill score is missing or incomplete. Build the score first."
       },
       "buildStages": {
         "idle": "No build logs",
         "updateStart": "Starting skill score build",
-        "updatePauseRequested": "Pausing skill score build",
-        "updatePaused": "Skill score build paused",
+        "updateCancelRequested": "Cancelling skill score build",
+        "updateCancelled": "Skill score build cancelled",
         "scanStart": "Scanning skill directories",
         "scanDone": "Skill directory scan complete",
         "diffDone": "Checking skill changes",
@@ -1727,8 +1849,8 @@
         "graphResolveDone": "Candidate relation resolution complete",
         "graphMaterializeStart": "Generating score structure",
         "graphMaterializeDone": "Score structure generated",
-        "graphScoreStart": "Building score retrieval structure",
-        "graphScoreDone": "Score retrieval structure built",
+        "graphLookupStart": "Building score lookup structure",
+        "graphLookupDone": "Score lookup structure built",
         "graphBuildDone": "Skill relation graph built",
         "artifactGraphWriteStart": "Writing score files",
         "artifactGraphWriteDone": "Score files written",
@@ -2319,11 +2441,12 @@
       "selectExisting": "Select existing directory",
       "addNewProject": "Add new project",
       "namePlaceholder": "Enter a short, recognizable project name",
+      "pathPlaceholder": "Enter an absolute project directory path",
       "chooseProjectDirectory": "Choose project directory",
       "directoryPickerUnsupported": "This environment cannot open the system directory picker. Enter the project name and path manually.",
-      "directoryPickerFailed": "Failed to choose directory. Please try again.",
+      "directoryPickerFailed": "Failed to choose directory. Enter the project name and path manually.",
       "lockedProjectTitle": "Project assignment cannot be changed from the input box for an existing conversation",
-      "clearProject": "Do not use a project",
+      "clearProject": "Work outside a project",
       "searchProject": "Search projects",
       "noProjectMatches": "No matching projects",
       "noProjects": "No projects",
@@ -2366,18 +2489,16 @@
     "image": "Image",
     "code": "Code",
     "moreActions": "More diagram actions",
-    "downloadSource": "Download source",
     "downloadImage": "Download as image",
     "copyCode": "Copy code",
     "copied": "Copied",
     "copyFailed": "Copy failed",
-    "downloadSourceFailed": "Could not save source file",
     "preparingImage": "Preparing image…",
     "downloadImageFailed": "Could not save image"
   },
   "svg": {
     "streaming": "Drawing…",
-    "invalid": "Invalid SVG code",
+    "invalid": "SVG code contains errors",
     "previewTitle": "SVG image preview"
   },
   "authPrompt": {

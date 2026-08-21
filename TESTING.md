@@ -72,8 +72,8 @@ pytest tests/unit_tests/test_config.py -v
 # 运行特定测试
 pytest tests/unit_tests/test_config.py::TestResolveEnvVars::test_resolve_string_with_env_var -v
 
-# Generate coverage report (recommended: make cov)
-make cov
+# Generate coverage report (recommended: make test-cov)
+make test-cov
 
 # Or invoke pytest directly
 pytest --cov=jiuwenswarm --cov-report=html --cov-report=term-missing
