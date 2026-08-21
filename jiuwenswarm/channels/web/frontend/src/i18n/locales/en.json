@@ -304,7 +304,6 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
-      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
@@ -464,6 +463,9 @@
   "plan": {
     "toolbarTag": "Plan",
     "closeTag": "Exit plan mode",
+    "closeTagDisabled": "You can exit plan mode once the reply finishes or you cancel it",
+    "toolbarUnavailableGoal": "A goal is already in progress, so Plan isn't available",
+    "toolbarUnavailableProcessing": "A reply is in progress, so Plan isn't available",
     "approvalPrompt": "The plan is ready. Choose what to do next.",
     "executePrompt": "The plan is approved. Start executing it.",
     "approvalExecute": "Execute",
@@ -471,12 +473,16 @@
     "approvalNext": "Next",
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
+  "persistSession": {
+    "textRequired": "Enter a task after /persist"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
     "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
+    "toolbarUnavailablePlan": "Plan mode is in progress, so Goal isn't available",
     "closeTag": "Cancel goal",
     "badge": "Goal",
     "status": {
@@ -1464,7 +1470,7 @@
     }
   },
   "skills": {
-    "title": "Skill Management",
+    "title": "Skills",
     "subtitle": "Manage and install skills available to the agent.",
     "tabs": {
       "mySkills": "My Skills",
@@ -1477,7 +1483,29 @@
       "enabled": "Enabled",
       "disabled": "Disabled"
     },
+    "publishFilter": {
+      "all": "All",
+      "published": "Published",
+      "unpublished": "Unpublished"
+    },
+    "skillTypes": {
+      "skill": "Skill Pack",
+      "team": "Team Skills",
+      "multimodal": "Multimodal"
+    },
+    "marketplaceCategories": {
+      "all": "All",
+      "software-development": "Software Development",
+      "office-productivity": "Office Productivity",
+      "content-creation": "Content Creation",
+      "multimodal-media": "Multimodal & Media",
+      "data-science-research": "Data & Research",
+      "compliance-legal": "Legal & Compliance",
+      "lifestyle-health": "Lifestyle & Health",
+      "finance-wealth": "Finance"
+    },
     "enable": "Enable",
+    "disable": "Disable",
     "noDisabledSkills": "No disabled skills",
     "noEnabledSkills": "No enabled skills",
     "setEnabledError": "Failed to set skill enabled status",
@@ -1514,10 +1542,76 @@
       "uninstall": "Uninstall",
       "importLocal": "Import Local Skill",
       "sourceManager": "Source Manager",
+      "create": "Create",
+      "uploadLocalSkill": "Upload Skill",
+      "documentToSkill": "Knowledge to Skill",
+      "createViaChat": "Create via Chat",
       "backToList": "Back to List",
       "viewEvolution": "View Skill Experience",
+      "evolutionTooltip": "This skill has new experience, ready to synthesize a new version",
       "enabling": "Enabling...",
-      "disabling": "Disabling..."
+      "disabling": "Disabling...",
+      "pinSkill": "Pin Skill",
+      "pinSkillPackage": "Pin Skill Package",
+      "unpinSkill": "Unpin Skill",
+      "unpinSkillPackage": "Unpin Skill Package",
+      "edit": "Edit",
+      "refresh": "Refresh",
+      "goToChat": "Go to Chat",
+      "goTry": "Try It",
+      "publish": "Publish",
+      "rebuild": "Rebuild",
+      "synthesizeNewVersion": "Rebuild Skill",
+      "synthesizeTooltip": "Synthesize accumulated skill experience with the original skill to generate a new version"
+    },
+    "publishForm": {
+      "title": "Publish Skill",
+      "name": "Name",
+      "skillName": "Skill Name",
+      "version": "Version",
+      "displayName": "Display Name",
+      "description": "Description",
+      "descriptionOptional": "Description (optional)",
+      "tags": "Tags",
+      "tagsOptional": "Tags (optional)",
+      "skillIcon": "Skill Icon",
+      "skillIconOptional": "Skill Icon (optional)",
+      "skillIconHint": "PNG file, max 5MB",
+      "sha256": "SHA-256 Checksum",
+      "versionNote": "Version Note",
+      "versionNoteOptional": "Version Note (Swarm Skill, optional)",
+      "confirm": "Confirm Publish",
+      "cancel": "Cancel",
+      "publish": "Publish",
+      "placeholderSelect": "Please select",
+      "placeholderSha256": "64-digit lowercase hex displayed after packaging",
+      "noticeText": "The skill will be published to JiuwenHub.",
+      "noticeView": "View",
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+    },
+    "uploadSkillModal": {
+      "title": "Upload Skill",
+      "pathLabel": "Local Skill Path",
+      "pathPlaceholder": "Enter skill file/directory path",
+      "notice": "Folders or .zip files must contain a SKILL.md file. The .md file must include skill name and description in YAML format.",
+      "dropHint": "Click or drag a compressed file or folder here",
+      "confirm": "Import",
+      "cancel": "Cancel"
+    },
+    "docToSkillModal": {
+      "title": "Knowledge to Skill",
+      "subtitle": "Extract knowledge, generate skills",
+      "sourceLabel": "Source",
+      "sourceLocal": "Local Upload",
+      "sourceLink": "Link",
+      "dropHint": "Click or drag a document here\nUpload a compressed file",
+      "linkLabel": "Link",
+      "linkTooltip": "Supports web links and video links",
+      "linkPlaceholder": "Please enter",
+      "descLabel": "Skill Description (optional)",
+      "descPlaceholder": "Please enter",
+      "confirm": "Confirm",
+      "cancel": "Cancel"
     },
     "builtIn": "Built-in",
     "status": {
@@ -1546,6 +1640,8 @@
     "searchPlaceholder": "Search skill names, descriptions, or tags",
     "totalCount": "{{count}} total",
     "listError": "Failed to load skills. Please check the backend service.",
+    "featuredTeamSkills": "Featured Team Skills",
+    "featuredSkills": "Featured Skills",
     "noMatches": "No matching skills",
     "viewMode": {
       "list": "List view",
@@ -1553,6 +1649,34 @@
     },
     "detailLoading": "Loading details...",
     "detailError": "Failed to load details",
+    "detail": {
+      "basicInfo": "Basic Info",
+      "versionManage": "Version Management",
+      "versionsLoadFailed": "Failed to load versions",
+      "noVersions": "No version records",
+      "fileTree": "File Tree",
+      "filesLoadFailed": "Failed to load file list",
+      "noFiles": "No files",
+      "binaryFileDownload": "This file cannot be previewed as text. Please download it.",
+      "noPreview": "Unable to preview this file",
+      "contentPreview": "Content Preview",
+      "selectFileToPreview": "Select a file on the left to preview",
+      "tabs": {
+        "contentDetail": "Content Details",
+        "filePreview": "File Preview",
+        "skillExperience": "Skill Experience"
+      }
+    },
+    "hubDetail": {
+      "loadFailed": "Failed to load skill detail",
+      "installs": "{{count}} installs",
+      "views": "{{count}} views",
+      "likes": "{{count}} likes",
+      "rating": "Rating {{rating}}",
+      "publisher": "Publisher",
+      "description": "Content Details",
+      "changelog": "Changelog"
+    },
     "retrieval": {
       "title": "Local Skill Retrieval",
       "disabled": "Retrieval disabled",
@@ -2365,12 +2489,10 @@
     "image": "Image",
     "code": "Code",
     "moreActions": "More diagram actions",
-    "downloadSource": "Download source",
     "downloadImage": "Download as image",
     "copyCode": "Copy code",
     "copied": "Copied",
     "copyFailed": "Copy failed",
-    "downloadSourceFailed": "Could not save source file",
     "preparingImage": "Preparing image…",
     "downloadImageFailed": "Could not save image"
   },
