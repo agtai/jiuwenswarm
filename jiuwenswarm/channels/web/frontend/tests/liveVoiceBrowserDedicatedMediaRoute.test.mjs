@@ -1097,9 +1097,9 @@ test('Alpha auth send failure is terminal before attach with zero media or busin
   assert.equal(JSON.stringify(route.activation).includes('A'.repeat(43)), false);
 });
 
-test('ticket-in-path routing is rejected by default and available only through explicit W2 compatibility', () => {
+test('ticket-in-path routing is permanently rejected without socket or business effects', () => {
   let allocations = 0;
-  let allocatedSocket = null;
+  const effects = { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
   const shared = {
     enabled: true,
     expected_origin: 'https://voice.example.test',
@@ -1108,10 +1108,11 @@ test('ticket-in-path routing is rejected by default and available only through e
     transport_available: true,
     socket_factory: () => {
       allocations += 1;
-      allocatedSocket = new FakeSocket();
-      return allocatedSocket;
+      return new FakeSocket();
     },
-    on_audio_frame: () => {},
+    on_audio_frame: () => {
+      effects.audio += 1;
+    },
   };
   const missingTicket = createBrowserDedicatedMediaRoute({
     ...shared,
@@ -1122,21 +1123,13 @@ test('ticket-in-path routing is rejected by default and available only through e
     endpoint_url: 'wss://voice.example.test/ws/live-voice/media/private-ticket',
     media_ticket: 'A'.repeat(43),
   });
-  const legacy = createBrowserDedicatedMediaRoute({
-    ...shared,
-    endpoint_url: 'wss://voice.example.test/ws/live-voice/media/private-ticket',
-    legacy_path_ticket_compat: true,
-  });
 
   assert.equal(missingTicket.active, false);
   assert.equal(missingTicket.reason_id, 'MEDIA_AUTHORITY_UNAVAILABLE');
   assert.equal(legacyByDefault.active, false);
   assert.equal(legacyByDefault.reason_id, 'MEDIA_ORIGIN_REJECTED');
-  assert.equal(legacy.active, true);
-  assert.equal(allocations, 1);
-  allocatedSocket.open();
-  assert.deepEqual(allocatedSocket.sent, []);
-  legacy.leaf.close();
+  assert.equal(allocations, 0);
+  assert.deepEqual(effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
 });
 
 test('flag-off and rejected origin allocate no socket and expose no effects', () => {
@@ -1151,9 +1144,6 @@ test('flag-off and rejected origin allocate no socket and expose no effects', ()
     },
     get media_ticket() {
       throw new Error('must not inspect ticket');
-    },
-    get legacy_path_ticket_compat() {
-      throw new Error('must not inspect compatibility mode');
     },
     get binding() {
       throw new Error('must not inspect authority');
