@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -38,6 +38,21 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationUnit,
     PresentedHistorySpan,
 )
+
+# A completed control command must not live for the loop's whole lifetime.  The
+# lane capacities bound only work that is still waiting to run, so barge-in and
+# response-cancel identities keep their own exact budget here.  Beyond it the
+# oldest identity releases its fingerprint and outcome and keeps only a compact
+# tombstone in the fail-closed replay fence below.
+MAX_RETAINED_CONTROL_COMMANDS = 256
+# The fence is a one-bit membership sketch whose bits are only ever set, so a
+# digest collision can refuse an identifier that was never used and can never
+# re-admit a retired one.  Four 8 KiB rows hold every retirement in 32 KiB for
+# the loop's lifetime instead of growing with the session.
+_CONTROL_REPLAY_FENCE_ROWS = 4
+_CONTROL_REPLAY_FENCE_WIDTH = 1 << 13
+_BARGE_CONTROL_SCOPE = "conversation.barge_in"
+_CANCEL_CONTROL_SCOPE = "conversation.response_cancel"
 
 
 class ConversationRuntimeLoopViolation(ValueError):
@@ -107,6 +122,21 @@ class PresentationHistoryIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class _ControlCommandRecord:
+    """One executed control command: its exact fingerprint and its outcome.
+
+    ``fingerprint`` is the exact barge-in ``(ref, cancel_response)`` tuple or the
+    exact response-cancel ``ResponseRef``, and ``result`` is the matching public
+    result.  Exactly one of ``result`` and ``error`` is set once the command has
+    finished; a record with neither means the command's outcome is unknown.
+    """
+
+    fingerprint: object
+    result: object | None = None
+    error: Exception | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationRuntimeLoopSnapshot:
     started: bool
     accepting: bool
@@ -118,6 +148,8 @@ class ConversationRuntimeLoopSnapshot:
     conversation: ConversationSnapshot
     presentation: PresentationLedgerSnapshot
     effects: tuple[EffectRecord, ...]
+    retained_control_commands: int = 0
+    fenced_control_commands: int = 0
 
 
 @dataclass(slots=True)
@@ -177,15 +209,19 @@ class ConversationRuntimeLoop:
         self._accepting = False
         self._closed = False
         self._effects: list[EffectRecord] = []
-        self._barge_fingerprints: dict[str, tuple[ResponseRef, bool]] = {}
-        self._barge_results: dict[str, BargeInResult] = {}
-        self._barge_errors: dict[str, Exception] = {}
+        # One bounded exact ledger per control kind.  It replaces the separate
+        # fingerprint, result and error maps that used to keep every executed
+        # command for the loop's lifetime.
+        self._barge_commands: OrderedDict[str, _ControlCommandRecord] = OrderedDict()
+        self._cancel_commands: OrderedDict[str, _ControlCommandRecord] = OrderedDict()
+        self._control_replay_fence = tuple(
+            bytearray(_CONTROL_REPLAY_FENCE_WIDTH)
+            for _ in range(_CONTROL_REPLAY_FENCE_ROWS)
+        )
+        self._fenced_control_commands = 0
         self._pending_barge: dict[
             str, tuple[tuple[ResponseRef, bool], asyncio.Future[BargeInResult]]
         ] = {}
-        self._cancel_fingerprints: dict[str, ResponseRef] = {}
-        self._cancel_results: dict[str, ResponseCancelResult] = {}
-        self._cancel_errors: dict[str, Exception] = {}
         self._pending_cancel: dict[
             str, tuple[ResponseRef, asyncio.Future[ResponseCancelResult]]
         ] = {}
@@ -410,19 +446,28 @@ class ConversationRuntimeLoop:
                     ErrorCode.CONFLICT,
                 )
             return future
-        prior_ref = self._cancel_fingerprints.get(command_id)
-        if prior_ref is not None:
-            if prior_ref != ref:
+        retained = self._cancel_commands.get(command_id)
+        if retained is not None:
+            if retained.fingerprint != ref:
                 raise ConversationRuntimeLoopViolation(
                     "RESPONSE_CANCEL_COMMAND_CONFLICT",
                     "a response cancel command identifier cannot change target",
                     ErrorCode.CONFLICT,
                 )
-            error = self._cancel_errors.get(command_id)
+            error = self._replayed_control_failure(retained)
             if error is not None:
                 return self._failed_future(running, error)
             return self._resolved_future(
-                running, replace(self._cancel_results[command_id], replayed=True)
+                running,
+                replace(cast(ResponseCancelResult, retained.result), replayed=True),
+            )
+        # Admission is the only fence gate: a command already accepted into a
+        # lane must not be refused by a bit another identity set after it.
+        if self._control_replay_fenced(_CANCEL_CONTROL_SCOPE, command_id):
+            raise ConversationRuntimeLoopViolation(
+                "RESPONSE_CANCEL_COMMAND_RETIRED",
+                "a retired response cancel command identifier cannot be reused",
+                ErrorCode.CONFLICT,
             )
         future = self._post(
             lambda: self._request_response_cancel(command_id, ref), control=True
@@ -531,19 +576,27 @@ class ConversationRuntimeLoop:
                     ErrorCode.CONFLICT,
                 )
             return future
-        prior_fingerprint = self._barge_fingerprints.get(action_id)
-        if prior_fingerprint is not None:
-            if prior_fingerprint != fingerprint:
+        retained = self._barge_commands.get(action_id)
+        if retained is not None:
+            if retained.fingerprint != fingerprint:
                 raise ConversationRuntimeLoopViolation(
                     "BARGE_IN_ACTION_CONFLICT",
                     "a barge-in action identifier cannot change target or policy",
                     ErrorCode.CONFLICT,
                 )
-            error = self._barge_errors.get(action_id)
+            error = self._replayed_control_failure(retained)
             if error is not None:
                 return self._failed_future(running, error)
             return self._resolved_future(
-                running, replace(self._barge_results[action_id], replayed=True)
+                running, replace(cast(BargeInResult, retained.result), replayed=True)
+            )
+        # Admission is the only fence gate: a command already accepted into a
+        # lane must not be refused by a bit another identity set after it.
+        if self._control_replay_fenced(_BARGE_CONTROL_SCOPE, action_id):
+            raise ConversationRuntimeLoopViolation(
+                "BARGE_IN_ACTION_RETIRED",
+                "a retired barge-in action identifier cannot be reused",
+                ErrorCode.CONFLICT,
             )
         future = self._post(
             lambda: self._barge_in(action_id, ref, cancel_response), control=True
@@ -607,6 +660,9 @@ class ConversationRuntimeLoop:
             conversation=self._runtime.snapshot(),
             presentation=self._presentation.snapshot(),
             effects=tuple(self._effects),
+            retained_control_commands=len(self._barge_commands)
+            + len(self._cancel_commands),
+            fenced_control_commands=self._fenced_control_commands,
         )
 
     def _produce_unit(self, unit: PresentationUnit) -> bool:
@@ -749,47 +805,66 @@ class ConversationRuntimeLoop:
                 ErrorCode.INVALID_ARGUMENT,
             )
         fingerprint = (ref, cancel_response)
-        prior_fingerprint = self._barge_fingerprints.get(action_id)
-        if prior_fingerprint is not None:
-            if prior_fingerprint != fingerprint:
+        retained = self._barge_commands.get(action_id)
+        if retained is not None:
+            if retained.fingerprint != fingerprint:
                 raise ConversationRuntimeLoopViolation(
                     "BARGE_IN_ACTION_CONFLICT",
                     "a barge-in action identifier cannot change target or policy",
                     ErrorCode.CONFLICT,
                 )
-            prior_error = self._barge_errors.get(action_id)
+            prior_error = self._replayed_control_failure(retained)
             if prior_error is not None:
                 raise prior_error
-            prior = self._barge_results[action_id]
-            return replace(prior, replayed=True)
+            return replace(cast(BargeInResult, retained.result), replayed=True)
 
-        self._barge_fingerprints[action_id] = fingerprint
+        self._retain_control_command(
+            self._barge_commands,
+            _BARGE_CONTROL_SCOPE,
+            action_id,
+            _ControlCommandRecord(fingerprint),
+        )
         try:
             result = self._apply_new_barge_in(action_id, ref, cancel_response)
         except Exception as error:
-            self._barge_errors[action_id] = error
+            self._retain_control_command(
+                self._barge_commands,
+                _BARGE_CONTROL_SCOPE,
+                action_id,
+                _ControlCommandRecord(fingerprint, error=error),
+            )
             raise
-        self._barge_results[action_id] = result
+        self._retain_control_command(
+            self._barge_commands,
+            _BARGE_CONTROL_SCOPE,
+            action_id,
+            _ControlCommandRecord(fingerprint, result=result),
+        )
         return result
 
     def _request_response_cancel(
         self, command_id: str, ref: ResponseRef
     ) -> ResponseCancelResult:
         command_id = self._require_id(command_id, "command_id")
-        prior_ref = self._cancel_fingerprints.get(command_id)
-        if prior_ref is not None:
-            if prior_ref != ref:
+        retained = self._cancel_commands.get(command_id)
+        if retained is not None:
+            if retained.fingerprint != ref:
                 raise ConversationRuntimeLoopViolation(
                     "RESPONSE_CANCEL_COMMAND_CONFLICT",
                     "a response cancel command identifier cannot change target",
                     ErrorCode.CONFLICT,
                 )
-            prior_error = self._cancel_errors.get(command_id)
+            prior_error = self._replayed_control_failure(retained)
             if prior_error is not None:
                 raise prior_error
-            return replace(self._cancel_results[command_id], replayed=True)
+            return replace(cast(ResponseCancelResult, retained.result), replayed=True)
 
-        self._cancel_fingerprints[command_id] = ref
+        self._retain_control_command(
+            self._cancel_commands,
+            _CANCEL_CONTROL_SCOPE,
+            command_id,
+            _ControlCommandRecord(ref),
+        )
         try:
             event, _ = self._runtime.request_response_cancel(ref)
             self._fence_presentation(ref, reason="response_cancel_requested")
@@ -802,10 +877,77 @@ class ConversationRuntimeLoop:
                 effect_id=effect.effect_id,
             )
         except Exception as error:
-            self._cancel_errors[command_id] = error
+            self._retain_control_command(
+                self._cancel_commands,
+                _CANCEL_CONTROL_SCOPE,
+                command_id,
+                _ControlCommandRecord(ref, error=error),
+            )
             raise
-        self._cancel_results[command_id] = result
+        self._retain_control_command(
+            self._cancel_commands,
+            _CANCEL_CONTROL_SCOPE,
+            command_id,
+            _ControlCommandRecord(ref, result=result),
+        )
         return result
+
+    def _retain_control_command(
+        self,
+        ledger: OrderedDict[str, _ControlCommandRecord],
+        scope: str,
+        key: str,
+        record: _ControlCommandRecord,
+    ) -> None:
+        """Keep one exact command and retire the oldest beyond the bound."""
+
+        ledger[key] = record
+        ledger.move_to_end(key)
+        while len(ledger) > MAX_RETAINED_CONTROL_COMMANDS:
+            retired, _ = ledger.popitem(last=False)
+            for row, index in zip(
+                self._control_replay_fence,
+                self._control_fence_indices(scope, retired),
+                strict=True,
+            ):
+                row[index] = 1
+            self._fenced_control_commands += 1
+
+    def _control_fence_indices(self, scope: str, key: str) -> tuple[int, ...]:
+        digest = hashlib.sha256(f"{scope}\0{key}".encode()).digest()
+        width = len(self._control_replay_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % width
+            for offset in range(0, 4 * _CONTROL_REPLAY_FENCE_ROWS, 4)
+        )
+
+    def _control_replay_fenced(self, scope: str, key: str) -> bool:
+        """Report whether this loop already retired the exact identifier."""
+
+        return all(
+            row[index]
+            for row, index in zip(
+                self._control_replay_fence,
+                self._control_fence_indices(scope, key),
+                strict=True,
+            )
+        )
+
+    @staticmethod
+    def _replayed_control_failure(
+        record: _ControlCommandRecord,
+    ) -> Exception | None:
+        """Return the failure a replay must raise, or None for a kept result."""
+
+        if record.error is not None:
+            return record.error
+        if record.result is None:
+            return ConversationRuntimeLoopViolation(
+                "CONTROL_COMMAND_RESULT_UNKNOWN",
+                "a retained control command has no recorded outcome",
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        return None
 
     def _clear_pending_barge(
         self, action_id: str, completed: asyncio.Future[BargeInResult]

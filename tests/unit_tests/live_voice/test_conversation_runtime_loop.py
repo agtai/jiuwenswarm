@@ -12,6 +12,7 @@ import pytest_asyncio
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ContractViolation,
+    ErrorCode,
     ResponseRef,
     ScopeRef,
     TerminalOutcome,
@@ -19,6 +20,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.live_voice.conversation_runtime import (
     CancelState,
+    ConversationRuntimeViolation,
     InteractionState,
     ResponseState,
 )
@@ -1157,3 +1159,167 @@ async def test_cancelled_close_waiter_does_not_lose_the_single_shutdown_result(
     assert barge.effect_ids == tuple(item.effect_id for item in recovered)
     assert [item.effect_type for item in recovered] == ["playback.stop"]
     assert await runtime.close() == ()
+
+
+# --- SRR-27 / B42: bounded control-command lifetime and failure privacy -------
+#
+# The loop's `control_capacity` only bounds work still waiting in a lane.  Every
+# barge and cancel identifier that finished stayed in the fingerprint, result and
+# error maps for the loop's whole lifetime, and the failure maps kept the raw
+# `Exception` object with its traceback and exception chain.
+
+CONTROL_RETENTION_PROBE = 320
+
+
+async def settled(future: asyncio.Future[object]) -> asyncio.Future[object]:
+    """Run the worker until `future` completes and its done callbacks have run."""
+
+    while not future.done():
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    return future
+
+
+async def test_completed_barge_ids_retire_once_control_retention_saturates(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 bounds/state: a saturated ledger must stop claiming exact knowledge."""
+
+    runtime, ref = await prepared(loop_factory, control_capacity=8)
+    for index in range(CONTROL_RETENTION_PROBE):
+        await runtime.barge_in(f"saturating-barge-{index}", ref)
+    effects_before = runtime.snapshot().effects
+    conversation_before = runtime.snapshot().conversation
+
+    newest = await runtime.barge_in(
+        f"saturating-barge-{CONTROL_RETENTION_PROBE - 1}", ref
+    )
+    assert newest.replayed is True
+    assert newest.applied is False
+
+    with pytest.raises(ConversationRuntimeLoopViolation) as retired:
+        await runtime.barge_in("saturating-barge-0", ref)
+    assert retired.value.reason == "BARGE_IN_ACTION_RETIRED"
+    assert retired.value.code is ErrorCode.CONFLICT
+    assert runtime.snapshot().effects == effects_before
+    assert runtime.snapshot().conversation == conversation_before
+
+
+async def test_retired_cancel_id_is_refused_and_never_executes_again(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 bounds/negative: a released identity must fail closed, not re-run."""
+
+    runtime, ref = await prepared(loop_factory, control_capacity=8)
+    stale = ResponseRef(ref.interaction_id, "missing", ref.response_generation)
+    for index in range(CONTROL_RETENTION_PROBE):
+        pending = await settled(
+            runtime.post_response_cancel(f"failing-cancel-{index}", stale)
+        )
+        assert isinstance(pending.exception(), ConversationRuntimeViolation)
+    effects_before = runtime.snapshot().effects
+    conversation_before = runtime.snapshot().conversation
+
+    with pytest.raises(ConversationRuntimeViolation) as recent:
+        await runtime.request_response_cancel(
+            f"failing-cancel-{CONTROL_RETENTION_PROBE - 1}", stale
+        )
+    assert recent.value.reason == "STALE_RESPONSE_REFERENCE"
+
+    with pytest.raises(ConversationRuntimeLoopViolation) as retired:
+        await runtime.request_response_cancel("failing-cancel-0", stale)
+    assert retired.value.reason == "RESPONSE_CANCEL_COMMAND_RETIRED"
+    assert retired.value.code is ErrorCode.CONFLICT
+
+    # A released identity must never be treated as fresh work: re-pointing it at
+    # the live response must not emit a cancel effect or move the cancel state.
+    with pytest.raises(ConversationRuntimeLoopViolation) as repointed:
+        await runtime.request_response_cancel("failing-cancel-0", ref)
+    assert repointed.value.reason == "RESPONSE_CANCEL_COMMAND_RETIRED"
+    assert runtime.snapshot().effects == effects_before
+    assert runtime.snapshot().conversation == conversation_before
+    assert runtime.snapshot().conversation.responses[0].cancel_state is CancelState.NONE
+
+
+async def test_control_retention_saturates_instead_of_growing_with_the_session(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 bounds: retained exact commands stop growing once the bound is met."""
+
+    runtime, ref = await prepared(loop_factory, control_capacity=8)
+    for index in range(CONTROL_RETENTION_PROBE):
+        await runtime.barge_in(f"bounded-barge-{index}", ref)
+    saturated = runtime.snapshot()
+    for index in range(CONTROL_RETENTION_PROBE, CONTROL_RETENTION_PROBE * 2):
+        await runtime.barge_in(f"bounded-barge-{index}", ref)
+    grown = runtime.snapshot()
+
+    assert saturated.retained_control_commands < CONTROL_RETENTION_PROBE
+    assert grown.retained_control_commands == saturated.retained_control_commands
+    assert grown.fenced_control_commands == (
+        CONTROL_RETENTION_PROBE * 2 - grown.retained_control_commands
+    )
+
+
+async def test_concurrent_control_admission_is_linearized_across_retirement(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 concurrency: one deterministic ingress batch, exactly-once effects."""
+
+    runtime, ref = await prepared(
+        loop_factory, control_capacity=CONTROL_RETENTION_PROBE
+    )
+    # Deterministic barrier: `post_barge_in` never yields, so the whole batch is
+    # queued before the worker applies any of it.
+    first_batch = [
+        runtime.post_barge_in(f"concurrent-barge-{index}", ref)
+        for index in range(CONTROL_RETENTION_PROBE)
+    ]
+    assert runtime.snapshot().pending_control == CONTROL_RETENTION_PROBE
+    first_results = await asyncio.gather(*first_batch)
+    assert [item.applied for item in first_results] == [True] + [False] * (
+        CONTROL_RETENTION_PROBE - 1
+    )
+    assert [item.effect.effect_type for item in runtime.snapshot().effects] == [
+        "playback.stop"
+    ]
+
+    second_batch = [
+        runtime.post_barge_in(f"concurrent-barge-successor-{index}", ref)
+        for index in range(CONTROL_RETENTION_PROBE)
+    ]
+    await asyncio.gather(*second_batch)
+    effects_before = runtime.snapshot().effects
+
+    fresh = runtime.post_barge_in("concurrent-barge-fresh", ref)
+    with pytest.raises(ConversationRuntimeLoopViolation) as retired:
+        runtime.post_barge_in("concurrent-barge-0", ref)
+    assert retired.value.reason == "BARGE_IN_ACTION_RETIRED"
+    assert (await fresh).replayed is False
+    assert runtime.snapshot().effects == effects_before
+
+
+async def test_control_retirement_is_memory_only_for_one_loop_lifetime(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 retry/recovery characterization: the fence has no durability claim."""
+
+    runtime, ref = await prepared(loop_factory, control_capacity=8)
+    for index in range(CONTROL_RETENTION_PROBE):
+        await runtime.barge_in(f"lifetime-barge-{index}", ref)
+    with pytest.raises(ConversationRuntimeLoopViolation) as retired:
+        await runtime.barge_in("lifetime-barge-0", ref)
+    assert retired.value.reason == "BARGE_IN_ACTION_RETIRED"
+
+    await runtime.close()
+    with pytest.raises(ConversationRuntimeLoopViolation) as closed:
+        await runtime.start()
+    assert closed.value.reason == "RUNTIME_LOOP_CLOSED"
+
+    # Characterization, not a durability contract: the ledger and its fence are
+    # memory-only, so a successor loop admits the same identifier as fresh work.
+    successor, successor_ref = await prepared(loop_factory, control_capacity=8)
+    revived = await successor.barge_in("lifetime-barge-0", successor_ref)
+    assert revived.applied is True
+    assert revived.replayed is False
