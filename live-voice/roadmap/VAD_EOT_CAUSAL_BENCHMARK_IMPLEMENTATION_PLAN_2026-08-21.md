@@ -63,7 +63,7 @@ OpenAI Realtime transcription WebSocket already used by the product.
   closed manifest through exclusive-create operations.
 - Task 2 consumes the immutable manifest/case types and WAV reader.
 
-- [ ] **Step 1: Write RED tests for canonical manifest and WAV validation**
+- [x] **Step 1: Write RED tests for canonical manifest and WAV validation**
 
 Create literal fixtures with a 48 kHz mono, 16-bit WAV. Tests must name the
 breaks: open JSON fields, bool integers, path escape, wrong SHA-256, stereo,
@@ -85,7 +85,7 @@ def test_manifest_rejects_before_wav_read(tmp_path: Path, mutation) -> None:
     assert wav_reads() == 0
 ```
 
-- [ ] **Step 2: Run the corpus tests and observe RED**
+- [x] **Step 2: Run the corpus tests and observe RED**
 
 Run:
 
@@ -95,7 +95,7 @@ uv run pytest tests/unit_tests/live_voice/test_prepare_vad_eot_corpus.py -q --no
 
 Expected: import/file failure because corpus support does not exist.
 
-- [ ] **Step 3: Implement immutable corpus types and validators**
+- [x] **Step 3: Implement immutable corpus types and validators**
 
 Use frozen/slotted dataclasses and exact-key validation:
 
@@ -124,7 +124,7 @@ class VadCorpusManifest:
 `normalize_transcript` must implement NFKC → casefold → non-letter/number to
 space → collapse → trim. No regex limited to ASCII is acceptable.
 
-- [ ] **Step 4: Write RED derivation tests**
+- [x] **Step 4: Write RED derivation tests**
 
 Derive from a literal WAV whose two clauses contain nonzero samples separated
 by a verified low-energy boundary and whose source already ends in 2000 ms of
@@ -140,7 +140,7 @@ def test_derivation_inserts_only_declared_pause_and_final_silence(tmp_path: Path
         assert samples[SPLIT + case.pause_ms * 48 :] == SOURCE[SPLIT:]
 ```
 
-- [ ] **Step 5: Implement the corpus builder and closed CLI**
+- [x] **Step 5: Implement the corpus builder and closed CLI**
 
 `prepare_vad_eot_corpus.py` accepts only:
 
@@ -162,7 +162,7 @@ content out of argv and process listings.
 On failure, remove only files created by the current invocation inside the
 newly claimed output root.
 
-- [ ] **Step 6: Run GREEN, static checks and commit Task 1**
+- [x] **Step 6: Run GREEN, static checks and commit Task 1**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_prepare_vad_eot_corpus.py -q --no-cov
