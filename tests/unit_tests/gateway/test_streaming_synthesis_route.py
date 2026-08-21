@@ -452,6 +452,59 @@ async def test_streams_ordered_20ms_frames_with_exact_content_hidden_binding() -
 
 
 @pytest.mark.asyncio
+async def test_repeated_gateway_synthesis_reuses_one_selected_provider() -> None:
+    provider = _FakeProvider()
+    selector_calls = 0
+
+    async def selector() -> StreamingSpeechSelection:
+        nonlocal selector_calls
+        selector_calls += 1
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    requests = (
+        _request(),
+        _request(
+            stream_id="synthesis-2",
+            interaction_id="interaction-2",
+            response_id="response-2",
+            unit_id="unit-2",
+        ),
+    )
+    for request in requests:
+        handle, outcome = await owner.begin(request)
+        assert handle is not None
+        assert outcome is None
+        provider.events.put_nowait(
+            _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+        )
+        provider.events.put_nowait(
+            _event(
+                request,
+                seq=1,
+                cursor=0,
+                kind=SynthesisEventKind.CHUNK,
+                samples=(1000,) * 480,
+            )
+        )
+        provider.events.put_nowait(
+            _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+        )
+
+        frame = await owner.next_chunk(handle)
+        terminal = await owner.next_chunk(handle)
+        assert frame.chunk is not None
+        assert terminal.outcome is not None
+        assert terminal.outcome.completed is True
+
+    assert selector_calls == 1
+    assert provider.open_count == 2
+    assert provider.closed == 0
+    await owner.close()
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
 async def test_product_streaming_source_emits_one_content_free_tts_probe_batch() -> None:
     provider = _FakeProvider()
     request = _request()

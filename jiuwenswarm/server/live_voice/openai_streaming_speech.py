@@ -907,6 +907,7 @@ class OpenAIStreamingSpeechProvider:
         self._socket_factory = socket_factory or _default_socket_factory
         self._sse_factory = sse_factory
         self._sse_client: httpx.AsyncClient | None = None
+        self._sse_client_loop: asyncio.AbstractEventLoop | None = None
         self._sse_client_close_requested: httpx.AsyncClient | None = None
         self._sse_client_lock = asyncio.Lock()
         self._degradation_sink = degradation_sink
@@ -988,7 +989,7 @@ class OpenAIStreamingSpeechProvider:
             return
         try:
             observer(ref, name, self._monotonic())
-        except Exception:
+        except BaseException:
             return
 
     def _synthesis_trace_callback(
@@ -1008,8 +1009,15 @@ class OpenAIStreamingSpeechProvider:
     async def _get_or_create_sse_client(self) -> httpx.AsyncClient:
         async with self._sse_client_lock:
             self._require_open()
+            loop = asyncio.get_running_loop()
+            if self._sse_client is not None and self._sse_client_loop is not loop:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH",
+                    "streaming Speech Provider transport belongs to another event loop",
+                )
             if self._sse_client is None:
                 self._sse_client = _default_sse_client_factory()
+                self._sse_client_loop = loop
                 self._sse_client_close_requested = None
             return self._sse_client
 
@@ -1018,11 +1026,17 @@ class OpenAIStreamingSpeechProvider:
             client = self._sse_client
             if client is None:
                 return None
+            if self._sse_client_loop is not asyncio.get_running_loop():
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH",
+                    "streaming Speech Provider transport belongs to another event loop",
+                )
             if (
                 self._sse_client_close_requested is client
                 and self._transport_cleanup_tasks.snapshot().clean
             ):
                 self._sse_client = None
+                self._sse_client_loop = None
                 self._sse_client_close_requested = None
                 return client
             self._sse_client_close_requested = client
@@ -1031,6 +1045,7 @@ class OpenAIStreamingSpeechProvider:
             )
             if complete and self._sse_client is client:
                 self._sse_client = None
+                self._sse_client_loop = None
                 self._sse_client_close_requested = None
             return client
 
@@ -1042,6 +1057,7 @@ class OpenAIStreamingSpeechProvider:
         async with self._sse_client_lock:
             if self._sse_client is client:
                 self._sse_client = None
+                self._sse_client_loop = None
                 self._sse_client_close_requested = None
 
     async def open_recognition(

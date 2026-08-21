@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -518,6 +519,36 @@ def test_cli_errors_are_stable_and_do_not_echo_unknown_private_values(
     assert private not in captured.out + captured.err
 
 
+def test_process_watchdog_terminates_cancellation_hostile_asyncio_worker() -> None:
+    hostile = """
+import asyncio
+
+async def hostile():
+    while True:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            continue
+
+async def run():
+    await asyncio.wait_for(hostile(), timeout=0.01)
+
+asyncio.run(run())
+"""
+    started = time.monotonic()
+
+    result = runner._run_process_with_watchdog(
+        (sys.executable, "-c", hostile),
+        environ=os.environ,
+        timeout_seconds=0.1,
+    )
+
+    assert result.timed_out is True
+    assert result.returncode is None
+    assert result.stdout == ""
+    assert time.monotonic() - started < 2.0
+
+
 class DuplicateTraceProvider(FakeSynthesisProvider):
     async def open_synthesis(self, request, *, on_transport_open=None) -> None:
         await super().open_synthesis(
@@ -672,6 +703,47 @@ async def test_operation_deadline_wins_when_provider_suppresses_cancellation(
         runner.TtsAttemptOutcome.UNKNOWN,
     ]
     assert attempts[0].reason == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_dirty_pair_cleanup_stops_before_next_paid_provider(
+    tmp_path: Path,
+) -> None:
+    config = runner.TtsConnectionBenchmarkConfig(
+        "tts-connection-run",
+        "run",
+        (tmp_path / "report.json").resolve(),
+        "a" * 40,
+        True,
+        "A1",
+        "gpt-4o-mini-tts-2025-12-15",
+        "marin",
+        24_000,
+    )
+    clock = ManualClock()
+    providers = []
+
+    class DirtyCleanupProvider(FakeSynthesisProvider):
+        async def close(self) -> None:
+            await super().close()
+            self.cleanup_snapshot = SimpleNamespace(clean=False)
+
+    def provider_factory(observer):
+        provider = DirtyCleanupProvider(observer, clock, reuse_warm=False)
+        providers.append(provider)
+        return provider
+
+    with pytest.raises(
+        ValueError, match="TTS_CONNECTION_BENCHMARK_CLEANUP_INCOMPLETE"
+    ):
+        await runner.run_benchmark(
+            config,
+            provider_factory=provider_factory,
+            monotonic=clock.now,
+        )
+
+    assert len(providers) == 1
+    assert providers[0].close_count == 1
 
 
 def test_report_parser_rejects_a_decision_that_disagrees_with_attempt_truth(

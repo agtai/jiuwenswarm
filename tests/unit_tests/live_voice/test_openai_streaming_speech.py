@@ -1999,6 +1999,7 @@ async def test_streaming_tts_sse_has_derived_cursor_and_request_level_text_prove
         "stream_format": "sse",
     }
     assert stream.closed is True
+    assert provider._sse_client is None
     assert_zero_business_effects(provider)
     await provider.close()
 
@@ -2177,6 +2178,59 @@ async def test_synthesis_transport_observer_failure_cannot_change_product_result
     ]
     assert "private-observer-sentinel" not in caplog.text
     assert provider.degradation_facts == ()
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_transport_observer_base_exception_is_product_inert() -> None:
+    class DiagnosticBaseException(BaseException):
+        pass
+
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    stream = FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    def observer(*_args: object) -> None:
+        raise DiagnosticBaseException("private-base-exception-sentinel")
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        synthesis_transport_observer=observer,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    events = [
+        await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        for _ in range(4)
+    ]
+
+    assert [event.kind for event in events] == [
+        SynthesisEventKind.STARTED,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.COMPLETED,
+    ]
+    assert provider.degradation_facts == ()
+    assert stream.closed is True
     assert_zero_business_effects(provider)
     await provider.close()
 
@@ -2378,6 +2432,390 @@ async def test_late_sse_client_close_is_retained_without_duplicate_cleanup(
     assert client.close_count == 1
     assert provider._sse_client is None
     assert provider.cleanup_snapshot.clean is True
+
+
+def test_provider_rejects_cross_event_loop_sse_client_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    lines = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        ),
+        "",
+        'data: {"type":"speech.audio.done","usage":{}}',
+        "",
+    )
+
+    class Response(FakeSseStream):
+        status_code = 200
+        headers = {
+            "content-type": "text/event-stream",
+            "content-encoding": "identity",
+        }
+
+        async def aiter_lines(self):
+            async for line in self:
+                yield line
+
+    class Request:
+        extensions: Mapping[str, object] = {}
+
+    class Client:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        def build_request(self, *_args, **_kwargs) -> Request:
+            return Request()
+
+        async def send(self, _request: Request, *, stream: bool) -> Response:
+            assert stream is True
+            return Response(lines)
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    client = Client()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_default_sse_client_factory",
+        lambda: client,
+    )
+    provider = OpenAIStreamingSpeechProvider(config())
+    request = synthesis_request()
+
+    async def synthesize() -> None:
+        provider.conformance.activate_response(request.ref.response)
+        await provider.open_synthesis(request)
+        while True:
+            event = await provider.next_synthesis_event(
+                request.ref, timeout_seconds=1
+            )
+            if event.kind is SynthesisEventKind.COMPLETED:
+                return
+
+    owner_loop = asyncio.new_event_loop()
+    foreign_loop = asyncio.new_event_loop()
+    try:
+        owner_loop.run_until_complete(synthesize())
+
+        with pytest.raises(OpenAIStreamingSpeechError) as mismatch:
+            foreign_loop.run_until_complete(provider.close())
+        assert mismatch.value.reason == "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH"
+        assert client.close_count == 0
+
+        owner_loop.run_until_complete(provider.close())
+        assert client.close_count == 1
+        assert provider.cleanup_snapshot.clean is True
+    finally:
+        foreign_loop.close()
+        owner_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_synthesis_streams_share_client_not_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    lines = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        ),
+        "",
+        'data: {"type":"speech.audio.done","usage":{}}',
+        "",
+    )
+
+    class Response(FakeSseStream):
+        status_code = 200
+        headers = {
+            "content-type": "text/event-stream",
+            "content-encoding": "identity",
+        }
+
+        def __init__(self) -> None:
+            super().__init__(lines)
+            self.release = asyncio.Event()
+
+        async def aiter_lines(self):
+            await self.release.wait()
+            async for line in self:
+                yield line
+
+    class Request:
+        extensions: Mapping[str, object] = {}
+
+    class Client:
+        def __init__(self) -> None:
+            self.responses = (Response(), Response(), Response(), Response())
+            self.send_count = 0
+            self.both_sent = asyncio.Event()
+            self.four_sent = asyncio.Event()
+            self.close_count = 0
+
+        def build_request(self, *_args, **_kwargs) -> Request:
+            return Request()
+
+        async def send(self, _request: Request, *, stream: bool) -> Response:
+            assert stream is True
+            response = self.responses[self.send_count]
+            self.send_count += 1
+            if self.send_count == 2:
+                self.both_sent.set()
+            if self.send_count == 4:
+                self.four_sent.set()
+            return response
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    client = Client()
+    factory_count = 0
+
+    def client_factory():
+        nonlocal factory_count
+        factory_count += 1
+        return client
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_default_sse_client_factory",
+        client_factory,
+    )
+    provider = OpenAIStreamingSpeechProvider(config())
+    first = synthesis_request()
+    second_response = ResponseRef("interaction-2", "response-2", 0)
+    second = replace(
+        synthesis_request(),
+        ref=SynthesisStreamRef("synthesis-2", 0, second_response, "unit-2", 0),
+    )
+    provider.conformance.activate_response(first.ref.response)
+    provider.conformance.activate_response(second.ref.response)
+
+    await asyncio.gather(
+        provider.open_synthesis(first),
+        provider.open_synthesis(second),
+    )
+    await asyncio.wait_for(client.both_sent.wait(), timeout=1)
+
+    async def drain(request: SynthesisStreamRequest) -> list[SynthesisEventKind]:
+        kinds = []
+        while not kinds or kinds[-1] is not SynthesisEventKind.COMPLETED:
+            event = await provider.next_synthesis_event(
+                request.ref, timeout_seconds=1
+            )
+            kinds.append(event.kind)
+        return kinds
+
+    client.responses[0].release.set()
+    first_kinds = await drain(first)
+    assert first_kinds[0] is SynthesisEventKind.STARTED
+    assert first_kinds[-1] is SynthesisEventKind.COMPLETED
+    assert client.responses[0].closed is True
+    assert client.responses[1].closed is False
+    assert client.close_count == 0
+    assert provider.conformance.snapshot().active_synthesis == 1
+
+    client.responses[1].release.set()
+    second_kinds = await drain(second)
+    assert second_kinds == first_kinds
+    assert client.responses[1].closed is True
+    assert factory_count == 1
+
+    third_response = ResponseRef("interaction-3", "response-3", 0)
+    fourth_response = ResponseRef("interaction-4", "response-4", 0)
+    third = replace(
+        synthesis_request(),
+        ref=SynthesisStreamRef("synthesis-3", 0, third_response, "unit-3", 0),
+    )
+    fourth = replace(
+        synthesis_request(),
+        ref=SynthesisStreamRef("synthesis-4", 0, fourth_response, "unit-4", 0),
+    )
+    provider.conformance.activate_response(third.ref.response)
+    provider.conformance.activate_response(fourth.ref.response)
+    await asyncio.gather(
+        provider.open_synthesis(third),
+        provider.open_synthesis(fourth),
+    )
+    await asyncio.wait_for(client.four_sent.wait(), timeout=1)
+
+    await provider.cancel_synthesis(third.ref)
+
+    assert client.responses[2].closed is True
+    assert client.responses[3].closed is False
+    assert client.close_count == 0
+    assert provider.conformance.snapshot().active_synthesis == 1
+
+    client.responses[3].release.set()
+    fourth_kinds = await drain(fourth)
+    assert fourth_kinds == first_kinds
+    assert client.responses[3].closed is True
+    assert factory_count == 1
+
+    await provider.close()
+    assert client.close_count == 1
+    assert_zero_business_effects(provider)
+
+
+@pytest.mark.asyncio
+async def test_sse_clients_are_provider_local_and_closed_provider_allocates_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    clients: list[Client] = []
+
+    def client_factory() -> Client:
+        client = Client()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_default_sse_client_factory",
+        client_factory,
+    )
+    first = OpenAIStreamingSpeechProvider(config())
+    second = OpenAIStreamingSpeechProvider(config())
+
+    first_client, second_client = await asyncio.gather(
+        first._get_or_create_sse_client(),
+        second._get_or_create_sse_client(),
+    )
+
+    assert first_client is clients[0]
+    assert second_client is clients[1]
+    assert first_client is not second_client
+    await asyncio.gather(first.close(), second.close())
+    assert [client.close_count for client in clients] == [1, 1]
+
+    request = synthesis_request()
+    with pytest.raises(OpenAIStreamingSpeechError) as closed:
+        await first.open_synthesis(request)
+    assert closed.value.reason == "STREAMING_SPEECH_CLOSED"
+    assert len(clients) == 2
+
+
+@pytest.mark.asyncio
+async def test_broken_pooled_request_has_no_retry_and_next_request_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    lines = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        ),
+        "",
+        'data: {"type":"speech.audio.done","usage":{}}',
+        "",
+    )
+
+    class Response(FakeSseStream):
+        status_code = 200
+        headers = {
+            "content-type": "text/event-stream",
+            "content-encoding": "identity",
+        }
+
+        async def aiter_lines(self):
+            async for line in self:
+                yield line
+
+    class Request:
+        extensions: Mapping[str, object] = {}
+
+    class Client:
+        def __init__(self) -> None:
+            self.send_count = 0
+            self.responses: list[Response] = []
+            self.close_count = 0
+
+        def build_request(self, *_args, **_kwargs) -> Request:
+            return Request()
+
+        async def send(self, _request: Request, *, stream: bool) -> Response:
+            assert stream is True
+            self.send_count += 1
+            if self.send_count == 2:
+                raise ConnectionError("private-broken-pool-sentinel")
+            response = Response(lines)
+            self.responses.append(response)
+            return response
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    client = Client()
+    factory_count = 0
+
+    def client_factory() -> Client:
+        nonlocal factory_count
+        factory_count += 1
+        return client
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_default_sse_client_factory",
+        client_factory,
+    )
+    facts: list[SpeechDegradationFact] = []
+    provider = OpenAIStreamingSpeechProvider(
+        config(), degradation_sink=facts.append
+    )
+
+    async def complete(request: SynthesisStreamRequest) -> list[SynthesisEventKind]:
+        provider.conformance.activate_response(request.ref.response)
+        await provider.open_synthesis(request)
+        kinds = []
+        while not kinds or kinds[-1] is not SynthesisEventKind.COMPLETED:
+            event = await provider.next_synthesis_event(
+                request.ref, timeout_seconds=1
+            )
+            kinds.append(event.kind)
+        return kinds
+
+    first_kinds = await complete(synthesis_request(generation=0))
+
+    failed_request = synthesis_request(generation=1)
+    provider.conformance.activate_response(failed_request.ref.response)
+    await provider.open_synthesis(failed_request)
+    failed_session = provider._require_synthesis(failed_request.ref)
+    assert failed_session.task is not None
+    await asyncio.wait_for(failed_session.task, timeout=1)
+
+    assert client.send_count == 2
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_UNAVAILABLE
+
+    third_kinds = await complete(synthesis_request(generation=2))
+
+    assert client.send_count == 3
+    assert factory_count == 1
+    assert third_kinds == first_kinds
+    assert first_kinds.count(SynthesisEventKind.COMPLETED) == 1
+    assert third_kinds.count(SynthesisEventKind.COMPLETED) == 1
+    assert all(response.closed for response in client.responses)
+    assert_zero_business_effects(provider)
+    await provider.close()
+    assert client.close_count == 1
 
 
 @pytest.mark.asyncio

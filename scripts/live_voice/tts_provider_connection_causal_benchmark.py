@@ -54,6 +54,7 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 EVENT_TIMEOUT_SECONDS = 20.0
 OPERATION_TIMEOUT_SECONDS = 30.0
 CLOSE_TIMEOUT_SECONDS = 5.0
+PROCESS_WATCHDOG_SECONDS = 240.0
 _FIXED_TEXT = "Please read this short sentence clearly."
 MAX_REPORT_BYTES = 1_048_576
 FORBIDDEN_EFFECTS = {
@@ -71,8 +72,50 @@ FORBIDDEN_EFFECTS = {
     "pcm_persisted": 0,
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_WORKER_FLAG = "--benchmark-worker"
 _BoundedValue = TypeVar("_BoundedValue")
 _RETAINED_BOUNDED_TASKS: set[asyncio.Future[object]] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessWatchdogResult:
+    returncode: int | None
+    stdout: str
+    timed_out: bool
+
+
+def _run_process_with_watchdog(
+    command: tuple[str, ...],
+    *,
+    environ: Mapping[str, str],
+    timeout_seconds: float,
+) -> _ProcessWatchdogResult:
+    if (
+        not command
+        or not all(type(part) is str and part for part in command)
+        or not isinstance(environ, Mapping)
+        or isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("TTS_CONNECTION_BENCHMARK_PROCESS_INVALID")
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(environ),
+            timeout=float(timeout_seconds),
+        )
+    except subprocess.TimeoutExpired:
+        return _ProcessWatchdogResult(None, "", True)
+    return _ProcessWatchdogResult(
+        completed.returncode,
+        completed.stdout if completed.returncode == 0 else "",
+        False,
+    )
 
 
 def _release_bounded_task(task: asyncio.Future[object]) -> None:
@@ -998,6 +1041,13 @@ async def run_benchmark(
         )
         attempts.extend(pair_attempts)
         cleanup_complete.append(pair_cleanup)
+        if not pair_cleanup:
+            raise ValueError("TTS_CONNECTION_BENCHMARK_CLEANUP_INCOMPLETE")
+        if any(
+            attempt.outcome is not TtsAttemptOutcome.COMPLETED
+            for attempt in pair_attempts
+        ):
+            raise ValueError("TTS_CONNECTION_BENCHMARK_INFRASTRUCTURE_INVALID")
     return build_report(
         config,
         provider_id="openai-streaming-speech",
@@ -1126,7 +1176,7 @@ async def _main(
     return 0
 
 
-def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
+def _worker_main(argv: tuple[str, ...] | list[str]) -> int:
     try:
         return asyncio.run(_main(argv, environ=os.environ))
     except (KeyboardInterrupt, SystemExit):
@@ -1134,6 +1184,52 @@ def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
     except BaseException:
         print("TTS_CONNECTION_BENCHMARK_FAILED", file=sys.stderr)
         return 1
+
+
+def _validated_worker_stdout(value: str) -> str | None:
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if (
+        type(payload) is not dict
+        or set(payload) != {"run_id", "decision"}
+        or type(payload["run_id"]) is not str
+        or not _RUN_ID.fullmatch(payload["run_id"])
+        or payload["decision"]
+        not in {"PILOT_VALID", "CONTROL_VALID", "CANDIDATE_VALID"}
+    ):
+        return None
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == _WORKER_FLAG:
+        return _worker_main(arguments[1:])
+    command = (
+        sys.executable,
+        str(Path(__file__).resolve()),
+        _WORKER_FLAG,
+        *arguments,
+    )
+    try:
+        result = _run_process_with_watchdog(
+            command,
+            environ=os.environ,
+            timeout_seconds=PROCESS_WATCHDOG_SECONDS,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        print("TTS_CONNECTION_BENCHMARK_FAILED", file=sys.stderr)
+        return 1
+    safe_stdout = None if result.timed_out else _validated_worker_stdout(result.stdout)
+    if result.returncode != 0 or safe_stdout is None:
+        print("TTS_CONNECTION_BENCHMARK_FAILED", file=sys.stderr)
+        return 1
+    print(safe_stdout)
+    return 0
 
 
 if __name__ == "__main__":
