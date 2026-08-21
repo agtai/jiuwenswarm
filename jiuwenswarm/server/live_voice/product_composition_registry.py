@@ -244,6 +244,7 @@ _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
 # ahead of a new microphone capture.  This closes the race where a terminal
 # TaskEvent allocates a response generation during an in-flight ASR final.
 _P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS = 1.0
+_P2_NOTIFICATION_BATCH_MAX = 16
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -7239,10 +7240,54 @@ class AgentServerProductCompositionRegistry:
             "publish_seq": notification.publish_seq,
         }
 
+    @staticmethod
+    def _p2_notification_can_precede_another(notification: Any) -> bool:
+        agent_event = notification.agent_event
+        return (
+            agent_event is not None
+            and agent_event.event_type in {"chat.delta", "chat.reasoning"}
+            and agent_event.error_reason is None
+            and notification.source_event is None
+            and notification.progress_event is None
+            and notification.presentation_unit is None
+            and notification.error_reason is None
+        )
+
+    @staticmethod
+    def _bind_p2_notification(
+        notification: Mapping[str, object], binding: P2InteractionBinding
+    ) -> dict[str, object]:
+        return {
+            **notification,
+            "session_id": binding.session_id,
+            "correlation_id": binding.correlation_id,
+            "interaction_id": binding.interaction_id,
+            "activation_id": binding.activation_id,
+            "activation_generation": binding.activation_generation,
+        }
+
+    @staticmethod
+    def _p2_keepalive(request_id: str) -> dict[str, object]:
+        return {
+            "status": "notification",
+            "kind": "transport.keepalive",
+            "request_id": request_id,
+            "round_id": None,
+            "response": None,
+            "agent_event": None,
+            "source_event": None,
+            "progress_event": None,
+            "presentation_unit": None,
+            "error_reason": None,
+            "publish_seq": None,
+        }
+
     async def _next_p2_notification(
         self,
         retained: _P2Route,
         request_id: str,
+        *,
+        max_notifications: int,
     ) -> P3RouteResult:
         try:
             pending_terminal = next(
@@ -7261,43 +7306,66 @@ class AgentServerProductCompositionRegistry:
                 await self._deliver_terminal_notification(
                     pending_terminal, retained=retained
                 )
-            notification = await asyncio.wait_for(
-                retained.activation_lease.next_notification(retained.binding),
-                timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
+            if max_notifications == 1:
+                notifications = (
+                    await asyncio.wait_for(
+                        retained.activation_lease.next_notification(retained.binding),
+                        timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
+                    ),
+                )
+            else:
+                notifications = await asyncio.wait_for(
+                    retained.activation_lease.next_notifications(
+                        retained.binding,
+                        limit=max_notifications,
+                        continue_after=self._p2_notification_can_precede_another,
+                    ),
+                    timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
+                )
+            serialized = tuple(
+                self._bind_p2_notification(
+                    self._serialize_p2_notification(notification), retained.binding
+                )
+                for notification in notifications
             )
-            return _success_result(
-                request_id,
-                {
-                    **self._serialize_p2_notification(notification),
-                    "session_id": retained.binding.session_id,
-                    "correlation_id": retained.binding.correlation_id,
-                    "interaction_id": retained.binding.interaction_id,
-                    "activation_id": retained.binding.activation_id,
-                    "activation_generation": (retained.binding.activation_generation),
-                },
-                retained.manifest,
-            )
-        except TimeoutError:
-            return _success_result(
-                request_id,
-                {
-                    "status": "notification",
-                    "kind": "transport.keepalive",
-                    "request_id": request_id,
-                    "round_id": None,
-                    "response": None,
-                    "agent_event": None,
-                    "source_event": None,
-                    "progress_event": None,
-                    "presentation_unit": None,
-                    "error_reason": None,
-                    "publish_seq": None,
+            if max_notifications > 1:
+                payload: dict[str, object] = {
+                    "status": "notification_batch",
+                    "notifications": list(serialized),
                     "session_id": retained.binding.session_id,
                     "correlation_id": retained.binding.correlation_id,
                     "interaction_id": retained.binding.interaction_id,
                     "activation_id": retained.binding.activation_id,
                     "activation_generation": retained.binding.activation_generation,
-                },
+                }
+            else:
+                payload = serialized[0]
+            return _success_result(
+                request_id,
+                payload,
+                retained.manifest,
+            )
+        except TimeoutError:
+            keepalive = self._bind_p2_notification(
+                self._p2_keepalive(request_id), retained.binding
+            )
+            return _success_result(
+                request_id,
+                (
+                    {
+                        "status": "notification_batch",
+                        "notifications": [keepalive],
+                        "session_id": retained.binding.session_id,
+                        "correlation_id": retained.binding.correlation_id,
+                        "interaction_id": retained.binding.interaction_id,
+                        "activation_id": retained.binding.activation_id,
+                        "activation_generation": (
+                            retained.binding.activation_generation
+                        ),
+                    }
+                    if max_notifications > 1
+                    else keepalive
+                ),
                 retained.manifest,
             )
         except Exception as exc:  # noqa: BLE001 - retained stable outcome
@@ -7319,21 +7387,21 @@ class AgentServerProductCompositionRegistry:
         if not self._settings.p2_enabled:
             return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
         try:
+            allowed_params = {
+                "auth_token",
+                "session_id",
+                "correlation_id",
+                "interaction_id",
+                "activation_id",
+                "activation_generation",
+                "claimed_user_id",
+                "claimed_project_id",
+                "notification_sequence",
+                "max_notifications",
+            }
             _require_exact_params(
                 params,
-                frozenset(
-                    {
-                        "auth_token",
-                        "session_id",
-                        "correlation_id",
-                        "interaction_id",
-                        "activation_id",
-                        "activation_generation",
-                        "claimed_user_id",
-                        "claimed_project_id",
-                        "notification_sequence",
-                    }
-                ),
+                frozenset(allowed_params),
             )
             self._ensure_running()
             parsed = self._parse_p2_route_binding(params, session_id=session_id)
@@ -7346,6 +7414,20 @@ class AgentServerProductCompositionRegistry:
                 raise FormalTaskViolation(
                     "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
                     "notification_sequence must be a positive safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            max_notifications = params.get("max_notifications", 1)
+            if (
+                type(max_notifications) is not int
+                or (
+                    "max_notifications" in params
+                    and not 2 <= max_notifications <= _P2_NOTIFICATION_BATCH_MAX
+                )
+                or ("max_notifications" not in params and max_notifications != 1)
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "max_notifications must be a canonical integer from 2 to 16",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             fingerprint = canonical_json_bytes(
@@ -7432,7 +7514,11 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.CONFLICT,
                         )
                     task = asyncio.create_task(
-                        self._next_p2_notification(retained, request_id),
+                        self._next_p2_notification(
+                            retained,
+                            request_id,
+                            max_notifications=max_notifications,
+                        ),
                         name=f"live-voice-product-p2-notification:{request_id}",
                     )
                     entry = _RetainedProductOperation(

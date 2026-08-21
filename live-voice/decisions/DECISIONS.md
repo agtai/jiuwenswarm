@@ -1056,3 +1056,15 @@
 - 退役决定：D-092 retirement manifest 不因本决定扩大。已退役三项保持退役，其余 18 行与 generic `schedule.*`、正式 P3-7 Panel/routes、Direct Executor、fixed media owner 和仍有消费者的兼容路径保持 retained/inventory，直至各自 replacement/oracle/feature-on/feature-off/rollback/review Gate 完成。
 - 证据与判读：backend/config/durability/observability/retirement `387 passed`，Registry affected `13 passed`，cross-language observability `19 passed`，build profiles `2 passed`，production build、Ruff、compileall 和 diff check PASS。首次独立 review 的 `C0/I2/M1` 全部修复；follow-up 为 `C0/I0/M0`。这使计划内 P3 模块开发和代码收尾在 P3-9 前完成，但完整 P3 仍必须通过 P3-9 cumulative human/product Journey。
 - 重新评估条件：新增真实 control primitive 或 Executor/D1 candidate；改变 D0/D2 capability matrix；要求 Store/schema migration；允许 private content/raw identity/open metric label；引入外部 telemetry/第二 authority；删除 retained manifest row；或把自动化/审查证据冒充 P3-9、物理、feature-complete、product-readiness、Production、`develop` 或 remote credit。
+
+## D-094 P2 有界通知拉取人工验收后默认开启并退役部署开关
+
+- 日期：2026-08-23（继承 2026-08-21 validation-branch 人工验收）
+- 状态：Accepted scoped default-and-compatibility decision（用户在 validation 分支的 `4b405fca1` 上完成 feature-on 人工验收后，明确决定不长期保留仅用于 A/B、验证和快速回滚的两个 P2 notification batch 部署开关；当前集成不改变该验收边界）。
+- 验收依据：三个问题的可见任务用时分别为 `10.65s`、`7.05s`、`2.78s / 3.14s / 3.14s`；语音均可播放，修复前连续出现的 `SPEECH_OPERATION_NOT_AUTHORIZED` 未复现。该结果只接受默认路径与修复效果，不是冻结语料 p50/p95，也不改变 controlled-candidate/feature-complete 状态。
+- 生产默认：Integrated Web 生产 owner 固定注入 `notification_batch_size: 16`。后端 `p2.notification.next` 始终接受显式 canonical `max_notifications=2..16`；未传该字段的旧客户端继续按单条 `notification` 拉取，不要求升级或伪造 batch response。
+- 配置退役：删除前端 `VITE_FEATURE_LIVE_VOICE_P2_NOTIFICATION_BATCH` 与后端 `JIUWENSWARM_LIVE_VOICE_P2_NOTIFICATION_BATCH_ENABLED`，不再由部署环境选择 P2 通知 transport mode。A/B 自动化通过依赖注入只选择 `1` 或 `16`，从而保留可重复基线而不恢复生产开关。
+- Authority 与非变化：Dedicated Media 在任何 Speech authority 写入前先完整校验 exact batch/item keys、activation binding、publish sequence 与 non-tail observer barrier；任一无效项使整批保持零 partial authorization。完整 batch 通过后，每个 final 仍复用既有 observer 校验/注册才可进入 TTS。batch 上限保持 `16`，replay、zero-forbidden-effect 和 fail-closed 语义不变。Successor-ACK/TTS 原本没有此类开关且已默认启用，本决定不为它新增或清理开关。
+- 回滚：默认切换验收完成后，回滚窗口不再依赖长期部署开关；若当前实现发生已证实回归，使用有边界的代码回退/修复并保留旧客户端单条兼容。该决定不授权 remote ref update。
+- 证据：[P2 default-on evidence](../evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md)。
+- 重新评估条件：显式 `2..16` 无法保持严格绑定/顺序/authoritative barrier；旧客户端缺省单条路径失败；生产 `16` 在真实负载下产生有证据的 backpressure、丢序或错误授权；或固定语料证明另一有界值需要成为新产品默认。重新评估不自动恢复环境开关。

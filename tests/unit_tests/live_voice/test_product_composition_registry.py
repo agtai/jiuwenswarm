@@ -56,6 +56,10 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
 )
+from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
+from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+    AgentConversationNotification,
+)
 from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
@@ -116,6 +120,10 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     _ProgressDelivery,
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
+)
+from jiuwenswarm.server.live_voice.presentation_ledger import (
+    PresentationSurface,
+    PresentationUnit,
 )
 from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
     ProductP3AuthorizedQuery,
@@ -1461,6 +1469,14 @@ def _registry(
         ),
     )
     return registry, p3_composition, manager, pushed
+
+
+async def _wait_for_p2_notifications(route, minimum: int) -> None:
+    for _ in range(100):
+        if route.activation_lease._runtime.snapshot().queued_notifications >= minimum:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("P2 notifications did not reach the deterministic queue")
 
 
 def _unified_registry(
@@ -10179,6 +10195,250 @@ async def test_segment_flags_fail_before_authority_or_downstream(
     assert p3.subscription_calls == []
     assert manager.get_calls == []
     assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_p2_notification_batch_drains_observers_through_first_authoritative_barrier_and_replays(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-batch-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    response = ResponseRef("interaction-1", "response-batch-1", 0)
+
+    def event(
+        seq: int, event_type: str, *, error_reason: str | None = None
+    ) -> AgentEvent:
+        return AgentEvent(
+            request_id="request-p2-batch-submit",
+            interaction_id="interaction-1",
+            turn_id="turn-batch-1",
+            commit_id="commit-batch-1",
+            seq=seq,
+            event_type=event_type,
+            source_provenance="formal",
+            text=f"chunk-{seq}",
+            error_reason=error_reason,
+        )
+
+    for seq in range(2):
+        runtime._publish(
+            AgentConversationNotification(
+                kind="agent.output",
+                request_id="request-p2-batch-submit",
+                round_id="round-batch-1",
+                response_ref=response,
+                agent_event=event(
+                    seq,
+                    "chat.delta",
+                    error_reason=("AGENT_STREAM_FAILED" if seq == 1 else None),
+                ),
+            )
+        )
+    unit = PresentationUnit(
+        ref=response,
+        surface=PresentationSurface.TEXT,
+        unit_id="unit-batch-1",
+        seq=0,
+        source_start_utf8=0,
+        source_end_utf8=7,
+        content_ref="sha256:fixture",
+    )
+    runtime._publish(
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id="request-p2-batch-submit",
+            round_id="round-batch-1",
+            response_ref=response,
+            agent_event=event(2, "chat.final"),
+            presentation_unit=unit,
+        ),
+        critical_key=("presentation", "request-p2-batch-submit"),
+    )
+    runtime._publish(
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id="request-p2-successor",
+            round_id="round-batch-2",
+            response_ref=ResponseRef("interaction-1", "response-batch-2", 1),
+            agent_event=event(3, "chat.delta"),
+        )
+    )
+    before = route.activation_lease._runtime.snapshot()
+
+    params = _p2_params(notification_sequence=1, max_notifications=16)
+    batched = await registry.handle_p2_notification_next(
+        params=params,
+        request_id="request-p2-batch-next-1",
+        session_id="session-product",
+    )
+    assert batched.ok is True
+    result = cast(dict[str, object], batched.payload["result"])
+    assert result["status"] == "notification_batch"
+    notifications = cast(list[dict[str, object]], result["notifications"])
+    assert len(notifications) == 2
+    assert notifications[-1]["presentation_unit"] is None
+    assert (
+        cast(dict[str, object], notifications[-1]["agent_event"])["error_reason"]
+        == "AGENT_STREAM_FAILED"
+    )
+    assert [item["publish_seq"] for item in notifications] == sorted(
+        cast(int, item["publish_seq"]) for item in notifications
+    )
+    for item in notifications:
+        assert item["status"] == "notification"
+        assert item["session_id"] == "session-product"
+        assert item["interaction_id"] == "interaction-1"
+        assert item["activation_generation"] == 1
+    after = route.activation_lease._runtime.snapshot()
+    assert after.queued_notifications >= 1
+    assert after.delivered_notifications == before.delivered_notifications + len(
+        notifications
+    )
+
+    replay = await registry.handle_p2_notification_next(
+        params=params,
+        request_id="request-p2-batch-next-1",
+        session_id="session-product",
+    )
+    assert replay.payload == batched.payload
+    assert (
+        route.activation_lease._runtime.snapshot().delivered_notifications
+        == after.delivered_notifications
+    )
+    conflict = await registry.handle_p2_notification_next(
+        params={**params, "max_notifications": 15},
+        request_id="request-p2-batch-next-1",
+        session_id="session-product",
+    )
+    assert conflict.ok is False
+    assert cast(dict[str, object], conflict.payload["error"])["reason"] == (
+        "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+    assert (
+        route.activation_lease._runtime.snapshot().delivered_notifications
+        == after.delivered_notifications
+    )
+    assert route.activation_lease._runtime.snapshot().harness.cancel_effects == 0
+
+    next_batch = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=2, max_notifications=16),
+        request_id="request-p2-batch-next-2",
+        session_id="session-product",
+    )
+    assert next_batch.ok is True
+    next_notifications = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], next_batch.payload["result"])["notifications"],
+    )
+    assert len(next_notifications) == 1
+    assert next_notifications[0]["presentation_unit"] is not None
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_notification_batch_bounds_and_legacy_single_pull(
+    tmp_path: Path,
+) -> None:
+    legacy_registry, _p3, legacy_manager, _pushed = _registry(tmp_path / "legacy")
+    assert (
+        await legacy_registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-legacy-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    assert (
+        await legacy_registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-legacy-1",
+                turn_id="turn-legacy-1",
+                response_id="response-legacy-1",
+                committed_at=NOW,
+                text="legacy notification pull",
+            ),
+            request_id="request-p2-legacy-submit",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    legacy_route = legacy_registry._p2_routes[("session-product", "interaction-1")]
+    await legacy_manager.agent.wait_for_calls(1)
+    await _wait_for_p2_notifications(legacy_route, 4)
+
+    bounded_registry, _p3, bounded_manager, _pushed = _registry(
+        tmp_path / "bounded"
+    )
+    assert (
+        await bounded_registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-bounded-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    assert (
+        await bounded_registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-bounded-1",
+                turn_id="turn-bounded-1",
+                response_id="response-bounded-1",
+                committed_at=NOW,
+                text="bounded notification pull",
+            ),
+            request_id="request-p2-bounded-submit",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    bounded_route = bounded_registry._p2_routes[("session-product", "interaction-1")]
+    await bounded_manager.agent.wait_for_calls(1)
+    await _wait_for_p2_notifications(bounded_route, 4)
+    bounded_before = bounded_route.activation_lease._runtime.snapshot()
+    for index, invalid in enumerate((False, 1, 17)):
+        rejected = await bounded_registry.handle_p2_notification_next(
+            params=_p2_params(
+                notification_sequence=1,
+                max_notifications=invalid,
+            ),
+            request_id=f"request-p2-invalid-batch-{index}",
+            session_id="session-product",
+        )
+        assert rejected.ok is False
+        assert (
+            bounded_route.activation_lease._runtime.snapshot().delivered_notifications
+            == bounded_before.delivered_notifications
+        )
+
+    bounded = await bounded_registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1, max_notifications=2),
+        request_id="request-p2-bounded-next",
+        session_id="session-product",
+    )
+    assert bounded.ok is True
+    assert cast(dict[str, object], bounded.payload["result"])["status"] == (
+        "notification_batch"
+    )
+
+    legacy = await legacy_registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1),
+        request_id="request-p2-legacy-next",
+        session_id="session-product",
+    )
+    assert legacy.ok is True
+    assert cast(dict[str, object], legacy.payload["result"])["status"] == (
+        "notification"
+    )
+    await legacy_registry.close_active_routes()
+    await bounded_registry.close_active_routes()
 
 
 @pytest.mark.asyncio

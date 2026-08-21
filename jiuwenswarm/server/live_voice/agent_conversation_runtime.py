@@ -88,6 +88,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 
 _MAX_NOTIFICATION_CONSUMER_ID_CHARS = 256
 _MAX_NOTIFICATION_CONSUMER_ID_UTF8_BYTES = 1024
+_MAX_NOTIFICATION_BATCH = 16
 _MAX_EFFECT_ID_CHARS = 256
 _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
@@ -279,6 +280,23 @@ class _BoundedNotificationBuffer:
                     detached_wait,
                     return_exceptions=True,
                 )
+
+    def get_nowait(
+        self,
+        *,
+        lease_active: Callable[[], bool] | None = None,
+        detached: asyncio.Event | None = None,
+    ) -> AgentConversationNotification | None:
+        if (lease_active is not None and not lease_active()) or (
+            detached is not None and detached.is_set()
+        ):
+            raise _NotificationConsumerDetached
+        queued = self._pop_next()
+        if queued is None:
+            return None
+        self._delivered_total += 1
+        self._last_delivered_seq = queued.publish_seq
+        return queued.notification
 
     def close(self) -> None:
         self._closed = True
@@ -2386,6 +2404,52 @@ class AgentConversationRuntime:
                 "the notification producer is closed and its retained buffer is empty",
                 ErrorCode.UNAVAILABLE,
             ) from error
+
+    async def drain_notifications_for(
+        self,
+        lease: AgentConversationNotificationLease,
+        *,
+        limit: int,
+    ) -> tuple[AgentConversationNotification, ...]:
+        """Drain only notifications already queued for one exact lease."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_NOTIFICATION_BATCH:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NOTIFICATION_BATCH_LIMIT",
+                "notification batch limit must be an integer from 1 to 16",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        record = self._require_notification_lease(
+            lease,
+            require_active=not (
+                self._notifications.closed
+                and self._active_notification_lease is not None
+                and self._active_notification_lease.drain_after_close
+            ),
+        )
+        drained: list[AgentConversationNotification] = []
+        try:
+            for _ in range(limit):
+                notification = self._notifications.get_nowait(
+                    lease_active=lambda: (
+                        self._active_notification_lease is record
+                        and (
+                            record.active
+                            or (self._notifications.closed and record.drain_after_close)
+                        )
+                    ),
+                    detached=record.detached,
+                )
+                if notification is None:
+                    break
+                drained.append(notification)
+        except _NotificationConsumerDetached as error:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_DETACHED",
+                "notification consumer lease is detached or superseded",
+                ErrorCode.STALE,
+            ) from error
+        return tuple(drained)
 
     async def claim_conversation_effects(
         self,
