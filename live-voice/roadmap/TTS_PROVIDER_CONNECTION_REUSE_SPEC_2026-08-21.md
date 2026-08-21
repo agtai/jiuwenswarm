@@ -1,12 +1,14 @@
 # TTS Provider Connection Reuse Specification
 
-> **Status:** proposed design, approved in chat on 2026-08-21; implementation
-> not started.
+> **Status:** executed and closed as `REJECTED` on 2026-08-21. B completed
+> 6/6 but every warm request opened fresh TCP/TLS, so the product candidate was
+> restored to request-scoped clients. See
+> [the result](TTS_PROVIDER_CONNECTION_REUSE_RESULT_2026-08-21.md).
 >
 > **Reference source:**
 > planning base `1f2ac7ba4ef2ed6a4aee498d0d285a7f40a25403`. The exact A
-> reference will be the later benchmark-seam commit derived from this base,
-> before connection-reuse product behavior changes.
+> reference is `e915e8dc0b414fafccf78a46d450a0b8d0633f5e`; the reviewed B
+> candidate is `72f0b15795018a770ed61d0e3f589ed1b8a942cd`.
 >
 > **Boundary:** no-Chrome, real-Provider P1/P2 Speech Synthesis component.
 > This document grants no implementation, performance, physical Browser,

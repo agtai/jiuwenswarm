@@ -416,8 +416,9 @@ Work should be packetized in this dependency order:
 4. ~~reconcile Hongxing's divergent TTS/successor-capture and playout-receipt
    commits, establish A1, port one candidate and run B/A2;~~ **ACCEPTED —
    first-audio component evidence only; receipt settlement remains ACK-delayed**
-5. evaluate TTS connection prewarm/reuse as the next owner-scoped A1/B/A2
-   packet;
+5. ~~evaluate TTS connection prewarm/reuse as the next owner-scoped A1/B/A2
+   packet;~~ **REJECTED — 0/3 B warm connections reused and warm first-PCM p50
+   regressed 7.0%; request-scoped lifecycle restored**
 6. run the no-Chrome EOT waiter A1 only if its 80 ms/10% materiality gate is
    still relevant, then evaluate semantic/adaptive VAD separately;
 7. authoritative acknowledgement for genuinely long operations;

@@ -122,7 +122,7 @@ not a presumed large optimization. Its governing spec is
 | Candidate | Isolated p50 gain estimate | Confidence | Notes |
 |---|---:|---|---|
 | successor-capture ACK decoupling | **accepted: 255/756 ms at injected 250/750 ms delays** | high causal/component | reviewed source `cd4d1b7d3`; physical first-audible and receipt-settlement gain remain separate |
-| TTS connection prewarm/reuse | 200–600 ms | medium | current batch TTS generation observed at 912–1,672 ms |
+| TTS connection prewarm/reuse | **rejected: −57.8 ms warm p50 versus A1-v2** | high causal/component | retaining the application client produced 0/3 warm connection reuse; request-scoped lifecycle restored |
 | adaptive startup lead, 1,000 → 160–300 ms | 700–840 ms | high code fact | deterministic implementation possible without Chrome; physical underrun gate later |
 | fixed authoritative phrase cache | 800–1,400 ms on hit | medium-high | only stable locale/provider/model/voice/version-bound ACK phrases |
 | bounded next-sentence prefetch | 100–800 ms between sentences | medium | continuity gain, not necessarily first-audio gain |
@@ -173,7 +173,8 @@ not promote those states to `running`, `applied` or `completed`.
 2. ~~establish a no-Chrome TTS first-audio causal benchmark;~~ **DONE**
 3. ~~port and test successor-capture ACK decoupling as one B candidate;~~
    **ACCEPTED at first-audio component scope**
-4. measure TTS prewarm/reuse next;
+4. ~~measure TTS prewarm/reuse next;~~ **REJECTED — no connection reuse and
+   7.0% warm first-PCM regression**
 5. run EOT waiter A1 and stop if below materiality;
 6. evaluate semantic/adaptive VAD.
 
@@ -219,7 +220,8 @@ is physical acceptance, and gains across rows overlap.
 1. ~~Compare `874cf327c` and `35cae3d9a`, build the no-Chrome TTS benchmark,
    and run the current-contract A1/B/A2 packet.~~ **ACCEPTED — source
    `cd4d1b7d3`, component first-audio only.**
-2. Evaluate TTS connection prewarm/reuse.
+2. ~~Evaluate TTS connection prewarm/reuse.~~ **REJECTED — see
+   [causal result](TTS_PROVIDER_CONNECTION_REUSE_RESULT_2026-08-21.md).**
 3. Run A1 for the EOT waiter only if it remains material; implement only if it
    passes 80 ms/10%.
 4. Preserve receipt-settlement overlap as a separate future authority question;

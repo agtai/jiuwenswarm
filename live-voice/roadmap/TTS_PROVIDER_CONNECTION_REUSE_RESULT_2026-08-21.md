@@ -1,162 +1,157 @@
 # TTS Provider Connection Reuse Result
 
-> **Status:** A-reference pilot and formal A1 complete; the connection-reuse
-> candidate and first Tier-2 remediation are implemented on 2026-08-21. The
-> independent re-review, B, A2 and final decision remain open.
+> **Status:** closed as `REJECTED` on 2026-08-21.
 >
 > **Measured boundary:** direct real
 > `OpenAIStreamingSpeechProvider`, no Gateway, Agent, Chrome, WebAudio, downlink
 > or playout receipt.
+>
+> **Product state:** request-scoped HTTPX client lifecycle restored in
+> `ddd845e561145cdb1aa2eb37d6ea9c57633494f6`. The diagnostic seam and hardened
+> runner remain.
 
-## 1. Exact reference
+## 1. Decision
 
-- A reference commit:
-  `e614a0d3bd431e8ee1a6cf55a7ea6d3ff7ccf3c2`;
-- source state: clean for pilot and A1;
-- Python: 3.11.15;
-- HTTPX: 0.28.1;
-- HTTPCore: 1.0.9;
-- model: `gpt-4o-mini-tts-2025-12-15`;
-- voice: `marin`;
-- output: mono PCM at 24 kHz;
-- fixed short English input, retained only in process memory and absent from
-  reports.
+The Provider-owned HTTPX client candidate did not produce connection reuse.
+All three B warm attempts emitted new TCP and TLS trace boundaries. B warm
+first-PCM p50 was also slower than the exact A1-v2 control:
 
-Credentials and API base remained in the pre-existing private mode-0600 runtime
-environment. They were loaded into the benchmark child process without being
-copied into this worktree or printed.
+```text
+A1-v2 warm first PCM p50: 832.0 ms
+B warm first PCM p50:     889.9 ms
+delta:                    +57.8 ms / +7.0%
+```
 
-## 2. Private evidence
+The final decision is therefore:
 
-| Population | Calls | Decision | Private report | SHA-256 |
-|---|---:|---|---|---|
-| uncredited pilot | 2 | `PILOT_VALID` | `/home/renan/openJiuwen-ai/live-voice-latency-runs/tts-provider-connection/tts-provider-connection-en-v1-20260821/pilot.json` | `0bd4bc65726ab73f31e87d1fb3235d31e598359f0dddcebef4e4ee26839025c5` |
-| formal A1 | 6 | `CONTROL_VALID` | `/home/renan/openJiuwen-ai/live-voice-latency-runs/tts-provider-connection/tts-provider-connection-en-v1-20260821/a1.json` | `0700ce15c2ad304ff04e08f63537e1a07ed5794f7d5a307f04769f8000050741` |
+```text
+TTS_PROVIDER_CONNECTION_REUSE_REJECTED
+reason = B_WARM_CONNECTION_NOT_REUSED
+```
 
-Both reports were exclusive-created with mode `0600`, deeply reparsed through
-the closed schema, and contain no credential, URL, header, input text, PCM, SSE
-payload, exception text or session/user identity.
+This is a causal rejection, not an absence-of-data result. Trace support was
+complete, all declared A1-v2 and B attempts completed, and cleanup was clean.
+The B report's closed per-run decision is `INCONCLUSIVE` because its schema
+correctly refuses candidate credit when warm reuse is absent; the higher-level
+experiment decision is `REJECTED` because that absence was positively proven.
 
-## 3. Pilot gate
+A2 was not run. Once B failed the mandatory reuse predicate and was slower than
+A1-v2, A2 could not make the candidate acceptable. Avoiding A2 preserved six
+authorized calls and did not hide a potentially successful candidate.
 
-The pilot completed 2/2 attempts. Both the first and second request created a
-new TCP and TLS connection, matching the current request-scoped HTTPX client
-lifecycle. Provider cleanup completed 1/1 and all forbidden-effect counters
-were zero.
+## 2. Exact sources and configuration
 
-| Position | Response headers | First Provider audio | First PCM | Completed |
-|---|---:|---:|---:|---:|
-| cold | 2153.3 ms | 2154.5 ms | 2159.5 ms | 2914.5 ms |
-| warm | 609.8 ms | 611.4 ms | 616.5 ms | 1244.8 ms |
+- historical pilot/A1 reference: `e614a0d3bd431e8ee1a6cf55a7ea6d3ff7ccf3c2`;
+- exact final A1-v2/A2 reference: `e915e8dc0b414fafccf78a46d450a0b8d0633f5e`;
+- reviewed B candidate: `72f0b15795018a770ed61d0e3f589ed1b8a942cd`;
+- product restoration: `ddd845e561145cdb1aa2eb37d6ea9c57633494f6`;
+- Python 3.11.15, HTTPX 0.28.1, HTTPCore 1.0.9;
+- model `gpt-4o-mini-tts-2025-12-15`, voice `marin`, mono 24 kHz PCM;
+- fixed short English input retained only in process memory.
 
-This large within-pair difference is not optimization credit. The current
-source opened a fresh connection for both attempts, so Provider/network
-variability remains present.
+The runner and runner-test blobs at A1-v2 and B were byte-identical:
 
-## 4. Formal A1 result
+```text
+runner SHA-256 = 5d879f07d449f57cac8a9140aac357e9c6d4b905e27514aa0deec4e9af1e065b
+runner-test SHA-256 = cb00dd6d269371e264e47553b95b6ecebd6ff38a0eeb61453824c6ff5921d073
+```
 
-A1 completed all six declared attempts with no failed, invalid or unknown
-outcome. All six attempts proved a fresh TCP and TLS path; no connection reuse
-was guessed. All three Provider instances closed cleanly and every forbidden
-counter remained zero.
+Credentials and API base stayed in the pre-existing private mode-0600 runtime
+environment. They were never copied into Git, printed or stored in a report.
 
-### 4.1 Aggregate latency
+## 3. Private evidence and call accounting
 
-| Position | Metric | p50 | p95 |
-|---|---|---:|---:|
-| cold | response headers | 1374.2 ms | 1393.4 ms |
-| cold | first Provider audio | 1375.7 ms | 1394.5 ms |
-| cold | first PCM | 1381.0 ms | 1400.1 ms |
-| cold | completed | 2093.7 ms | 2165.4 ms |
-| warm | response headers | 980.0 ms | 1259.6 ms |
-| warm | first Provider audio | 981.1 ms | 1260.8 ms |
-| warm | first PCM | 986.3 ms | 1265.7 ms |
-| warm | completed | 1589.9 ms | 2311.0 ms |
+| Population | Source | Calls | Report decision | SHA-256 |
+|---|---|---:|---|---|
+| pilot, historical | `e614a0d3` | 2 | `PILOT_VALID` | `0bd4bc65726ab73f31e87d1fb3235d31e598359f0dddcebef4e4ee26839025c5` |
+| A1, historical | `e614a0d3` | 6 | `CONTROL_VALID` | `0700ce15c2ad304ff04e08f63537e1a07ed5794f7d5a307f04769f8000050741` |
+| A1-v2, credited control | `e915e8dc` | 6 | `CONTROL_VALID` | `f87be3ec59af56e8786f0988157dcd889ecd9a8134f751d7ff8bb35de1231db3` |
+| B, credited candidate | `72f0b157` | 6 | `INCONCLUSIVE` | `393e8bbbdc233b284c205ce9db95f0e7b16b31f3a86e37ae9b1058b5935ed187` |
+| A2 | not run | 0 | not applicable | not applicable |
 
-### 4.2 Per-attempt causal boundaries
+Private paths:
 
-| Pair | Position | TCP complete | TLS complete | Response headers | First audio | First PCM | Completed |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 0 | cold | 50.0 ms | 71.3 ms | 1374.2 ms | 1375.7 ms | 1381.0 ms | 2093.7 ms |
-| 0 | warm | 49.8 ms | 94.2 ms | 1259.6 ms | 1260.8 ms | 1265.7 ms | 2311.0 ms |
-| 1 | cold | 49.9 ms | 73.8 ms | 1393.4 ms | 1394.5 ms | 1400.1 ms | 2165.4 ms |
-| 1 | warm | 45.9 ms | 71.5 ms | 628.0 ms | 629.1 ms | 634.3 ms | 1142.1 ms |
-| 2 | cold | 39.7 ms | 60.6 ms | 953.5 ms | 954.7 ms | 960.0 ms | 1717.2 ms |
-| 2 | warm | 39.7 ms | 59.9 ms | 980.0 ms | 981.1 ms | 986.3 ms | 1589.9 ms |
+- `/home/renan/openJiuwen-ai/live-voice-latency-runs/tts-provider-connection/tts-provider-connection-en-v1-20260821/pilot.json`;
+- `/home/renan/openJiuwen-ai/live-voice-latency-runs/tts-provider-connection/tts-provider-connection-en-v1-20260821/a1.json`;
+- `/home/renan/openJiuwen-ai/live-voice-latency-runs/tts-provider-connection/tts-provider-connection-en-v1-20260821/a1-v2.json`;
+- `/home/renan/openJiuwen-ai/live-voice-latency-runs/tts-provider-connection/tts-provider-connection-en-v1-20260821/b.json`.
 
-The time between response headers and first Provider audio was approximately
-1–2 ms, and first Provider audio to first PCM was approximately 5 ms. Most
-pre-audio time after TLS is therefore Provider/network response wait rather than
-local decode/resampling.
+All four files are mode `0600`, deeply parse through the closed schema and have
+zero forbidden effects. Total real calls were 20/26 authorized: 8 historical,
+6 A1-v2 and 6 B. No retry occurred.
 
-## 5. Current interpretation
+## 4. A1-v2 versus B
 
-The A1 materiality gate is structurally satisfied: the existing code recreated
-the application client and performed TCP/TLS setup for every request. The
-candidate may now test whether keeping the Provider-owned pool removes that
-setup from warm requests.
+All A1-v2 attempts proved fresh TCP/TLS. B also completed 6/6 with clean
+cleanup, but every B attempt—including all warm attempts—proved fresh TCP/TLS.
 
-The likely removable setup in this sample was roughly 60–94 ms. Consequently,
-the experiment may prove correct connection reuse while still failing the
-predeclared acceptance threshold of at least 100 ms and 10% improvement in warm
-first-PCM p50 against both A1 and A2. That threshold remains unchanged; the
-candidate will not be retained merely because reuse is technically visible.
+| Position | Metric | A1-v2 p50 | B p50 | Delta B−A | A1-v2 p95 | B p95 |
+|---|---|---:|---:|---:|---:|---:|
+| cold | response headers | 1023.1 ms | 1110.1 ms | +86.9 ms | 2318.3 ms | 1229.5 ms |
+| cold | first Provider audio | 1025.0 ms | 1111.4 ms | +86.4 ms | 2319.8 ms | 1230.7 ms |
+| cold | first PCM | 1039.6 ms | 1116.8 ms | +77.2 ms | 2324.9 ms | 1236.1 ms |
+| cold | completed | 1808.3 ms | 1812.8 ms | +4.5 ms | 3067.3 ms | 1832.1 ms |
+| warm | response headers | 825.4 ms | 883.6 ms | +58.1 ms | 1393.0 ms | 1335.4 ms |
+| warm | first Provider audio | 826.7 ms | 884.8 ms | +58.0 ms | 1394.5 ms | 1336.4 ms |
+| warm | first PCM | 832.0 ms | 889.9 ms | +57.8 ms | 1400.2 ms | 1342.1 ms |
+| warm | completed | 1718.1 ms | 1732.6 ms | +14.5 ms | 2146.3 ms | 2045.0 ms |
 
-No end-to-end, Browser, audible output, downlink, P2 ACK or Production-readiness
-credit follows from A1.
+B failed the acceptance contract before any statistical ambiguity:
 
-The report field `stream_closed_ms` is a conservative completion-time proxy:
-the Provider closes the response before publishing `COMPLETED`, and the runner
-records the time it receives that terminal event. It is not an independent
-transport-close timestamp and must not support close-duration conclusions.
+- B warm reuse: required 3/3, observed 0/3;
+- warm first-PCM improvement: required at least 100 ms and 10%, observed a
+  57.8 ms / 7.0% regression versus A1-v2;
+- no wait was removed from connection setup because setup still occurred;
+- cleanup and forbidden-effect gates passed but cannot compensate for the
+  failed causal predicate.
 
-## 6. Candidate and Tier-2 remediation
+## 5. Why the pool did not reuse the connection
 
-The initial product candidate was commit
-`022db8945af804e68cd91a2ca5a372263c9d38c4`. The first independent Tier-2
-review found no Critical issue and five Important gaps. All five were
-reproduced before remediation. The reviewed candidate is now
-`b44c82636d6e81ea4ac488afe95613488bd6e92c`, pending cold re-review.
+The experiment proves that retaining the application `AsyncClient` alone is
+insufficient for this SSE lifecycle. Every immediate warm request still opened
+TCP/TLS.
 
-The candidate now provides:
+The leading code-level hypothesis is that the adapter returns as soon as it
+accepts `speech.audio.done`, then closes the streaming response without reading
+the HTTP body through EOF. HTTPX may therefore discard rather than pool the
+connection. A Provider/server-side connection-close policy is another possible
+cause. The current evidence does not distinguish those two mechanisms, so this
+is recorded as a hypothesis rather than a fact.
 
-- one lazy HTTPX client per Provider and owning event loop;
-- pool bounds of 8 active connections, 8 keepalive connections and a 30-second
-  keepalive expiry;
-- response-only stream cleanup and Provider-owned client cleanup;
-- exact client retention across failed or late cleanup without duplicate close;
-- fail-closed cross-event-loop access and cleanup;
-- a fully inert content-free diagnostic observer, including `BaseException`;
-- a process-level benchmark watchdog capable of terminating a
-  cancellation-hostile worker;
-- immediate stop before another paid pair after dirty cleanup or an
-  infrastructure-invalid attempt;
-- causal coverage for simultaneous streams, one-stream cancellation, distinct
-  responses, Provider isolation, closed/custom-factory zero allocation, broken
-  pooled transport without retry, and repeated Gateway use of one selected
-  Provider.
+A future experiment may test a separately specified bounded
+`audio.done → EOF` drain. It must prove that EOF arrives under a hard deadline,
+does not delay or change first PCM, does not accept extra audio/events, and
+actually produces warm reuse before any product change is retained. It is not
+part of this rejected candidate.
 
-The watchdog and dirty-cleanup stop are control-plane/failure-path runner
-hardening added after A1. The successful `_main` timing path, trace collection,
-request population, report schema and metric calculation are unchanged. This
-runner byte difference is recorded explicitly; the independent re-review must
-decide whether it preserves A1 credit before B begins.
+## 6. Review and verification
 
-Fresh remediation verification completed 115/115 focused cases, plus Ruff,
-`py_compile` and diff-check. Two broader Gateway tests still fail
-deterministically on the unchanged A and B source: one Windows-path-only test
-oracle running on Linux and one pre-existing fake-provider cancel cleanup race.
-They do not exercise the OpenAI client change and are excluded rather than
-silently credited.
+The independent Tier-2 review initially found five Important gaps. Remediation
+closed observer inertness, event-loop ownership, process watchdog, dirty-run
+evidence, concurrency, cancellation, isolation, custom/closed allocation,
+broken-pool no-retry and Gateway Provider-cache coverage. Its final code verdict
+at `72f0b157` was zero remaining Critical or Important findings.
 
-## 7. Remaining sequence
+After restoration, fresh focused verification passed 108/108 cases plus Ruff,
+`py_compile` and diff-check. The final Provider implementation differs from the
+A diagnostic baseline only by containing diagnostic `BaseException`; the
+request-scoped HTTPX lifecycle is restored.
 
-1. close the independent Tier-2 re-review before further paid calls;
-2. run B on the final reviewed candidate, six calls without retry;
-3. run A2 from a detached clean worktree at the unchanged A reference, six
-   calls without retry;
-4. apply every causal, regression and drift gate from the specification;
-5. record `ACCEPTED`, `REJECTED` or `INCONCLUSIVE` and synchronize current
-   documentation.
+Two broader Gateway tests remain deterministic baseline failures in unchanged
+code: one Windows-only traceback-path oracle running on Linux and one existing
+fake-provider cancel-cleanup race. Neither exercises the OpenAI client.
 
-Call accounting is currently 8/20: two pilot plus six formal A1 calls.
+## 7. Credit boundary and next step
+
+This result grants only a no-Chrome real-Provider rejection of application-level
+client reuse. It grants no Browser, audible output, downlink, P2 ACK,
+end-to-end, Production-readiness or public SLO credit.
+
+The next optimization should not reintroduce this pool unchanged. Candidate
+options are:
+
+1. specify and measure bounded post-`audio.done` EOF draining;
+2. move to another independent Live Voice bottleneck with larger measured
+   headroom;
+3. retain the current request-scoped lifecycle until a candidate proves actual
+   connection reuse and the full acceptance threshold.

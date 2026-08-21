@@ -1,5 +1,12 @@
 # TTS Provider Connection Reuse Implementation Plan
 
+> **Execution result:** closed as `REJECTED` on 2026-08-21. Tasks 1–5 and the
+> A1-v2/B portion of Task 6 completed. A2 was intentionally skipped after B
+> proved 0/3 warm connection reuse and regressed warm first-PCM p50. Task 7
+> restored request-scoped product lifecycle and synchronized documentation.
+> Total real calls: 20/26 authorized. See
+> [the result](TTS_PROVIDER_CONNECTION_REUSE_RESULT_2026-08-21.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` (recommended) or
 > `superpowers:executing-plans` to implement this plan task-by-task. Steps use
@@ -29,9 +36,9 @@ Ruff, Git worktrees, OpenAI-compatible streaming TTS SSE.
 - Work only in the isolated branch `latency/tts-provider-connection-reuse`.
 - The planning base is `1f2ac7ba4ef2ed6a4aee498d0d285a7f40a25403`;
   the exact A reference is a later clean benchmark-seam commit derived from it.
-- The experiment makes at most 20 real TTS calls: two uncredited pilot calls,
-  six A1 calls, six B calls and six A2 calls. An extra paid rerun requires new
-  user authorization.
+- The original experiment allowed 20 real TTS calls. The user later authorized
+  six additional calls for an exact-runner A1-v2, raising the cap to 26. The
+  run used 20 calls; A2's six calls were not needed after causal rejection.
 - No startup probe, dummy phrase, retry, replay, fallback, Agent, Tool, Task,
   history, Browser, STT or VAD effect is allowed.
 - The fixed request configuration uses one Provider, model, voice, short fixed
