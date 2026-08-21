@@ -39,6 +39,8 @@ from jiuwenswarm.server.live_voice.product_authority import (
     TrustedAuthorityLookup,
 )
 from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+    _CLOSED_GENERATION_CAPACITY,
+    _GENERATION_FENCE_CELL_MAX,
     P2ActivationReason,
     P2ActivationResult,
     P2ActivationStatus,
@@ -1247,13 +1249,20 @@ class _LeaseLifetimeFixture:
         self.retained.append(self.last_runtime)
         return self.last_runtime
 
-    async def open_and_close(self, index: int) -> None:
-        """Run one complete distinct interaction to its terminal close."""
+    async def open_and_close(self, index: int | str, *, generation: int = 1) -> None:
+        """Run one complete distinct interaction to its terminal close.
+
+        ``generation`` exists so a corpus can carry more than one activation
+        generation.  A corpus that closes everything at the same generation
+        encodes every fence cell to the same value and cannot tell a
+        conservative maximum apart from a plain overwrite.
+        """
 
         result = await self.adapter.activate(
             request(
                 interaction_id=f"interaction-{index}",
                 activation_id=f"activation-{index}",
+                generation=generation,
             )
         )
         assert result.status is P2ActivationStatus.ACTIVE
@@ -1535,6 +1544,170 @@ async def test_released_generation_fence_is_owner_lifetime_characterization() ->
     )
     assert still_fenced.status is P2ActivationStatus.DENIED
     retired.assert_zero_activation_effects(still_fenced)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "generation",
+    (_GENERATION_FENCE_CELL_MAX - 1, _GENERATION_FENCE_CELL_MAX),
+    ids=("at_cell_width", "past_cell_width"),
+)
+async def test_generation_too_wide_for_a_fence_cell_refuses_every_replay(
+    generation: int,
+) -> None:
+    """Both sides of the fence cell width stay fail-closed.
+
+    RED on the candidate before this fix: a released generation was clamped
+    into the cell, so the sketch reported ``cell_max - 1``.  Every generation
+    above that read back *below* the truth, and the released generation was
+    readmitted with a fresh runtime and Interaction Engine — exactly the side
+    effect that releasing closed leases must never produce.  ``activate``
+    only demands a positive integer, so both sides are reachable at this
+    boundary regardless of what today's callers happen to pass.
+    """
+
+    fixture = _LeaseLifetimeFixture()
+    await fixture.open_and_close("wide", generation=generation)
+    # Push the released key past the exact tombstone capacity, so only the
+    # compact sketch can still answer for it.
+    for index in range(_CLOSED_GENERATION_CAPACITY):
+        await fixture.open_and_close(index)
+    assert (
+        "session-1",
+        "interaction-wide",
+    ) not in fixture.adapter._closed_generations
+    allocated_runtimes = fixture.runtime_allocations
+    allocated_engines = fixture.engine_allocations
+
+    # The released generation itself, and every generation above it: a cell
+    # that can no longer carry the bound refuses everything rather than
+    # publishing a bound the released generation outranks.
+    for replayed in (generation, generation + 1):
+        stale = await fixture.adapter.activate(
+            request(
+                interaction_id="interaction-wide",
+                activation_id="activation-wide-replay",
+                generation=replayed,
+            )
+        )
+        assert stale.status is P2ActivationStatus.DENIED
+        assert stale.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+        fixture.assert_zero_activation_effects(stale)
+    assert fixture.runtime_allocations == allocated_runtimes
+    assert fixture.engine_allocations == allocated_engines
+    assert len(fixture.adapter._leases) == 0
+
+
+def _fence_cell_sharing_suffix(
+    adapter: ProductP2InteractionAdapter,
+    target_suffix: str,
+) -> str:
+    """Find an interaction suffix whose fence shares a cell with the target.
+
+    A key's fence is the minimum over its cells, so one shared cell is enough
+    for one key's write to be visible in the other key's answer.  Searching
+    for it keeps the oracle below honest if the cell layout ever changes.
+    """
+
+    target = adapter._closed_generation_fence_indices(
+        ("session-1", f"interaction-{target_suffix}")
+    )
+    for probe in range(1 << 16):
+        suffix = f"fence-low-{probe}"
+        probed = adapter._closed_generation_fence_indices(
+            ("session-1", f"interaction-{suffix}")
+        )
+        if any(left == right for left, right in zip(probed, target, strict=True)):
+            return suffix
+    raise AssertionError("no probed key shares a fence cell with the target")
+
+
+@pytest.mark.asyncio
+async def test_fence_keeps_the_higher_generation_when_a_cell_is_shared() -> None:
+    """The sketch is a conservative maximum: a later low write never lowers it.
+
+    Live oracle for the invariant the fence claims.  Replacing the per-cell
+    maximum with a plain assignment leaves every other test in this module
+    green, because the rest of the corpus closes everything at generation 1
+    and therefore encodes every cell to the same value.  Here a high released
+    generation and a low one land on the same cell, in that order, and the low
+    write must not readmit a generation the high key already fenced.
+    """
+
+    fixture = _LeaseLifetimeFixture()
+    high_suffix = "fence-high"
+    low_suffix = _fence_cell_sharing_suffix(fixture.adapter, high_suffix)
+
+    await fixture.open_and_close(high_suffix, generation=100)
+    await fixture.open_and_close(low_suffix, generation=2)
+    # Both released keys leave the exact tombstone map, high first, so the
+    # sketch takes the high write before the low one on their shared cell.
+    for index in range(_CLOSED_GENERATION_CAPACITY):
+        await fixture.open_and_close(index)
+    tombstones = fixture.adapter._closed_generations
+    assert ("session-1", f"interaction-{high_suffix}") not in tombstones
+    assert ("session-1", f"interaction-{low_suffix}") not in tombstones
+    allocated_runtimes = fixture.runtime_allocations
+    allocated_engines = fixture.engine_allocations
+
+    stale = await fixture.adapter.activate(
+        request(
+            interaction_id=f"interaction-{high_suffix}",
+            activation_id="activation-fence-high-replay",
+            generation=50,
+        )
+    )
+
+    assert stale.status is P2ActivationStatus.DENIED
+    assert stale.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+    fixture.assert_zero_activation_effects(stale)
+    assert fixture.runtime_allocations == allocated_runtimes
+    assert fixture.engine_allocations == allocated_engines
+    assert len(fixture.adapter._leases) == 0
+
+    # Positive control: the fence still reports exactly the high released
+    # generation rather than refusing everything, so a genuine successor above
+    # it runs.  A blanket refusal would satisfy the assertions above.
+    successor = await fixture.adapter.activate(
+        request(
+            interaction_id=f"interaction-{high_suffix}",
+            activation_id="activation-fence-high-successor",
+            generation=101,
+        )
+    )
+    assert successor.status is P2ActivationStatus.ACTIVE
+    assert successor.reason is P2ActivationReason.ACTIVATION_LEASE_OPEN
+    assert fixture.runtime_allocations == allocated_runtimes + 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tombstone_record_keeps_the_closed_lease_retained() -> None:
+    """Fault injection: releasing a key must never outrun fencing it.
+
+    The only failure this path ever had was a fence cell overflow, which the
+    saturation sentinel removes, so this is a structural guard rather than a
+    reproduction.  Recording the tombstone before dropping the lease is what
+    keeps the failure fail-closed: the key stays refused by its still retained
+    lease instead of becoming a free, unfenced key.
+    """
+
+    fixture = _LeaseLifetimeFixture()
+    opened = await fixture.adapter.activate(request())
+    assert opened.lease is not None
+
+    def refuse_to_record(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("tombstone store unavailable")
+
+    fixture.adapter._record_closed_generation = refuse_to_record
+    closed = await opened.lease.close(opened.lease.binding, timeout_seconds=1.0)
+
+    assert closed.status is P2LeaseCloseStatus.CLOSED
+    assert len(fixture.adapter._leases) == 1
+    stale = await fixture.adapter.activate(request())
+    assert stale.status is P2ActivationStatus.DENIED
+    assert stale.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+    fixture.assert_zero_activation_effects(stale)
+    assert fixture.runtime_allocations == 1
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,11 @@ _P2_CAPABILITIES = frozenset({_P2_OPERATION})
 _CLOSED_GENERATION_CAPACITY = 256
 _GENERATION_FENCE_ROWS = 4
 _GENERATION_FENCE_CELLS = 1 << 13
+# The widest value a fence cell holds is reserved as a saturation sentinel
+# rather than spent on a generation.  A generation whose encoding reaches it no
+# longer fits the cell, so the cell stops naming a bound and refuses every
+# generation instead.  Over-refusing is the sketch's sanctioned direction;
+# reporting a bound *below* the released generation would readmit it.
 _GENERATION_FENCE_CELL_MAX = (1 << 64) - 1
 
 
@@ -1620,11 +1625,15 @@ class ProductP2InteractionAdapter:
                 # released.  A superseded terminal notification must only ever
                 # retire itself and can never collect the live lease.
                 return
-            del self._leases[lease_key]
+            # Fence first, release second.  A key must never be observable
+            # with neither its lease nor its tombstone, so a failure while
+            # recording keeps the closed lease retained, refusing successors
+            # exactly as before, instead of freeing an unfenced key.
             self._record_closed_generation(
                 lease_key,
                 lease.binding.activation_generation,
             )
+            del self._leases[lease_key]
 
     def _record_closed_generation(
         self,
@@ -1644,8 +1653,10 @@ class ProductP2InteractionAdapter:
         key: tuple[str, str],
         generation: int,
     ) -> None:
-        # Clamping only ever raises what the sketch reports, so a generation
-        # beyond the cell width still fails closed instead of overflowing.
+        # A generation whose encoding reaches the cell width saturates the cell
+        # into the sentinel that refuses everything.  Storing a smaller number
+        # instead would publish a fence *below* the released generation and
+        # readmit it, which is the opposite of failing closed.
         encoded = min(generation + 1, _GENERATION_FENCE_CELL_MAX)
         for row, index in zip(
             self._closed_generation_fence,
@@ -1665,8 +1676,13 @@ class ProductP2InteractionAdapter:
             for offset in (0, 4, 8, 12)
         )
 
-    def _closed_generation(self, key: tuple[str, str]) -> int | None:
-        """Report the highest released generation, exact tombstone first."""
+    def _closed_generation(self, key: tuple[str, str]) -> int | float | None:
+        """Report the highest released generation, exact tombstone first.
+
+        A saturated sketch cell reports ``math.inf`` instead of a number: the
+        released generation no longer fits the cell, so the key refuses every
+        generation rather than naming a bound that generation could outrank.
+        """
 
         with self._closed_generation_lock:
             exact = self._closed_generations.get(key)
@@ -1680,6 +1696,8 @@ class ProductP2InteractionAdapter:
                     strict=True,
                 )
             )
+        if fenced >= _GENERATION_FENCE_CELL_MAX:
+            return math.inf
         # Activation generations are positive, so a recorded cell holds at
         # least two.  Anything lower was never recorded and reads as a missing
         # key rather than as generation zero.
