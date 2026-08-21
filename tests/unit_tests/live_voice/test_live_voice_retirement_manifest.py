@@ -45,6 +45,11 @@ REQUIRED_MANIFEST_IDS = {
     "product_composition_contract_retained_boundary",
     "historical_document_batches",
 }
+EXPECTED_RETIRED_IDS = {
+    "legacy_ticket_media",
+    "retired_snapshot_helper",
+    "w2_dotenv_preservation_flags",
+}
 EXPECTED_AUDIT_MAPPING_IDS = {
     "branch_w2_dotenv",
     "branch_ticket_path",
@@ -183,8 +188,19 @@ def test_every_retirement_item_has_owner_oracle_preconditions_tests_and_rollback
     None
 ):
     entries = _load()["entries"]
-    assert {entry["id"] for entry in entries}.issuperset(REQUIRED_MANIFEST_IDS)
+    assert {entry["id"] for entry in entries} == REQUIRED_MANIFEST_IDS
     assert len(entries) == len({entry["id"] for entry in entries})
+    retired_ids = {
+        entry["id"]
+        for entry in entries
+        if entry["phase"] == "retired" or entry["deletion_authorized"] is True
+    }
+    assert retired_ids == EXPECTED_RETIRED_IDS
+    assert {
+        entry["id"]
+        for entry in entries
+        if entry["phase"] == "inventory" and entry["deletion_authorized"] is False
+    } == REQUIRED_MANIFEST_IDS - EXPECTED_RETIRED_IDS
     expected_keys = {
         "id",
         "category",

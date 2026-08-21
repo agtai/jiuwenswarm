@@ -27,7 +27,7 @@
     "B1 authorized no deletion; B2 executed only the three explicitly reviewed snapshot, W2-dotenv-symbol and ticket-in-path-symbol retirements recorded below.",
     "ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are current P3-7 formal carrier/composition surfaces, not legacy-lane deletion candidates.",
     ".env.production remains the ordinary-production default-off owner and production_task_intent.py remains active generalized intent authority.",
-    "formalTaskResultRoute.ts remains the current immutable TaskResult parser/owner.",
+    "formalTaskResultRoute.ts remains a retained isolated immutable TaskResult oracle pending an accepted composed replacement.",
     "S7/S8 and Wave2 evidence runners remain while unique safety/private-oracle consumers are live; TESTING.md alone is not their replacement oracle."
   ],
   "b1_add_only_files": [
@@ -84,7 +84,7 @@
       "id": "retirement_execution_candidate",
       "after": "replacement_oracles_pass",
       "owner": "P3-8B integration owner",
-      "intent": "Re-audit inventory item preconditions; deletion remains a separately reviewed later phase."
+      "intent": "Execute only the exact items whose replacement oracles pass independent review; every other inventory deletion remains a separately reviewed later phase."
     }
   ],
   "shared_file_boundaries": [
@@ -208,7 +208,7 @@
     {"id": "backend_realtime_media", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "realtime_media.py", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["test_support_rehome"], "retained_owner": "media tests/fakes", "excluded_scope": "supported runtime consumer if found"},
     {"id": "frontend_runtime_replica", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "conversationRuntimeReplica.ts", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "frontend runtime tests", "excluded_scope": "real runtime truth"},
     {"id": "frontend_fake_vertical", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "fakeP1Vertical.ts", "current_disposition": "rehome_or_remove_fake", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "frontend test support", "excluded_scope": "formal product truth"},
-    {"id": "frontend_task_result", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "formalTaskResultRoute.ts", "current_disposition": "retain_current_immutable_result_owner", "manifest_entry_ids": ["formal_task_result_route_retained"], "retained_owner": "P3-7 formal TaskResult route", "excluded_scope": "whole current parser/owner"},
+    {"id": "frontend_task_result", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "formalTaskResultRoute.ts", "current_disposition": "retain_isolated_immutable_result_oracle", "manifest_entry_ids": ["formal_task_result_route_retained"], "retained_owner": "Isolated immutable TaskResult parser oracle pending an accepted composed replacement", "excluded_scope": "whole isolated parser/oracle"},
     {"id": "frontend_v2_contract", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "liveVoiceContractV2.ts", "current_disposition": "retain", "manifest_entry_ids": ["duplicate_frontend_validators"], "retained_owner": "cross-language trust boundary", "excluded_scope": "backend/frontend parity"},
     {"id": "frontend_observability", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "liveVoiceObservability.ts", "current_disposition": "retain_product_subset_rehome_support", "manifest_entry_ids": ["duplicate_frontend_validators", "frontend_formal_test_support"], "retained_owner": "formal Web observability", "excluded_scope": "product-consumed subset"},
     {"id": "frontend_product_contract", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "productCompositionContract.ts", "current_disposition": "retain_trust_boundary", "manifest_entry_ids": ["product_composition_contract_retained_boundary"], "retained_owner": "Web/backend contract parity", "excluded_scope": "whole validator before generated replacement"},
@@ -495,14 +495,14 @@
       "id": "formal_task_result_route_retained",
       "category": "retained_current_owner",
       "phase": "inventory",
-      "disposition": "retain_current_immutable_result_owner",
+      "disposition": "retain_isolated_immutable_result_oracle",
       "deletion_authorized": false,
       "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskResultRoute.ts"],
-      "replacement_owner": "P3-7 formal TaskResult route owner",
-      "oracle_migration": ["No migration is authorized: the route remains the current complete immutable TaskResult parser and replay owner."],
+      "replacement_owner": "Isolated immutable TaskResult parser oracle pending an accepted composed replacement",
+      "oracle_migration": ["No migration is authorized: the uncomposed route remains an isolated complete immutable TaskResult parser/replay oracle until an accepted owner absorbs its unique semantics."],
       "delete_preconditions": ["A separately accepted replacement preserves exact result/replay/error semantics", "P3-7 result-route and mounted regressions pass against that replacement."],
       "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/formalTaskResultRoute.test.mjs"],
-      "rollback": "Retain the current route; never delete it as frontend test support."
+      "rollback": "Retain the isolated oracle; never delete it as generic frontend test support."
     },
     {
       "id": "duplicate_exact_object_validators",
