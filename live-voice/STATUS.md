@@ -120,9 +120,9 @@ risks, dependencies, acceptance and integration order.
 | Executor & Durability | **PARTIAL overall; P3-3 and P3-4 scoped Gates PASS.** Immutable Direct capability/profile selection, priority/FIFO admission, project-busy/capacity deferral, D0/D1/D2 truth, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect manual settlement are integrated. Real Agent/file-Tool production regression and Store/Direct/OS-lock product-path evidence are closed within their declared boundaries | Generalize the supported Executor/configuration matrix and carry D0-D2 truth through later product acceptance; no additional durability primitive is implied | Tier-3 Direct/Store/Core evidence plus exact Wave-2 and Wave-3 private boundaries; the private run is not a host-crash oracle |
 | Voice–Task Bridge | **PARTIAL overall; P3-6 scoped Gate PASS and P3-7 consumer integrated.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported; clarification, durable single-use confirmation, parity and zero-false-truth paths are closed. The formal Web owner now consumes these queries/mutations without adding another Bridge authority | Broader language/policy generalization; provide-input/pause/resume remain unsupported until real primitives exist; P3-8B may observe but not replace this authority | Exact Store Task/Attempt/event/result/capability truth, authenticated context/model reread, the 68-case/14-group corpus and frozen D-091 interface |
 | Integrated Web product experience | **PARTIAL overall; P3-5B and P3-7 scoped Gates PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed; the mounted Exit/immediate-re-enable automated seam remains deferred | Compose P3-8B diagnostics/configuration and replacement-gated retirement without changing the frozen P3-7 authority; close Agent-generation interruption, P2 presentation latency, mounted Exit/re-enable recovery, device/privacy/recovery UX and the cumulative human journey | [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [review](reviews/P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md), P3-8B/P3-9 plus remaining P1/P2 completion; P3-7 automation grants no physical audio credit |
-| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations include the bounded SLI/privacy/OTel assets. The `e1df8b452` physical diagnostic measured one 0.669-second EOT-to-submit interval and 1.683 seconds from text to TTS downlink, and isolated a dominant P2 one-notification-per-RPC tail: 64 intervals at about 85 ms median accounted for approximately 5.52 seconds after model completion. This is diagnostic evidence, not a fixed-corpus benchmark | Prioritize a separately scoped Tier-3 P2 batch/push/coalescing repair; then evaluate VAD finalization and first-audio startup. Compose the P3-8A codec behind its owner and execute the remaining [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with frozen environment/corpus and p50/p95 proof | [Physical latency finding](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md), [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md), fixed corpus/environment and Conversation Runtime/P1 media owners |
+| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets and P3-8B B1 preparation PASS.** Trace foundations now include bounded SLI/privacy/OTel assets plus an immutable correlation/causation validator that separates high-cardinality trace identity from closed metric dimensions and requires an injected trusted receipt verifier before readiness. The `e1df8b452` physical diagnostic measured one 0.669-second EOT-to-submit interval and isolated the P2 notification tail; it is diagnostic evidence, not a fixed-corpus benchmark | B2 must compose the codec/exporter/backend lifecycle and content-free Task/Executor/presentation diagnostic chain; separately repair P2 delivery and execute the [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with frozen environment/corpus and p50/p95 proof | [P3-8B preparation](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md), [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md), fixed corpus/environment and frozen D-091 owners |
 | Automated verification and product acceptance | **PARTIAL overall; Wave-2, bounded Wave-3 and P3-7 scoped Gates PASS.** P3-7 completed backend `184/184`, owner `14/14`, mounted affected `10/10`, build profiles `2/2`, production build and independent `C0/I0/M0`; full Formal Web was `439/440` with only the disclosed baseline Exit/re-enable failure. Earlier exact-source automation/review/real-path credits remain unchanged. Exact source `e1df8b452` retains scoped physical functional PASS; latency remains PARTIAL, the combined P3 Task journey remains open, and the controlled candidate remains FAIL | Complete P3-8B, repair P2 notification delivery, close fixed-corpus latency and deferred Exit/re-enable, then run the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md), [P1/P2 physical evidence](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) and exact clean sources |
-| Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
+| Configuration, code and document cleanup | **PARTIAL overall; P3-8B B1 preparation PASS.** Three cleanup audits and document Batch A are complete; ordinary production remains flag-off and the explicit Live Voice profile flag-on. B1 adds a pure validated-configuration-to-capability declaration with no env/provider/worker/backend effects and a provenance-checked retirement manifest; no product composition or deletion is yet claimed | B2 must consume the declaration without auth/durability downgrade, migrate each replacement oracle, and retire only manifest rows whose preconditions/flag-on/flag-off/rollback review pass; local artifacts and generic non-Live-Voice consumers stay excluded | [P3-8B preparation/manifest](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md) plus the [code](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) retirement Gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
 ## P3-G0 scoped PASS and deferred gaps
@@ -195,8 +195,11 @@ exact-source Alpha result.
   under [D-091](decisions/DECISIONS.md), with
   [review](reviews/P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md)
   and [evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md).
-  B1 has completed its isolated add-only implementation and independent review;
-  Main will accept that commit only after this freeze record, then activate B2.
+  B1 is accepted on integrated source
+  `bd3fd0883e93dd73a55927296d4fe75ac0956132`: exactly seven add-only files,
+  focused `59/59`, accepted P3-8A regression `207/207`, scoped static checks and
+  independent `0 Critical / 0 Important / 0 Minor`. B2 is now active on that
+  baseline under the exact lease below.
 
 ### Child A — P3-7 formal Integrated Web P3 experience
 
@@ -284,6 +287,11 @@ exact-source Alpha result.
   static checks, link/manifest validation and independent Tier-3 review pass.
   External OTel/backend, product composition, lifecycle/health and retirement
   are explicitly unclaimed.
+- **B1 disposition:** **PASS on integrated source `bd3fd0883e93dd73a55927296d4fe75ac0956132`.**
+  The commit is exactly seven add-only files and preserves every existing
+  product/composition owner. Main reproduced focused `59/59`, P3-8A affected
+  `207/207`, Ruff/format/compile/diff checks; independent final review returned
+  `0 Critical / 0 Important / 0 Minor`.
 - **B2 frozen-interface scope:** after Main records `P3-7` PASS, B may connect
   P3-8A codec/SLI/privacy assets behind the existing formal adapter/exporter;
   carry content-free diagnostics through admission, queue, lease, outbox,
@@ -301,6 +309,26 @@ exact-source Alpha result.
   dependency or compatibility path is deleted only after its replacement owner,
   migrated oracle, flag-on/flag-off regression, rollback and affected review
   pass. Generic non-Live-Voice `schedule.*` consumers are outside retirement.
+- **B2 active baseline and single-writer lease:** exact clean source
+  `bd3fd0883e93dd73a55927296d4fe75ac0956132`. The isolated B2 worktree may edit
+  the two B1 contracts, P3-8A `observability*` codec/exporter/fault/privacy
+  modules, `product_observability_adapter.py`, and new focused backend/tests.
+  D-091 grants it the narrow existing-file lease for `agent_ws_server.py`,
+  `product_composition_registry.py` and the currently selected Provider/
+  Executor/profile configuration entrypoints only to consume validated
+  declarations, carry content-free observations and expose fail-closed
+  lifecycle/health. It may add frozen read/projection hooks but may not alter
+  Task/Core/Store/Executor/Runtime/PresentationAck authority. Retirement files
+  are leased only after the manifest proves the exact replacement oracle;
+  shared `schedule.*`, current Direct Adapter, fixed media registry/handler,
+  formal Panel/routes and P3-7 projection remain retained unless Main records a
+  narrower replacement disposition.
+- **B2 sequencing:** first compose validated configuration plus correlation,
+  codec, bounded exporter/backend lifecycle and health; next prove the complete
+  content-free diagnostic chain and privacy/feature-off zero effects; then
+  migrate manifest oracles and delete only rows whose preconditions pass. A
+  read-only retirement scout may run in parallel, but no candidate deletion is
+  authorized merely by inventory status.
 
 - **Shared exclusions/non-claims:** no P1/P2 Exit/immediate-re-enable repair,
   notification-latency work, VAD/TTS/media change, generation-time barge-in,
