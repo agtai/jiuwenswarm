@@ -792,10 +792,16 @@ async def test_successor_cancels_inflight_open_before_activating_new_response() 
     await provider.cancel_started.wait()
     provider.open_gate.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await first_task
     successor, outcome = await successor_task
     assert successor is not None and outcome is None
+    # The successor supersedes the owner-created open work only.  The caller's
+    # own task is never cancelled; it observes supersession as an exact outcome.
+    superseded_handle, superseded_outcome = await asyncio.wait_for(first_task, 1.0)
+    assert first_task.cancelled() is False
+    assert superseded_handle is None
+    assert superseded_outcome is not None
+    assert superseded_outcome.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+    assert superseded_outcome.batch_eligible is False
     assert first_request.ref in provider.cancelled
     assert provider.open_count == 2
     await owner.cancel(successor)
@@ -838,8 +844,12 @@ async def test_close_cancels_inflight_open_and_closes_shared_provider_once() -> 
     await provider.open_started.wait()
     await owner.close()
 
-    with pytest.raises(asyncio.CancelledError):
-        await begin_task
+    begin_handle, begin_outcome = await asyncio.wait_for(begin_task, 1.0)
+    assert begin_task.cancelled() is False
+    assert begin_handle is None
+    assert begin_outcome is not None
+    assert begin_outcome.reason is StreamingSynthesisReason.OWNER_CLOSED
+    assert begin_outcome.batch_eligible is False
     assert provider.cancelled == [request.ref]
     assert provider.closed == 1
     assert owner.active_count == 0
@@ -1096,12 +1106,26 @@ async def test_close_fences_late_selector_and_closes_provider_once(
         open_timeout_seconds=0.05,
         max_retained_tasks=1,
     )
-    availability = asyncio.create_task(owner.available())
+    served: list[object] = []
+
+    async def connection() -> str:
+        """One caller task that serves two RPCs, like a WebSocket connection."""
+
+        served.append(await owner.available())
+        served.append(await owner.available())
+        return "connection-alive"
+
+    connection_task = asyncio.create_task(connection())
     await selector_started.wait()
     await owner.close()
-    with pytest.raises(asyncio.CancelledError):
-        await availability
+    await asyncio.wait({connection_task}, timeout=1.0)
     selector_release.set()
+    assert connection_task.done() is True
+    assert connection_task.cancelled() is False, (
+        "close cancelled the caller's connection task instead of its own selector work"
+    )
+    assert connection_task.result() == "connection-alive"
+    assert served == [False, False]
     await _wait_for_retained_cleanup(owner)
     assert provider.open_count == 0
     assert provider.closed == 1
@@ -1594,7 +1618,10 @@ async def test_predecessor_open_process_control_cleans_then_rethrows() -> None:
     await predecessor_done.wait()
     legacy_scope = ("legacy-session", "legacy-subject", "legacy-correlation")
     predecessor_key = (legacy_scope, "predecessor", 0)
-    owner._opening[predecessor_key] = predecessor
+    # Owner-created opening work, exactly as `_begin_prepared` publishes it.
+    predecessor_work = route_module._SupersedableWork()
+    predecessor_work.adopt(predecessor)
+    owner._opening[predecessor_key] = predecessor_work
     owner._opening_responses[predecessor_key] = prior_response
     owner._current_responses[(legacy_scope, prior_response.interaction_id)] = (
         prior_response

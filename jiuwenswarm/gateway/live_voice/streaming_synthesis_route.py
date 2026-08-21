@@ -115,6 +115,56 @@ def _discard_awaitable(awaitable: Awaitable[object]) -> None:
         awaitable.cancel()
 
 
+class _OwnedWorkSuperseded(Exception):
+    """One task this owner created was cancelled by this owner, not its caller.
+
+    It never leaves this module: `_select` and `_begin_prepared` translate it
+    into their existing selection and outcome vocabulary, so no new reason code
+    or fallback action reaches any caller.
+    """
+
+
+@dataclass(slots=True)
+class _SupersedableWork:
+    """Owner-created work plus the caller-observable supersession signal.
+
+    A caller's own WebSocket/RPC task is never stored here.  Close and
+    successor supersession can therefore reach only the task this owner
+    created, and the caller learns that it was superseded by observing
+    `superseded` instead of losing its whole connection to a cancellation.
+    """
+
+    superseded: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    reason: StreamingSynthesisReason | None = field(default=None, repr=False)
+    task: asyncio.Task[object] | None = field(default=None, repr=False)
+
+    def adopt(self, task: asyncio.Task[object]) -> None:
+        """Own one task this route created, never a caller's own task."""
+
+        self.task = task
+        if self.superseded.is_set():
+            task.cancel()
+
+    def withdraw(self) -> None:
+        """Stop offering work that already left this owner's control."""
+
+        self.task = None
+
+    def supersede(
+        self, reason: StreamingSynthesisReason
+    ) -> asyncio.Task[object] | None:
+        """Publish the first supersession truth, then offer owner-created work.
+
+        The first reason wins, so a close following a successor cannot rewrite
+        what the caller is told, and repeated supersession stays a no-op.
+        """
+
+        if not self.superseded.is_set():
+            self.reason = reason
+            self.superseded.set()
+        return self.task
+
+
 class _BoundedHardDeadlineOwner:
     """Bound all route-owned awaits, including cancellation-hostile Providers.
 
@@ -156,6 +206,7 @@ class _BoundedHardDeadlineOwner:
         operation: str,
         cleanup: bool = False,
         reservation: _TaskReservation | None = None,
+        work: _SupersedableWork | None = None,
     ) -> _T:
         if reservation is not None:
             if cleanup or not reservation._consume(self):
@@ -185,16 +236,26 @@ class _BoundedHardDeadlineOwner:
         self._tasks.add(owned)
         self._idle.clear()
         owned.add_done_callback(self._consume_done)
+        if work is not None:
+            work.adopt(cast(asyncio.Task[object], owned))
         try:
             done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
         except asyncio.CancelledError:
             task.cancel()
             raise
+        finally:
+            if work is not None:
+                work.withdraw()
         if not done:
             task.cancel()
             raise TimeoutError(f"hard deadline expired for {operation}")
         self._tasks.discard(owned)
         self._set_idle_if_empty()
+        if work is not None and task.cancelled():
+            # Only this owner ever cancels a task it created, and only after
+            # publishing supersession.  The caller's own task was untouched, so
+            # this must never surface to it as its own cancellation.
+            raise _OwnedWorkSuperseded(operation)
         result = task.result()
         if result.process_control is not None:
             raise result.process_control
@@ -563,10 +624,13 @@ class StreamingSynthesisRouteOwner:
         self._lifecycle_lock = asyncio.Lock()
         self._close_start_lock = asyncio.Lock()
         self._selection: StreamingSpeechSelection | None = None
-        self._selection_waiter: asyncio.Task[object] | None = None
+        # Selection and opening work are owner-created tasks, never the
+        # caller's WebSocket/RPC task.  Close and successor supersession may
+        # cancel only what is reachable through these records.
+        self._selection_work: _SupersedableWork | None = None
         self._selection_attempt: object | None = None
         self._active: dict[_ScopedStreamKey, StreamingSynthesisHandle] = {}
-        self._opening: dict[_ScopedStreamKey, asyncio.Task[object]] = {}
+        self._opening: dict[_ScopedStreamKey, _SupersedableWork] = {}
         self._opening_responses: dict[_ScopedStreamKey, ResponseRef] = {}
         self._current_responses: OrderedDict[_ScopedResponseKey, ResponseRef] = (
             OrderedDict()
@@ -733,10 +797,13 @@ class StreamingSynthesisRouteOwner:
             )
 
         key = _scoped_stream_key(scope_identity, ref)
-        current_task = asyncio.current_task()
-        if current_task is None:
+        if asyncio.current_task() is None:
             raise RuntimeError("streaming synthesis begin requires an asyncio task")
 
+        # The caller's own task never becomes route state.  Only the opening
+        # task created below is supersedable, so close or a successor can never
+        # cancel the connection request task this call arrived on.
+        work = _SupersedableWork()
         opening_registered = False
         open_reservation: _TaskReservation | None = None
         try:
@@ -798,10 +865,12 @@ class StreamingSynthesisRouteOwner:
                 # retain the binding as an anti-replay tombstone.
                 self._make_binding_capacity(key)
                 self._retained_bindings[key] = binding_ref
-                self._opening[key] = current_task
+                self._opening[key] = work
                 self._opening_responses[key] = ref.response
                 opening_registered = True
-                await self._activate_response(provider, ref.response, scope_identity)
+                await self._activate_response(
+                    provider, ref.response, scope_identity, own_work=work
+                )
                 if self._closed:
                     return None, self._failure_outcome(
                         binding_ref,
@@ -815,12 +884,25 @@ class StreamingSynthesisRouteOwner:
 
             try:
                 await self._task_owner.run(
-                    self._open_provider_guarded(
-                        provider, prepared, key=key, owner_task=current_task
-                    ),
+                    self._open_provider_guarded(provider, prepared, key=key, work=work),
                     timeout_seconds=self._open_timeout_seconds,
                     operation="provider-open",
                     reservation=open_reservation,
+                    work=work,
+                )
+            except _OwnedWorkSuperseded:
+                # Close or a successor superseded this owner-created open.  The
+                # caller keeps its own task and stays usable for later RPCs, and
+                # the Provider effect was already settled inside the task that
+                # was cancelled, so nothing is left for this frame to clean up.
+                return None, self._failure_outcome(
+                    binding_ref,
+                    self._supersession_reason(work),
+                    ref=ref,
+                    first_audio_emitted=False,
+                    allow_batch=False,
+                    allow_fallback=False,
+                    capability=capability,
                 )
             except asyncio.CancelledError as caller_cancel:
                 if prepared.open_attempted:
@@ -866,7 +948,7 @@ class StreamingSynthesisRouteOwner:
         finally:
             if open_reservation is not None:
                 open_reservation.release()
-            if opening_registered and self._opening.get(key) is current_task:
+            if opening_registered and self._opening.get(key) is work:
                 del self._opening[key]
                 self._opening_responses.pop(key, None)
 
@@ -1165,9 +1247,20 @@ class StreamingSynthesisRouteOwner:
                 opening = tuple(self._opening.values())
                 handles = tuple(self._active.values())
                 selection = self._selection
-                selection_waiter = self._selection_waiter
-        waiters = opening + (
-            (selection_waiter,) if selection_waiter is not None else ()
+                selection_work = self._selection_work
+        supersedable = opening + (
+            (selection_work,) if selection_work is not None else ()
+        )
+        # Publish supersession first, then cancel only the tasks this owner
+        # created.  A caller's WebSocket/RPC task must survive its route being
+        # closed and stay usable for the rest of that connection.
+        waiters = tuple(
+            task
+            for task in (
+                work.supersede(StreamingSynthesisReason.OWNER_CLOSED)
+                for work in supersedable
+            )
+            if task is not None
         )
         interruption: BaseException | None = None
         cleanup_complete = True
@@ -1281,17 +1374,21 @@ class StreamingSynthesisRouteOwner:
                 return self._selection
             if self._closed:
                 return StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None)
-            current = asyncio.current_task()
-            if current is None:
+            if asyncio.current_task() is None:
                 raise RuntimeError("streaming Speech selection requires a task")
             attempt = object()
-            self._selection_waiter = cast(asyncio.Task[object], current)
+            # Close supersedes this owner-created selector task, never the
+            # caller's task, so a slow selector racing close leaves the caller
+            # with a truthful unavailable selection instead of a dead task.
+            work = _SupersedableWork()
+            self._selection_work = work
             self._selection_attempt = attempt
             try:
                 selection = await self._task_owner.run(
                     self._invoke_selector(attempt),
                     timeout_seconds=self._open_timeout_seconds,
                     operation="provider-selector",
+                    work=work,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1300,8 +1397,8 @@ class StreamingSynthesisRouteOwner:
             except BaseException:
                 selection = StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None)
             finally:
-                if self._selection_waiter is current:
-                    self._selection_waiter = None
+                if self._selection_work is work:
+                    self._selection_work = None
                 if self._selection_attempt is attempt:
                     self._selection_attempt = None
             if not isinstance(selection, StreamingSpeechSelection):
@@ -1351,6 +1448,8 @@ class StreamingSynthesisRouteOwner:
         provider: NativeStreamingSpeechProvider,
         response: ResponseRef,
         scope_identity: StreamingSynthesisScopeIdentity = _LEGACY_SYNTHESIS_SCOPE,
+        *,
+        own_work: _SupersedableWork | None = None,
     ) -> None:
         response_key = (scope_identity, response.interaction_id)
         current = self._current_responses.get(response_key)
@@ -1374,18 +1473,29 @@ class StreamingSynthesisRouteOwner:
             and handle.ref.response.interaction_id == response.interaction_id
         )
         opening_predecessors = tuple(
-            task
-            for key, task in self._opening.items()
+            work
+            for key, work in self._opening.items()
             if self._opening_responses.get(key) is not None
             and key[0] == scope_identity
             and self._opening_responses[key].interaction_id == response.interaction_id
             and self._opening_responses[key] != response
-            and task is not asyncio.current_task()
+            and work is not own_work
         )
         if opening_predecessors:
+            # Publish supersession first, then cancel only owner-created work.
+            # A predecessor caller keeps its own task and observes the exact
+            # superseded control outcome instead of losing its connection.
+            predecessor_tasks = tuple(
+                task
+                for task in (
+                    work.supersede(StreamingSynthesisReason.RESPONSE_SUPERSEDED)
+                    for work in opening_predecessors
+                )
+                if task is not None
+            )
             try:
                 await self._task_owner.cancel_and_wait(
-                    opening_predecessors,
+                    predecessor_tasks,
                     timeout_seconds=_PROVIDER_CLEANUP_TIMEOUT_SECONDS,
                     operation="predecessor-open",
                 )
@@ -1866,15 +1976,35 @@ class StreamingSynthesisRouteOwner:
         prepared: _PreparedSynthesisRequest,
         *,
         key: _ScopedStreamKey,
-        owner_task: asyncio.Task[object],
+        work: _SupersedableWork,
     ) -> None:
-        async with self._provider_open_lock:
-            prepared.open_attempted = True
-            await provider.open_synthesis(prepared._payload)
-        if self._closed or self._opening.get(key) is not owner_task:
+        try:
+            async with self._provider_open_lock:
+                prepared.open_attempted = True
+                await provider.open_synthesis(prepared._payload)
+        except asyncio.CancelledError:
+            # This task is owner-created, so its cancellation is this owner's
+            # own supersession.  Settling the Provider here keeps the effect
+            # inside the task the canceller joins, instead of leaving it to the
+            # caller's connection task and racing the close drain.
+            if prepared.open_attempted and work.superseded.is_set():
+                try:
+                    await self._cancel_provider(
+                        provider, prepared.ref, reason="open_superseded"
+                    )
+                except (asyncio.CancelledError, *_PROCESS_CONTROL):
+                    pass
+            raise
+        if (
+            self._closed
+            or work.superseded.is_set()
+            or self._opening.get(key) is not work
+        ):
             await self._cancel_provider(
                 provider, prepared.ref, reason="late_open_fenced"
             )
+            if work.superseded.is_set():
+                raise _OwnedWorkSuperseded("provider-open")
             raise StreamingSynthesisRouteViolation(
                 "SYNTHESIS_LATE_OPEN_FENCED",
                 "a synthesis open completed after its route was fenced",
@@ -2116,6 +2246,17 @@ class StreamingSynthesisRouteOwner:
                 "SYNTHESIS_HANDLE_NOT_OWNED",
                 "synthesis handle is absent, stale, or belongs to another owner",
             )
+
+    def _supersession_reason(self, work: _SupersedableWork) -> StreamingSynthesisReason:
+        """Report supersession with the route's existing control vocabulary."""
+
+        if work.reason is not None:
+            return work.reason
+        return (
+            StreamingSynthesisReason.OWNER_CLOSED
+            if self._closed
+            else StreamingSynthesisReason.ROUTE_ABORTED
+        )
 
     @staticmethod
     def _selection_reason(
