@@ -4159,7 +4159,7 @@ async function runConcurrentCaptureJourney(options = {}) {
           status: 'media_playout_acknowledged',
           reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
           receipt_id: 'media-playout-duplex-1',
-          duplex_media_observed: true,
+          duplex_media_observed: options.receiptDuplexObserved ?? true,
           ...params,
         };
       }
@@ -5129,6 +5129,26 @@ test('formal P1 dedicated downlink ACKs scheduled audio and receipts only render
   await owner.close();
   assert.equal(environment.contexts[0].state, 'closed');
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+});
+
+test('formal P1 accepts a truthful completed playout receipt without early duplex observation', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    receiptDuplexObserved: false,
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    1,
+  );
+  assert.equal(journey.environment.contexts[0].sourceStartCount, 1);
+  assert.equal(
+    journey.calls.some(([method]) => method.includes('task.') || method.includes('tool.')),
+    false,
+  );
+  await journey.owner.close();
 });
 
 test('server speech-start/EOT during playout triggers barge-in without Task mutation', async () => {
