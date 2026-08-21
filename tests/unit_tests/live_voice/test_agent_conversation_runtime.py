@@ -28,6 +28,8 @@ from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationRuntime,
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
+    _COMPOSITION_TEARDOWN_PHASES,
+    _teardown_phase_name,
 )
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentBridgeRuntime,
@@ -6516,6 +6518,41 @@ class TeardownFailingBridge(CountingCloseBridge):
         await AgentBridgeRuntime.close(self)
 
 
+class SnapshotHostileBridge(TeardownFailingBridge):
+    """Fail the Agent Bridge closed-truth probe alongside its teardown owner.
+
+    The probe is only consulted while this bridge is being torn down, so the
+    hostile window opens when ``close()`` is entered.  A test reopens the real
+    snapshot afterwards to read the settled composition truth.
+    """
+
+    def __init__(
+        self,
+        *,
+        close_error: BaseException,
+        snapshot_error: BaseException,
+        instance_id: str = "snapshot-hostile-bridge",
+    ) -> None:
+        super().__init__(
+            close_error=close_error,
+            close_first=False,
+            instance_id=instance_id,
+        )
+        self.snapshot_error = snapshot_error
+        self.snapshot_probes = 0
+        self.hostile_snapshot = False
+
+    async def close(self) -> None:
+        self.hostile_snapshot = True
+        await super().close()
+
+    def snapshot(self):
+        if self.hostile_snapshot:
+            self.snapshot_probes += 1
+            raise self.snapshot_error
+        return TeardownFailingBridge.snapshot(self)
+
+
 class FaultyDeliveryBridge(CountingCloseBridge):
     """Fail the sole bridge consumer without failing any teardown owner."""
 
@@ -6796,6 +6833,52 @@ class HostileNameMeta(type):
 
 class HostileTeardownError(Exception, metaclass=HostileNameMeta):
     """An owner failure whose class refuses to expose a usable type name."""
+
+
+class RenderProbeName:
+    """A non-string owner exception name that records every render attempt.
+
+    Reading this object is harmless; rendering it is the leak.  ``__format__``
+    and ``__str__`` are the two ways ``f"teardown_failed:{name}"`` can execute
+    hostile code, so both record the attempt and both return private content.
+    ``__repr__`` stays inert and content-free so that a failing assertion
+    cannot itself forge the evidence this probe exists to collect.
+    """
+
+    marker = "private-non-string-class-name"
+
+    def __init__(self) -> None:
+        self.renders: list[str] = []
+
+    def __format__(self, format_spec: str) -> str:
+        self.renders.append("format")
+        return self.marker
+
+    def __str__(self) -> str:
+        self.renders.append("str")
+        return self.marker
+
+    def __repr__(self) -> str:
+        return "<non-string owner exception name>"
+
+
+class NonStrNameMeta(type):
+    @property
+    def __name__(cls) -> object:
+        return cls.render_probe
+
+
+class NonStrNameTeardownError(Exception, metaclass=NonStrNameMeta):
+    """An owner failure whose class name is not a string at all."""
+
+    render_probe = RenderProbeName()
+
+
+class HostilePhaseName(str):
+    """A registered phase name lookalike that is not exactly a ``str``."""
+
+    def __format__(self, format_spec: str) -> str:
+        return "private-hostile-phase-detail"
 
 
 @pytest.mark.asyncio
@@ -7108,3 +7191,240 @@ async def test_notification_cleanup_closes_the_producer_even_when_discard_fails(
     assert detached.value.reason == "NOTIFICATION_CONSUMER_DETACHED"
     assert lower.calls == 0
     assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer() -> None:
+    """Guard the failed-probe fallback in ``_bridge_reports_closed``.
+
+    Property: consulting the Agent Bridge's own closed truth is a read, never a
+    terminal.  When a bridge fails both ``close()`` and ``snapshot()`` the probe
+    degrades to "not closed", so the sole ``_consume_bridge`` child is still
+    cancelled and settled, and the probe's own error never becomes the consumer
+    owner's recorded outcome.
+
+    Delete the ``except BaseException: return False`` guard and the probe's
+    error escapes ``_settle_bridge_consumer``: the consumer task is never
+    cancelled and never awaited -- a leaked child of a composition that has
+    already given up its Agent Bridge -- and the consumer phase is recorded as
+    the probe's own ``LookupError`` instead of the authoritative
+    ``CancelledError`` that settling the child actually produces.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    probe_marker = "private-bridge-probe-detail"
+    bridge = SnapshotHostileBridge(
+        close_error=RuntimeError("private-bridge-close-detail"),
+        snapshot_error=LookupError(probe_marker),
+    )
+    harness = teardown_harness("unreadable-closed-truth")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="unreadable-closed-truth",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    assert consumer.done() is False
+
+    failed = await current.close(timeout_seconds=1)
+    bridge.hostile_snapshot = False
+
+    assert bridge.snapshot_probes == 1
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert current._teardown_failures == (
+        ("bridge", "RuntimeError"),
+        ("consumer", "CancelledError"),
+    )
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.teardown_owner_failures == 2
+    rendered = repr((failed, current._teardown_failures))
+    assert "LookupError" not in rendered
+    assert probe_marker not in rendered
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert settled.conversation.closed is True
+    assert settled.harness.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await bridge.settle_real_close()
+
+
+@pytest.mark.asyncio
+async def test_non_string_owner_exception_name_never_reaches_a_public_detail() -> None:
+    """Guard the ``type(name) is str`` half of the owner-name guard.
+
+    Property: ``_teardown_failure_name`` reads an owner failure's type name and
+    keeps it only when that name is exactly a string.  A hostile class whose
+    ``__name__`` is some other object must never be rendered, so neither its
+    ``__format__`` nor its ``__str__`` may run, and none of its content may
+    reach the public shutdown detail or the teardown snapshot.
+
+    Delete the ``type(name) is str`` test and the hostile object flows straight
+    into ``f"teardown_failed:{first_failure[1]}"``: its ``__format__`` executes
+    inside the composition and its private content becomes the composition's
+    public FAILED detail.
+    """
+
+    probe = NonStrNameTeardownError.render_probe
+    probe.renders.clear()
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=NonStrNameTeardownError("hostile"),
+        instance_id="non-string-name-bridge",
+    )
+    harness = teardown_harness("non-string-name")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="non-string-name",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert probe.renders == []
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:unknown"
+    assert RenderProbeName.marker not in failed.detail
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "unknown")
+    assert type(settled.first_teardown_owner_failure[1]) is str
+    assert current._teardown_failures == (("bridge", "unknown"),)
+    assert probe.renders == []
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_bridge_consumer_settles_before_the_next_owner_runs() -> None:
+    """Guard the ``await asyncio.shield(consumer)`` on the cancel path.
+
+    Property: a consumer whose terminal can never arrive is cancelled *and*
+    settled by its own teardown owner.  No later registered owner may start
+    while that owned child is still pending, and the child's cancellation is
+    recorded as the consumer phase's own outcome.
+
+    Delete the ``await`` after ``consumer.cancel()`` and the consumer owner
+    returns with the cancellation only requested: the Harness owner runs while
+    the child is still unsettled, and the consumer phase records no outcome at
+    all.  Settling then degrades to whatever the next owner happens to yield
+    for, which is a scheduling accident rather than an owner guarantee.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=RuntimeError("private-bridge-close-detail"),
+        close_first=False,
+        instance_id="cancel-path-settle-bridge",
+    )
+    harness = teardown_harness("cancel-path-settle")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="cancel-path-settle",
+        bridge=bridge,
+        harness=harness,
+    )
+    order: list[str] = []
+    observed: dict[str, object] = {}
+
+    def observe_child(owner: str) -> None:
+        order.append(owner)
+        consumer = current._consumer
+        observed[f"settled_before_{owner}"] = consumer is not None and consumer.done()
+        observed[f"cancelled_before_{owner}"] = (
+            consumer is not None and consumer.cancelled()
+        )
+
+    harness.close_observer = lambda: observe_child("harness")
+    conversation_closes = observe_conversation_close(
+        current, observer=lambda: observe_child("conversation")
+    )
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    assert consumer.done() is False
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert order == ["harness", "conversation"]
+    assert observed["settled_before_harness"] is True
+    assert observed["cancelled_before_harness"] is True
+    assert observed["settled_before_conversation"] is True
+    assert observed["cancelled_before_conversation"] is True
+    assert current._teardown_failures == (
+        ("bridge", "RuntimeError"),
+        ("consumer", "CancelledError"),
+    )
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.teardown_owner_failures == 2
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+    await bridge.settle_real_close()
+
+
+def test_teardown_phase_names_stay_inside_the_registered_vocabulary() -> None:
+    """Guard the registered-phase fallback in ``_teardown_phase_name``.
+
+    Property: a public teardown diagnostic only ever names one of the phases
+    this composition registered.  Every registered phase survives verbatim as
+    an exact ``str``; anything else -- an unregistered name, or a ``str``
+    subclass that merely compares equal to a registered one -- degrades to
+    ``"unknown"``.  Production only ever passes registered literals, so this
+    guard is unreachable through the public surface and is called directly.
+
+    Drop the ``"unknown"`` fallback and an unregistered phase name is echoed
+    back verbatim.  Drop the ``type(phase) is str`` test and a hostile ``str``
+    subclass passes the membership test and is returned as the phase name, so
+    its own ``__format__`` decides what a public teardown diagnostic says.
+    """
+
+    for phase in _COMPOSITION_TEARDOWN_PHASES:
+        named = _teardown_phase_name(phase)
+        assert named == phase
+        assert type(named) is str
+    assert _teardown_phase_name("private-unregistered-phase") == "unknown"
+    lookalike = HostilePhaseName("bridge")
+    assert lookalike == "bridge"
+    assert f"{lookalike}" == "private-hostile-phase-detail"
+    named = _teardown_phase_name(lookalike)
+    assert named == "unknown"
+    assert type(named) is str
+    assert f"{named}" == "unknown"
