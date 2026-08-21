@@ -276,7 +276,11 @@ listed as branch-bound paths rather than current-tree links.
 - `latency/eot-stt-settlement-overlap`:
   `live-voice/roadmap/EOT_STT_SETTLEMENT_OVERLAP_SPEC_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:
+  `live-voice/roadmap/EOT_STT_SETTLEMENT_OVERLAP_IMPLEMENTATION_PLAN_2026-08-21.md`
+- `latency_checkpoint_accepted_optimizations`:
   `live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`
+- `latency_checkpoint_accepted_optimizations`:
+  `live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_IMPLEMENTATION_PLAN_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:
   `live-voice/roadmap/LATENCY_ACCEPTED_OPTIMIZATIONS_CHECKPOINT_SPEC_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:

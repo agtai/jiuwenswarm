@@ -130,6 +130,11 @@ feature.
 
 The first implementation is a benchmark/harness, not the product join.
 
+It extends the existing `LatencyProbeRuntime`, Browser latency-round marks,
+correlation identity and report reduction. It may add only the missing
+result-wait start/return boundaries and a fixture-specific reducer; it must not
+create a second trace/event protocol or general observability platform.
+
 It composes the real current `ProductP1VoiceRoute` owner and Gateway registry
 seams with deterministic dependencies. Fixed populations vary two independent
 readiness times:

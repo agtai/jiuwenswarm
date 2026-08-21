@@ -141,7 +141,24 @@ fails, it terminates with a typed failed, unknown or degraded outcome and
 bounded cleanup. Replaying its audio into a new Server VAD session could
 duplicate or truncate the user turn and is forbidden.
 
-## 7. No-Browser causal runner
+## 7. Existing probe and no-Browser causal runner
+
+This packet must extend the existing measurement owners rather than create a
+second event protocol or general observability platform:
+
+- existing `LatencyProbeRuntime`, correlation identity, marks and report
+  reduction remain authoritative for boundaries they already observe;
+- the EOT/STT packet adds only missing settlement/waiter marks to that probe;
+- `scripts/live_voice/vad_eot_causal_benchmark.py` and
+  `scripts/live_voice/vad_eot_benchmark_support.py` remain the owning causal
+  benchmark framework for audio-ground-truth endpointing;
+- the Semantic VAD runner may add a closed configuration dimension and report
+  fields, but must reuse the existing pacing, corpus validation, integrity,
+  privacy, cleanup and forbidden-effect machinery.
+
+`final_voiced_frame_to_eot_ms` remains benchmark-owned because the full-pipeline
+latency probe cannot infer the private corpus's exact final voiced sample. That
+specialized metric is not a competing trace protocol.
 
 The runner exercises the real typed Streaming Speech and OpenAI Adapter seam.
 It:
@@ -346,7 +363,8 @@ Required deliverables are:
 
 1. typed Semantic VAD model and Adapter contract, feature-off in product;
 2. deterministic protocol, ordering, failure and compatibility tests;
-3. extended no-Browser A/B/A runner and closed sanitized report schema;
+3. the existing no-Browser VAD runner extended for A/B/A mode/configuration and
+   its closed sanitized report schema;
 4. immutable private English semantic corpus and verifier;
 5. pilot plus formal real-Provider reports for `auto` and `high`;
 6. independent Tier-3 module review and a sanitized result document bound to
