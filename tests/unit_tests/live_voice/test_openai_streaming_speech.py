@@ -2003,6 +2003,183 @@ async def test_streaming_tts_sse_has_derived_cursor_and_request_level_text_prove
 
 
 @pytest.mark.asyncio
+async def test_default_sse_trace_observer_reports_only_closed_transport_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_delta = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    class HttpxResponse(FakeSseStream):
+        async def aiter_lines(self):
+            async for line in self:
+                yield line
+
+    response = HttpxResponse(
+        (
+            audio_delta,
+            "",
+            audio_delta,
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+    response.status_code = 200
+    response.headers = {
+        "content-type": "text/event-stream",
+        "content-encoding": "identity",
+    }
+    observed: list[tuple[SynthesisStreamRef, str, float]] = []
+    trace_payload = {"private": "trace-sentinel"}
+    client_close_count = 0
+
+    class Request:
+        def __init__(self, extensions: Mapping[str, object]) -> None:
+            self.extensions = extensions
+
+    class Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def build_request(
+            self,
+            _method: str,
+            _url: str,
+            *,
+            headers: Mapping[str, str],
+            json: Mapping[str, str],
+            extensions: Mapping[str, object],
+        ) -> Request:
+            assert headers["Authorization"].startswith("Bearer ")
+            assert json["response_format"] == "pcm"
+            return Request(extensions)
+
+        async def send(self, request: Request, *, stream: bool):
+            assert stream is True
+            trace = request.extensions["trace"]
+            assert callable(trace)
+            await trace("connection.connect_tcp.started", trace_payload)
+            await trace("connection.connect_tcp.complete", trace_payload)
+            await trace("connection.start_tls.started", trace_payload)
+            await trace("connection.start_tls.complete", trace_payload)
+            await trace("http11.send_request_headers.started", trace_payload)
+            await trace("http11.receive_response_headers.complete", trace_payload)
+            await trace("http11.receive_response_body.started", trace_payload)
+            return response
+
+        async def aclose(self) -> None:
+            nonlocal client_close_count
+            client_close_count += 1
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech.httpx.AsyncClient",
+        Client,
+    )
+    clock_value = 1.0
+
+    def monotonic() -> float:
+        nonlocal clock_value
+        clock_value += 0.1
+        return clock_value
+
+    request = synthesis_request()
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        monotonic=monotonic,
+        synthesis_transport_observer=lambda ref, name, at: observed.append(
+            (ref, name, at)
+        ),
+    )
+    provider.conformance.activate_response(request.ref.response)
+
+    await provider.open_synthesis(request)
+    events = [
+        await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        for _ in range(5)
+    ]
+
+    assert [event.kind for event in events] == [
+        SynthesisEventKind.STARTED,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.COMPLETED,
+    ]
+    assert [(ref, name) for ref, name, _ in observed] == [
+        (request.ref, "connect_tcp.started"),
+        (request.ref, "connect_tcp.complete"),
+        (request.ref, "start_tls.started"),
+        (request.ref, "start_tls.complete"),
+        (request.ref, "send_request_headers.started"),
+        (request.ref, "receive_response_headers.complete"),
+        (request.ref, "first_audio_event"),
+    ]
+    observed_at = [at for _, _, at in observed]
+    assert observed_at == sorted(observed_at)
+    assert len(set(observed_at)) == 7
+    assert trace_payload == {"private": "trace-sentinel"}
+    assert client_close_count == 1
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_transport_observer_failure_cannot_change_product_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    stream = FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    def observer(*_args: object) -> None:
+        raise RuntimeError("private-observer-sentinel")
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        synthesis_transport_observer=observer,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER.name):
+        await provider.open_synthesis(request)
+        events = [
+            await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            for _ in range(4)
+        ]
+
+    assert [event.kind for event in events] == [
+        SynthesisEventKind.STARTED,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.COMPLETED,
+    ]
+    assert "private-observer-sentinel" not in caplog.text
+    assert provider.degradation_facts == ()
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_synthesis_timeout_is_per_event_not_whole_stream() -> None:
     pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
     audio_delta = "data: " + json.dumps(

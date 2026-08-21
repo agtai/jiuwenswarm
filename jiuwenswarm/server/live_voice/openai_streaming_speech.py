@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 from urllib.parse import urlencode, urlparse, urlunparse
 
 import httpx
@@ -139,6 +139,29 @@ class SpeechRouteTier(StrEnum):
     STREAMING = "streaming"
     BATCH = "batch"
     TEXT = "text"
+
+
+SynthesisTransportEventName = Literal[
+    "connect_tcp.started",
+    "connect_tcp.complete",
+    "start_tls.started",
+    "start_tls.complete",
+    "send_request_headers.started",
+    "receive_response_headers.complete",
+    "first_audio_event",
+]
+SynthesisTransportObserver = Callable[
+    [SynthesisStreamRef, SynthesisTransportEventName, float], None
+]
+
+_SYNTHESIS_TRANSPORT_EVENT_NAMES: tuple[SynthesisTransportEventName, ...] = (
+    "connect_tcp.started",
+    "connect_tcp.complete",
+    "start_tls.started",
+    "start_tls.complete",
+    "send_request_headers.started",
+    "receive_response_headers.complete",
+)
 
 
 class SpeechDegradationReason(StrEnum):
@@ -690,6 +713,7 @@ class _SynthesisSession:
     event_seq: int = 0
     audio_cursor: int = 0
     wire_audio_bytes: int = 0
+    first_audio_observed: bool = False
     closing: bool = False
     terminal: bool = False
     on_transport_open: Callable[[], None] | None = field(default=None, repr=False)
@@ -804,10 +828,18 @@ async def _default_sse_factory(
     headers: Mapping[str, str],
     payload: Mapping[str, str],
     timeout_seconds: float,
+    *,
+    trace: Callable[[str, Mapping[str, object]], Awaitable[None]] | None = None,
 ) -> SpeechSseStream:
     client = httpx.AsyncClient(follow_redirects=False, timeout=None)
     try:
-        request = client.build_request("POST", url, headers=headers, json=dict(payload))
+        request_kwargs: dict[str, object] = {
+            "headers": headers,
+            "json": dict(payload),
+        }
+        if trace is not None:
+            request_kwargs["extensions"] = {"trace": trace}
+        request = client.build_request("POST", url, **request_kwargs)
         response = await asyncio.wait_for(
             client.send(request, stream=True), timeout=timeout_seconds
         )
@@ -844,6 +876,7 @@ class OpenAIStreamingSpeechProvider:
         socket_factory: RealtimeSocketFactory | None = None,
         sse_factory: SpeechSseFactory | None = None,
         degradation_sink: DegradationSink | None = None,
+        synthesis_transport_observer: SynthesisTransportObserver | None = None,
         fallback_tier: SpeechRouteTier = SpeechRouteTier.TEXT,
         monotonic: Callable[[], float] = time.monotonic,
         event_queue_wait_seconds: float = EVENT_QUEUE_WAIT_SECONDS,
@@ -860,8 +893,10 @@ class OpenAIStreamingSpeechProvider:
         self._event_queue_wait_seconds = event_queue_wait_seconds
         self._config = config
         self._socket_factory = socket_factory or _default_socket_factory
+        self._uses_default_sse_factory = sse_factory is None
         self._sse_factory = sse_factory or _default_sse_factory
         self._degradation_sink = degradation_sink
+        self._synthesis_transport_observer = synthesis_transport_observer
         if fallback_tier is not SpeechRouteTier.TEXT:
             raise ValueError(
                 "runtime fallback must be text; product wiring owns batch eligibility"
@@ -928,6 +963,33 @@ class OpenAIStreamingSpeechProvider:
     @property
     def cleanup_snapshot(self) -> TransportCleanupSnapshot:
         return self._transport_cleanup_tasks.snapshot()
+
+    def _observe_synthesis_transport(
+        self,
+        ref: SynthesisStreamRef,
+        name: SynthesisTransportEventName,
+    ) -> None:
+        observer = self._synthesis_transport_observer
+        if observer is None:
+            return
+        try:
+            observer(ref, name, self._monotonic())
+        except Exception:
+            return
+
+    def _synthesis_trace_callback(
+        self, ref: SynthesisStreamRef
+    ) -> Callable[[str, Mapping[str, object]], Awaitable[None]] | None:
+        if self._synthesis_transport_observer is None:
+            return None
+
+        async def trace(name: str, _info: Mapping[str, object]) -> None:
+            for normalized in _SYNTHESIS_TRANSPORT_EVENT_NAMES:
+                if name == normalized or name.endswith(f".{normalized}"):
+                    self._observe_synthesis_transport(ref, normalized)
+                    return
+
+        return trace
 
     async def open_recognition(
         self,
@@ -1751,12 +1813,21 @@ class OpenAIStreamingSpeechProvider:
             timeout_ms=max(0, int(self._config.connect_timeout_seconds * 1000)),
         )
         try:
-            stream = await self._sse_factory(
-                endpoint,
-                headers,
-                payload,
-                self._config.connect_timeout_seconds,
-            )
+            if self._uses_default_sse_factory:
+                stream = await _default_sse_factory(
+                    endpoint,
+                    headers,
+                    payload,
+                    self._config.connect_timeout_seconds,
+                    trace=self._synthesis_trace_callback(session.request.ref),
+                )
+            else:
+                stream = await self._sse_factory(
+                    endpoint,
+                    headers,
+                    payload,
+                    self._config.connect_timeout_seconds,
+                )
         except BaseException as exc:
             failure = _safe_transport_exception(exc)
         headers = {}
@@ -1868,6 +1939,14 @@ class OpenAIStreamingSpeechProvider:
                 raise OpenAIStreamingSpeechError(
                     "SPEECH_PROVIDER_AUDIO_LIMIT",
                     "speech Provider audio is invalid or exceeds the limit",
+                )
+            if (
+                self._synthesis_transport_observer is not None
+                and not session.first_audio_observed
+            ):
+                session.first_audio_observed = True
+                self._observe_synthesis_transport(
+                    session.request.ref, "first_audio_event"
                 )
             output = _encode_s16le(session.resampler.feed(_decode_s16le(pcm)))
             frame_bytes = MAX_AUDIO_SAMPLES_PER_FRAME * 2
