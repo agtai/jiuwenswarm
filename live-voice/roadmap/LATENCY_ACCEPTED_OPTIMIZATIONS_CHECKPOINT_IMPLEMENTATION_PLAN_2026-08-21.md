@@ -400,7 +400,7 @@ Voice P1/P2 owners and latency contracts.
   Every material finding receives one causal RED before minimal remediation.
   Rerun Tasks 1–3 gates and record the final clean reviewed B source.
 
-- [ ] **Step 3: Create the A-reference worktree**
+- [x] **Step 3: Create the A-reference worktree**
 
   ```bash
   CHECKPOINT_B_SHA="$(git rev-parse HEAD)"
@@ -414,27 +414,27 @@ Voice P1/P2 owners and latency contracts.
   The variable is resolved and length-checked from the reviewed clean HEAD in
   the same shell before worktree creation; no ambiguous ref is used.
 
-- [ ] **Step 4: Write RED sequential-reference tests in A**
+- [x] **Step 4: Write RED sequential-reference tests in A**
 
   In the A worktree, add no new permanent runner API. Run the existing accepted
   TTS A-reference assertions against current owner interfaces: downlink must
   remain unopened until successor ACK, and `duplex_media_observed` validation
   must remain truthful. Confirm current B source fails the sequential oracle.
 
-- [ ] **Step 5: Reverse only accepted TTS product hunks**
+- [x] **Step 5: Reverse only accepted TTS product hunks**
 
   Use `git show` on `56a1fc4eb7` and `cd4d1b7d3` to inspect the accepted hunks,
   then use `apply_patch` only in the two production files named above. Preserve
   all later unrelated latency, identity, cleanup and receipt fixes. Do not
   restore whole historical blobs.
 
-- [ ] **Step 6: Configure P2 baseline without code reversal**
+- [x] **Step 6: Configure P2 baseline without code reversal**
 
   The A run uses server batch flag false and Web batch size 1. No P2 production
   file changes. Add an A-reference test command proving 10/50/100 RPC counts
   under this mode.
 
-- [ ] **Step 7: Verify A/B diff closure**
+- [x] **Step 7: Verify A/B diff closure**
 
   Require runner/fixture hashes identical. The product diff may contain only
   declared TTS sequential/overlap hunks; P2 differs only by run configuration.
@@ -450,7 +450,7 @@ Voice P1/P2 owners and latency contracts.
   git diff --check
   ```
 
-- [ ] **Step 8: Commit A reference**
+- [x] **Step 8: Commit A reference**
 
   ```bash
   git add \
