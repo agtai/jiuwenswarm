@@ -1505,7 +1505,21 @@ test('mounted bounded text Task route requires a later committed confirmation an
     }
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
     if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.list') {
+      return {
+        request_id: options?.requestId ?? null,
+        ok: true,
+        error: null,
+        result: {
+          tasks: [],
+          cursor: null,
+          next_cursor: null,
+          has_more: false,
+          limit: 100,
+          supported_operations: [],
+        },
+      };
+    }
     if (method === 'live_voice.composition.p3.intent') {
       routeCorrelation = params.correlation_id;
       intentCalls += 1;
@@ -1665,7 +1679,21 @@ test('mounted Task intent failure renders only the stable content-free reason', 
     }
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
     if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.list') {
+      return {
+        request_id: options?.requestId ?? null,
+        ok: true,
+        error: null,
+        result: {
+          tasks: [],
+          cursor: null,
+          next_cursor: null,
+          has_more: false,
+          limit: 100,
+          supported_operations: [],
+        },
+      };
+    }
     if (method === 'live_voice.composition.p3.intent') throw new Error(sentinel);
     throw new Error(`unexpected mounted request: ${method}`);
   };
@@ -4571,7 +4599,21 @@ test('mounted P3 restores the historical task correlation and advances progress 
     if (method === 'live_voice.composition.p2.activate') return activateP2(params);
     if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.list') {
+      return {
+        request_id: options?.requestId ?? null,
+        ok: true,
+        error: null,
+        result: {
+          tasks: [],
+          cursor: null,
+          next_cursor: null,
+          has_more: false,
+          limit: 100,
+          supported_operations: [],
+        },
+      };
+    }
     if (method === 'live_voice.task.status') {
       assert.equal(params.task_id, 'task-historical-progress');
       return mountedP3Status(historicalBinding, {
@@ -4630,7 +4672,7 @@ test('mounted P3 restores the historical task correlation and advances progress 
         [historicalBinding.correlation_id, historicalBinding.correlation_id, 2],
       ],
     );
-    assert.equal(calls.filter(call => call.method === 'live_voice.task.list').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.list').length, 2);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
     assert.equal(
       renderer.root
@@ -6643,6 +6685,407 @@ test('mounted production task adapter renders accepted and running as distinct a
     } finally {
       if (renderer) await act(async () => renderer.unmount());
     }
+  }
+});
+
+test('mounted formal product carrier exposes two authoritative Tasks, replay/result lineage and separate command truth', async () => {
+  const i18n = await createI18n('en');
+  const selected = {
+    task_id: 'task-visible-a',
+    attempt_id: 'attempt-visible-a',
+    attempt_number: 1,
+    correlation_id: 'correlation-visible-a',
+    subject_id: 'subject-visible',
+    session_id: 'session-visible',
+    project_id: 'project-visible',
+    name: 'Visible predecessor',
+    canonical_state: 'terminal',
+    display_state: 'completed',
+    outcome: 'completed',
+    queued: false,
+    admission_priority: null,
+    admission_reason: null,
+    event_head: 1,
+    revision_number: 1,
+    predecessor_task_id: null,
+    successor_task_id: 'task-visible-b',
+    blocking_question: null,
+    progress: 'complete',
+    result_availability: 'available',
+    result_text: 'immutable result A',
+    result_attempt_id: 'attempt-visible-a',
+    replay_event_count: 2,
+    replay_event_types: ['task.accepted', 'task.terminal'],
+    available_operations: [],
+  };
+  const successor = {
+    ...selected,
+    task_id: 'task-visible-b',
+    attempt_id: 'attempt-visible-b',
+    correlation_id: 'correlation-visible-b',
+    name: 'Visible successor',
+    canonical_state: 'running',
+    display_state: 'running',
+    outcome: null,
+    revision_number: 2,
+    predecessor_task_id: 'task-visible-a',
+    successor_task_id: null,
+    result_availability: 'not_ready',
+    result_text: null,
+    result_attempt_id: null,
+    replay_event_types: ['task.accepted', 'task.running'],
+    available_operations: ['task.adjust', 'task.cancel'],
+  };
+  const selectedTasks = [];
+  let refreshes = 0;
+  let confirms = 0;
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(
+          I18nextProvider,
+          { i18n },
+          React.createElement(MountedFormalProductLiveVoiceDemoBar, {
+            active: false,
+            available: true,
+            status: 'idle',
+            interimTranscript: '',
+            committedTranscript: '',
+            handsFree: true,
+            surfaceState: {
+              terminal_notification: null,
+              adjustment_notification: null,
+              task_progress_state: null,
+              task_unread_delivery: {
+                task_id: successor.task_id,
+                attempt_id: 'attempt-visible-b-prior',
+                event_id: 'task-visible-b:event:1',
+                event_seq: 1,
+                acknowledgement: 'pending',
+              },
+              task_experience: {
+                status: 'ready',
+                session_id: 'session-visible',
+                tasks: [selected, successor],
+                selected_task_id: selected.task_id,
+                collection_operations: ['task.create'],
+                command: {
+                  command_id: 'server-command-visible',
+                  request_id: 'request-visible',
+                  operation: 'task.create_successor',
+                  task_id: selected.task_id,
+                  attempt_id: selected.attempt_id,
+                  event_head: selected.event_head,
+                  revision_number: selected.revision_number,
+                  phase: 'confirmation_required',
+                  accepted: false,
+                  applied: false,
+                  terminal_outcome: selected.outcome,
+                  reason: null,
+                },
+                reason: null,
+              },
+            },
+            async onTaskRefresh() { refreshes += 1; },
+            async onTaskSelect(taskId) { selectedTasks.push(taskId); },
+            async onTaskMutation() {},
+            async onTaskConfirm() { confirms += 1; },
+            onEnable() {},
+            onExit() {},
+            onPrimaryAction() {},
+          }),
+        ),
+      );
+    });
+    const panel = renderer.root.findByProps({ 'data-testid': 'formal-p3-task-experience' });
+    const taskNav = panel.findByProps({ 'aria-label': 'Authoritative Tasks' });
+    const rendered = JSON.stringify(renderer.toJSON());
+    assert.equal(taskNav.findAllByType('button').length, 2);
+    assert.match(rendered, /immutable result A/);
+    assert.match(rendered, /task\.accepted → task\.terminal/);
+    assert.match(rendered, /task-visible-a/);
+    assert.match(rendered, /task-visible-b/);
+    assert.match(rendered, /server-command-visible/);
+    assert.match(rendered, /request-visible/);
+    assert.match(rendered, /Accepted.*false/);
+    assert.match(rendered, /Applied.*false/);
+    assert.match(rendered, /Terminal outcome.*completed/);
+    assert.doesNotMatch(rendered, /Unread delivery: pending/);
+
+    await act(async () => taskNav.findAllByType('button')[1].props.onClick());
+    await act(async () => panel.findByProps({ children: 'Refresh Tasks' }).props.onClick());
+    await act(async () => panel.findByProps({ children: 'Confirm exact control' }).props.onClick());
+    assert.deepEqual(selectedTasks, ['task-visible-b']);
+    assert.equal(refreshes, 1);
+    assert.equal(confirms, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
+test('mounted formal P3 owner revalidates list through result before adoption and repeats the full chain on reconnect', async () => {
+  const i18n = await createI18n('en');
+  const browser = installP1BrowserEnvironment();
+  const sessionId = 'mounted-formal-p3-owner-session';
+  const scope = {
+    subject_id: 'mounted-formal-p3-owner-subject',
+    session_id: sessionId,
+    project_id: 'mounted-formal-p3-owner-project',
+    assurance: 'authenticated',
+  };
+  const makeTask = suffix => ({
+    task_id: `mounted-formal-p3-task-${suffix}`,
+    scope,
+    spec: {
+      name: `Mounted Task ${suffix}`,
+      instruction: `Mounted instruction ${suffix}`,
+      origin: {},
+      context: {},
+      executor_id: 'mounted-executor',
+      required_capabilities: [],
+      side_effect_class: 'project_mutation',
+      constraints: [],
+      attributes: {},
+    },
+    state: 'running',
+    attempt_id: `mounted-formal-p3-attempt-${suffix}`,
+    correlation_id: `mounted-formal-p3-correlation-${suffix}`,
+    cancel_requested: false,
+    dispatch_fenced: false,
+    outcome: null,
+    reconciliation: null,
+    revision: { number: 1, predecessor_task_id: null, create_command_id: `mounted-create-${suffix}` },
+    event_head: 1,
+    queued: false,
+    admission: null,
+  });
+  const tasks = [makeTask('a'), makeTask('b')];
+  const timeline = [];
+  const calls = [];
+  const states = [];
+  let holdReconnectResult = false;
+  let rejectReconnectResult = false;
+  let releaseReconnectResult = null;
+  let renderer;
+  const request = async (method, params, options) => {
+    const requestId = options?.requestId ?? null;
+    calls.push({ method, params: { ...params }, requestId });
+    const timelineMethod = method === 'live_voice.composition.p3.progress.activate'
+      ? `${method}:${params.task_id ?? 'generic'}`
+      : method;
+    timeline.push(`${timelineMethod}:start`);
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') {
+      timeline.push(`${method}:success`);
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: { tasks, cursor: null, next_cursor: null, has_more: false, limit: 100, supported_operations: ['task.create'] },
+      };
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      timeline.push(`${timelineMethod}:success`);
+      return {
+        ok: true,
+        result: mountedProgressActivation(params, {
+          task_id: params.task_id ?? tasks[0].task_id,
+          attempt_id: tasks[0].attempt_id,
+        }),
+      };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
+    const task = tasks.find(candidate => candidate.task_id === params.task_id);
+    assert.ok(task, `unknown mounted Task ${params.task_id}`);
+    if (method === 'live_voice.task.status') {
+      timeline.push(`${method}:success`);
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: {
+          task,
+          attempt: {
+            task_id: task.task_id,
+            attempt_id: task.attempt_id,
+            attempt_number: 1,
+            executor_id: 'mounted-executor',
+            executor_ref: 'mounted-carrier',
+            state: 'running',
+            outcome: null,
+            source_seq: 1,
+          },
+          admission: null,
+          retry_admission: { eligible: false, reason: 'TASK_RETRY_STATE_CONFLICT', task_id: task.task_id, attempt_id: null, attempt_number: null },
+          supported_operations: ['task.adjust', 'task.cancel'],
+        },
+      };
+    }
+    if (method === 'live_voice.task.events') {
+      timeline.push(`${method}:success`);
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: {
+          task_id: task.task_id,
+          after_seq: -1,
+          events: [
+            {
+              event_id: `${task.task_id}:event:0`, task_id: task.task_id, attempt_id: task.attempt_id, scope, seq: 0,
+              event_type: 'task.accepted', state: 'accepted', outcome: null, producer: 'task_core', source_event_id: null,
+              causation_id: task.revision.create_command_id, correlation_id: task.correlation_id, occurred_at: '2026-08-21T00:00:00Z', details: {},
+            },
+            {
+              event_id: `${task.task_id}:event:1`, task_id: task.task_id, attempt_id: task.attempt_id, scope, seq: 1,
+              event_type: 'task.running', state: 'running', outcome: null, producer: 'task_core', source_event_id: 'mounted-dispatch',
+              causation_id: task.revision.create_command_id, correlation_id: task.correlation_id, occurred_at: '2026-08-21T00:00:01Z', details: { progress: 'mounted current Attempt' },
+            },
+          ],
+          head_seq: 1,
+          next_after_seq: null,
+          has_more: false,
+          limit: 500,
+          truncated: false,
+          cursor_replay_supported: true,
+        },
+      };
+    }
+    if (method === 'live_voice.task.result') {
+      if (rejectReconnectResult) {
+        rejectReconnectResult = false;
+        timeline.push(`${method}:failure`);
+        throw new Error('mounted reconnect result authority unavailable');
+      }
+      if (holdReconnectResult) {
+        holdReconnectResult = false;
+        await new Promise(resolve => {
+          releaseReconnectResult = resolve;
+        });
+        releaseReconnectResult = null;
+      }
+      timeline.push(`${method}:success`);
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: { task_id: task.task_id, availability: 'not_ready', reason: 'TASK_RESULT_NOT_READY', task_result: null },
+      };
+    }
+    throw new Error(`unexpected mounted formal P3 owner request: ${method}`);
+  };
+
+  const element = isConnected => mountedP3Element(i18n, sessionId, request, undefined, isConnected, undefined, {
+    onProductVoiceStateChange: state => states.push(state),
+  });
+  try {
+    await act(async () => {
+      renderer = create(element(true));
+      await waitForMounted(() => states.at(-1)?.task_experience.status === 'ready', 'formal P3 owner did not complete initial revalidation');
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.task_id === tasks[0].task_id),
+        'formal P3 owner did not adopt its selected durable progress route',
+      );
+    });
+    const firstActivation = timeline.indexOf(`live_voice.composition.p3.progress.activate:${tasks[0].task_id}:start`);
+    assert.ok(firstActivation > timeline.indexOf('live_voice.task.result:success'));
+    assert.ok(firstActivation > timeline.indexOf('live_voice.task.events:success'));
+    assert.equal(states.at(-1).task_experience.tasks.length, 2);
+    assert.equal(states.at(-1).task_experience.selected_task_id, tasks[0].task_id);
+
+    const initialLists = calls.filter(call => call.method === 'live_voice.task.list').length;
+    const initialResults = calls.filter(call => call.method === 'live_voice.task.result').length;
+    const initialActivations = calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length;
+    const initialAcks = calls.filter(call => call.method.includes('.ack')).length;
+    await act(async () => {
+      renderer.update(element(false));
+      await waitForMounted(() => states.at(-1)?.task_experience.status === 'disconnected', 'formal P3 owner did not disconnect');
+    });
+    const mutationCallsAtDisconnect = calls.filter(call => call.method === 'live_voice.composition.p3.intent' || call.method === 'live_voice.composition.p3.mutate').length;
+    holdReconnectResult = true;
+    await act(async () => {
+      renderer.update(element(true));
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.task.result').length > initialResults,
+        'formal P3 owner did not reach the deferred reconnect result read',
+      );
+    });
+    assert.equal(states.at(-1)?.task_experience.status, 'loading');
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length, initialActivations);
+    assert.equal(calls.filter(call => call.method.includes('.ack')).length, initialAcks);
+    await act(async () => {
+      assert.equal(typeof releaseReconnectResult, 'function');
+      releaseReconnectResult();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => states.at(-1)?.task_experience.status === 'ready'
+          && calls.filter(call => call.method === 'live_voice.task.list').length > initialLists
+          && calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length > initialActivations,
+        'formal P3 owner did not activate after its fresh reconnect revalidation',
+      );
+    });
+    const reconnectResultSuccess = timeline.lastIndexOf('live_voice.task.result:success');
+    const reconnectActivation = timeline.lastIndexOf(`live_voice.composition.p3.progress.activate:${tasks[0].task_id}:start`);
+    assert.ok(reconnectActivation > reconnectResultSuccess);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.intent' || call.method === 'live_voice.composition.p3.mutate').length, mutationCallsAtDisconnect);
+
+    const activationsBeforeFailedReconnect = calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length;
+    const acksBeforeFailedReconnect = calls.filter(call => call.method.includes('.ack')).length;
+    await act(async () => {
+      renderer.update(element(false));
+      await waitForMounted(() => states.at(-1)?.task_experience.status === 'disconnected', 'formal P3 owner did not enter the second disconnect');
+    });
+    rejectReconnectResult = true;
+    await act(async () => {
+      renderer.update(element(true));
+      await waitForMounted(
+        () => timeline.at(-1) === 'live_voice.task.result:failure',
+        'formal P3 owner did not reach the rejected reconnect result read',
+      );
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => states.at(-1)?.task_experience.status === 'failed',
+        'formal P3 owner did not fail closed after reconnect result rejection',
+      );
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length, activationsBeforeFailedReconnect);
+    assert.equal(calls.filter(call => call.method.includes('.ack')).length, acksBeforeFailedReconnect);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted P3 feature-off composition allocates no Task experience transport', async () => {
+  const i18n = await createI18n('en');
+  const calls = [];
+  const states = [];
+  let renderer;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    throw new Error(`feature-off mounted route must not call ${method}`);
+  };
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-p3-feature-off', request, {
+        onProductVoiceStateChange: state => states.push(state),
+      }));
+      await waitForMounted(() => states.at(-1)?.task_experience.status === 'disabled', 'mounted P3 feature-off state was not published');
+    });
+    assert.equal(calls.some(call => call.method.startsWith('live_voice.task.') || call.method.startsWith('live_voice.composition.p3.')), false);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
   }
 });
 

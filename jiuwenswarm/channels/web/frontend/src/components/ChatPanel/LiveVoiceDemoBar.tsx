@@ -1,7 +1,12 @@
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import { AlertCircle, LoaderCircle, Mic, Square, Volume2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceTaskAdapter';
+import type {
+  FormalP3TaskExperienceSnapshot,
+  FormalP3TaskMutationInput,
+  FormalP3TaskOperation,
+} from '../../features/live-voice/formal/formalP3TaskExperience';
 import { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
 import './LiveVoiceDemoBar.css';
 
@@ -64,10 +69,185 @@ export type FormalProductTaskPresentationState = Readonly<{
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_progress_state: string | null;
+  task_unread_delivery: Readonly<{
+    task_id: string;
+    attempt_id: string;
+    event_id: string;
+    event_seq: number;
+    acknowledgement: 'idle' | 'pending' | 'acknowledged' | 'failed';
+  }> | null;
+  task_experience: FormalP3TaskExperienceSnapshot;
 }>;
 
 export interface FormalProductLiveVoiceDemoBarProps extends Omit<LiveVoiceDemoBarProps, 'taskActivity'> {
   surfaceState: FormalProductTaskPresentationState | null;
+  onTaskRefresh: () => Promise<void>;
+  onTaskSelect: (taskId: string) => Promise<void>;
+  onTaskMutation: (input: FormalP3TaskMutationInput) => Promise<void>;
+  onTaskConfirm: () => Promise<void>;
+}
+
+const FORMAL_P3_VISIBLE_OPERATIONS = Object.freeze([
+  'task.create',
+  'task.update',
+  'task.adjust',
+  'task.reprioritize',
+  'task.cancel',
+  'task.create_successor',
+  'task.retry',
+  'task.provide_input',
+  'task.pause',
+  'task.resume',
+] as const);
+
+function runFormalP3Action(action: () => Promise<void>): void {
+  void action().catch(() => undefined);
+}
+
+function FormalP3TaskExperiencePanel({
+  snapshot,
+  unreadDelivery,
+  onRefresh,
+  onSelect,
+  onMutation,
+  onConfirm,
+}: Readonly<{
+  snapshot: FormalP3TaskExperienceSnapshot;
+  unreadDelivery: FormalProductTaskPresentationState['task_unread_delivery'];
+  onRefresh: () => Promise<void>;
+  onSelect: (taskId: string) => Promise<void>;
+  onMutation: (input: FormalP3TaskMutationInput) => Promise<void>;
+  onConfirm: () => Promise<void>;
+}>) {
+  const { t } = useTranslation();
+  const [operation, setOperation] = useState<FormalP3TaskOperation>('task.create');
+  const [name, setName] = useState('');
+  const [instruction, setInstruction] = useState('');
+  const [adjustment, setAdjustment] = useState('');
+  const [priority, setPriority] = useState<'low' | 'normal' | 'high' | 'urgent'>('normal');
+  const selected = snapshot.tasks.find(task => task.task_id === snapshot.selected_task_id) ?? null;
+  const selectedUnread = selected !== null
+    && unreadDelivery?.task_id === selected.task_id
+    && unreadDelivery.attempt_id === selected.attempt_id
+    ? unreadDelivery
+    : null;
+  const unsupported = ['task.provide_input', 'task.pause', 'task.resume'].includes(operation);
+  const operationAvailable = operation === 'task.create'
+    ? snapshot.collection_operations.includes(operation)
+    : Boolean(selected?.available_operations.includes(operation));
+  const targetRequired = operation !== 'task.create';
+  const contentReady =
+    (operation !== 'task.create' && operation !== 'task.create_successor' || Boolean(name.trim() && instruction.trim()))
+    && (operation !== 'task.update' || Boolean(instruction.trim()))
+    && (operation !== 'task.adjust' || Boolean(adjustment.trim()));
+  const controlsDisabled = snapshot.status !== 'ready' || ['issuing', 'confirmation_required', 'unknown'].includes(snapshot.command?.phase ?? 'idle');
+  const submit = () => onMutation({
+    operation,
+    ...(targetRequired && selected !== null ? { task_id: selected.task_id } : {}),
+    ...(operation === 'task.create' || operation === 'task.create_successor' ? { name, instruction } : {}),
+    ...(operation === 'task.update' ? { instruction } : {}),
+    ...(operation === 'task.adjust' ? { adjustment } : {}),
+    ...(operation === 'task.reprioritize' ? { priority } : {}),
+  });
+
+  return (
+    <section className="live-voice-demo__p3" aria-label={t('liveVoice.formal.p3.title')} data-testid="formal-p3-task-experience">
+      <header className="live-voice-demo__p3-header">
+        <div>
+          <strong>{t('liveVoice.formal.p3.title')}</strong>
+          <span>{t('liveVoice.formal.p3.authority')}</span>
+        </div>
+        <button type="button" disabled={snapshot.status === 'loading'} onClick={() => runFormalP3Action(onRefresh)}>
+          {t('liveVoice.formal.p3.refresh')}
+        </button>
+      </header>
+      {snapshot.reason !== null && <span className="live-voice-demo__p3-notice" role="alert">{snapshot.reason}</span>}
+      <div className="live-voice-demo__p3-body">
+        <nav className="live-voice-demo__p3-tasks" aria-label={t('liveVoice.formal.p3.tasks')}>
+          {snapshot.tasks.length === 0 ? <span>{t('liveVoice.formal.p3.empty')}</span> : snapshot.tasks.map(task => (
+            <button
+              key={task.task_id}
+              type="button"
+              className={task.task_id === snapshot.selected_task_id ? 'is-active' : undefined}
+              aria-pressed={task.task_id === snapshot.selected_task_id}
+              onClick={() => runFormalP3Action(() => onSelect(task.task_id))}
+            >
+              <strong>{task.name}</strong>
+              <span>{task.display_state}{task.outcome === null ? '' : ` / ${task.outcome}`}</span>
+              <code>{task.task_id}</code>
+              {unreadDelivery?.task_id === task.task_id
+                && unreadDelivery.attempt_id === task.attempt_id
+                && unreadDelivery.acknowledgement !== 'acknowledged' && (
+                <em>{t('liveVoice.formal.p3.unreadDelivery', { state: unreadDelivery.acknowledgement })}</em>
+              )}
+            </button>
+          ))}
+        </nav>
+        <div className="live-voice-demo__p3-detail">
+          {selected === null ? (
+            <span className="live-voice-demo__p3-notice">{t('liveVoice.formal.p3.select')}</span>
+          ) : (
+            <dl>
+              <div><dt>{t('liveVoice.formal.p3.taskAttempt')}</dt><dd><code>{selected.task_id}</code><code>{selected.attempt_id}</code></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.correlation')}</dt><dd><code>{selected.correlation_id}</code></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.state')}</dt><dd><code>{selected.canonical_state}</code></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.outcome')}</dt><dd><code>{selected.outcome ?? '—'}</code></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.admission')}</dt><dd><code>{selected.queued ? 'queued' : 'not queued'}</code><code>{selected.admission_priority ?? '—'}</code><code>{selected.admission_reason ?? '—'}</code></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.progress')}</dt><dd>{selected.progress ?? '—'}</dd></div>
+              <div><dt>{t('liveVoice.formal.p3.blocking')}</dt><dd>{selected.blocking_question ?? '—'}</dd></div>
+              <div><dt>{t('liveVoice.formal.p3.replay')}</dt><dd><code>{selected.replay_event_count}</code><span>{selected.replay_event_types.join(' → ') || '—'}</span></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.unread')}</dt><dd>{selectedUnread === null ? <code>{t('liveVoice.formal.p3.unreadUnavailable')}</code> : <><code>{selectedUnread.acknowledgement}</code><code>{selectedUnread.event_id}:{selectedUnread.event_seq}</code></>}</dd></div>
+              <div><dt>{t('liveVoice.formal.p3.result')}</dt><dd><code>{selected.result_availability ?? '—'}</code><span>{selected.result_text ?? '—'}</span></dd></div>
+              <div><dt>{t('liveVoice.formal.p3.lineage')}</dt><dd><code>{selected.predecessor_task_id ?? '—'}</code><span>→</span><code>{selected.task_id}</code><span>→</span><code>{selected.successor_task_id ?? '—'}</code></dd></div>
+            </dl>
+          )}
+          <div className="live-voice-demo__p3-control">
+                <label>
+                  <span>{t('liveVoice.formal.p3.operation')}</span>
+                  <select value={operation} disabled={controlsDisabled} onChange={event => setOperation(event.target.value as FormalP3TaskOperation)}>
+                    {FORMAL_P3_VISIBLE_OPERATIONS.map(candidate => {
+                      const candidateUnsupported = ['task.provide_input', 'task.pause', 'task.resume'].includes(candidate);
+                      const available = candidate === 'task.create'
+                        ? snapshot.collection_operations.includes(candidate)
+                        : Boolean(selected?.available_operations.includes(candidate));
+                      return <option key={candidate} value={candidate} disabled={candidateUnsupported || !available}>{candidate}{candidateUnsupported ? ` — ${t('liveVoice.formal.p3.unsupported')}` : ''}</option>;
+                    })}
+                  </select>
+                </label>
+                {(operation === 'task.create' || operation === 'task.create_successor') && (
+                  <label><span>{t('liveVoice.formal.p3.name')}</span><input value={name} maxLength={256} onChange={event => setName(event.target.value)} /></label>
+                )}
+                {(operation === 'task.create' || operation === 'task.create_successor' || operation === 'task.update') && (
+                  <label className="is-wide"><span>{t('liveVoice.formal.p3.instruction')}</span><textarea value={instruction} maxLength={4096} onChange={event => setInstruction(event.target.value)} /></label>
+                )}
+                {operation === 'task.adjust' && (
+                  <label className="is-wide"><span>{t('liveVoice.formal.p3.adjustment')}</span><textarea value={adjustment} maxLength={4096} onChange={event => setAdjustment(event.target.value)} /></label>
+                )}
+                {operation === 'task.reprioritize' && (
+                  <label><span>{t('liveVoice.formal.p3.priority')}</span><select value={priority} onChange={event => setPriority(event.target.value as typeof priority)}><option value="low">low</option><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option></select></label>
+                )}
+                <button type="button" disabled={controlsDisabled || unsupported || !operationAvailable || !contentReady} onClick={() => runFormalP3Action(submit)}>
+                  {t('liveVoice.formal.p3.issue')}
+                </button>
+          </div>
+          {snapshot.command !== null && (
+            <div className="live-voice-demo__p3-command" role="status">
+              <strong>{snapshot.command.operation}</strong>
+              <span>{t('liveVoice.formal.p3.command')}: <code>{snapshot.command.command_id}</code></span>
+              <span>{t('liveVoice.formal.p3.request')}: <code>{snapshot.command.request_id ?? '—'}</code></span>
+              <span>{t('liveVoice.formal.p3.accepted')}: <code>{String(snapshot.command.accepted)}</code></span>
+              <span>{t('liveVoice.formal.p3.applied')}: <code>{String(snapshot.command.applied)}</code></span>
+              <span>{t('liveVoice.formal.p3.terminal')}: <code>{snapshot.command.terminal_outcome ?? '—'}</code></span>
+              {snapshot.command.reason !== null && <span>{snapshot.command.reason}</span>}
+              {snapshot.command.phase === 'confirmation_required' && (
+                <button type="button" onClick={() => runFormalP3Action(onConfirm)}>{t('liveVoice.formal.p3.confirm')}</button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function VoiceStatusIcon({ status }: { status: LiveVoiceVisualState }) {
@@ -453,8 +633,9 @@ export function LiveVoiceDemoBar({
 }
 
 /** Production adapter from the formal product surface truth to the shared voice bar. */
-export function FormalProductLiveVoiceDemoBar({ surfaceState, ...props }: FormalProductLiveVoiceDemoBarProps) {
+export function FormalProductLiveVoiceDemoBar({ surfaceState, onTaskRefresh, onTaskSelect, onTaskMutation, onTaskConfirm, ...props }: FormalProductLiveVoiceDemoBarProps) {
   const { t } = useTranslation();
+  const taskExperience = surfaceState?.task_experience ?? null;
   const taskDetail =
     surfaceState?.terminal_notification ??
     surfaceState?.adjustment_notification ??
@@ -468,5 +649,19 @@ export function FormalProductLiveVoiceDemoBar({ surfaceState, ...props }: Formal
         detail: taskDetail,
       }
     : null;
-  return <LiveVoiceDemoBar {...props} taskActivity={taskActivity} />;
+  return (
+    <>
+      <LiveVoiceDemoBar {...props} taskActivity={taskActivity} />
+      {taskExperience !== null && taskExperience.status !== 'disabled' && taskExperience.status !== 'closed' && (
+        <FormalP3TaskExperiencePanel
+          snapshot={taskExperience}
+          unreadDelivery={surfaceState?.task_unread_delivery ?? null}
+          onRefresh={onTaskRefresh}
+          onSelect={onTaskSelect}
+          onMutation={onTaskMutation}
+          onConfirm={onTaskConfirm}
+        />
+      )}
+    </>
+  );
 }

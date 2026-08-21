@@ -74,6 +74,11 @@ import {
   type FormalTaskIntentReceipt,
   type FormalTaskIntentTaskControlBinding,
 } from '../../features/live-voice/formal/formalTaskIntentRoute';
+import {
+  FormalP3TaskExperienceOwner,
+  type FormalP3TaskExperienceSnapshot,
+  type FormalP3TaskMutationInput,
+} from '../../features/live-voice/formal/formalP3TaskExperience';
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
 import {
   BROWSER_AUDIO_SYSTEM_DEFAULT_TOKEN,
@@ -150,11 +155,19 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   task_progress_task_id: string | null;
   task_progress_state: string | null;
   task_progress_delivery_mode: ProductTextProgressEvent['delivery_mode'] | null;
+  task_unread_delivery: Readonly<{
+    task_id: string;
+    attempt_id: string;
+    event_id: string;
+    event_seq: number;
+    acknowledgement: 'idle' | 'pending' | 'acknowledged' | 'failed';
+  }> | null;
   terminal_announcement_state: TerminalAnnouncementState;
   recovery_diagnostic: ProductLiveVoiceRecoveryDiagnostic | null;
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_controls_locked: boolean;
+  task_experience: FormalP3TaskExperienceSnapshot;
 }>;
 
 export interface ProductLiveVoiceSurfaceControl {
@@ -169,6 +182,10 @@ export interface ProductLiveVoiceSurfaceControl {
   cancelTaskConfirmation(): void;
   confirm(): Promise<void>;
   cancelConfirmation(): void;
+  refreshTasks(): Promise<void>;
+  selectTask(taskId: string): Promise<void>;
+  issueTaskMutation(input: FormalP3TaskMutationInput): Promise<void>;
+  confirmTaskMutation(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -1309,6 +1326,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     receipt: null,
     reason: null,
   });
+  const [taskExperience, setTaskExperience] = useState<FormalP3TaskExperienceSnapshot>({
+    status: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? 'idle' : 'disabled',
+    session_id: null,
+    tasks: Object.freeze([]),
+    selected_task_id: null,
+    collection_operations: Object.freeze([]),
+    command: null,
+    reason: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? null : 'FORMAL_P3_TASK_EXPERIENCE_DISABLED',
+  });
+  const taskExperienceValidatedSessionRef = useRef<string | null>(null);
+  const taskExperienceRevalidationPendingSessionRef = useRef<string | null>(null);
   const [p3RetryInspectionStatus, setP3RetryInspectionStatus] = useState<'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed'>('idle');
   const [p3RetryInspectionReason, setP3RetryInspectionReason] = useState<string | null>(null);
   const [p3RetryEligibility, setP3RetryEligibility] = useState<Readonly<FormalTaskControlRecord> | null>(null);
@@ -1409,6 +1437,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
   const taskIntentOwnerRef = useRef<ProductFormalTaskIntentOwner | null>(null);
+  const taskExperienceOwnerRef = useRef<FormalP3TaskExperienceOwner | null>(null);
   const pendingNaturalCreateHandoffRef = useRef<Readonly<{
     owner: ProductFormalTaskIntentOwner;
     session_id: string;
@@ -3618,6 +3647,98 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [correlationId, props.activeSessionId, props.isConnected]);
 
   useEffect(() => {
+    taskExperienceOwnerRef.current?.close();
+    taskExperienceOwnerRef.current = null;
+    const sessionId = props.activeSessionId;
+    if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION) {
+      taskExperienceValidatedSessionRef.current = null;
+      taskExperienceRevalidationPendingSessionRef.current = null;
+      setTaskExperience({
+        status: 'disabled',
+        session_id: null,
+        tasks: Object.freeze([]),
+        selected_task_id: null,
+        collection_operations: Object.freeze([]),
+        command: null,
+        reason: 'FORMAL_P3_TASK_EXPERIENCE_DISABLED',
+      });
+      return;
+    }
+    if (sessionId === null || !hasDurableProductVoiceSession(sessionId)) {
+      taskExperienceValidatedSessionRef.current = null;
+      taskExperienceRevalidationPendingSessionRef.current = null;
+      setTaskExperience({ status: 'idle', session_id: null, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: null, reason: null });
+      return;
+    }
+    if (inspectProductP3TaskTarget({ session_id: sessionId }).status === 'invalid') {
+      setTaskExperience({
+        status: 'failed',
+        session_id: sessionId,
+        tasks: Object.freeze([]),
+        selected_task_id: null,
+        collection_operations: Object.freeze([]),
+        command: null,
+        reason: 'PRODUCT_P3_TASK_TARGET_RECOVERY_REQUIRED',
+      });
+      return;
+    }
+    if (!props.isConnected) {
+      if (taskExperienceValidatedSessionRef.current === sessionId) {
+        taskExperienceRevalidationPendingSessionRef.current = sessionId;
+      }
+      // A route is a connection-local activation hint, not reconnect authority.
+      // The durable Task target journal remains available for the fresh
+      // list/status/events/result recovery owned below.
+      adoptCreatedProgressRoute(null);
+      setTaskExperience(previous => ({
+        ...previous,
+        status: 'disconnected',
+        session_id: sessionId,
+        command: null,
+        reason: 'FORMAL_P3_TASK_RECONNECT_REQUIRED',
+      }));
+      return;
+    }
+    const owner = new FormalP3TaskExperienceOwner({
+      enabled: true,
+      request: (method, params, requestId) => productRequest(method, params, { requestId }),
+      on_snapshot: snapshot => {
+        if (taskExperienceOwnerRef.current !== owner || activeSessionRef.current !== sessionId) return;
+        if (snapshot.status === 'loading' && taskExperienceValidatedSessionRef.current === sessionId) {
+          taskExperienceRevalidationPendingSessionRef.current = sessionId;
+        }
+        setTaskExperience(snapshot);
+        const selected = snapshot.status === 'ready'
+          ? snapshot.tasks.find(task => task.task_id === snapshot.selected_task_id)
+          : undefined;
+        if (snapshot.status === 'ready') {
+          taskExperienceValidatedSessionRef.current = sessionId;
+          taskExperienceRevalidationPendingSessionRef.current = null;
+        }
+        if (selected === undefined && createdProgressRouteRef.current !== null) {
+          adoptCreatedProgressRoute(null);
+        }
+        if (selected !== undefined && createdProgressRouteRef.current?.task_id !== selected.task_id) {
+          adoptCreatedProgressRoute(Object.freeze({
+            task_id: selected.task_id,
+            correlation_id: selected.correlation_id,
+            origin: null,
+          }));
+        }
+      },
+    });
+    taskExperienceOwnerRef.current = owner;
+    setTaskExperience(owner.snapshot());
+    void owner.refresh(sessionId).catch(() => {
+      // The owner publishes a fail-closed snapshot with no retained controls.
+    });
+    return () => {
+      owner.close();
+      if (taskExperienceOwnerRef.current === owner) taskExperienceOwnerRef.current = null;
+    };
+  }, [productRequest, props.activeSessionId, props.isConnected]);
+
+  useEffect(() => {
     if (!props.isConnected) {
       p3ProgressReconciliationGenerationRef.current += 1;
       cancelP3RetryInspection();
@@ -5139,6 +5260,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     let cancelled = false;
     let owner: ProductWebP3ProgressOwner | null = null;
     const ownedSessionId = props.activeSessionId;
+    const ownedProgressRoute = createdProgressRoute;
     const ownedProgressCorrelationId = createdProgressCorrelationId ?? correlationId;
     const ownedProgressOrigin = createdProgressOrigin;
     const ownerEpoch = progressOwnerEpochRef.current + 1;
@@ -5176,6 +5298,33 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             fallback_reason: null,
           });
         }
+        return;
+      }
+      // A loading Task-experience snapshot clears the ref synchronously, but
+      // this effect can still hold the previous render's route. Fence that old
+      // closure before it can reactivate or ACK. Once the formal collection has
+      // supplied authority, reconnect and later refreshes stay blocked until a
+      // complete fresh list/status/events/result read publishes its selection.
+      // Legacy P3 progress remains independently owned until that first formal
+      // collection read succeeds, preserving the accepted P3-5B boundary.
+      const routeIsCurrent = ownedProgressRoute === createdProgressRouteRef.current;
+      const formalRevalidationPending = taskExperienceRevalidationPendingSessionRef.current === ownedSessionId;
+      const formalCollectionOwnsSession = taskExperienceValidatedSessionRef.current === ownedSessionId;
+      if (
+        !routeIsCurrent
+        || formalRevalidationPending
+        || (formalCollectionOwnsSession && ownedProgressRoute === null)
+      ) {
+        setP3Activation({
+          status: 'idle',
+          binding: null,
+          reason: null,
+          requested_origin_kind: null,
+          effective_origin_kind: null,
+          voice_progress: null,
+          voice_reason: null,
+          fallback_reason: null,
+        });
         return;
       }
       const taskTargetInspection = createdProgressRoute === null ? inspectProductP3TaskTarget({ session_id: props.activeSessionId }) : null;
@@ -5587,11 +5736,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         task_progress_task_id: progress?.task_id ?? null,
         task_progress_state: progress?.state ?? null,
         task_progress_delivery_mode: progress?.delivery_mode ?? null,
+        task_unread_delivery: progress === null ? null : Object.freeze({
+          task_id: progress.task_id,
+          attempt_id: progress.attempt_id,
+          event_id: progress.source_event.event_id,
+          event_seq: progress.source_event.seq,
+          acknowledgement: progressAck,
+        }),
         terminal_announcement_state: terminalAnnouncementState,
         recovery_diagnostic: recoveryDiagnostic,
         terminal_notification: terminalNotification,
         adjustment_notification: adjustmentNotification,
         task_controls_locked: taskControlsLocked,
+        task_experience: taskExperience,
       }),
     );
   }, [
@@ -5606,8 +5763,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     productVoiceAvailable,
     productCommandRoute,
     progress?.delivery_mode,
+    progress?.attempt_id,
+    progress?.source_event.event_id,
+    progress?.source_event.seq,
     progress?.state,
     progress?.task_id,
+    progressAck,
     props.onProductVoiceStateChange,
     props.isConnected,
     editedVoiceDraftConfirmation?.phase,
@@ -5619,6 +5780,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     adjustmentNotification,
     terminalAnnouncementState,
     terminalNotification,
+    taskExperience,
   ]);
 
   useEffect(() => {
@@ -5636,6 +5798,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       cancelConfirmation: () => {
         updateRecognizedSpeechConfirmation(null);
         updateEditedVoiceDraftConfirmation(null);
+      },
+      refreshTasks: async () => {
+        const owner = taskExperienceOwnerRef.current;
+        const sessionId = activeSessionRef.current;
+        if (owner === null || sessionId === null || !isConnectedRef.current) throw new Error('formal P3 Task experience is unavailable');
+        await owner.refresh(sessionId);
+      },
+      selectTask: async taskId => {
+        const owner = taskExperienceOwnerRef.current;
+        if (owner === null || !isConnectedRef.current) throw new Error('formal P3 Task experience is unavailable');
+        await owner.select(taskId);
+      },
+      issueTaskMutation: async input => {
+        const owner = taskExperienceOwnerRef.current;
+        if (owner === null || !isConnectedRef.current) throw new Error('formal P3 Task experience is unavailable');
+        await owner.issue(input);
+      },
+      confirmTaskMutation: async () => {
+        const owner = taskExperienceOwnerRef.current;
+        if (owner === null || !isConnectedRef.current) throw new Error('formal P3 Task experience is unavailable');
+        await owner.confirm();
       },
       close: closeProductVoice,
     });

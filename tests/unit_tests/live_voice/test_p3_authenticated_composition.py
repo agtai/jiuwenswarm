@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CONTRACT_VERSION,
@@ -29,6 +30,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     TurnCommitLedger,
 )
+from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice.formal_task_models import (
     AdmissionPolicy,
     ExecutorDeliveryResult,
@@ -85,6 +88,7 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
 from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     ProductCompositionSettings,
+    _project_production_status_authority,
 )
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityDecisionStatus,
@@ -1058,6 +1062,432 @@ async def test_registry_production_classifier_bridge_store_and_core_without_hint
 
     await registry.stop()
     await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_agentserver_structured_continuation_reaches_registry_and_sqlite_exactly_once(
+    tmp_path: Path,
+) -> None:
+    future_expiry = "2100-01-01T00:00:00Z"
+    harness = _harness(
+        tmp_path,
+        expires_at=future_expiry,
+        contexts={
+            "session-1": _context(tmp_path, expires_at=future_expiry),
+            "session-2": _context(
+                tmp_path,
+                project_id="project-2",
+                session_id="session-2",
+                expires_at=future_expiry,
+            ),
+        },
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=ProductP3ConfirmationForwarder(owner),
+    )
+    server = object.__new__(AgentWebSocketServer)
+    server._live_voice_product_composition = registry
+    server._live_voice_product_observability = None
+
+    class Socket:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, payload: str) -> None:
+            self.sent.append(payload)
+
+    async def through_agentserver(
+        request_id: str,
+        params: dict[str, object],
+        *,
+        session_id: str = "session-1",
+    ) -> dict[str, object]:
+        socket = Socket()
+        await server._handle_live_voice_product_request(
+            socket,
+            AgentRequest(
+                request_id=request_id,
+                channel_id="web",
+                session_id=session_id,
+                req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+                params=params,
+            ),
+            asyncio.Lock(),
+        )
+        wire = json.loads(socket.sent[0])
+        assert wire["status"] == "succeeded", wire
+        payload = wire["body"]["result"]
+        assert isinstance(payload, dict)
+        return payload
+
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-structured-seed"),
+            request_id="request-structured-seed",
+            session_id="session-1",
+        )
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        assert await harness.composition._core.drain_outbox_once(observed_at=NOW)
+
+        structured = {
+            "auth_token": TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "correlation-structured-cancel",
+            "source": "structured",
+            "source_id": "command-structured-cancel",
+            "source_confidence": 1,
+            "committed": True,
+            "operation_hint": "task.cancel",
+            "task_id_hint": task_id,
+            "structured_intent": {
+                "operation": "task.cancel",
+                "target": task_id,
+                "arguments": {},
+            },
+        }
+        pending_payload = await through_agentserver(
+            "request-structured-cancel-pending", structured
+        )
+        pending = pending_payload["result"]
+        assert isinstance(pending, dict)
+        assert pending["status"] == "clarification"
+        token = str(pending["confirmation_token"])
+        confirmation = {**structured, "continuation_id": token}
+
+        before_confirm = harness.composition._core.store.counts()
+        confirmed_payload = await through_agentserver(
+            "request-structured-cancel-confirm", confirmation
+        )
+        confirmed = confirmed_payload["result"]
+        assert isinstance(confirmed, dict)
+        assert confirmed["status"] == "dispatched"
+        assert confirmed["operation"] == "task.cancel"
+        assert confirmed["task_id"] == task_id
+        after_confirm = harness.composition._core.store.counts()
+        assert after_confirm != before_confirm
+
+        replayed_payload = await through_agentserver(
+            "request-structured-cancel-confirm", confirmation
+        )
+        assert replayed_payload == confirmed_payload
+        assert harness.composition._core.store.counts() == after_confirm
+
+        changed_duplicate = await registry.handle_p3_intent(
+            params={
+                **confirmation,
+                "source_id": "command-structured-cancel-changed",
+            },
+            request_id="request-structured-cancel-confirm",
+            session_id="session-1",
+        )
+        assert changed_duplicate.ok is False
+        assert changed_duplicate.payload["error"]["reason"] == (
+            "PRODUCT_REQUEST_ID_CONFLICT"
+        )
+        assert harness.composition._core.store.counts() == after_confirm
+
+        second = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-structured-negative"),
+            request_id="request-structured-negative-create",
+            session_id="session-1",
+        )
+        assert second.ok is True, second.payload
+        second_task_id = str(second.payload["result"]["task_id"])
+        # The previously confirmed cancellation is ahead of this create in the
+        # durable outbox. Drain both exact effects before testing an adjustment
+        # that is valid only for the second Task's running Attempt.
+        assert await harness.composition._core.drain_outbox_once(observed_at=NOW)
+        assert await harness.composition._core.drain_outbox_once(observed_at=NOW)
+        assert (
+            harness.composition._core.store.get_task(
+                second_task_id, _scope()
+            ).state.value
+            == "running"
+        )
+        adjustment = {
+            "auth_token": TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "correlation-structured-adjust",
+            "source": "structured",
+            "source_id": "command-structured-adjust",
+            "source_confidence": 1,
+            "committed": True,
+            "operation_hint": "task.adjust",
+            "task_id_hint": second_task_id,
+            "structured_intent": {
+                "operation": "task.adjust",
+                "target": second_task_id,
+                "arguments": {"adjustment": "retain exact proposal"},
+            },
+        }
+        adjustment_pending = await registry.handle_p3_intent(
+            params=adjustment,
+            request_id="request-structured-adjust-pending",
+            session_id="session-1",
+        )
+        assert adjustment_pending.ok is True, adjustment_pending.payload
+        adjustment_token = str(
+            adjustment_pending.payload["result"]["confirmation_token"]
+        )
+        before_rejections = harness.composition._core.store.counts()
+        changed_continuation = await registry.handle_p3_intent(
+            params={
+                **adjustment,
+                "continuation_id": adjustment_token,
+                "source_id": "command-structured-adjust-changed",
+                "operation_hint": "task.cancel",
+                "task_id_hint": task_id,
+                "structured_intent": {
+                    "operation": "task.cancel",
+                    "target": task_id,
+                    "arguments": {},
+                },
+            },
+            request_id="request-structured-adjust-changed",
+            session_id="session-1",
+        )
+        cross_scope = await registry.handle_p3_intent(
+            params={
+                **adjustment,
+                "session_id": "session-2",
+                "continuation_id": adjustment_token,
+            },
+            request_id="request-structured-adjust-cross-scope",
+            session_id="session-2",
+        )
+        assert changed_continuation.ok is False
+        assert cross_scope.ok is False
+        assert harness.composition._core.store.counts() == before_rejections
+        assert harness.executor.adjustments == []
+    finally:
+        await registry.stop()
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_product_status_projects_only_exact_existing_authority_operations(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-status-projection"),
+            request_id="request-status-projection-create",
+            session_id="session-1",
+        )
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        status = await harness.composition.handle(
+            operation="task.status",
+            params={**_base(), "task_id": task_id},
+            request_id="request-status-projection",
+            session_id="session-1",
+        )
+        assert status.ok is True, status.payload
+        raw = status.payload["result"]
+        assert isinstance(raw, dict)
+        retry_admission = raw["retry_admission"]
+        assert isinstance(retry_admission, dict)
+        authority = harness.composition.prepare_production_intent_authority(
+            bearer_token=TOKEN,
+            operation="task.status",
+            session_id="session-1",
+        )
+        fact = authority.reader.task_status(authority.scope, task_id)
+        assert fact is not None
+
+        before_counts = harness.composition._core.store.counts()
+        before_effects = (
+            list(harness.executor.dispatches),
+            list(harness.executor.cancels),
+            list(harness.executor.adjustments),
+        )
+        expected_operations = set(fact.supported_operations)
+        if retry_admission["eligible"] is True:
+            expected_operations.add("task.retry")
+        projected = _project_production_status_authority(
+            raw,
+            production_authority=authority,
+            authority_fact=fact,
+            retry_admission=retry_admission,
+            authorized_operations=frozenset(expected_operations),
+        )
+        assert projected["supported_operations"] == sorted(expected_operations)
+
+        def changed(path: tuple[str, ...], value: object) -> dict[str, object]:
+            candidate = json.loads(json.dumps(raw))
+            cursor: dict[str, object] = candidate
+            for key in path[:-1]:
+                child = cursor[key]
+                assert isinstance(child, dict)
+                cursor = child
+            cursor[path[-1]] = value
+            return candidate
+
+        mismatches = (
+            changed(("task", "scope", "subject_id"), "subject-foreign"),
+            changed(("task", "scope", "project_id"), "project-foreign"),
+            changed(("task", "task_id"), "task-foreign"),
+            changed(("attempt", "attempt_id"), "attempt-stale"),
+            changed(("task", "event_head"), int(raw["task"]["event_head"]) + 1),
+            changed(
+                ("task", "revision", "number"),
+                int(raw["task"]["revision"]["number"]) + 1,
+            ),
+            {**raw, "supported_operations": ["task.cancel"]},
+        )
+        for mismatch in mismatches:
+            with pytest.raises(FormalTaskViolation) as rejected:
+                _project_production_status_authority(
+                    mismatch,
+                    production_authority=authority,
+                    authority_fact=fact,
+                    retry_admission=retry_admission,
+                    authorized_operations=frozenset(expected_operations),
+                )
+            assert rejected.value.reason == (
+                "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH"
+            )
+        assert harness.composition._core.store.counts() == before_counts
+        assert (
+            harness.executor.dispatches,
+            harness.executor.cancels,
+            harness.executor.adjustments,
+        ) == before_effects
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_registry_status_controls_intersect_principal_and_existing_retry_admission(
+    tmp_path: Path,
+) -> None:
+    future_expiry = "2100-01-01T00:00:00Z"
+    harness = _harness(
+        tmp_path,
+        expires_at=future_expiry,
+        contexts={"session-1": _context(tmp_path, expires_at=future_expiry)},
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    harness.executor.dispatch_outcome = TerminalOutcome.CANCELLED
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=ProductP3ConfirmationForwarder(owner),
+    )
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-status-principal"),
+            request_id="request-status-principal-create",
+            session_id="session-1",
+        )
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        assert await harness.composition._core.drain_outbox_once(observed_at=NOW)
+
+        eligible = await registry.handle_p3_query(
+            operation="task.status",
+            params={**_base(), "task_id": task_id},
+            request_id="request-status-principal-eligible",
+            session_id="session-1",
+        )
+        assert eligible.ok is True, eligible.payload
+        eligible_result = eligible.payload["result"]
+        assert isinstance(eligible_result, dict)
+        assert eligible_result["retry_admission"]["eligible"] is True, eligible_result
+        assert "task.retry" in eligible_result["supported_operations"]
+
+        before_counts = harness.composition._core.store.counts()
+        before_effects = (
+            list(harness.executor.dispatches),
+            list(harness.executor.cancels),
+            list(harness.executor.adjustments),
+        )
+        harness.composition._authenticator = StaticBearerAuthenticator(
+            token=TOKEN,
+            principal=_principal(
+                expires_at=future_expiry,
+                allowed_operations=frozenset({"task.list", "task.status"}),
+            ),
+        )
+        listed = await registry.handle_p3_query(
+            operation="task.list",
+            params=_base(),
+            request_id="request-status-principal-list-only",
+            session_id="session-1",
+        )
+        status_only = await registry.handle_p3_query(
+            operation="task.status",
+            params={**_base(), "task_id": task_id},
+            request_id="request-status-principal-status-only",
+            session_id="session-1",
+        )
+        assert listed.ok is True, listed.payload
+        assert listed.payload["result"]["supported_operations"] == []
+        assert status_only.ok is True, status_only.payload
+        status_result = status_only.payload["result"]
+        assert isinstance(status_result, dict)
+        assert status_result["supported_operations"] == []
+        assert status_result["retry_admission"] == {
+            "eligible": False,
+            "reason": "FORMAL_TASK_AUTHORIZATION_DENIED",
+            "task_id": task_id,
+            "attempt_id": None,
+            "attempt_number": None,
+        }
+        assert harness.composition._core.store.counts() == before_counts
+        assert (
+            harness.executor.dispatches,
+            harness.executor.cancels,
+            harness.executor.adjustments,
+        ) == before_effects
+    finally:
+        await registry.stop()
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio

@@ -1591,6 +1591,10 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /FEATURE_LIVE_VOICE_INTEGRATED_WEB\s*&&\s*FEATURE_LIVE_VOICE_INTEGRATED_P1/);
   assert.match(source, /formalProductVoiceEnabled\s*\?\s*\(\s*<FormalProductLiveVoiceDemoBar/);
   assert.match(source, /surfaceState=\{productVoiceState\}/);
+  assert.match(source, /onTaskRefresh=/);
+  assert.match(source, /onTaskSelect=/);
+  assert.match(source, /onTaskMutation=/);
+  assert.match(source, /onTaskConfirm=/);
   assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
   assert.match(source, /addMessageIfAbsent\(event\.session_id/);

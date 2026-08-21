@@ -1280,11 +1280,13 @@ export function ChatPanel({
         previous.task_progress_task_id === next.task_progress_task_id &&
         previous.task_progress_state === next.task_progress_state &&
         previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
+        previous.task_unread_delivery === next.task_unread_delivery &&
         previous.terminal_announcement_state === next.terminal_announcement_state &&
         previous.recovery_diagnostic === next.recovery_diagnostic &&
         previous.terminal_notification === next.terminal_notification &&
         previous.adjustment_notification === next.adjustment_notification &&
-        previous.task_controls_locked === next.task_controls_locked
+        previous.task_controls_locked === next.task_controls_locked &&
+        previous.task_experience === next.task_experience
       ) {
         return previous;
       }
@@ -1401,7 +1403,14 @@ export function ChatPanel({
     },
   };
   const liveVoiceDemoBar = formalProductVoiceEnabled ? (
-    <FormalProductLiveVoiceDemoBar {...formalLiveVoiceDemoProps} surfaceState={productVoiceState} />
+    <FormalProductLiveVoiceDemoBar
+      {...formalLiveVoiceDemoProps}
+      surfaceState={productVoiceState}
+      onTaskRefresh={async () => { await productVoiceControlRef.current?.refreshTasks(); }}
+      onTaskSelect={async taskId => { await productVoiceControlRef.current?.selectTask(taskId); }}
+      onTaskMutation={async input => { await productVoiceControlRef.current?.issueTaskMutation(input); }}
+      onTaskConfirm={async () => { await productVoiceControlRef.current?.confirmTaskMutation(); }}
+    />
   ) : (
     <LiveVoiceDemoBar {...legacyLiveVoiceDemoProps} />
   );

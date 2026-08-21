@@ -172,6 +172,7 @@ from .production_task_classifier import (
     ProductionTaskIntentClassifierContext,
 )
 from .production_task_intent import (
+    AuthenticatedTaskFact,
     BoundedClarificationOwner,
     ClarificationAnswer,
     ProductionConfirmationBinding,
@@ -616,6 +617,103 @@ def _serialize_manifest(manifest: ProductCompositionManifest) -> dict[str, objec
             for route in manifest.routes
         ],
     }
+
+
+def _project_production_status_authority(
+    result_payload: Mapping[str, object],
+    *,
+    production_authority: PreparedProductionIntentAuthority,
+    authority_fact: AuthenticatedTaskFact,
+    retry_admission: Mapping[str, object],
+    authorized_operations: frozenset[str],
+) -> dict[str, object]:
+    """Bind raw Core status to the existing production authority projection."""
+
+    raw_task = result_payload.get("task")
+    raw_attempt = result_payload.get("attempt")
+    if type(authority_fact) is not AuthenticatedTaskFact:
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "task status authority projection requires an exact authenticated fact",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    fact = authority_fact.canonical_dict()
+    if (
+        not isinstance(raw_task, Mapping)
+        or not isinstance(raw_attempt, Mapping)
+        or "supported_operations" in result_payload
+        or raw_task.get("scope") != production_authority.scope.to_dict()
+        or raw_task.get("task_id") != fact.get("task_id")
+        or raw_task.get("attempt_id") != fact.get("attempt_id")
+        or raw_task.get("event_head") != fact.get("event_head")
+        or raw_task.get("state") != fact.get("state")
+        or raw_task.get("outcome") != fact.get("outcome")
+        or not isinstance(raw_task.get("revision"), Mapping)
+        or raw_task["revision"].get("number") != fact.get("revision_number")
+        or not isinstance(raw_task.get("spec"), Mapping)
+        or raw_task["spec"].get("name") != fact.get("name")
+        or raw_attempt.get("task_id") != fact.get("task_id")
+        or raw_attempt.get("attempt_id") != fact.get("attempt_id")
+        or raw_attempt.get("state") != fact.get("attempt_state")
+        or raw_attempt.get("outcome") != fact.get("attempt_outcome")
+        or retry_admission.get("task_id") != fact.get("task_id")
+        or (
+            retry_admission.get("eligible") is True
+            and retry_admission.get("attempt_id") != fact.get("attempt_id")
+        )
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "raw Task status does not bind the production authority fact",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    supported = fact.get("supported_operations")
+    if (
+        not isinstance(supported, list)
+        or any(type(item) is not str for item in supported)
+        or not isinstance(authorized_operations, frozenset)
+        or any(type(item) is not str for item in authorized_operations)
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "production authority operations are not canonical",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    operations = set(supported).intersection(authorized_operations)
+    # Retry is not a production-intent operation. Its existing status admission
+    # reader is already principal-, scope-, lifecycle- and limit-aware.
+    if (
+        retry_admission.get("eligible") is True
+        and "task.retry" in authorized_operations
+    ):
+        operations.add("task.retry")
+    projected = dict(result_payload)
+    projected["retry_admission"] = dict(retry_admission)
+    projected["supported_operations"] = sorted(operations)
+    return projected
+
+
+def _project_production_collection_authority(
+    result_payload: Mapping[str, object],
+    *,
+    supported_operations: frozenset[str],
+) -> dict[str, object]:
+    """Expose only already-authorized collection controls to the Web carrier."""
+
+    if (
+        "supported_operations" in result_payload
+        or not isinstance(result_payload.get("tasks"), list)
+        or not isinstance(supported_operations, frozenset)
+        or any(type(item) is not str for item in supported_operations)
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "Task collection control projection is not canonical",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    projected = dict(result_payload)
+    projected["supported_operations"] = sorted(supported_operations)
+    return projected
 
 
 def _required_text(value: object, field: str, *, maximum: int = 256) -> str:
@@ -9299,8 +9397,11 @@ class AgentServerProductCompositionRegistry:
         source = str(clean["source"])
         try:
             if source == "structured":
+                # The structured carrier already supplied a closed-schema proposal.
+                # Confirmation must reuse that exact retained proposal; reparsing a
+                # client payload here would let the operation or arguments drift.
                 if continuation is not None:
-                    raise ValueError("STRUCTURED_CONTINUATION_UNSUPPORTED")
+                    return continuation.proposal
                 return self._production_task_classifier.parse_structured(
                     clean["structured_intent"],
                     committed=committed,
@@ -10965,7 +11066,42 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
-            if operation == "task.status" and envelope.ok:
+            if operation == "task.list" and envelope.ok:
+                result_payload = payload.get("result")
+                if not isinstance(result_payload, dict):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P3_QUERY_FAILED",
+                        code=ErrorCode.INTERNAL,
+                        manifest=activation.manifest,
+                    )
+                collection_operations: frozenset[str] = frozenset()
+                if self._p3_control_ready():
+                    try:
+                        await asyncio.to_thread(
+                            self._p3_composition.prepare_production_intent_authority,
+                            bearer_token=params.get("auth_token"),
+                            operation="task.create",
+                            session_id=routed_session,
+                        )
+                    except FormalTaskViolation:
+                        pass
+                    else:
+                        collection_operations = frozenset({"task.create"})
+                try:
+                    payload["result"] = _project_production_collection_authority(
+                        result_payload,
+                        supported_operations=collection_operations,
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                        manifest=activation.manifest,
+                    )
+            elif operation == "task.status" and envelope.ok:
                 result_payload = payload.get("result")
                 if not isinstance(result_payload, dict):
                     return _error_result(
@@ -10975,12 +11111,23 @@ class AgentServerProductCompositionRegistry:
                         manifest=activation.manifest,
                     )
                 try:
+                    production_authority = await asyncio.to_thread(
+                        self._p3_composition.prepare_production_intent_authority,
+                        bearer_token=params.get("auth_token"),
+                        operation="task.status",
+                        session_id=routed_session,
+                    )
                     retry_admission = (
                         await self._p3_composition.read_product_status_retry_admission(
                             bearer_token=params.get("auth_token"),
                             session_id=routed_session,
                             task_id=str(task_id or ""),
                         )
+                    )
+                    authority_fact = await asyncio.to_thread(
+                        production_authority.reader.task_status,
+                        production_authority.scope,
+                        str(task_id or ""),
                     )
                 except FormalTaskViolation as exc:
                     return _error_result(
@@ -10999,8 +11146,61 @@ class AgentServerProductCompositionRegistry:
                         reason="PRODUCT_P3_QUERY_FAILED",
                         manifest=activation.manifest,
                     )
-                result_payload = dict(result_payload)
-                result_payload["retry_admission"] = retry_admission
+                if authority_fact is None:
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+                        code=ErrorCode.PROTOCOL_VIOLATION,
+                        manifest=activation.manifest,
+                    )
+                authorized_operations: set[str] = set()
+                if self._p3_control_ready():
+                    if retry_admission.get("eligible") is True:
+                        # The existing retry-admission owner already revalidates
+                        # principal, scope, lifecycle and retry limits. Retry is
+                        # not passed through the production-intent operation set.
+                        authorized_operations.add("task.retry")
+                    candidates = set(authority_fact.supported_operations)
+                    for candidate in sorted(
+                        candidates.intersection(P3_PRODUCTION_MUTATIONS)
+                    ):
+                        try:
+                            candidate_authority = await asyncio.to_thread(
+                                self._p3_composition.prepare_production_intent_authority,
+                                bearer_token=params.get("auth_token"),
+                                operation=candidate,
+                                session_id=routed_session,
+                            )
+                        except FormalTaskViolation:
+                            continue
+                        if (
+                            candidate_authority.principal_id
+                            != production_authority.principal_id
+                            or candidate_authority.scope != production_authority.scope
+                        ):
+                            return _error_result(
+                                request_id,
+                                reason="PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+                                code=ErrorCode.PROTOCOL_VIOLATION,
+                                manifest=activation.manifest,
+                            )
+                        authorized_operations.add(candidate)
+                try:
+                    result_payload = _project_production_status_authority(
+                        result_payload,
+                        production_authority=production_authority,
+                        authority_fact=authority_fact,
+                        retry_admission=retry_admission,
+                        authorized_operations=frozenset(authorized_operations),
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                        manifest=activation.manifest,
+                    )
                 payload["result"] = result_payload
             payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
