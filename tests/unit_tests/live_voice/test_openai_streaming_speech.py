@@ -9,6 +9,7 @@ import traceback
 from collections.abc import Mapping
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
@@ -2122,8 +2123,9 @@ async def test_default_sse_trace_observer_reports_only_closed_transport_boundari
     assert observed_at == sorted(observed_at)
     assert len(set(observed_at)) == 7
     assert trace_payload == {"private": "trace-sentinel"}
-    assert client_close_count == 1
+    assert client_close_count == 0
     await provider.close()
+    assert client_close_count == 1
 
 
 @pytest.mark.asyncio
@@ -2177,6 +2179,205 @@ async def test_synthesis_transport_observer_failure_cannot_change_product_result
     assert provider.degradation_facts == ()
     assert_zero_business_effects(provider)
     await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_default_sse_client_is_reused_until_provider_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    lines = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        ),
+        "",
+        'data: {"type":"speech.audio.done","usage":{}}',
+        "",
+    )
+
+    class Response(FakeSseStream):
+        status_code = 200
+        headers = {
+            "content-type": "text/event-stream",
+            "content-encoding": "identity",
+        }
+
+        async def aiter_lines(self):
+            async for line in self:
+                yield line
+
+    class Request:
+        def __init__(self, extensions: Mapping[str, object] | None) -> None:
+            self.extensions = extensions or {}
+
+    class Client:
+        def __init__(self, kwargs: Mapping[str, object]) -> None:
+            self.kwargs = dict(kwargs)
+            self.responses: list[Response] = []
+            self.close_count = 0
+
+        def build_request(
+            self,
+            _method: str,
+            _url: str,
+            *,
+            headers: Mapping[str, str],
+            json: Mapping[str, str],
+            extensions: Mapping[str, object] | None = None,
+        ) -> Request:
+            assert headers["Authorization"].startswith("Bearer ")
+            assert json["input"] == "A P I"
+            return Request(extensions)
+
+        async def send(self, _request: Request, *, stream: bool) -> Response:
+            assert stream is True
+            response = Response(lines)
+            self.responses.append(response)
+            return response
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    clients: list[Client] = []
+
+    def client_factory(**kwargs: object) -> Client:
+        client = Client(kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech.httpx.AsyncClient",
+        client_factory,
+    )
+    provider = OpenAIStreamingSpeechProvider(config())
+
+    for generation in range(2):
+        request = synthesis_request(generation=generation)
+        provider.conformance.activate_response(request.ref.response)
+        await provider.open_synthesis(request)
+        kinds = []
+        while not kinds or kinds[-1] is not SynthesisEventKind.COMPLETED:
+            event = await provider.next_synthesis_event(
+                request.ref, timeout_seconds=1
+            )
+            kinds.append(event.kind)
+        assert kinds[0] is SynthesisEventKind.STARTED
+        assert kinds[-1] is SynthesisEventKind.COMPLETED
+
+    assert len(clients) == 1
+    assert len(clients[0].responses) == 2
+    assert all(response.closed for response in clients[0].responses)
+    assert clients[0].close_count == 0
+
+    await provider.close()
+
+    assert clients[0].close_count == 1
+    limits = clients[0].kwargs["limits"]
+    assert isinstance(limits, httpx.Limits)
+    assert limits.max_connections == 8
+    assert limits.max_keepalive_connections == 8
+    assert limits.keepalive_expiry == 30.0
+
+
+@pytest.mark.asyncio
+async def test_provider_close_retries_same_failed_sse_client_and_stays_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+            if self.close_count == 1:
+                raise RuntimeError("private-client-close-sentinel")
+
+    client = Client()
+    factory_count = 0
+
+    def client_factory():
+        nonlocal factory_count
+        factory_count += 1
+        return client
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_default_sse_client_factory",
+        client_factory,
+    )
+    provider = OpenAIStreamingSpeechProvider(config())
+    assert await provider._get_or_create_sse_client() is client
+
+    await provider.close()
+
+    assert factory_count == 1
+    assert client.close_count == 2
+    assert provider._sse_client is None
+    assert provider.cleanup_snapshot.clean is True
+
+    await provider.close()
+    assert client.close_count == 2
+
+
+@pytest.mark.asyncio
+async def test_late_sse_client_close_is_retained_without_duplicate_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "TRANSPORT_CLEANUP_CLOSE_BUDGET_SECONDS",
+        0.01,
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.close_count = 0
+            self.close_started = asyncio.Event()
+            self.close_returned = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+            self.close_started.set()
+            while not self.release_close.is_set():
+                try:
+                    await self.release_close.wait()
+                except asyncio.CancelledError:
+                    continue
+            self.close_returned.set()
+
+    client = Client()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_default_sse_client_factory",
+        lambda: client,
+    )
+    provider = OpenAIStreamingSpeechProvider(config())
+    assert await provider._get_or_create_sse_client() is client
+
+    with pytest.raises(OpenAIStreamingSpeechError) as incomplete:
+        await asyncio.wait_for(provider.close(), timeout=0.5)
+    assert incomplete.value.reason == "SPEECH_PROVIDER_CLEANUP_INCOMPLETE"
+    assert client.close_count == 1
+    assert provider._sse_client is client
+    assert provider.cleanup_snapshot.clean is False
+
+    client.release_close.set()
+    await asyncio.wait_for(client.close_returned.wait(), timeout=1)
+    await provider.close()
+
+    assert client.close_count == 1
+    assert provider._sse_client is None
+    assert provider.cleanup_snapshot.clean is True
 
 
 @pytest.mark.asyncio
