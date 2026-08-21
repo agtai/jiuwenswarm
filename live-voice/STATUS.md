@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-20. This is the only mutable source for current product
+> Updated: 2026-08-21. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -15,12 +15,18 @@
   `3aa61f0193ac25e3da277f2dd632870355baf95a`. This source passes the bounded
   P3-2/P3-3/P3-5A file-Tool/A2/control/cleanup Gate only; it is not a complete
   microphone/TTS controlled-product journey.
+- **Latest scoped Wave-3 source and private regression:**
+  `17e929650203525dd3cb41d1878908ffd2c1978b`. P3-4, P3-5B and P3-6 pass their
+  bounded source/automation/review Gate. A fresh ACL-private current-source run
+  also passes the production-factory/real-Agent/file-Tool/reopen/cleanup
+  regression; it is not physical browser/audio-device or complete-P3 proof.
 - **Current product status:** **P3 EXPANSION ACTIVE — P3-G0 passed its scoped
   authoritative-foundation Gate under D-086; controlled product readiness
-  remains unpassed.** P3-2, P3-3 and P3-5A have locally integrated source,
-  affected automation, independent review and a successful bounded physical
-  Wave-2 Gate. The failed post-TTS continuation remains deferred to P1/P2
-  completion and receives no fabricated product-readiness PASS.
+  remains unpassed.** P3-2, P3-3, P3-4, P3-5A, P3-5B and P3-6 have locally
+  integrated source, affected automation and independent review; Wave-2 and
+  the bounded Wave-3 private regression have validated physical credit only
+  for their declared seams. The failed post-TTS continuation remains deferred
+  to P1/P2 completion and receives no fabricated product-readiness PASS.
 - **Accepted historical baseline:** `PASS — INTEGRATED WEB ALPHA` remains bound
   only to `d33b520e0d21ae0829d30814d77a01cc18256f09`. Later source and broader
   functionality do not inherit that result.
@@ -31,9 +37,10 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** preserve the closed D-088 Wave-2 source and
-  physical evidence while activating P3-4, P3-5B and P3-6 in dependency order.
-  The deferred P1/P2 issue is recorded in the
+- **Current highest priority:** preserve the closed D-088 Wave-2 and D-089
+  Wave-3 source/evidence, then select the next bounded packet from the deferred
+  P1/P2 repair or later P3 completion work. No next implementation packet is
+  activated by this status update. The deferred P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
   and must close before a later controlled-candidate or feature-complete claim.
 - **Integration:** integration with a `develop` ref is deferred until the
@@ -86,12 +93,12 @@ risks, dependencies, acceptance and integration order.
 | Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist; manual retry admitted a second turn | Automatic continuation without recurrent recovery failure; interruption during Agent generation, complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
-| Task Control Core and Store | **PARTIAL overall; P3-1, P3-2 and P3-5A scoped Gates PASS.** Schema v5 retains the P3-1 multi-Task authority, implements the closed P3-2 command/disposition/update/successor matrix and adds retained result/event plus pure unread and explicit class-isolated ACK. Durable negative decisions, failpoints, restart verification, two-Store races and the Wave-2 physical journey are closed; unsupported controls remain truthful rather than inventing Executor primitives | Implement P3-5B presentation filtering/invocation, P3-6 product targeting and the later complete one-product-Task model | Executor capability/admission facts, Voice–Task Bridge and restart/concurrency matrix; exact Wave-2 facts in the [evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md) and [review](reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md) |
-| Executor & Durability | **PARTIAL overall; P3-3 scoped source/automation/review/physical Gate PASS.** Immutable Direct capability/profile selection, priority/FIFO admission, project-busy/capacity deferral, absolute deadline, three-fence separation, queued reprioritization and bounded reconciliation are integrated. The successful private run proves real file-Tool pairing, two-project concurrency, A2 busy/dequeue/control and clean settlement on the exact selected Direct binding | Add supported D1 checkpoint and D2 reconciliation semantics in P3-4 | Tier-3 Direct Adapter/Agent/Tool evidence plus Core/Store admission integration; D1/D2 remain explicitly excluded from Wave-2 |
-| Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
-| Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses. A broader P3-1 diagnostic also reproduced the unchanged mounted Exit/immediate-re-enable presentation-ACK timing failure at 406/407; both remain outside the accepted Core/Store package | Complete P3 controls/projections while preserving profile semantics; later close capture/Exit recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus deferred P1/P2 completion |
+| Task Control Core and Store | **PARTIAL overall; P3-1, P3-2, P3-4, P3-5A, P3-5B and P3-6 scoped Gates PASS.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; unsupported controls remain truthful | Complete later P3 UI/product-model packages and cumulative one-product acceptance without adding a second Task, event, presentation or confirmation authority | Executor capability/admission/durability facts, Voice–Task Bridge and restart/concurrency matrix; exact Wave-3 facts in the [evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md) and [review](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md) |
+| Executor & Durability | **PARTIAL overall; P3-3 and P3-4 scoped Gates PASS.** Immutable Direct capability/profile selection, priority/FIFO admission, project-busy/capacity deferral, D0/D1/D2 truth, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect manual settlement are integrated. Real Agent/file-Tool production regression and Store/Direct/OS-lock product-path evidence are closed within their declared boundaries | Generalize the supported Executor/configuration matrix and carry D0-D2 truth through later product acceptance; no additional durability primitive is implied | Tier-3 Direct/Store/Core evidence plus exact Wave-2 and Wave-3 private boundaries; the private run is not a host-crash oracle |
+| Voice–Task Bridge | **PARTIAL overall; P3-6 scoped Gate PASS.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported; clarification, durable single-use confirmation, parity and zero-false-truth paths are closed | Add later P3-7 product UI and broader language/policy generalization; provide-input/pause/resume remain unsupported until real primitives exist | Exact Store Task/Attempt/event/result/capability truth, authenticated context/model reread and the 68-case/14-group corpus |
+| Integrated Web product experience | **PARTIAL overall; P3-5B scoped Gate PASS.** Text consumption follows connected-DOM adoption and voice consumption follows canonical Runtime AUDIO ACK; fallback, reconnect, Attempt rollover, large prefixes and ACK/close/retry are bounded. The explicit profile, P2/P3 composition and real foreground Agent text/TTS remain present, while the unchanged mounted Exit/immediate-re-enable timing failure is still reproducible | Implement P3-7 Task UI and later controls/projections; close deferred capture/Exit recovery, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks only after replacement | P3-2 through P3-9 plus deferred P1/P2 completion; no physical audio-device credit from P3-5B automation |
 | Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations now include a bounded content-free SLI calculator, complete declaration-only telemetry privacy profile and source-bound canonical OTel backend codec that reuses the current observability owner's calendar and private-carrier validation. The codec is not product-composed and owns no exporter/backend lifecycle | Compose the codec behind the existing adapter/exporter in the later owning package; add validated backend configuration and exact Task/Attempt/Command/activation/generation/ACK/Executor diagnostics; then execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with a fresh physical baseline, stable EOT/Agent/TTS/first-audible facts, authoritative ACK, formal sentence-level Agent→TTS overlap and fixed-corpus p50/p95 proof | Exact scoped evidence in the [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md); P3-8B composition/retirement after P3-7; fixed corpus/environment and Conversation Runtime/P1 media owners |
-| Automated verification and product acceptance | **PARTIAL overall; Wave-2 scoped Gate PASS.** Exact-source G0 affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review retain their source-bound credit. The current Wave-2 source package has a final integrated `1008 passed, 5 skipped` regression, shared Python `133/133`, TypeScript/JavaScript `40/40`, production build/static checks, independent Tier-3 review and a validated real file-Tool/A2/control/cleanup journey. The controlled product candidate remains FAIL | Repair/rerun the P1/P2 seam and complete later P3 packages, the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, the [Wave-2 evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md), current acceptance and exact clean source |
+| Automated verification and product acceptance | **PARTIAL overall; Wave-2 and bounded Wave-3 scoped Gates PASS.** Wave-3 closes `477` final affected Python tests, a broad `2721 passed, 5 skipped, 1 known failure`, Formal Web `414/415` with one known P1/P2 failure, strict contracts `45/45` and `14/14`, production build, `67/67` S8 readiness, static checks, independent Tier-3 review and a validated current-source real Agent/file-Tool private regression. The controlled product candidate remains FAIL | Repair/rerun the P1/P2 seam and complete later P3 packages, the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, the [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md), current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -138,8 +145,8 @@ exact-source Alpha result.
 ## Current execution packet
 
 - **Packet:** D-089 bounded Wave 3 — P3-4 durability/recovery, P3-5B
-  presentation consumption and P3-6 multi-Task intent resolution; **active on
-  three isolated local worker lanes with Main-only integration ownership**.
+  presentation consumption and P3-6 multi-Task intent resolution; **closed
+  locally with scoped source/automation/review/private-evidence PASS**.
 - **Authority:** clean activation baseline
   `cfff0c43aa599c009ab9517397566fec5c1bdd95`, [D-089](decisions/DECISIONS.md),
   the [Wave-3 execution packet](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EXECUTION_PACKET_2026-08-20.md),
@@ -149,29 +156,29 @@ exact-source Alpha result.
   [P3-5B implementation review](reviews/P3_5B_PRESENTATION_CONSUMPTION_IMPLEMENTATION_REVIEW_2026-08-21.md).
   The scoped P3-4 source and affected-automation verdict is recorded in the
   [P3-4 implementation review](reviews/P3_4_DURABILITY_RECOVERY_IMPLEMENTATION_REVIEW_2026-08-21.md).
-  Minimum-intervention mode is active for task-scoped local work; every
-  remote-ref update remains separately excluded until exact user approval.
+  Final integration/review and private evidence are in the
+  [Wave-3 implementation review](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md)
+  and [evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md).
+  Every remote-ref update remains separately excluded until exact user
+  approval.
 - **Source state:** D-088 Wave-2 P3-2/P3-3/P3-5A source and physical evidence
-  remain accepted on their exact sources. The W3 branch now contains the local
-  review-clean P3-4 schema-v6/Direct recovery source at
-  `b2366e293e1f039140d6a84bc9383a8589d39bfb`, the review-clean scoped P3-5B
-  presentation-consumption source at
-  `d6d3eafefef13a3aaaece289db4c95835b65cd30`, and P3-6 resolver-policy
-  commits. P3-6 still lacks its real classifier/authenticated Core invocation.
-  No child source, test harness, corpus or pure asset currently grants final
-  Wave-3 product credit.
-- **Execution:** worker branches `codex/w3-p3-4`, `codex/w3-p3-5b` and
-  `codex/w3-p3-6` preserve their isolated returns; P3-4 and P3-5B are now
-  integrated and review-clean. Main is opening the P3-6 shared-composition
-  write set. Main remains the
-  sole schema-semantic, integration-history, Tier-3-verdict and evidence owner.
-  D-090 reactivates only the existing P3-5A/Core Task-wide consumer cursor read
-  Port for restart, rollover and bounded replay; it adds no schema or second
-  consumer authority.
-- **Next action:** implement P3-6 real classification, single-consume
-  confirmation and authenticated Core invocation, then complete its independent
-  review. After that child Gate, run one final broad Gate and the minimum honest
-  ACL-private physical scenarios.
+  remain accepted on their exact sources. The W3 branch contains review-clean
+  P3-4 schema-v6/Direct recovery, P3-5B presentation consumption and P3-6 real
+  classifier/authenticated Store/Core invocation. D-090 reuses the existing
+  Task-wide consumer cursor authority and adds no schema or second ledger.
+- **Execution:** the final affected Python set, one fresh broad Python Gate,
+  Formal Web, strict contracts, production build, S8 readiness and static
+  checks completed. Two independently reviewed baseline failures remain
+  disclosed: D-087 cancelled-only retry versus an old completed-retry test, and
+  the P1/P2 mounted Exit/immediate-re-enable ACK timing case. A fresh
+  ACL-private current-source production run validated real Agent/file-Tool,
+  Direct admission/control, Store reopen and cleanup with zero observation
+  loss. P3-5B browser/audio and the full P3-6 operation set retain their exact
+  product-path automation credit rather than fabricated physical credit.
+- **Next action:** no new implementation packet is activated. Preserve the
+  closed local Wave-3 line, obtain exact approval before any remote update, and
+  select the next bounded packet from the deferred P1/P2 repair or later P3
+  completion route.
 - **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; unsupported
   controls without real primitives; P3-7 UI; P3-8B retirement; P3-9 cumulative
   acceptance; complete P3, feature complete, controlled-candidate PASS,
@@ -202,8 +209,12 @@ exact-source Alpha result.
    and P3-5A retained replay/unread ACK~~ **DONE — SCOPED SOURCE/AUTOMATION/
    REVIEW/PHYSICAL GATE PASS.** The fresh private run proves the required real
    file-Tool pairs, A2 busy/zero-effect/same-Attempt dequeue, adjustment,
-   cancellation and clean durable settlement. Activate P3-4, P3-5B and P3-6 in
-   dependency order. Continue migrating each still-applicable
+   cancellation and clean durable settlement. ~~Activate P3-4, P3-5B and P3-6
+   in dependency order~~ **DONE — BOUNDED WAVE-3 GATE PASS.** Schema-v6
+   durability/recovery, presentation-gated consumption and authenticated
+   multi-Task intent resolution are integrated, independently reviewed and
+   bound to current-source private Agent/Tool regression evidence. Continue
+   migrating each still-applicable
    historical oracle with its first owning package; perform code placement,
    duplicate consolidation and entrypoint/document retirement only after
    replacement without deleting live coverage. Complete P1/P2 quality in
@@ -290,6 +301,16 @@ exact-source Alpha result.
 
 ## Verification and runtime truth
 
+- `P3-4/P3-5B/P3-6` bounded Wave-3 source passes final affected automation,
+  strict contracts, production build, S8 readiness, static checks and
+  independent Tier-3/fix-only review. Broad Python and Formal Web completed
+  with two disclosed out-of-scope baseline failures. The fresh ACL-private
+  current-source run validated
+  production registration/factory, real Agent/file-Tool observations,
+  admission/control, reopen and cleanup with 22 observations and zero loss or
+  pairing error. Exact commands, counts and non-claims are recorded in the
+  [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md)
+  and [review](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md).
 - `P3-2/P3-3/P3-5A` Wave-2 source, schema, composition and default-off evidence
   observer have affected automation/static/build and independent Tier-3 review
   credit, including the final `1008 passed, 5 skipped` combined regression,

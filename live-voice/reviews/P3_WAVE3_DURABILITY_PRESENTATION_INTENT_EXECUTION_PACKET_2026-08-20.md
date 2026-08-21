@@ -108,4 +108,13 @@ root and existing private configuration. A failed root is retained as
 
 ## 5. Results
 
-Pending implementation, integration, review, automation and physical evidence.
+The packet was locally closed on 2026-08-21 at exact integrated source
+`17e929650203525dd3cb41d1878908ffd2c1978b`. P3-4, P3-5B and P3-6 passed their
+scoped implementation, automation and independent Tier-3/fix-only reviews; the
+fresh ACL-private current-source production run also passed its bounded real
+Agent/file-Tool/reopen/cleanup contract. Exact results and honest physical
+boundaries are recorded in the
+[implementation review](P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md)
+and [sanitized evidence](../evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md).
+No remote update, complete-P3, controlled-product, feature-complete or
+Production credit was granted.
