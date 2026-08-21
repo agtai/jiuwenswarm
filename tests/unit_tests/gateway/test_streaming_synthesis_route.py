@@ -2254,3 +2254,286 @@ async def test_a_restarted_owner_does_not_inherit_the_retirement_fence(
     assert replayed is not None and replayed_outcome is None
     await restarted.cancel(replayed)
     await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_close_racing_a_slow_open_leaves_the_connection_task_serving() -> None:
+    """B24: close may cancel only work this owner created, never its caller.
+
+    The caller is modelled as a real WebSocket/RPC connection task that serves
+    more than one request, so killing it would take the whole connection down.
+    """
+
+    provider = _FakeProvider()
+    provider.open_gate = asyncio.Event()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    request = _request(stream_id="connection-open-vs-close")
+    served: list[object] = []
+
+    async def connection() -> str:
+        handle, outcome = await owner.begin(request)
+        served.append(("begin", handle, outcome))
+        served.append(("later-rpc", await owner.available()))
+        return "connection-alive"
+
+    connection_task = asyncio.create_task(connection())
+    # Deterministic barrier: the Provider open has started, so `begin` has
+    # published its opening work and is parked inside the owner-created task.
+    await provider.open_started.wait()
+    await owner.close()
+    provider.open_gate.set()
+
+    await asyncio.wait({connection_task}, timeout=1.0)
+    assert connection_task.done() is True
+    assert connection_task.cancelled() is False, (
+        "close cancelled the caller's connection task instead of its own opening work"
+    )
+    assert connection_task.result() == "connection-alive"
+    kind, handle, outcome = served[0]
+    assert kind == "begin"
+    assert handle is None
+    assert outcome is not None
+    assert outcome.reason is StreamingSynthesisReason.OWNER_CLOSED
+    assert outcome.batch_eligible is False
+    assert outcome.fact is not None
+    assert outcome.fact.fallback_action is StreamingSynthesisFallbackAction.NONE
+    assert served[1] == ("later-rpc", False)
+    assert owner.active_count == 0
+    assert provider.open_count == 1
+    assert provider.cancelled == [request.ref]
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_a_successor_supersedes_the_open_not_the_caller_connection() -> None:
+    """B24: a successor supersedes predecessor open work, not its caller.
+
+    The superseded caller must stay usable for a later RPC on the same
+    connection, and must learn about supersession without being cancelled.
+    """
+
+    provider = _FakeProvider()
+    provider.open_gate = asyncio.Event()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    first_request = _request(stream_id="predecessor-connection")
+    later_request = _request(
+        stream_id="predecessor-connection-later-rpc",
+        interaction_id="interaction-later",
+        response_id="response-later",
+    )
+    served: list[object] = []
+
+    async def connection() -> str:
+        handle, outcome = await owner.begin(first_request)
+        served.append(("begin", handle, outcome))
+        later_handle, later_outcome = await owner.begin(later_request)
+        served.append(("later-rpc", later_handle, later_outcome))
+        return "connection-alive"
+
+    connection_task = asyncio.create_task(connection())
+    await provider.open_started.wait()
+    successor_request = _request(
+        stream_id="successor-stream",
+        response_id="response-successor",
+        response_generation=1,
+    )
+    successor_task = asyncio.create_task(owner.begin(successor_request))
+    # Deterministic barrier: the successor has reached predecessor supersession
+    # and the superseded open has already settled its Provider effect.
+    await provider.cancel_started.wait()
+    provider.open_gate.set()
+    successor, successor_outcome = await successor_task
+    assert successor is not None and successor_outcome is None
+
+    await asyncio.wait({connection_task}, timeout=1.0)
+    assert connection_task.done() is True
+    assert connection_task.cancelled() is False, (
+        "the successor cancelled the predecessor's connection task instead of "
+        "its opening work"
+    )
+    assert connection_task.result() == "connection-alive"
+    kind, handle, outcome = served[0]
+    assert kind == "begin"
+    assert handle is None
+    assert outcome is not None
+    assert outcome.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+    assert outcome.batch_eligible is False
+    assert outcome.fact is not None
+    assert outcome.fact.fallback_action is StreamingSynthesisFallbackAction.NONE
+    later_kind, later_handle, later_outcome = served[1]
+    assert later_kind == "later-rpc"
+    assert later_handle is not None, "the connection could not serve a later RPC"
+    assert later_outcome is None
+    assert provider.cancelled.count(first_request.ref) == 1
+    await owner.cancel(successor)
+    await owner.cancel(later_handle)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_superseded_open_work_is_settled_once_and_is_never_a_caller_task() -> (
+    None
+):
+    """Only route-created work is supersedable, and only once."""
+
+    provider = _FakeProvider()
+    provider.open_gate = asyncio.Event()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    first_request = _request(stream_id="settled-once-predecessor")
+    connection_task = asyncio.create_task(owner.begin(first_request))
+    await provider.open_started.wait()
+    opening_key = (
+        route_module._LEGACY_SYNTHESIS_SCOPE,
+        first_request.ref.stream_id,
+        first_request.ref.stream_generation,
+    )
+    published = owner._opening[opening_key]
+    assert published.task is not None
+    assert published.task is not connection_task, (
+        "the owner published the caller's own task as cancellable route work"
+    )
+    assert published.task.get_name().startswith("live-voice-streaming-tts-")
+
+    successor_request = _request(
+        stream_id="settled-once-successor",
+        response_id="response-settled-once",
+        response_generation=1,
+    )
+    successor_task = asyncio.create_task(owner.begin(successor_request))
+    await provider.cancel_started.wait()
+    provider.open_gate.set()
+    successor, successor_outcome = await successor_task
+    assert successor is not None and successor_outcome is None
+    handle, outcome = await asyncio.wait_for(connection_task, 1.0)
+    assert handle is None and outcome is not None
+    assert outcome.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+
+    # The first supersession truth wins, so a later close can neither rewrite
+    # what the caller was told nor cancel the same work a second time.
+    assert published.superseded.is_set() is True
+    assert published.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+    assert published.supersede(StreamingSynthesisReason.OWNER_CLOSED) is None, (
+        "settled work is still offered for cancellation after it finished"
+    )
+    assert published.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+    assert opening_key not in owner._opening
+    assert provider.cancelled.count(first_request.ref) == 1
+
+    await owner.cancel(successor)
+    await owner.close()
+    assert provider.cancelled.count(first_request.ref) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_open_completing_after_supersession_is_fenced_not_admitted() -> None:
+    """A cancellation-hostile open that finishes late stays fenced."""
+
+    provider = _FakeProvider()
+    provider.open_gate = asyncio.Event()
+    provider.ignore_open_cancel = True
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    first_request = _request(stream_id="late-open-predecessor")
+    connection_task = asyncio.create_task(owner.begin(first_request))
+    await provider.open_started.wait()
+    opening_key = (
+        route_module._LEGACY_SYNTHESIS_SCOPE,
+        first_request.ref.stream_id,
+        first_request.ref.stream_generation,
+    )
+    published = owner._opening[opening_key]
+    successor_request = _request(
+        stream_id="late-open-successor",
+        response_id="response-late-open",
+        response_generation=1,
+    )
+    successor_task = asyncio.create_task(owner.begin(successor_request))
+    # Deterministic barrier: the successor has published supersession, so the
+    # Provider open below can only finish after its route was superseded.
+    await published.superseded.wait()
+    provider.open_gate.set()
+
+    successor, successor_outcome = await successor_task
+    assert successor is not None and successor_outcome is None
+    handle, outcome = await asyncio.wait_for(connection_task, 1.0)
+    assert connection_task.cancelled() is False
+    assert handle is None and outcome is not None
+    assert outcome.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+    assert outcome.batch_eligible is False
+    # The late open never became a stream, and its Provider effect was settled.
+    assert owner.active_count == 1
+    assert opening_key not in owner._active
+    assert provider.cancelled.count(first_request.ref) == 1
+    await owner.cancel(successor)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_open_stays_fenced_and_a_restart_replays_clean() -> None:
+    """A superseded identity is non-revivable; the fence stays process-local."""
+
+    provider = _FakeProvider()
+    provider.open_gate = asyncio.Event()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    superseded_request = _request(stream_id="fenced-after-supersede")
+    begin_task = asyncio.create_task(owner.begin(superseded_request))
+    await provider.open_started.wait()
+    successor_request = _request(
+        stream_id="fenced-after-supersede-successor",
+        response_id="response-fenced-successor",
+        response_generation=1,
+    )
+    successor_task = asyncio.create_task(owner.begin(successor_request))
+    await provider.cancel_started.wait()
+    provider.open_gate.set()
+    successor, successor_outcome = await successor_task
+    assert successor is not None and successor_outcome is None
+    handle, outcome = await asyncio.wait_for(begin_task, 1.0)
+    assert handle is None and outcome is not None
+    assert outcome.reason is StreamingSynthesisReason.RESPONSE_SUPERSEDED
+    assert owner.active_count == 1
+
+    opened_before = provider.open_count
+    cancelled_before = list(provider.cancelled)
+    retained_before = dict(owner._retained_bindings)
+    with pytest.raises(StreamingSynthesisRouteViolation) as replayed:
+        await owner.begin(superseded_request)
+    assert replayed.value.reason == "SYNTHESIS_STREAM_REUSED"
+    assert provider.open_count == opened_before
+    assert provider.cancelled == cancelled_before
+    assert owner._retained_bindings == retained_before
+    assert owner.active_count == 1
+    await owner.cancel(successor)
+    await owner.close()
+
+    # Characterization: the anti-replay fence is process-local, exactly like
+    # the retained ledger it protects, so a restarted owner starts clean.
+    restarted_provider = _FakeProvider()
+
+    async def restarted_selector() -> StreamingSpeechSelection:
+        return _selection(restarted_provider)
+
+    restarted = StreamingSynthesisRouteOwner(restarted_selector)
+    replayed_handle, replayed_outcome = await restarted.begin(superseded_request)
+    assert replayed_handle is not None and replayed_outcome is None
+    await restarted.cancel(replayed_handle)
+    await restarted.close()
