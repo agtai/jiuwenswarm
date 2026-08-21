@@ -24,6 +24,7 @@ const REQUIRED_MARKS = Object.freeze([
   'browser.eot_received',
   'browser.uplink_closed',
   'browser.streaming_result_request_started',
+  'benchmark.provider_final_ready',
   'browser.streaming_result_returned',
   'browser.stt_final_received',
 ]);
@@ -190,6 +191,7 @@ export class JsonLineRegistryFixture {
     this.terminationRequested = false;
     this.closePromise = null;
     this.terminationPromise = null;
+    this.exchangeTail = Promise.resolve();
     let resolveSpawn;
     let resolveExit;
     this.spawned = new Promise(resolve => { resolveSpawn = resolve; });
@@ -253,7 +255,13 @@ export class JsonLineRegistryFixture {
     if (!result.settled || result.value !== true) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
   }
 
-  async request(operation) {
+  request(operation) {
+    const exchange = this.exchangeTail.then(() => this._requestOnce(operation));
+    this.exchangeTail = exchange.catch(() => undefined);
+    return exchange;
+  }
+
+  async _requestOnce(operation) {
     try {
       if (this.protocolClosed || !['open', 'provider_final', 'route_settled', 'streaming_result', 'close'].includes(operation)) {
         fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
@@ -477,9 +485,10 @@ function makeAudioEnvironment() {
 }
 
 class BenchmarkMediaSocket {
-  constructor(binding, registryFixture) {
+  constructor(binding, registryFixture, localSettlementMs) {
     this.binding = binding;
     this.registryFixture = registryFixture;
+    this.localSettlementMs = localSettlementMs;
     this.readyState = 0;
     this.bufferedAmount = 0;
     this.protocol = '';
@@ -515,7 +524,9 @@ class BenchmarkMediaSocket {
     let control = null;
     try { control = JSON.parse(value); } catch { control = null; }
     if (control?.type !== 'media.detach') return;
-    void this.registryFixture.request('route_settled').then(response => {
+    void new Promise(resolve => setTimeout(resolve, this.localSettlementMs)).then(
+      () => this.registryFixture.request('route_settled'),
+    ).then(response => {
       if (response.status !== 'route_settled') fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
       this.onmessage?.({ data: JSON.stringify(control) });
     }).catch(() => this.onerror?.({}));
@@ -584,8 +595,7 @@ function mediaBinding(params) {
   };
 }
 
-function makeLatencyProbe(now, points) {
-  let origin = null;
+function makeLatencyProbe(now, points, clockState) {
   let roundIndex = 0;
   return {
     beginRound() {
@@ -606,8 +616,8 @@ function makeLatencyProbe(now, points) {
           if (REQUIRED_MARKS.includes(point)) {
             const observed = observation?.monotonic_ms;
             const markedAt = typeof observed === 'number' && Number.isFinite(observed) ? observed : now();
-            if (point === 'browser.eot_received') origin = markedAt;
-            if (origin !== null) points[point] = rounded(Math.max(0, markedAt - origin));
+            if (point === 'browser.eot_received') clockState.origin = markedAt;
+            if (clockState.origin !== null) points[point] = rounded(Math.max(0, markedAt - clockState.origin));
           }
           return true;
         },
@@ -662,8 +672,10 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
   let cleanupComplete = false;
   let exactResult = false;
   let rpcCount = 0;
+  let providerFinalOperation = null;
   const points = Object.fromEntries(REQUIRED_MARKS.map(point => [point, null]));
   const now = () => performance.now();
+  const clockState = { origin: null };
   try {
     const [productModule, mediaModule] = await Promise.all([import(PRODUCT_MODULE_URL.href), import(MEDIA_MODULE_URL.href)]);
     const { ProductP1VoiceRouteOwner, PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD } = productModule;
@@ -676,12 +688,12 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
     owner = new ProductP1VoiceRouteOwner({
       enabled: true,
       expected_origin: 'https://voice.example.test',
-      latency_probe: makeLatencyProbe(now, points),
+      latency_probe: makeLatencyProbe(now, points, clockState),
       latency_monotonic_ms: now,
       audio_environment: environment,
       socket_factory: () => {
         if (binding === null) fail('EOT_STT_BENCHMARK_BINDING_FAILED');
-        socket = new BenchmarkMediaSocket(binding, registryFixture);
+        socket = new BenchmarkMediaSocket(binding, registryFixture, fixture.localSettlementMs);
         queueMicrotask(() => socket.open());
         return socket;
       },
@@ -711,7 +723,8 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
         }
         if (method === 'live_voice.speech.recognize_streaming_result') {
           rpcCount += 1;
-          const provider = await registryFixture.request('provider_final');
+          if (providerFinalOperation === null) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+          const provider = await providerFinalOperation;
           if (provider.status !== 'provider_final') fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
           const response = await registryFixture.request('streaming_result');
           if (response.status !== 'completed' || response.exact_result !== true || response.business_result?.status !== 'completed') {
@@ -733,6 +746,17 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
       fail('EOT_STT_BENCHMARK_EOT_FAILED');
     }
     socket.emitEndOfTurn(serializeMediaControl);
+    if (clockState.origin === null) fail('EOT_STT_BENCHMARK_EOT_FAILED');
+    providerFinalOperation = new Promise(resolve => setTimeout(resolve, fixture.providerFinalMs)).then(
+      () => registryFixture.request('provider_final'),
+    ).then(provider => {
+      if (provider.status !== 'provider_final' || clockState.origin === null) {
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      points['benchmark.provider_final_ready'] = rounded(Math.max(0, now() - clockState.origin));
+      return provider;
+    });
+    void providerFinalOperation.catch(() => undefined);
     for (let turn = 0; turn < 10 && recognitionPromise === null; turn += 1) await Promise.resolve();
     if (recognitionPromise === null) fail('EOT_STT_BENCHMARK_EOT_FAILED');
     const recognition = await recognitionPromise;

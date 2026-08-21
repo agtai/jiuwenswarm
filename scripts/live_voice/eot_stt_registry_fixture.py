@@ -305,7 +305,6 @@ class EotSttRegistryFixture:
             or self._record is None
         ):
             raise RuntimeError("benchmark fixture state is invalid")
-        await asyncio.sleep(self.local_settlement_ms / 1000)
         self.registry.complete_route(
             self._record,
             DedicatedMediaSocketLeafResult(
@@ -323,7 +322,6 @@ class EotSttRegistryFixture:
     async def _release_provider_final(self) -> dict[str, object]:
         if not self._opened or self._provider_final or self._close_requested:
             raise RuntimeError("benchmark fixture state is invalid")
-        await asyncio.sleep(self.provider_final_ms / 1000)
         await self._provider.release_final()
         self._provider_final = True
         return {"status": "provider_final", "elapsed_ms": self.provider_final_ms}

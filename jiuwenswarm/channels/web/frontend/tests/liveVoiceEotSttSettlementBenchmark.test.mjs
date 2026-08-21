@@ -29,8 +29,8 @@ test('candidate A1 reduces the four exact fixtures into closed p50 and nearest-r
   assert.equal(report.forbidden_effects.agent_submit, 0);
   assert.equal(report.forbidden_effects.tts_request, 0);
   assert.equal(report.summaries[0].successful_samples, 5);
-  assert.deepEqual(report.summaries[0].eot_to_recognized_final_ms, { p50_ms: 100, p95_ms: 100 });
-  assert.deepEqual(report.summaries[3].eot_to_recognized_final_ms, { p50_ms: 1000, p95_ms: 1000 });
+  assert.deepEqual(report.summaries[0].eot_to_recognized_final_ms, { p50_ms: 50, p95_ms: 50 });
+  assert.deepEqual(report.summaries[3].eot_to_recognized_final_ms, { p50_ms: 500, p95_ms: 500 });
   assert.deepEqual(Object.keys(report.attempts[0]), [
     'fixture_id',
     'attempt_index',
@@ -39,6 +39,8 @@ test('candidate A1 reduces the four exact fixtures into closed p50 and nearest-r
     'rpc_count',
     'exact_result',
     'cleanup_complete',
+    'removable_serial_gap_ms',
+    'removable_serial_gap_fraction',
   ]);
   assert.equal(JSON.stringify(report).includes('transcript'), false);
   assert.equal(JSON.stringify(report).includes('final_text'), false);
@@ -84,6 +86,7 @@ test('attempt reduction rejects private fields, unknown fields, and non-monotoni
       'browser.eot_received': 0,
       'browser.uplink_closed': 50,
       'browser.streaming_result_request_started': 50,
+      'benchmark.provider_final_ready': 75,
       'browser.streaming_result_returned': 100,
       'browser.stt_final_received': 100,
     }),
@@ -101,6 +104,15 @@ test('attempt reduction rejects private fields, unknown fields, and non-monotoni
         'browser.streaming_result_returned': 40,
       },
     },
+    {
+      ...validAttempt,
+      marks_ms: Object.fromEntries(
+        Object.entries(validAttempt.marks_ms).filter(([point]) => point !== 'benchmark.provider_final_ready'),
+      ),
+    },
+    { ...validAttempt, marks_ms: { ...validAttempt.marks_ms, 'benchmark.provider_final_ready': Number.NaN } },
+    { ...validAttempt, marks_ms: { ...validAttempt.marks_ms, 'benchmark.provider_final_ready': -1 } },
+    { ...validAttempt, marks_ms: { ...validAttempt.marks_ms, 'benchmark.provider_final_ready': 110 } },
   ];
   for (const invalidAttempt of cases) {
     let failure = null;
@@ -120,6 +132,57 @@ test('attempt reduction rejects private fields, unknown fields, and non-monotoni
   }
 });
 
+function concurrentAttempt(fixture, attemptIndex, removableTailMs) {
+  const providerReadyMs = fixture.providerFinalMs;
+  const uplinkClosedMs = fixture.localSettlementMs;
+  const resultReturnedMs = Math.max(uplinkClosedMs, providerReadyMs) + removableTailMs;
+  return Object.freeze({
+    fixture_id: fixture.id,
+    attempt_index: attemptIndex,
+    outcome: 'completed',
+    marks_ms: Object.freeze({
+      'browser.eot_received': 0,
+      'browser.uplink_closed': uplinkClosedMs,
+      'browser.streaming_result_request_started': uplinkClosedMs,
+      'benchmark.provider_final_ready': providerReadyMs,
+      'browser.streaming_result_returned': resultReturnedMs,
+      'browser.stt_final_received': resultReturnedMs,
+    }),
+    rpc_count: 1,
+    exact_result: true,
+    cleanup_complete: true,
+  });
+}
+
+test('local-fast/provider-slow retains a large route wait but only the removable post-readiness tail', async () => {
+  const report = await runEotSttSettlementBenchmark({
+    fixtures: FIXTURES,
+    attempts: 1,
+    candidate: 'A1',
+    attempt_runner: (fixture, attemptIndex) => concurrentAttempt(fixture, attemptIndex, 10),
+  });
+  const summary = report.summaries.find(item => item.fixture_id === 'local-fast-provider-slow');
+  const attempt = report.attempts.find(item => item.fixture_id === 'local-fast-provider-slow');
+  assert.deepEqual(summary.route_settled_to_result_returned_ms, { p50_ms: 460, p95_ms: 460 });
+  assert.deepEqual(summary.removable_serial_gap_ms, { p50_ms: 10, p95_ms: 10 });
+  assert.deepEqual(summary.removable_serial_gap_fraction, { p50: 0.02, p95: 0.02 });
+  assert.equal(attempt.removable_serial_gap_ms, 10);
+  assert.equal(attempt.removable_serial_gap_fraction, 0.02);
+});
+
+test('an injected scheduling and result-RPC tail remains a material removable gap', async () => {
+  const report = await runEotSttSettlementBenchmark({
+    fixtures: FIXTURES,
+    attempts: 1,
+    candidate: 'A1',
+    attempt_runner: (fixture, attemptIndex) => concurrentAttempt(fixture, attemptIndex, 100),
+  });
+  const summary = report.summaries[0];
+  assert.deepEqual(summary.route_settled_to_result_returned_ms, { p50_ms: 100, p95_ms: 100 });
+  assert.deepEqual(summary.removable_serial_gap_ms, { p50_ms: 100, p95_ms: 100 });
+  assert.deepEqual(summary.removable_serial_gap_fraction, { p50: 0.667, p95: 0.667 });
+});
+
 test('completed attempts reject a zero EOT-to-final duration before derived statistics', async () => {
   const zeroDuration = Object.freeze({
     fixture_id: 'local-fast-provider-fast',
@@ -129,6 +192,7 @@ test('completed attempts reject a zero EOT-to-final duration before derived stat
       'browser.eot_received',
       'browser.uplink_closed',
       'browser.streaming_result_request_started',
+      'benchmark.provider_final_ready',
       'browser.streaming_result_returned',
       'browser.stt_final_received',
     ].map(point => [point, 0]))),

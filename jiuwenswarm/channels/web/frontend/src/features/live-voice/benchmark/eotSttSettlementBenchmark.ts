@@ -18,6 +18,7 @@ const MARK_POINTS = Object.freeze([
   'browser.eot_received',
   'browser.uplink_closed',
   'browser.streaming_result_request_started',
+  'benchmark.provider_final_ready',
   'browser.streaming_result_returned',
   'browser.stt_final_received',
 ] as const);
@@ -61,6 +62,8 @@ export interface EotSttAttempt {
   readonly rpc_count: number;
   readonly exact_result: boolean;
   readonly cleanup_complete: boolean;
+  readonly removable_serial_gap_ms: number | null;
+  readonly removable_serial_gap_fraction: number | null;
 }
 
 export interface EotSttBenchmarkSummary {
@@ -72,8 +75,9 @@ export interface EotSttBenchmarkSummary {
   readonly eot_to_recognized_final_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
   readonly eot_to_uplink_closed_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
   readonly streaming_result_wait_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
-  readonly candidate_savings_ceiling_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
-  readonly candidate_savings_ceiling_percent: Readonly<{ p50: number | null; p95: number | null }>;
+  readonly route_settled_to_result_returned_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly removable_serial_gap_ms: Readonly<{ p50_ms: number | null; p95_ms: number | null }>;
+  readonly removable_serial_gap_fraction: Readonly<{ p50: number | null; p95: number | null }>;
 }
 
 export interface EotSttBenchmarkReport {
@@ -172,8 +176,8 @@ function validateConfig(input: unknown): Readonly<{
   });
 }
 
-function defaultAttempt(fixture: Readonly<EotSttFixture>, attemptIndex: number): Readonly<EotSttAttempt> {
-  const recognized = fixture.localSettlementMs + fixture.providerFinalMs;
+function defaultAttempt(fixture: Readonly<EotSttFixture>, attemptIndex: number): Readonly<Record<string, unknown>> {
+  const recognized = Math.max(fixture.localSettlementMs, fixture.providerFinalMs);
   return Object.freeze({
     fixture_id: fixture.id,
     attempt_index: attemptIndex,
@@ -182,6 +186,7 @@ function defaultAttempt(fixture: Readonly<EotSttFixture>, attemptIndex: number):
       'browser.eot_received': 0,
       'browser.uplink_closed': fixture.localSettlementMs,
       'browser.streaming_result_request_started': fixture.localSettlementMs,
+      'benchmark.provider_final_ready': fixture.providerFinalMs,
       'browser.streaming_result_returned': recognized,
       'browser.stt_final_received': recognized,
     }),
@@ -193,15 +198,29 @@ function defaultAttempt(fixture: Readonly<EotSttFixture>, attemptIndex: number):
 
 function validateMarks(value: unknown): Readonly<Record<EotSttMarkPoint, number>> {
   if (!isPlainRecord(value) || !hasExactKeys(value, MARK_POINTS)) fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
-  let previous = Number.NEGATIVE_INFINITY;
   const marks = {} as Record<EotSttMarkPoint, number>;
   for (const point of MARK_POINTS) {
     const mark = ownValue(value, point);
-    if (typeof mark !== 'number' || !Number.isFinite(mark) || mark < 0 || mark < previous) {
+    if (typeof mark !== 'number' || !Number.isFinite(mark) || mark < 0) {
       fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
     }
     marks[point] = mark;
-    previous = mark;
+  }
+  const eot = marks['browser.eot_received'];
+  const uplink = marks['browser.uplink_closed'];
+  const request = marks['browser.streaming_result_request_started'];
+  const providerReady = marks['benchmark.provider_final_ready'];
+  const returned = marks['browser.streaming_result_returned'];
+  const final = marks['browser.stt_final_received'];
+  if (
+    uplink < eot ||
+    request < uplink ||
+    providerReady < eot ||
+    returned < request ||
+    returned < providerReady ||
+    final < returned
+  ) {
+    fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
   }
   return Object.freeze(marks);
 }
@@ -233,6 +252,27 @@ function validateAttempt(
   ) {
     fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
   }
+  const successful = outcome === 'completed'
+    && rpcCount === 1
+    && ownValue(value, 'exact_result') === true
+    && ownValue(value, 'cleanup_complete') === true;
+  const duration = marks['browser.stt_final_received'] - marks['browser.eot_received'];
+  const removableGap = marks['browser.streaming_result_returned'] - Math.max(
+    marks['browser.uplink_closed'],
+    marks['benchmark.provider_final_ready'],
+  );
+  const removableFraction = successful ? rounded(removableGap / duration) : null;
+  if (
+    removableGap < 0 ||
+    (successful && (
+      !Number.isFinite(removableFraction) ||
+      removableFraction === null ||
+      removableFraction < 0 ||
+      removableFraction > 1
+    ))
+  ) {
+    fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
+  }
   return Object.freeze({
     fixture_id: fixture.id,
     attempt_index: attemptIndex,
@@ -241,6 +281,8 @@ function validateAttempt(
     rpc_count: rpcCount as number,
     exact_result: ownValue(value, 'exact_result') as boolean,
     cleanup_complete: ownValue(value, 'cleanup_complete') as boolean,
+    removable_serial_gap_ms: successful ? rounded(removableGap) : null,
+    removable_serial_gap_fraction: removableFraction,
   });
 }
 
@@ -259,7 +301,7 @@ function percentiles(values: readonly number[]): Readonly<{ p50_ms: number | nul
   return Object.freeze({ p50_ms: nearestRank(values, 50), p95_ms: nearestRank(values, 95) });
 }
 
-function percentagePercentiles(values: readonly number[]): Readonly<{ p50: number | null; p95: number | null }> {
+function fractionPercentiles(values: readonly number[]): Readonly<{ p50: number | null; p95: number | null }> {
   return Object.freeze({ p50: nearestRank(values, 50), p95: nearestRank(values, 95) });
 }
 
@@ -276,11 +318,10 @@ function summarize(
     attempt.marks_ms['browser.uplink_closed'] - attempt.marks_ms['browser.eot_received']);
   const resultWait = successful.map(attempt =>
     attempt.marks_ms['browser.streaming_result_returned'] - attempt.marks_ms['browser.streaming_result_request_started']);
-  const savings = successful.map(attempt => Math.min(
-    attempt.marks_ms['browser.uplink_closed'] - attempt.marks_ms['browser.eot_received'],
-    attempt.marks_ms['browser.streaming_result_returned'] - attempt.marks_ms['browser.streaming_result_request_started'],
-  ));
-  const savingsPercent = savings.map((value, index) => rounded((value / durations[index]) * 100));
+  const routeSettledToReturn = successful.map(attempt =>
+    attempt.marks_ms['browser.streaming_result_returned'] - attempt.marks_ms['browser.uplink_closed']);
+  const removableGaps = successful.map(attempt => attempt.removable_serial_gap_ms as number);
+  const removableFractions = successful.map(attempt => attempt.removable_serial_gap_fraction as number);
   return Object.freeze({
     fixture_id: fixture.id,
     local_settlement_ms: fixture.localSettlementMs,
@@ -290,8 +331,9 @@ function summarize(
     eot_to_recognized_final_ms: percentiles(durations),
     eot_to_uplink_closed_ms: percentiles(uplink),
     streaming_result_wait_ms: percentiles(resultWait),
-    candidate_savings_ceiling_ms: percentiles(savings),
-    candidate_savings_ceiling_percent: percentagePercentiles(savingsPercent),
+    route_settled_to_result_returned_ms: percentiles(routeSettledToReturn),
+    removable_serial_gap_ms: percentiles(removableGaps),
+    removable_serial_gap_fraction: fractionPercentiles(removableFractions),
   });
 }
 
