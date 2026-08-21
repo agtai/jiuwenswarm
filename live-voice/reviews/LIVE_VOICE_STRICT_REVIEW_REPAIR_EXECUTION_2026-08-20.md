@@ -886,7 +886,7 @@ parallel on `agtai/hx/0812_live_voice_w3`.
   strict review split from A1: SRR-24 lifted the conformance ceiling, and this
   packet is what makes the product-side lift real end to end.
 - Worker-owned source/tests:
-  `jiuwenswarm/gateway/routing/streaming_synthesis_route.py` and
+  `jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py` and
   `tests/unit_tests/gateway/test_streaming_synthesis_route.py` only.
 - Intended behavior: A17 (`:510-560,716-763,1850-1867`) has **two independent
   changes**. First, `_retained_bindings` — declared at `:558`, written at `:763`,
