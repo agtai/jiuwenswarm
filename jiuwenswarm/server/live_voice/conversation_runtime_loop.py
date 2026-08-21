@@ -22,6 +22,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.server.live_voice.conversation_runtime import (
     CancelState,
     ConversationRuntime,
+    ConversationRuntimeViolation,
     ConversationSnapshot,
     InteractionState,
     ResponseRecord,
@@ -34,6 +35,7 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
     PresentationLedger,
     PresentationLedgerSnapshot,
+    PresentationLedgerViolation,
     PresentationSurface,
     PresentationUnit,
     PresentedHistorySpan,
@@ -53,6 +55,12 @@ _CONTROL_REPLAY_FENCE_ROWS = 4
 _CONTROL_REPLAY_FENCE_WIDTH = 1 << 13
 _BARGE_CONTROL_SCOPE = "conversation.barge_in"
 _CANCEL_CONTROL_SCOPE = "conversation.response_cancel"
+# A retained failure keeps only a stable code, reason and message.  These caps
+# bound that record and reject anything that is not the short, module-authored
+# description these violation families are contracted to carry.
+_MAX_CONTROL_FAILURE_REASON_CHARS = 128
+_MAX_CONTROL_FAILURE_MESSAGE_CHARS = 256
+_CONTROL_COMMAND_FAILURE_MESSAGE = "conversation runtime control command failed"
 
 
 class ConversationRuntimeLoopViolation(ValueError):
@@ -60,6 +68,70 @@ class ConversationRuntimeLoopViolation(ValueError):
         super().__init__(message)
         self.reason = reason
         self.code = code
+
+
+# Only these exact violation families carry a stable, module-authored reason and
+# message.  Matching is by physical type identity, never `isinstance`, so a
+# subclass or an untrusted caller object can never reach the branch that keeps
+# its text.
+_SAFE_CONTROL_FAILURE_TYPES: tuple[type[Exception], ...] = (
+    ConversationRuntimeLoopViolation,
+    ConversationRuntimeViolation,
+    PresentationLedgerViolation,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlFailure:
+    """A content-free description of one failed control command.
+
+    It holds no exception object, traceback, exception chain or caller payload,
+    only the exception family to rebuild and the stable code, reason and message
+    a replaying caller still needs.
+    """
+
+    factory: Callable[[str, str, ErrorCode], Exception]
+    reason: str
+    message: str
+    code: ErrorCode
+
+    def rebuild(self) -> Exception:
+        """Build a fresh failure so no caller inherits another's traceback."""
+
+        return self.factory(self.reason, self.message, self.code)
+
+
+def _control_failure(error: BaseException) -> _ControlFailure:
+    """Project a control failure onto its stable, content-free facts.
+
+    Classification never calls a hook on the failing object: an unrecognized
+    exception keeps no text at all, so a hostile ``__str__``/``__repr__`` is
+    never invoked and no transcript, payload or exception chain survives.
+    """
+
+    failure_type = type(error)
+    for candidate in _SAFE_CONTROL_FAILURE_TYPES:
+        if failure_type is not candidate:
+            continue
+        reason = getattr(error, "reason", None)
+        code = getattr(error, "code", None)
+        args = error.args
+        message = args[0] if len(args) == 1 else None
+        if (
+            type(reason) is str
+            and type(message) is str
+            and type(code) is ErrorCode
+            and len(reason) <= _MAX_CONTROL_FAILURE_REASON_CHARS
+            and len(message) <= _MAX_CONTROL_FAILURE_MESSAGE_CHARS
+        ):
+            return _ControlFailure(candidate, reason, message, code)
+        break
+    return _ControlFailure(
+        ConversationRuntimeLoopViolation,
+        "CONTROL_COMMAND_FAILED",
+        _CONTROL_COMMAND_FAILURE_MESSAGE,
+        ErrorCode.INTERNAL,
+    )
 
 
 class EffectState(StrEnum):
@@ -127,13 +199,13 @@ class _ControlCommandRecord:
 
     ``fingerprint`` is the exact barge-in ``(ref, cancel_response)`` tuple or the
     exact response-cancel ``ResponseRef``, and ``result`` is the matching public
-    result.  Exactly one of ``result`` and ``error`` is set once the command has
-    finished; a record with neither means the command's outcome is unknown.
+    result.  Exactly one of ``result`` and ``failure`` is set once the command
+    has finished; a record with neither means the command's outcome is unknown.
     """
 
     fingerprint: object
     result: object | None = None
-    error: Exception | None = None
+    failure: _ControlFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -831,7 +903,7 @@ class ConversationRuntimeLoop:
                 self._barge_commands,
                 _BARGE_CONTROL_SCOPE,
                 action_id,
-                _ControlCommandRecord(fingerprint, error=error),
+                _ControlCommandRecord(fingerprint, failure=_control_failure(error)),
             )
             raise
         self._retain_control_command(
@@ -881,7 +953,7 @@ class ConversationRuntimeLoop:
                 self._cancel_commands,
                 _CANCEL_CONTROL_SCOPE,
                 command_id,
-                _ControlCommandRecord(ref, error=error),
+                _ControlCommandRecord(ref, failure=_control_failure(error)),
             )
             raise
         self._retain_control_command(
@@ -939,8 +1011,10 @@ class ConversationRuntimeLoop:
     ) -> Exception | None:
         """Return the failure a replay must raise, or None for a kept result."""
 
-        if record.error is not None:
-            return record.error
+        if record.failure is not None:
+            # Rebuild per replay so the traceback one caller raises can never
+            # become part of the record the next caller receives.
+            return record.failure.rebuild()
         if record.result is None:
             return ConversationRuntimeLoopViolation(
                 "CONTROL_COMMAND_RESULT_UNKNOWN",

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
+import weakref
 from collections.abc import Callable
 
 import pytest
@@ -83,13 +85,14 @@ async def prepared(
     factory: Callable[..., ConversationRuntimeLoop],
     *,
     policy: HistorySurfacePolicy = HistorySurfacePolicy.TEXT,
+    text: str = "请解释 code/path",
     **kwargs: object,
 ) -> tuple[ConversationRuntimeLoop, ResponseRef]:
     runtime = factory(**kwargs)
     assert await runtime.start() is True
     await runtime.open_interaction("interaction-1")
     await runtime.start_turn("interaction-1", "turn-1")
-    accepted, _ = await runtime.commit_turn(commit())
+    accepted, _ = await runtime.commit_turn(commit(text=text))
     assert accepted is True
     ref, _ = await runtime.accept_response(
         "turn-1", "response-1", history_policy=policy
@@ -1169,6 +1172,7 @@ async def test_cancelled_close_waiter_does_not_lose_the_single_shutdown_result(
 # `Exception` object with its traceback and exception chain.
 
 CONTROL_RETENTION_PROBE = 320
+CONTROL_SENTINEL = "SRR27-PRIVATE-TRANSCRIPT-4c1f8a"
 
 
 async def settled(future: asyncio.Future[object]) -> asyncio.Future[object]:
@@ -1179,6 +1183,87 @@ async def settled(future: asyncio.Future[object]) -> asyncio.Future[object]:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     return future
+
+
+def retained_sentinel_paths(error: BaseException, sentinel: str) -> list[str]:
+    """Report every path to `sentinel` reachable from a retained failure alone."""
+
+    hits: list[str] = []
+    seen: set[int] = set()
+
+    def visit(value: object, path: str, budget: int) -> None:
+        if budget <= 0 or id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, str):
+            if sentinel in value:
+                hits.append(path)
+            return
+        if isinstance(value, (bytes, bytearray)):
+            if sentinel.encode() in value:
+                hits.append(path)
+            return
+        if isinstance(value, dict):
+            for key, item in list(value.items())[:256]:
+                visit(item, f"{path}[{key!r}]", budget - 1)
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for index, item in enumerate(list(value)[:256]):
+                visit(item, f"{path}[{index}]", budget - 1)
+            return
+        namespace = getattr(value, "__dict__", None)
+        if isinstance(namespace, dict):
+            for key, item in list(namespace.items())[:256]:
+                visit(item, f"{path}.{key}", budget - 1)
+        slots = getattr(type(value), "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for slot in slots:
+            visit(getattr(value, slot, None), f"{path}.{slot}", budget - 1)
+
+    visit(error.args, "args", 5)
+    frame = error.__traceback__
+    while frame is not None:
+        visit(
+            frame.tb_frame.f_locals,
+            f"traceback<{frame.tb_frame.f_code.co_name}>.f_locals",
+            7,
+        )
+        frame = frame.tb_next
+    for label, chained in (("cause", error.__cause__), ("context", error.__context__)):
+        if chained is not None:
+            visit(chained.args, f"{label}.args", 5)
+    return hits
+
+
+class _HostileControlError(Exception):
+    """A control failure whose formatting hooks are hostile implementations."""
+
+    def __init__(self, payload: str) -> None:
+        super().__init__(f"hostile failure carrying {payload}")
+        self.payload = payload
+        self.hook_calls: list[str] = []
+
+    def __str__(self) -> str:
+        self.hook_calls.append("__str__")
+        return f"hostile str carrying {self.payload}"
+
+    def __repr__(self) -> str:
+        self.hook_calls.append("__repr__")
+        return f"hostile repr carrying {self.payload}"
+
+
+class _HostileResponseRef:
+    """A caller-supplied response reference whose comparison hook raises."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def __eq__(self, other: object) -> bool:
+        raise self.error
+
+    def __hash__(self) -> int:
+        return 0
 
 
 async def test_completed_barge_ids_retire_once_control_retention_saturates(
@@ -1323,3 +1408,95 @@ async def test_control_retirement_is_memory_only_for_one_loop_lifetime(
     revived = await successor.barge_in("lifetime-barge-0", successor_ref)
     assert revived.applied is True
     assert revived.replayed is False
+
+
+async def test_replayed_control_failure_is_content_free_and_not_the_raw_object(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 privacy: only a stable code, reason and message may be retained."""
+
+    runtime, ref = await prepared(
+        loop_factory, text=f"请把账单发到 {CONTROL_SENTINEL} 这个地址"
+    )
+    stale = ResponseRef(ref.interaction_id, "missing", ref.response_generation)
+
+    first = await settled(runtime.post_barge_in("privacy-barge", stale))
+    raw = first.exception()
+    assert isinstance(raw, ConversationRuntimeLoopViolation)
+    assert raw.reason == "STALE_RESPONSE_REFERENCE"
+    # The caller that issued the command still gets the real diagnostic; only the
+    # record the loop keeps for later replays has to be content-free.
+    assert retained_sentinel_paths(raw, CONTROL_SENTINEL) != []
+
+    replay = runtime.post_barge_in("privacy-barge", stale)
+    retained = replay.exception()
+    assert retained is not raw
+    assert isinstance(retained, ConversationRuntimeLoopViolation)
+    assert retained.reason == raw.reason
+    assert retained.code is ErrorCode.STALE
+    assert str(retained) == str(raw)
+    assert retained.__traceback__ is None
+    assert retained.__cause__ is None
+    assert retained.__context__ is None
+    assert retained_sentinel_paths(retained, CONTROL_SENTINEL) == []
+
+    # Raising one replay attaches that caller's frames to the object it raised,
+    # so every replay needs its own rebuild or the next caller inherits them.
+    with pytest.raises(ConversationRuntimeLoopViolation) as raised_replay:
+        await runtime.barge_in("privacy-barge", stale)
+    assert raised_replay.value.__traceback__ is not None
+    successor = runtime.post_barge_in("privacy-barge", stale).exception()
+    assert successor is not retained
+    assert successor is not raised_replay.value
+    assert successor.__traceback__ is None
+    assert retained_sentinel_paths(successor, CONTROL_SENTINEL) == []
+
+
+async def test_untrusted_control_failure_keeps_no_payload_and_calls_no_hook(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 privacy: an unclassifiable failure never reaches a hostile hook."""
+
+    runtime, _ = await prepared(loop_factory)
+    hostile_error = _HostileControlError(CONTROL_SENTINEL)
+    hostile_ref = _HostileResponseRef(hostile_error)
+    effects_before = runtime.snapshot().effects
+    conversation_before = runtime.snapshot().conversation
+
+    first = await settled(runtime.post_barge_in("hostile-barge", hostile_ref))
+    assert first.exception() is hostile_error
+
+    replay = runtime.post_barge_in("hostile-barge", hostile_ref)
+    retained = replay.exception()
+    assert retained is not hostile_error
+    assert isinstance(retained, ConversationRuntimeLoopViolation)
+    assert retained.reason == "CONTROL_COMMAND_FAILED"
+    assert retained.code is ErrorCode.INTERNAL
+    assert CONTROL_SENTINEL not in str(retained)
+    assert retained_sentinel_paths(retained, CONTROL_SENTINEL) == []
+    assert hostile_error.hook_calls == []
+    assert runtime.snapshot().effects == effects_before
+    assert runtime.snapshot().conversation == conversation_before
+
+
+async def test_retained_control_failure_releases_the_raw_exception_object(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    """B42 privacy: the raw object and its traceback must not survive at all."""
+
+    runtime, ref = await prepared(loop_factory)
+    stale = ResponseRef(ref.interaction_id, "missing", ref.response_generation)
+    pending = await settled(runtime.post_response_cancel("released-cancel", stale))
+    raw = pending.exception()
+    assert isinstance(raw, ConversationRuntimeViolation)
+    observed = weakref.ref(raw)
+    del raw, pending
+    gc.collect()
+    assert observed() is None
+
+    # Releasing the object must not degrade the truth the caller relies on.
+    with pytest.raises(ConversationRuntimeViolation) as replay:
+        await runtime.request_response_cancel("released-cancel", stale)
+    assert replay.value.reason == "STALE_RESPONSE_REFERENCE"
+    assert replay.value.code is ErrorCode.STALE
+    assert str(replay.value) == "response operation requires the exact response tuple"
