@@ -13,6 +13,7 @@ import {
   compareCheckpointReports,
   runCheckpointAttempt,
 } from '../node_modules/.cache/live-voice-accepted-checkpoint/acceptedOptimizationsCheckpoint.js';
+import { runControlledOwnerAttempt } from '../scripts/liveVoiceAcceptedOptimizationsCheckpoint.mjs';
 
 class ManualClock {
   #time;
@@ -316,4 +317,62 @@ test('comparison fails closed when runner fingerprints or A source differ', () =
     attempts.map(attempt => ({ ...attempt, population: 'A2' })),
   );
   assert.throws(() => compareCheckpointReports(a1, b, runnerMismatch), /CHECKPOINT_FINGERPRINT_MISMATCH/);
+});
+
+test('W1 owner composition uses one bounded P2 pull and overlaps successor ACK on optimized source', async () => {
+  const result = await runControlledOwnerAttempt(attemptConfig({ workload_id: 'W1' }));
+
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.segments.p2_final_delivery.duration_ms, 85);
+  assert.ok(result.segments.round_total.duration_ms >= 6985);
+  assert.ok(result.segments.round_total.duration_ms < 7100);
+  assert.deepEqual(result.p2, {
+    notification_rpc_count: 1,
+    notification_batch_count: 1,
+    ordered_barriers: [],
+  });
+  assert.deepEqual(result.p1, {
+    successor_ack_confirmed: true,
+    next_turn_ready: true,
+    downlink_opened_before_successor_ack: true,
+    product_owner: 'ProductP1VoiceRouteOwner',
+  });
+});
+
+test('W2 and W3 preserve bounded RPC counts and exact Tool barrier tails', async () => {
+  const w2 = await runControlledOwnerAttempt(attemptConfig({ workload_id: 'W2' }));
+  const w3 = await runControlledOwnerAttempt(attemptConfig({ workload_id: 'W3' }));
+
+  assert.equal(w2.outcome, 'completed');
+  assert.equal(w2.p2.notification_rpc_count, 4);
+  assert.equal(w2.segments.p2_final_delivery.duration_ms, 340);
+  assert.deepEqual(w2.p2.ordered_barriers, []);
+  assert.equal(w3.outcome, 'completed');
+  assert.equal(w3.p2.notification_rpc_count, 8);
+  assert.equal(w3.segments.p2_final_delivery.duration_ms, 680);
+  assert.deepEqual(w3.p2.ordered_barriers, [40, 41]);
+});
+
+test('malformed P2 evidence fails closed before P1 and still closes its real owner once', async () => {
+  let mutated = 0;
+  let closes = 0;
+  const result = await runControlledOwnerAttempt(attemptConfig({ workload_id: 'W1' }), {
+    p2NotificationMutator(notification) {
+      mutated += 1;
+      return mutated === 1 ? { ...notification, publish_seq: 99 } : notification;
+    },
+    onP2Close() {
+      closes += 1;
+    },
+  });
+
+  assert.equal(result.outcome, 'unknown');
+  assert.equal(result.reason, 'CHECKPOINT_DEPENDENCY_FAILED');
+  assert.equal(mutated, 10);
+  assert.equal(closes, 1);
+  assert.equal(result.p1, null);
+  assert.deepEqual(
+    result.events.map(event => event.point),
+    ['speech_end', 'stt_final', 'admission_accepted', 'model_complete_and_notifications_enqueued'],
+  );
 });

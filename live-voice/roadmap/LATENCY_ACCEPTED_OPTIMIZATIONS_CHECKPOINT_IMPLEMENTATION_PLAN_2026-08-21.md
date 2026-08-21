@@ -223,14 +223,15 @@ Voice P1/P2 owners and latency contracts.
   P2 parse/order/barrier behavior and real P1 downlink/ACK/next-turn join.
 - Produces exact counts `A=10/50/100 RPC`, `B=1/4/8 RPC`.
 
-- [ ] **Step 1: Write RED W1 end-to-end owner test**
+- [x] **Step 1: Write RED W1 optimized-source end-to-end owner test**
 
-  Compile the real owners and inject only controlled external seams. Assert A
-  uses 10 RPCs and waits successor ACK before downlink; B uses one RPC and opens
-  downlink before ACK. Both must end with one confirmed ACK and exact next-turn
-  readiness.
+  Compile the real owners and inject only controlled external seams. On the B
+  source, assert W1 uses one P2 RPC and opens downlink before successor ACK. It
+  must end with one confirmed ACK and exact next-turn readiness. The equivalent
+  A sequential-source RED/GREEN belongs to Task 4 after that source exists; no
+  runtime TTS toggle is invented in this task.
 
-- [ ] **Step 2: Verify RED against the absent composition seam**
+- [x] **Step 2: Verify RED against the absent composition seam**
 
   ```bash
   cd jiuwenswarm/channels/web/frontend
@@ -239,7 +240,7 @@ Voice P1/P2 owners and latency contracts.
 
   Expected: failure because `runControlledOwnerAttempt` is absent.
 
-- [ ] **Step 3: Implement exact notification fixtures**
+- [x] **Step 3: Implement exact notification fixtures**
 
   Generate immutable notification records with increasing `publish_seq`; W1/W2
   contain only observations before final. W3 contains Tool-start at 40,
@@ -247,28 +248,28 @@ Voice P1/P2 owners and latency contracts.
   A and barrier-bounded batches up to 16 in B; the real Web owner performs all
   parsing, validation, retention and local-tail delivery.
 
-- [ ] **Step 4: Implement controlled P1 dependencies**
+- [x] **Step 4: Implement controlled P1 dependencies**
 
   Use real P1 ownership with deterministic capture readiness, synthesis
   descriptor, downlink frames, playout scheduler and exact receipt. Emit fixed
   24 kHz PCM frame metadata without storing PCM in results. A dependency waits
   ACK before downlink; B follows the accepted source overlap behavior.
 
-- [ ] **Step 5: Add W2/W3 RED/GREEN tests**
+- [x] **Step 5: Add W2/W3 RED/GREEN tests**
 
   Assert W2 A/B RPC counts `50/4`. Assert W3 A/B counts `100/8` and exact batch
   tails `40`, `41`, `99`; no batch crosses a barrier. All workloads preserve one
   final PresentationUnit, one render, one ACK and zero Agent/Tool/Task/history
   mutation.
 
-- [ ] **Step 6: Add fault/lifecycle RED/GREEN tests**
+- [x] **Step 6: Add fault/lifecycle RED/GREEN tests**
 
   Cover malformed sequence, duplicate final, nested Agent error, wrong Tool
   barrier, delayed/stale ACK, downlink failure, playout failure, close during
   wait, timeout, retry/replay and late successor readiness. Each produces one
   stable terminal outcome and zero forbidden cross-scope effect.
 
-- [ ] **Step 7: Run affected owner regressions**
+- [x] **Step 7: Run affected owner regressions**
 
   ```bash
   cd jiuwenswarm/channels/web/frontend
@@ -278,7 +279,7 @@ Voice P1/P2 owners and latency contracts.
   npm run test:live-voice-integrated-web
   ```
 
-- [ ] **Step 8: Commit owner composition**
+- [x] **Step 8: Commit owner composition**
 
   ```bash
   git add \
