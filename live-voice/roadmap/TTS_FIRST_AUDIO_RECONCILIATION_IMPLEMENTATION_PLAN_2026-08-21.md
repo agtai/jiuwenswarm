@@ -22,6 +22,14 @@ media.
 compile/test harness, Python Gateway registry tests, JSON mode-600 causal
 reports, Git worktrees, pytest and Ruff.
 
+> **Result — COMPLETE 2026-08-21:** `SUCCESSOR_ACK_DECOUPLING_ACCEPTED` at
+> no-Chrome first-audio component scope on independently reviewed source
+> `cd4d1b7d34a529839ecf219f7f2eb567fedce4d2`. A1/B2/A2 reduced delayed
+> first-source p50 from 255.597/756.542 ms to 0.486/0.476 ms and returned to
+> 254.980/754.721 ms. Receipt settlement remains ACK-delayed; physical Browser,
+> audible-output, Provider and network credit remain open. Exact evidence:
+> [TTS_FIRST_AUDIO_CAUSAL_RESULT_2026-08-21.md](../evidence/TTS_FIRST_AUDIO_CAUSAL_RESULT_2026-08-21.md).
+
 **Spec:**
 [NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md](NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md)
 
@@ -68,7 +76,7 @@ reports, Git worktrees, pytest and Ruff.
 - Produces: a closed hunk disposition table used by Tasks 3 and 4:
   `port`, `already_present`, `superseded`, `exclude`.
 
-- [ ] **Step 1: Freeze current and divergent source facts**
+- [x] **Step 1: Freeze current and divergent source facts**
 
 Run:
 
@@ -86,7 +94,7 @@ git diff --stat 874cf327c..35cae3d9a
 Expected: all commits resolve; the four Hongxing commits are absent from the
 current ancestry; worktree is clean.
 
-- [ ] **Step 2: Compare only the owning hunks**
+- [x] **Step 2: Compare only the owning hunks**
 
 Run:
 
@@ -109,7 +117,7 @@ git diff 874cf327c..35cae3d9a -- \
 For every changed function, record current line/function, historical intent,
 current equivalent and disposition. Do not copy STATUS/history hunks.
 
-- [ ] **Step 3: Write the reconciliation review**
+- [x] **Step 3: Write the reconciliation review**
 
 The review must include this exact table shape:
 
@@ -124,7 +132,7 @@ The review must include this exact table shape:
 Also record which old tests remain semantically applicable versus superseded by
 current generation/latency ownership.
 
-- [ ] **Step 4: Verify and commit Task 1**
+- [x] **Step 4: Verify and commit Task 1**
 
 ```bash
 git diff --check
@@ -162,7 +170,7 @@ npm run benchmark:live-voice-tts-first-audio -- \
   `live-voice.tts-first-audio-causal-report.v0`.
 - Task 3 consumes the exact clean runner commit and report.
 
-- [ ] **Step 1: Write RED closed-CLI/report tests**
+- [x] **Step 1: Write RED closed-CLI/report tests**
 
 Test exact arguments, absolute/nonexistent output, clean/matching Git commit,
 run ID, `samples=5`, exclusive mode-600 output and stable private failure token.
@@ -178,7 +186,7 @@ test('TTS causal CLI freezes the four populations and private report', async () 
 });
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -187,7 +195,7 @@ node --test tests/liveVoiceTtsFirstAudioCausalBenchmark.test.mjs
 
 Expected: fail because the runner does not exist.
 
-- [ ] **Step 3: Implement closed config and report types**
+- [x] **Step 3: Implement closed config and report types**
 
 The report contains only:
 
@@ -223,7 +231,7 @@ playout_receipt_accepted_ms
 Allowed outcomes are `completed|degraded_interruption|failed|invalid|unknown`.
 Failed/invalid/unknown attempts carry no comparison latency samples.
 
-- [ ] **Step 4: Write RED real-owner journey tests**
+- [x] **Step 4: Write RED real-owner journey tests**
 
 Instantiate the real `ProductP1VoiceRoute` with deterministic current-product
 Speech/media/audio fakes. Drive one exact authoritative response and assert:
@@ -242,14 +250,14 @@ Legacy 1100 ms ACK must reproduce the current bounded startup failure and stay
 in the denominator. The benchmark must not encode candidate success as its
 oracle.
 
-- [ ] **Step 5: Implement deterministic runner composition**
+- [x] **Step 5: Implement deterministic runner composition**
 
 Reuse current test fakes/build helpers rather than copying product logic.
 Inject one monotonic manual clock and schedule descriptor, ACK, downlink frame
 and first-source callbacks against absolute deadlines. Count every request and
 audio source. Do not invoke a shell, network, Provider or Browser.
 
-- [ ] **Step 6: Add benchmark package command**
+- [x] **Step 6: Add benchmark package command**
 
 Add:
 
@@ -259,7 +267,7 @@ Add:
 
 Use the same strict compiler flags as the existing P2 benchmark command.
 
-- [ ] **Step 7: Run GREEN and affected regressions**
+- [x] **Step 7: Run GREEN and affected regressions**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -271,7 +279,7 @@ npx prettier --check scripts/liveVoiceTtsFirstAudioCausalBenchmark.mjs tests/liv
 git diff --check
 ```
 
-- [ ] **Step 8: Commit Task 2**
+- [x] **Step 8: Commit Task 2**
 
 ```bash
 git add \
@@ -299,7 +307,7 @@ git commit -m "test(live-voice): add TTS first-audio causal benchmark"
 - Produces decision `NO_MATERIAL_SUCCESSOR_ACK_GAP` or
   `SUCCESSOR_ACK_DECOUPLING_ELIGIBLE`.
 
-- [ ] **Step 1: Freeze one clean A1 source**
+- [x] **Step 1: Freeze one clean A1 source**
 
 ```bash
 git status --porcelain --untracked-files=all
@@ -309,7 +317,7 @@ git rev-parse HEAD
 Require empty status. Record exact Node version and runner hash without private
 machine paths in committed evidence.
 
-- [ ] **Step 2: Run A1**
+- [x] **Step 2: Run A1**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -323,7 +331,7 @@ npm run benchmark:live-voice-tts-first-audio -- \
   --samples 5
 ```
 
-- [ ] **Step 3: Apply A1 materiality gate**
+- [x] **Step 3: Apply A1 materiality gate**
 
 The candidate is eligible when either delayed-success population (250 or
 750 ms):
@@ -337,7 +345,7 @@ The candidate is eligible when either delayed-success population (250 or
 Otherwise record `NO_MATERIAL_SUCCESSOR_ACK_GAP`, stop product implementation
 and route Task 6 documentation directly to TTS Provider prewarm.
 
-- [ ] **Step 4: Commit sanitized A1 evidence**
+- [x] **Step 4: Commit sanitized A1 evidence**
 
 ```bash
 git add live-voice/evidence/TTS_FIRST_AUDIO_A1_RESULT_2026-08-21.md
@@ -379,7 +387,7 @@ git commit -m "docs(live-voice): record TTS first-audio A1"
 - `duplex_media_observed` remains an existing boolean fact; false cannot reject
   an otherwise exact completed playout receipt.
 
-- [ ] **Step 1: Write RED concurrency-order tests**
+- [x] **Step 1: Write RED concurrency-order tests**
 
 Required cases:
 
@@ -394,7 +402,7 @@ cancel during startup: both branches fenced; old downlink/source remains zero
 Assert `downlink_opened_ms < successor_first_ack_ms` for delayed ACK and zero
 Agent/Tool/Task/history calls in every failure/degradation case.
 
-- [ ] **Step 2: Run Web RED**
+- [x] **Step 2: Run Web RED**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -403,7 +411,7 @@ node --test --test-name-pattern='successor ACK|interruption degradation|late ACK
 
 Expected: current source waits for ACK or fails before opening downlink.
 
-- [ ] **Step 3: Implement concurrent startup owner**
+- [x] **Step 3: Implement concurrent startup owner**
 
 In `playAgentText`, start exactly two retained operations:
 
@@ -418,7 +426,7 @@ bounded owner: ready preserves barge-in; no-frame/no-ACK/startup failure stops
 and revokes only that successor and publishes degraded interruption. Current
 generation/cancel fences own both promises.
 
-- [ ] **Step 4: Write RED Gateway receipt tests**
+- [x] **Step 4: Write RED Gateway receipt tests**
 
 Drive exact short downlink completion under:
 
@@ -429,7 +437,7 @@ successor frame only after completion → retained receipt unchanged false
 wrong binding/malformed/incomplete downlink → rejected
 ```
 
-- [ ] **Step 5: Run Gateway RED**
+- [x] **Step 5: Run Gateway RED**
 
 ```bash
 uv run pytest tests/unit_tests/gateway/test_dedicated_media_registration.py -q --no-cov -k 'early_duplex or playout_receipt'
@@ -437,17 +445,17 @@ uv run pytest tests/unit_tests/gateway/test_dedicated_media_registration.py -q -
 
 Expected: no-early-duplex exact receipt is currently rejected.
 
-- [ ] **Step 6: Implement receipt truth separation**
+- [x] **Step 6: Implement receipt truth separation**
 
 Make downlink completion depend on exact authorized transport, frame/queue and
 browser render facts, not on successor uplink activity. Return the already
 declared `duplex_media_observed` boolean from the retained observation. Preserve
 all identity, origin, activation, content-hash, idempotency and replay checks.
 
-- [ ] **Step 7: Run Task 4 focused and cumulative checks**
+- [x] **Step 7: Run Task 4 focused and cumulative checks**
 
 ```bash
-uv run pytest tests/unit_tests/gateway/test_dedicated_media_registration.py tests/unit_tests/live_voice/test_streaming_speech_route.py tests/unit_tests/live_voice/test_openai_streaming_speech.py -q --no-cov
+uv run pytest tests/unit_tests/gateway/test_dedicated_media_registration.py tests/unit_tests/gateway/test_streaming_speech_route.py tests/unit_tests/live_voice/test_openai_streaming_speech.py -q --no-cov
 uv run ruff check jiuwenswarm/gateway/live_voice/dedicated_media_registration.py tests/unit_tests/gateway/test_dedicated_media_registration.py
 cd jiuwenswarm/channels/web/frontend
 node --test tests/productP1VoiceRoute.test.mjs tests/liveVoiceIntegratedRoutePanelMounted.test.mjs
@@ -457,7 +465,7 @@ npx tsc --noEmit
 git diff --check
 ```
 
-- [ ] **Step 8: Commit Task 4**
+- [x] **Step 8: Commit Task 4**
 
 ```bash
 git add \
@@ -488,18 +496,18 @@ git commit -m "perf(live-voice): decouple TTS from successor capture"
 - Consumes exact A1 runner/reference and one Task 4 B commit.
 - Produces `SUCCESSOR_ACK_DECOUPLING_ACCEPTED|REJECTED|INCONCLUSIVE`.
 
-- [ ] **Step 1: Run B on the candidate commit**
+- [x] **Step 1: Run B on the candidate commit**
 
 Use the exact Task 2 command/fixtures. Require 20/20 attempts to be completed
 or declared `degraded_interruption` only for the 1100 ms population; no failed,
 invalid or unknown attempt receives latency credit.
 
-- [ ] **Step 2: Run A2 in a clean detached/reference worktree**
+- [x] **Step 2: Run A2 in a clean detached/reference worktree**
 
 Run the exact A1 commit, runner, delays and machine. A2 p50 must remain within
 10% of A1 per population and have identical outcome counts.
 
-- [ ] **Step 3: Compare stage-by-stage**
+- [x] **Step 3: Compare stage-by-stage**
 
 B is accepted only when:
 
@@ -511,13 +519,13 @@ B is accepted only when:
 - TTS descriptor/downlink/first-frame waits are not displaced later;
 - every attempt has exact cleanup and zero forbidden effects.
 
-- [ ] **Step 4: Request independent Tier-3 review**
+- [x] **Step 4: Request independent Tier-3 review**
 
 Review the complete Task 1–4 diff and raw/sanitized A1/B/A2 structure. Remediate
 every Critical/Important through RED/GREEN; rerun only affected deterministic
 checks and any causal population whose semantics changed.
 
-- [ ] **Step 5: Write and commit sanitized result**
+- [x] **Step 5: Write and commit sanitized result**
 
 Record exact commits/run IDs, Node/runtime labels, per-population counts,
 stage p50/p95, decision and no-Chrome limitation.
@@ -539,16 +547,16 @@ git commit -m "docs(live-voice): record TTS first-audio causal result"
   `live-voice/roadmap/NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md`
 - Modify this plan's checkboxes/result note.
 
-- [ ] **Step 1: Update only current owning facts**
+- [x] **Step 1: Update only current owning facts**
 
 If no material A1 gap, route next to TTS Provider prewarm. If B is accepted,
 record causal component credit and keep physical Chrome first-audible open. If
 rejected/inconclusive, preserve current product behavior and exact reason.
 
-- [ ] **Step 2: Run final verification**
+- [x] **Step 2: Run final verification**
 
 ```bash
-uv run pytest tests/unit_tests/gateway/test_dedicated_media_registration.py tests/unit_tests/live_voice/test_streaming_speech_route.py tests/unit_tests/live_voice/test_openai_streaming_speech.py -q --no-cov
+uv run pytest tests/unit_tests/gateway/test_dedicated_media_registration.py tests/unit_tests/gateway/test_streaming_speech_route.py tests/unit_tests/live_voice/test_openai_streaming_speech.py -q --no-cov
 uv run ruff check jiuwenswarm/gateway/live_voice/dedicated_media_registration.py tests/unit_tests/gateway/test_dedicated_media_registration.py
 cd jiuwenswarm/channels/web/frontend
 node --test tests/liveVoiceTtsFirstAudioCausalBenchmark.test.mjs tests/productP1VoiceRoute.test.mjs tests/liveVoiceIntegratedRoutePanelMounted.test.mjs
@@ -558,7 +566,7 @@ npx tsc --noEmit
 git diff --check
 ```
 
-- [ ] **Step 3: Verify documentation structure and commit**
+- [x] **Step 3: Verify documentation structure and commit**
 
 Check changed relative Markdown links, no duplicate under `docs/zh/live-voice`,
 private reports untracked and product default VAD unchanged.

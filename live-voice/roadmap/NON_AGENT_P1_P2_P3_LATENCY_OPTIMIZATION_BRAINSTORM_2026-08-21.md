@@ -80,7 +80,7 @@ ranking work from the obsolete 11.5-second projection.
 - Consequence: only semantic/adaptive or hybrid endpointing may recover that
   headroom without weakening turn integrity.
 
-## Current branch divergence that changes priority
+## Branch divergence reconciliation and result
 
 The current causal line contains the P2 bounded-pull candidate, but does not
 contain Hongxing's later P1/P2 commits:
@@ -92,8 +92,14 @@ contain Hongxing's later P1/P2 commits:
 | `35cae3d9a` | separate completed playout receipt from early-duplex observation | prevents false post-playout failure/recovery |
 | `e1df8b452` | restore hands-free playout controls | physical tested source containing the preceding fixes |
 
-These commits must be compared and ported by current contracts, not blindly
-cherry-picked across the divergent history.
+The cold comparison was completed without blind cherry-pick. The current
+contract port of `874cf327c` plus the required `35cae3d9a` receipt correction
+was accepted on reviewed source `cd4d1b7d3`. At 250/750 ms injected successor
+ACK delay, first-source p50 changed from 255.597/756.542 ms to 0.486/0.476 ms;
+the 1100 ms path rendered once and truthfully degraded interruption instead of
+failing TTS before downlink. Receipt settlement remains ACK-delayed, and
+`6cd8840d5` capture rotation remains excluded. See the
+[TTS causal result](../evidence/TTS_FIRST_AUDIO_CAUSAL_RESULT_2026-08-21.md).
 
 ## P1 input opportunities
 
@@ -115,7 +121,7 @@ not a presumed large optimization. Its governing spec is
 
 | Candidate | Isolated p50 gain estimate | Confidence | Notes |
 |---|---:|---|---|
-| port successor-capture ACK decoupling | 300–1,000 ms | medium-high | Hongxing already implemented the owning contract on `874cf327c` |
+| successor-capture ACK decoupling | **accepted: 255/756 ms at injected 250/750 ms delays** | high causal/component | reviewed source `cd4d1b7d3`; physical first-audible and receipt-settlement gain remain separate |
 | TTS connection prewarm/reuse | 200–600 ms | medium | current batch TTS generation observed at 912–1,672 ms |
 | adaptive startup lead, 1,000 → 160–300 ms | 700–840 ms | high code fact | deterministic implementation possible without Chrome; physical underrun gate later |
 | fixed authoritative phrase cache | 800–1,400 ms on hit | medium-high | only stable locale/provider/model/voice/version-bound ACK phrases |
@@ -163,10 +169,11 @@ not promote those states to `running`, `applied` or `completed`.
 
 ### 1. Conservative pipeline portfolio — recommended first
 
-1. reconcile/port Hongxing TTS/capture commits;
-2. establish a no-Chrome TTS first-audio causal benchmark;
-3. port successor-capture ACK decoupling as one B candidate;
-4. measure TTS prewarm/reuse;
+1. ~~reconcile/port Hongxing TTS/capture commits;~~ **DONE**
+2. ~~establish a no-Chrome TTS first-audio causal benchmark;~~ **DONE**
+3. ~~port and test successor-capture ACK decoupling as one B candidate;~~
+   **ACCEPTED at first-audio component scope**
+4. measure TTS prewarm/reuse next;
 5. run EOT waiter A1 and stop if below materiality;
 6. evaluate semantic/adaptive VAD.
 
@@ -209,12 +216,14 @@ is physical acceptance, and gains across rows overlap.
 
 ## Revised execution order
 
-1. Compare `874cf327c` and `35cae3d9a` against current source and instantiate a
-   current-contract port packet rather than reimplementing them.
-2. Build the no-Chrome TTS first-audio benchmark with boundaries
-   `PresentationUnit → request → Provider first chunk → downlink ready`.
-3. Run A1 for the EOT waiter; implement only if it passes 80 ms/10%.
-4. Evaluate TTS connection prewarm/reuse.
+1. ~~Compare `874cf327c` and `35cae3d9a`, build the no-Chrome TTS benchmark,
+   and run the current-contract A1/B/A2 packet.~~ **ACCEPTED — source
+   `cd4d1b7d3`, component first-audio only.**
+2. Evaluate TTS connection prewarm/reuse.
+3. Run A1 for the EOT waiter only if it remains material; implement only if it
+   passes 80 ms/10%.
+4. Preserve receipt-settlement overlap as a separate future authority question;
+   do not infer it from the first-audio result.
 5. Specify P3 authoritative acknowledgement and bounded cache.
 6. Evaluate semantic/adaptive VAD.
 7. Specify Runtime-owned sentence-level TTS and bounded prefetch.

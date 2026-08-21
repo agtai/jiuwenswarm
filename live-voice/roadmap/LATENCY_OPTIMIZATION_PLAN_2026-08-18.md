@@ -1,7 +1,7 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** P2 AND VAD CAUSAL SCREENS COMPLETE — accepted current-source
-> physical warm/cold measurement is not complete. [STATUS](../STATUS.md)
+> **Plan status:** P2, VAD AND TTS FIRST-AUDIO CAUSAL PACKETS COMPLETE — accepted
+> current-source physical warm/cold measurement is not complete. [STATUS](../STATUS.md)
 > remains the only owner
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
@@ -67,6 +67,16 @@
 > ranking and estimates are in the
 > [non-Agent P1/P2/P3 brainstorm](NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md).
 
+> **2026-08-21 TTS first-audio causal decision:** the reconciled successor-ACK
+> candidate was accepted at no-Chrome component scope on reviewed source
+> `cd4d1b7d34a529839ecf219f7f2eb567fedce4d2`. At 250/750 ms injected ACK delay,
+> first-source p50 changed from A1 255.597/756.542 ms to B2 0.486/0.476 ms and
+> returned to A2 254.980/754.721 ms; 1100 ms changed from five pre-downlink
+> failures to five truthful interruption degradations after one render. Receipt
+> settlement remains ACK-delayed at 254.023/753.939/1006.918 ms p50, so the
+> credit is first-audio only. See the
+> [TTS causal result](../evidence/TTS_FIRST_AUDIO_CAUSAL_RESULT_2026-08-21.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -111,7 +121,7 @@ Important code facts are:
 | Agent | `agent_conversation_runtime.py::_consume_agent_event` creates the text `PresentationUnit` only for `chat.final`; `chat.delta` is observation only. | The Agent's full 6–8 second historical generation time is silent before TTS starts. |
 | Task commands | `voice_task_bridge.py::resolve_unified` already has a structured Task route and short authoritative speech for supported Task operations. | A new generic “fast Task route” is not the first task; its truth and latency should be measured and repaired where necessary. |
 | TTS start | `productP1VoiceRoute.ts::playAgentText` sends the complete authoritative text. The Gateway pulls the first Provider audio before returning the downlink ticket. | Streaming exists below the full-text gate, so first audio still waits for `chat.final`. |
-| Capture/playback overlap | Current causal source waits on successor-capture readiness before downlink. Hongxing's divergent `874cf327c` decouples that ACK but is not present here. | Reconcile/port the accepted contract and measure `PresentationUnit → Provider first chunk → downlink ready` before inventing another fix. |
+| Capture/playback overlap | Reviewed source `cd4d1b7d3` starts downlink and bounded successor capture concurrently; no-frame/no-ACK startup degrades interruption without discarding exact TTS. | First-source ACK decoupling is accepted at component scope. Receipt settlement still waits for successor readiness; physical Browser/device confirmation remains open. |
 | Browser playout | `browserAudioIOAdapter.ts::PLAYOUT_STARTUP_LEAD_SECONDS` is fixed at `1.0`; its test schedules the first two 20 ms sources at 11.00 and 11.02 when current time is 10. | This deliberately adds one second to first audible to mask Provider burst gaps. |
 | Backpressure | the synthesis media queues default to eight frames, or 160 ms at 20 ms/frame. | Raising every queue to 64 frames would add up to 1.28 seconds of stale/cancel backlog and does not by itself solve Provider seed gaps. |
 
@@ -403,13 +413,13 @@ Work should be packetized in this dependency order:
    component evidence only**
 3. ~~no-Browser real-Provider fixed-threshold VAD screen;~~ **DONE — 800/900
    rejected, retain 1200; component evidence only**
-4. reconcile Hongxing's divergent TTS/successor-capture and playout-receipt
-   commits against current source, then establish a no-Chrome TTS first-audio
-   A1 before porting one candidate;
-5. run the no-Chrome EOT waiter A1 and change protocol only if its 80 ms/10%
-   materiality gate passes;
-6. evaluate TTS connection prewarm/reuse and semantic/adaptive VAD as separate
-   owner-scoped A1/B/A2 packets;
+4. ~~reconcile Hongxing's divergent TTS/successor-capture and playout-receipt
+   commits, establish A1, port one candidate and run B/A2;~~ **ACCEPTED —
+   first-audio component evidence only; receipt settlement remains ACK-delayed**
+5. evaluate TTS connection prewarm/reuse as the next owner-scoped A1/B/A2
+   packet;
+6. run the no-Chrome EOT waiter A1 only if its 80 ms/10% materiality gate is
+   still relevant, then evaluate semantic/adaptive VAD separately;
 7. authoritative acknowledgement for genuinely long operations;
 8. Conversation Runtime-owned sentence streaming with bounded semantic
    prefetch;
