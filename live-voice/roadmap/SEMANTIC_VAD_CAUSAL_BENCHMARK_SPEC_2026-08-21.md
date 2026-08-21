@@ -2,7 +2,7 @@
 
 Date: 2026-08-21
 
-Status: approved design; implementation and real-Provider evidence pending
+Status: approved next latency screen; implementation and real-Provider evidence pending
 
 ## 1. Decision and position in the latency route
 
@@ -11,15 +11,15 @@ global fixed-silence reduction and not a second semantic-model RPC. The current
 `server_vad` configuration with `silence_duration_ms=1200` remains the product
 default and the exact feature-off/configuration fallback.
 
-This packet follows, and does not combine with, the existing
+This packet follows, and does not combine with, the now-closed
 [EOT/STT settlement-overlap packet](EOT_STT_SETTLEMENT_OVERLAP_SPEC_2026-08-21.md):
 
-1. run the EOT/STT materiality screen;
-2. implement the early waiter/join candidate only if the existing 80 ms and 10%
-   materiality gates both pass;
-3. close that packet as accepted or rejected;
-4. use its resulting clean source as the control source for this Semantic VAD
-   packet.
+1. complete A1 source `8e5dab8b8` retained ten marks/eight segments in 20/20
+   exact cleanup-complete attempts;
+2. every removable gap/fraction pair missed the 80 ms/0.10 gate;
+3. the packet closed as `NO_MATERIAL_SERIAL_GAP` with no product candidate;
+4. use that resulting clean code source as the control boundary for this
+   Semantic VAD packet.
 
 The VAD comparison changes only turn detection. Any accepted EOT/STT overlap is
 held constant across every A1, B and A2 arm.

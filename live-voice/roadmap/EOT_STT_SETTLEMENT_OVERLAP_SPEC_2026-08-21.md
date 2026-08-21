@@ -8,6 +8,12 @@ Date: 2026-08-21
 > no-Chrome TTS first-audio A1 precede it. See the
 > [non-Agent P1/P2/P3 brainstorm](NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md).
 
+> **Closed-result note:** complete A1 source `8e5dab8b8` retained all ten marks
+> and eight segments in 20/20 exact cleanup-complete attempts. The largest
+> respective removable-gap/fraction p50 values were 0.880 ms and 0.015, so the decision is
+> `NO_MATERIAL_SERIAL_GAP`; no product candidate is permitted. The next latency
+> screen is Provider-native Semantic VAD with the 1200 ms fallback retained.
+
 ## 1. Goal and decision boundary
 
 Determine whether starting the exact streaming-result waiter before local
@@ -25,7 +31,7 @@ The decision is one of:
 
 - `NO_MATERIAL_SERIAL_GAP`: A1 shows less than 80 ms p50 removable wait or less
   than 10% of `EOT → recognized final`; do not change the product protocol and
-  route next to TTS time-to-first-audio.
+  route next to the separately specified Provider-native Semantic VAD screen.
 - `JOIN_CANDIDATE_ELIGIBLE`: A1 proves a material gap and all safety fixtures
   are measurable; implement B and run unchanged-source A2.
 - `JOIN_CANDIDATE_ACCEPTED`: B improves both A1 and A2 without moving the wait,
@@ -120,11 +126,11 @@ Retain Provider final earlier without changing Browser request order. This is
 mostly present already through `event_task`; it is unlikely to remove the
 Browser/RPC tail and is not the first candidate.
 
-### C. Skip directly to TTS
+### C. Skip the product waiter
 
 If A1 shows the post-settlement result wait is below the materiality threshold,
 this is the required outcome. Do not implement A merely to complete a planned
-feature.
+feature; route next to the current latency-plan owner.
 
 ## 6. Candidate-neutral A1 benchmark
 
@@ -148,15 +154,16 @@ readiness times:
 
 Each fixture runs at least five attempts. A1 records:
 
-- `eot_observed`;
-- `capture_stop_started` and `capture_stopped`;
-- `last_frame_offered`;
-- `last_frame_acked`;
-- `uplink_route_settled`;
-- `provider_final_ready`;
-- `streaming_result_request_started`;
-- `streaming_result_returned`;
-- `recognized_final_accepted`.
+- `browser.eot_received`;
+- `browser.capture_stop_requested`;
+- `browser.capture_stopped`;
+- `browser.uplink_last_frame_sent`;
+- `browser.uplink_last_ack_received`;
+- `browser.uplink_closed`;
+- `benchmark.provider_final_ready`;
+- `browser.streaming_result_request_started`;
+- `browser.streaming_result_returned`;
+- `browser.stt_final_received`.
 
 Derived segments:
 
@@ -170,7 +177,10 @@ Derived segments:
 - EOT → recognized final accepted.
 
 The benchmark also records RPC count and exact outcome, but no transcript,
-audio payload or private exception text.
+audio payload or private exception text. The fixed synthetic registry business
+envelope may cross only captured in-memory child stdout because the real
+Product P1 owner must consume it. Reports, error strings and terminal output
+remain content-free.
 
 Materiality gate: the candidate proceeds only when the removable serial gap
 `streaming result returned − max(uplink closed, Provider final ready)` has p50

@@ -77,6 +77,16 @@
 > credit is first-audio only. See the
 > [TTS causal result](../evidence/TTS_FIRST_AUDIO_CAUSAL_RESULT_2026-08-21.md).
 
+> **2026-08-21 EOT/STT materiality decision:** the complete deterministic A1
+> at `8e5dab8b8c6651b2be784cf103df9239a93814a0` retained all ten owner/fixture
+> marks and eight derived segments across 20/20 exact cleanup-complete attempts.
+> The largest removable-gap p50 was 0.880 ms and the largest removable fraction
+> p50 was 0.015, below the 80 ms/0.10 gate. The packet is closed as
+> `NO_MATERIAL_SERIAL_GAP`; no early-wait candidate is permitted. The next
+> latency screen is [Provider-native Semantic VAD](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md)
+> with the 1200 ms fallback retained. See the
+> [complete EOT/STT result](../evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -298,18 +308,18 @@ This seam is complete when first audio can flow independently, current
 generation/cancel fences still own both streams, and tests cover capture-ready,
 capture-late, capture-failed and cancel-during-startup cases.
 
-### Overlap Provider final retrieval with local end-of-turn settlement
+### EOT/STT early-wait overlap — closed, no candidate
 
-The Gateway already allows a server-VAD final to arrive before the browser
-finishes its uplink. The product contract should expose “Provider final ready”
-separately from “all local frames accounted for”, let the two settle in
-parallel, and commit text only after both succeed. It must not simply call the
-existing finish method early, because that would weaken complete-frame and ACK
-proof.
+The complete A1 confirmed that Gateway Provider-final collection already
+overlaps local media settlement. Local-fast/provider-slow retained a large
+450.782 ms p50 route-settled-to-result-returned diagnostic, but its removable
+tail was only 0.885 ms / 0.002 of EOT-to-final. Across all four fixtures the
+largest respective p50 values were 0.880 ms and 0.015, so no fixture passed both the
+80 ms and 0.10 gates.
 
-Completion requires identical committed text and zero side effects on timeout,
-missing ACK, stale capture or Provider-final failure, plus a measured reduction
-in the EOT-to-STT-final segment.
+Do not add an early result waiter or weaken complete-frame/ACK proof. Keep the
+current exact result authority unchanged and route the next endpointing work to
+the separately specified Semantic VAD screen below.
 
 ### Tune VAD by evidence, not by a global constant change
 

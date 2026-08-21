@@ -10,6 +10,12 @@
 
 **Spec:** `live-voice/roadmap/EOT_STT_SETTLEMENT_OVERLAP_SPEC_2026-08-21.md`
 
+> **Final closure:** complete A1 source
+> `8e5dab8b8c6651b2be784cf103df9239a93814a0` produced 20/20 exact,
+> cleanup-complete attempts with all ten marks and eight segments. The largest
+> respective removable-gap/fraction p50 values were 0.880 ms and 0.015, so the packet is closed as
+> `NO_MATERIAL_SERIAL_GAP`; Tasks 4–6 remain skipped.
+
 ## Global Constraints
 
 - `ServerVadConfig.silence_duration_ms` remains exactly `1200`.
@@ -175,10 +181,17 @@ export interface EotSttAttempt {
   readonly rpc_count: number;
   readonly exact_result: boolean;
   readonly cleanup_complete: boolean;
+  readonly segments_ms: Readonly<Record<string, number | null>>;
+  readonly removable_serial_gap_ms: number | null;
+  readonly removable_serial_gap_fraction: number | null;
 }
 ```
 
 Use one monotonic clock, nearest-rank p95, exclusive file creation and `chmod(0o600)`. The report must contain no frames, transcript, item ID, exception text or credentials.
+The closed mark set is the nine exact existing `browser.*` observations named
+in the spec plus fixture-local `benchmark.provider_final_ready`; successful
+attempts retain all eight spec segments, while unsuccessful attempts retain no
+numeric segment or removable-gap credit.
 
 - [x] **Step 4: Implement the real-registry fixture boundary**
 
@@ -200,11 +213,14 @@ return {"status": payload["status"], "exact_result": fixture.is_exact(payload)}
 ```
 
 The command process reads/writes one bounded JSON object per line, uses no
-shell, emits no transcript or identity value, and closes every registry task.
+shell and closes every registry task. The fixed synthetic registry business
+envelope may cross only captured in-memory child stdout for
+`ProductP1VoiceRouteOwner` consumption; reports, error strings and terminal
+output remain content-free and expose no transcript or identity value.
 
 - [x] **Step 5: Compose the real Product P1 owner with the real registry seam**
 
-The benchmark script must use the same owner factory pattern as `productP1VoiceRoute.test.mjs`. The Speech transport delays result readiness by `providerFinalMs`; the media leaf delays `completeUplink()` by `localSettlementMs`; both expose exact event callbacks to the existing latency round. Return the fixed text only inside the fake and persist only `exact_result=true`.
+The benchmark script must use the same owner factory pattern as `productP1VoiceRoute.test.mjs`. The Speech transport delays result readiness by `providerFinalMs`; the media leaf delays `completeUplink()` by `localSettlementMs`; both expose exact event callbacks to the existing latency round. The fixed text remains only in the captured fake/owner business exchange; persist only `exact_result=true` and content-free marks/segments.
 
 Require an absolute `--python-executable` CLI value and start the fixture with
 no shell:
@@ -263,7 +279,7 @@ git commit -m "test(live-voice): add EOT settlement materiality benchmark"
 test -z "$(git status --porcelain)"
 git rev-parse HEAD
 cd jiuwenswarm/channels/web/frontend
-npm run benchmark:live-voice-eot-stt -- --candidate A1 --attempts 5 --git-commit bdd57bb6dd2418fcbbfb87ed2df7c27e08de9a0f --run-id eot-stt-a1-materiality-bdd57bb6d --output /home/renan/openJiuwen-ai/live-voice-latency-runs/eot-stt-a1-materiality-bdd57bb6d.json --python-executable /home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/live-voice-eot-stt-overlap/.venv/bin/python3
+npm run benchmark:live-voice-eot-stt -- --output /tmp/live-voice-eot-stt-final-Up1qNe/eot-stt-a1-complete.json --git-commit 8e5dab8b8c6651b2be784cf103df9239a93814a0 --run-id eot-stt-complete-contract-final --attempts 5 --candidate A1 --python-executable /home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/live-voice-eot-stt-overlap/.venv/bin/python3
 ```
 
 - [x] **Step 2: Apply the closed materiality rule**
@@ -295,6 +311,11 @@ git commit -m "docs(live-voice): record EOT settlement materiality"
 Result: all four removable p50/fraction pairs were below the 80 ms/0.10 gate;
 the closed decision is `NO_MATERIAL_SERIAL_GAP`. Stop this plan here. Tasks
 4–6 are skipped and forbidden.
+
+Final exact result: 20/20 attempts retained all ten marks and eight segments;
+the largest removable-gap p50 was 0.880 ms and the largest removable fraction
+p50 was 0.015. See the
+[sanitized result](../evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md).
 
 ### Task 4: Add the conditional Gateway early-wait join — SKIPPED (`NO_MATERIAL_SERIAL_GAP`)
 
