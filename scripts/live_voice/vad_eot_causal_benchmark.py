@@ -619,6 +619,22 @@ async def run_vad_attempt(
             except Exception:
                 pass
     cleanup = bool(provider is not None and provider.cleanup_snapshot.clean)
+    if early_eot and cleanup:
+        return VadAttemptResult.failed(
+            configuration_id,
+            silence_duration_ms,
+            case.case_id,
+            attempt_index,
+            VadAttemptReason.EARLY_EOT,
+            speech_started_count=started,
+            speech_stopped_count=stopped,
+            committed_count=committed,
+            final_count=final,
+            exact_identity=exact_identity,
+            transcript_complete=transcript_complete,
+            cleanup_complete=True,
+            pacing_valid=pacing_valid,
+        )
     return VadAttemptResult.failed(
         configuration_id,
         silence_duration_ms,

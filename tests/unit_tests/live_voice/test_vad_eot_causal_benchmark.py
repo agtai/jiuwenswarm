@@ -204,6 +204,36 @@ class FakeProvider:
         self.closed = True
 
 
+class EarlyEotThenProtocolProvider(FakeProvider):
+    async def send_recognition_audio(self, frame) -> None:
+        self.frames.append(frame)
+        if not self.emitted and frame.sample_cursor + frame.sample_count >= self.case.second_clause_first_frame:
+            self.emitted = True
+            item = "private-item"
+            for event in (
+                RecognitionTurnBoundaryEvent(
+                    self.ref, self.provider, 0,
+                    RecognitionTurnBoundaryKind.SPEECH_STARTED, item,
+                    provider_start_ms=0,
+                ),
+                RecognitionTurnBoundaryEvent(
+                    self.ref, self.provider, 1,
+                    RecognitionTurnBoundaryKind.SPEECH_STOPPED, item,
+                    provider_end_ms=self.case.second_clause_first_frame // 48,
+                ),
+                RecognitionTurnBoundaryEvent(
+                    self.ref, self.provider, 2,
+                    RecognitionTurnBoundaryKind.COMMITTED, item,
+                ),
+            ):
+                await self.events.put(event)
+
+    async def next_recognition_event(self, ref, *, timeout_seconds: float):
+        if self.events.empty() and self.emitted:
+            raise RuntimeError("private-provider-sentinel")
+        return await super().next_recognition_event(ref, timeout_seconds=timeout_seconds)
+
+
 def test_config_is_closed_and_freezes_sequence(tmp_path: Path) -> None:
     pilot = _config(tmp_path / "pilot")
     formal = _config(tmp_path / "formal", mode="run")
@@ -297,6 +327,27 @@ async def test_provider_failure_cancels_collector_and_closes_owner(tmp_path: Pat
     )
     assert result.outcome is runner.VadAttemptOutcome.UNKNOWN
     assert result.reason is runner.VadAttemptReason.PROVIDER_PROTOCOL
+    assert provider.closed is True
+
+
+@pytest.mark.asyncio
+async def test_observed_early_eot_remains_turn_failure_when_tail_protocol_fails(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _, manifest = _corpus(tmp_path / "second")
+    case = manifest.cases[-1]
+    clock = ManualClock()
+    provider = EarlyEotThenProtocolProvider(case, 1200)
+
+    async def factory(_turn_detection):
+        return provider
+
+    result = await runner.run_vad_attempt(
+        config, case, 0, configuration_id="A1", silence_duration_ms=1200,
+        provider_factory=factory, monotonic=clock.now, sleep=clock.sleep,
+    )
+    assert result.outcome is runner.VadAttemptOutcome.FAILED
+    assert result.reason is runner.VadAttemptReason.EARLY_EOT
+    assert result.final_voiced_frame_to_eot_ms is None
     assert provider.closed is True
 
 

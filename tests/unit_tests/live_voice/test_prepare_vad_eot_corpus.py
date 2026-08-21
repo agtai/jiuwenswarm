@@ -89,6 +89,39 @@ def test_prepare_derives_only_declared_pause_and_preserves_source(tmp_path: Path
     assert support.load_vad_corpus_manifest(output_root / "manifest.json") == manifest
 
 
+def test_builder_ignores_low_energy_phone_noise_after_last_voiced_frame(tmp_path: Path) -> None:
+    support = _load(SUPPORT_PATH, "vad_support_noisy_tail")
+    source = tmp_path / "source-noisy.wav"
+    samples = list(_write_source(source))
+    samples = samples[:-96_000] + [100] * 2_000 + samples[-96_000:]
+    with wave.open(str(source), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(48_000)
+        output.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    expectation = tmp_path / "expectation-noisy.json"
+    _expectation(expectation)
+
+    manifest = support.prepare_vad_corpus(
+        support.PrepareVadCorpusRequest(
+            source,
+            source_hash,
+            tmp_path / "derived-noisy",
+            "vad-en-v1",
+            2_880,
+            expectation,
+        )
+    )
+
+    assert {case.final_voiced_frame for case in manifest.cases} == {
+        5_760,
+        20_160,
+        34_560,
+        53_760,
+    }
+
+
 def test_manifest_is_closed_hash_bound_and_path_confined(tmp_path: Path) -> None:
     support = _load(SUPPORT_PATH, "vad_support_manifest")
     source = tmp_path / "source.wav"

@@ -18,6 +18,8 @@ SAMPLE_RATE_HZ = 48_000
 CHANNEL_COUNT = 1
 SAMPLE_WIDTH_BYTES = 2
 FINAL_SILENCE_MS = 2_000
+VOICE_RMS_THRESHOLD = 512
+VOICE_WINDOW_SAMPLES = 480
 PAUSES_MS = (0, 300, 600, 1_000)
 CASE_IDS = (
     "no-internal-pause",
@@ -218,10 +220,13 @@ def _validate_source(request: PrepareVadCorpusRequest) -> tuple[Pcm16MonoWav, in
         raise ValueError("VAD_CORPUS_SPLIT_INVALID")
     if len(samples) < 96_000 or any(samples[-96_000:]):
         raise ValueError("VAD_CORPUS_FINAL_SILENCE_INVALID")
-    final_voiced = next(
-        (index + 1 for index in range(len(samples) - 1, -1, -1) if samples[index]),
-        0,
-    )
+    final_voiced = 0
+    speech_area = len(samples) - 96_000
+    threshold_energy = VOICE_RMS_THRESHOLD * VOICE_RMS_THRESHOLD
+    for offset in range(0, speech_area, VOICE_WINDOW_SAMPLES):
+        window = samples[offset : min(offset + VOICE_WINDOW_SAMPLES, speech_area)]
+        if window and sum(sample * sample for sample in window) / len(window) > threshold_energy:
+            final_voiced = offset + len(window)
     if final_voiced <= split:
         raise ValueError("VAD_CORPUS_SPLIT_INVALID")
     return decoded, final_voiced

@@ -130,6 +130,9 @@ The builder refuses overwrite, path escape, noncanonical WAV, source-hash
 mismatch, a split outside the declared low-energy boundary window, invalid
 pause values or an output whose decoded facts differ from its manifest. The
 split frame is explicit input and is never rediscovered during a benchmark run.
+The content endpoint is the end of the last 10 ms window whose PCM RMS exceeds
+512; this fixed corpus rule excludes low-energy phone noise before the required
+2000 ms digital-silence tail from being mislabeled as spoken input.
 
 ## 6. Real Provider data flow
 
