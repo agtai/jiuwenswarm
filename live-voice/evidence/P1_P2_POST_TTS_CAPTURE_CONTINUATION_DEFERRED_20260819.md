@@ -7,11 +7,12 @@
 - Original controlled-candidate result: **FAIL — not a controlled
   product-readiness candidate**. That immutable result remains recorded in the
   [P3-G0 attempt](P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md).
-- Current disposition: defer this P1/P2 media/conversation defect until formal
+- Original disposition (2026-08-19): defer this P1/P2 media/conversation defect until formal
   P1/P2 moves from `PARTIAL` to `COMPLETE`. It no longer blocks P3-1 expansion,
   but it still blocks a controlled product-readiness PASS and the later
   feature-complete boundary.
-- This record grants no source fix, physical PASS or product-readiness credit.
+- The original record grants no source fix, physical PASS or product-readiness
+  credit; dated later facts are recorded in the disposition sections below.
 
 ## Product expectation
 
@@ -116,3 +117,22 @@ affected automated evidence; see the
 later-acceptance criteria in this record remain open and unchanged: they close
 only on a real microphone/TTS run, and no physical or candidate credit is
 granted by the automated repair.
+
+## Later disposition (2026-08-20 through 2026-08-21)
+
+Exact source `e1df8b4529b073beed21affffda952bdb8262fc8` subsequently
+passed the scoped real Windows Chrome microphone/speaker journey for audible
+short/long TTS, automatic post-playout listening, foreground Stop and
+button/automatic playout-time barge-in. See the
+[physical validation and latency finding](P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
+
+The repair range was then integrated into the W3 line with affected
+automation/build evidence recorded in the
+[W3 integration evidence](P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md). These
+later facts close the original visible post-TTS continuation symptom only for
+their scoped journey. They do not rewrite the original failed candidate, prove
+quiet multi-boundary/device generalization, close mounted Exit/immediate-
+re-enable, generation-time interruption, fixed-corpus latency or the combined
+P3 Task product journey. The W3 migration/core repair batch is closed, but
+formal P1/P2 overall remains `PARTIAL`: the Exit regression and P2 latency work
+still require code closure before the complete validation/review boundary.

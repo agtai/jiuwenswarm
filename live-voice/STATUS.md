@@ -25,8 +25,10 @@
   remains unpassed.** P3-2, P3-3, P3-4, P3-5A, P3-5B and P3-6 have locally
   integrated source, affected automation and independent review; Wave-2 and
   the bounded Wave-3 private regression have validated physical credit only
-  for their declared seams. The failed post-TTS continuation remains deferred
-  to P1/P2 completion and receives no fabricated product-readiness PASS.
+  for their declared seams. The P1/P2 post-TTS repair is now integrated with
+  scoped automation/build evidence and a source-bound functional physical PASS;
+  latency, Exit/re-enable, broader generalization and cumulative product
+  acceptance remain open, so no product-readiness PASS is inferred.
 - **Accepted historical baseline:** `PASS — INTEGRATED WEB ALPHA` remains bound
   only to `d33b520e0d21ae0829d30814d77a01cc18256f09`. Later source and broader
   functionality do not inherit that result.
@@ -46,15 +48,17 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** preserve the closed D-088 Wave-2 and D-089/
-  D-090 Wave-3 source/evidence, then select the next bounded packet from the
-  deferred P1/P2 repair/quality route or the now-eligible P3-7 formal carrier.
+- **Current highest priority:** preserve the integrated P1/P2 repair and closed
+  D-088/D-089/D-090 evidence. The P1/P2 closeout sequence is: repair the one
+  reproduced mounted Exit/immediate-re-enable regression; integrate and verify
+  the assigned P2 notification batch/push/coalescing latency work when ready;
+  close generation-time interruption required by the formal feature-complete
+  P1/P2 boundary; then run the complete fixed-corpus, automated, review and real-
+  device Journey. P3-7 may proceed in parallel only under disjoint ownership.
   No next implementation packet is activated by this status update. Any packet
   that changes Interaction or intent semantics must first name its semantic
   owner, fixed corpus/languages, thresholds and capability-owned positive/
-  negative/zero-effect evidence. The deferred P1/P2 issue is recorded in the
-  [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
-  and must close before a later controlled-candidate or feature-complete claim.
+  negative/zero-effect evidence.
 - **Integration:** integration with a `develop` ref is deferred until the
   feature-complete boundary below passes. At that future boundary, re-read the
   configured remotes and live ref before any integration; this document assumes
@@ -110,7 +114,7 @@ risks, dependencies, acceptance and integration order.
 | Voice–Task Bridge | **PARTIAL overall; P3-6 scoped Gate PASS.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported; clarification, durable single-use confirmation, parity and zero-false-truth paths are closed | Add later P3-7 product UI and broader language/policy generalization; provide-input/pause/resume remain unsupported until real primitives exist | Exact Store Task/Attempt/event/result/capability truth, authenticated context/model reread and the 68-case/14-group corpus |
 | Integrated Web product experience | **PARTIAL overall; P3-5B scoped Gate PASS.** Text consumption follows connected-DOM adoption and voice consumption follows canonical Runtime AUDIO ACK; fallback, reconnect, Attempt rollover, large prefixes and ACK/close/retry are bounded. The explicit profile and P2/P3 composition remain present. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed; the mounted Exit/immediate-re-enable automated seam remains deferred | Implement P3-7 Task UI and later controls/projections; close Agent-generation interruption, P2 presentation latency, mounted Exit/re-enable recovery, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks only after replacement | P3-2 through P3-9 plus remaining P1/P2 completion; [2026-08-20 physical evidence](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md); P3-5B automation grants no separate physical audio credit |
 | Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations include the bounded SLI/privacy/OTel assets. The `e1df8b452` physical diagnostic measured one 0.669-second EOT-to-submit interval and 1.683 seconds from text to TTS downlink, and isolated a dominant P2 one-notification-per-RPC tail: 64 intervals at about 85 ms median accounted for approximately 5.52 seconds after model completion. This is diagnostic evidence, not a fixed-corpus benchmark | Prioritize a separately scoped Tier-3 P2 batch/push/coalescing repair; then evaluate VAD finalization and first-audio startup. Compose the P3-8A codec behind its owner and execute the remaining [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with frozen environment/corpus and p50/p95 proof | [Physical latency finding](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md), [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md), fixed corpus/environment and Conversation Runtime/P1 media owners |
-| Automated verification and product acceptance | **PARTIAL overall; Wave-2 and bounded Wave-3 scoped Gates PASS.** Their exact-source automation, review and real-path credits remain unchanged. Exact source `e1df8b452` adds scoped physical functional PASS for audible playout, automatic continuation, Stop and playout-time barge-in; latency remains PARTIAL, independent T2 review and the combined P3 Task journey remain open, and the controlled candidate remains FAIL | Verify the integrated W3 source, repair P2 notification delivery, complete independent affected review and fixed-corpus latency evidence, resolve the deferred Exit/re-enable seam, then run the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, the [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md), the [P1/P2 physical evidence](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) and exact clean sources |
+| Automated verification and product acceptance | **PARTIAL overall; Wave-2 and bounded Wave-3 scoped Gates PASS.** Their exact-source automation, review and real-path credits remain unchanged. Integrated P1/P2 source `8846862f` passes browser audio `103/103`, affected backend `194/194`, production build and Formal Web `422/423` with only the disclosed Exit/re-enable failure. Exact source `e1df8b452` retains scoped physical functional PASS; latency remains PARTIAL, independent T2 review and the combined P3 Task journey remain open, and the controlled candidate remains FAIL | Repair P2 notification delivery, complete independent affected review and fixed-corpus latency evidence, resolve the deferred Exit/re-enable seam, then run the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | [W3 integration evidence](evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md), [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md), [P1/P2 physical evidence](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) and exact clean sources |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -138,21 +142,19 @@ cumulative product acceptance; it grants no physical or candidate credit:
    `AUDIO_CAPTURE_DURATION_EXCEEDED`, but available logs still do not distinguish
    provider speech-start/echo from the exact rotation race.
 
-A P1/P2 defect was demonstrated twice on the clean candidate and is explicitly
+A P1/P2 defect was demonstrated twice on the clean candidate and was explicitly
 deferred from the P3-1 sequencing Gate:
 
-7. **P1/P2 post-TTS capture continuation — PARTIAL / DEFERRED.** The 30-second capture bound
-   begins during overlapping TTS. After each of two real Agent responses, the
-   route entered `AUDIO_CAPTURE_DURATION_EXCEEDED`, streaming recognition aborted
-   and speech cancel/cleanup did not acknowledge cleanly. Manual `重新监听` admitted
-   one more turn but the same failure recurred. Its phenomenon, confirmed
-   mechanism, unresolved trigger attribution, repair direction and later
-   acceptance are in the [deferred issue record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
-   The `P1/P2-T1` packet has since implemented those repair directions with
-   source and affected automated evidence in the
-   [repair record](evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md);
-   the physical later-acceptance criteria remain open and grant no candidate
-   credit.
+7. **P1/P2 post-TTS capture continuation — SCOPED FUNCTIONAL REPAIR PASS / FULL
+   ACCEPTANCE PARTIAL.** The original `f24dd17d` candidate remains failed. The
+   repair is integrated on W3 with affected automation/build evidence, and exact
+   source `e1df8b452` passed repeated audible turns, automatic post-playout
+   listening, foreground Stop and playout-time barge-in. Quiet multi-boundary
+   and broader device/network generalization, mounted Exit/re-enable,
+   generation-time interruption, fixed-corpus latency and the combined P3 Task
+   journey remain open. See the [dated disposition](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md),
+   [physical result](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md)
+   and [W3 integration evidence](evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md).
 
 The explicit build profile and ordinary-production flag-off behaviour are
 source/build/deploy verified. D-086 passes only the P3 expansion prerequisite;
@@ -161,23 +163,41 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** integrate the accepted P1/P2-T1 capture repair and bounded
-  P1/P2-T2 playout/latency findings into the closed W3 line.
-- **Authority:** the deferred continuation contract, the scoped source and
-  evidence carried by `7814c147..046ecac0`, and root `TESTING.md`. The accepted
-  D-088 Wave-2 and D-089/D-090 Wave-3 source/evidence remain unchanged.
+- **Packet:** P1/P2 repair integration into the closed W3 line — **closed
+  locally with scoped source/automation/build evidence**.
+- **Authority:** the deferred continuation contract, imported source range
+  `7814c147..046ecac0`, the
+  [W3 integration evidence](evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md)
+  and root `TESTING.md`. The accepted D-088 Wave-2 and D-089/D-090 Wave-3
+  source/evidence remain unchanged.
 - **Objective:** preserve the W3 Task presentation and consumer authorities
   while integrating transparent post-TTS capture continuation, successor-capture
   ACK decoupling, post-playout receipt truth and hands-free playout controls.
 - **Risk:** Tier 3 for capture/media/runtime ordering, cancellation and ACK
   fencing. Documentation synchronization is Tier 0 but cannot upgrade the
   source or physical verdict.
-- **Source state:** P3-2 through P3-6 retain their previously accepted scoped
-  source, automation, review and exact real-path credit. This integration adds
-  no Task schema, ledger, presentation ACK or intent authority.
-- **Next action:** migrate the six commits in order, resolve only the overlapping
-  W3 presentation seams, rerun affected Formal Web/gateway checks and reconcile
-  STATUS against the exact integrated source.
+- **Source state:** the six commits are migrated in order. Their four source/test
+  payloads have stable patch IDs identical to the originals; only STATUS needed
+  manual adaptation so old schema-v4/P3-2-active prose could not overwrite W3.
+  P3-2 through P3-6 retain their accepted scoped credit, and this integration
+  adds no Task schema, ledger, presentation ACK or intent authority.
+- **Execution:** exact integrated source `8846862f` passes browser audio
+  `103/103`, the affected backend set `194/194`, the Live Voice production
+  build and Formal Web `422/423`. The sole failure is the already disclosed
+  mounted Exit/immediate-re-enable case. The physical run was not repeated on
+  W3; its scoped credit remains bound to `e1df8b452`.
+- **Closeout interpretation:** the six-commit migration/core repair batch is
+  closed; formal P1/P2 overall remains **PARTIAL**, not “complete except for
+  validation.” There is one currently reproduced failing regression
+  (mounted Exit/immediate-re-enable), plus unfinished implementation for P2
+  notification latency and the feature-complete generation-time interruption
+  boundary. Fixed-corpus p50/p95, broader device/network coverage, a complete
+  W3 physical Journey and independent T2 review are subsequent verification
+  work, not substitutes for those code closures.
+- **Next action:** no new implementation packet is activated. Finish the P1/P2
+  code closures above and then execute one exact-source closeout validation, or
+  activate P3-7 in parallel under a disjoint owner; obtain exact approval before
+  any remote update.
 - **Excluded/non-claims:** generation-time barge-in, mounted Exit/immediate-
   re-enable closure, fixed-corpus p50/p95, latency-target PASS, a new controlled
   candidate, P3-7/P3-8B/P3-9, Production, `develop` integration and every remote
@@ -232,20 +252,20 @@ exact-source Alpha result.
   deferred Exit/re-enable seam failing — recorded in the
   [repair record](evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md).
   The independent Tier-3 cold review passed with no P1/P2 and four recorded
-  P3 notes, each dispositioned in the repair record. Physical verification
-  remains open per the deferred record.
+  P3 notes, each dispositioned in the repair record. The later exact-source
+  physical journey passed its scoped continuation criteria; broader device,
+  quiet multi-boundary, Exit and cumulative acceptance remain open.
 
-### Batch member P1/P2-T2 — latency optimization (delegated)
+### Batch member P1/P2-T2 — playout repair and latency diagnosis delivered
 
-- **Packet:** P1/P2-T2 — execute the
-  [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
-  in its §7 delivery order (measurement contract and fresh baseline first)
-  under a delegated owner.
-- **Constraint:** L1 server-side instrumentation may start immediately; all
-  frontend work in `productP1VoiceRoute.ts`/`browserAudioIOAdapter.ts` waits
-  for the integrated `P1/P2-T1` commit or explicit coordination. No
-  Provider/model/billing change, persistent speech cache, new retention
-  policy or raw-audio storage; ideas rejected in the plan's §8 stay rejected.
+- **Packet result:** successor-capture ACK and post-playout receipt decoupling,
+  hands-free controls and one physical latency diagnosis are delivered and
+  integrated. The [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
+  remains open beyond that diagnosis.
+- **Constraint:** the next latency implementation must separately scope the P2
+  shared notification delivery owner. No Provider/model/billing change,
+  persistent speech cache, new retention policy or raw-audio storage; ideas
+  rejected in the plan's §8 stay rejected.
 - **Risk:** per-batch tier under root `TESTING.md`; the pipeline and
   sentence-overlap batches are Tier 3.
 - **Acceptance:** per the plan's §§3–7 measured evidence relative to the
@@ -338,7 +358,7 @@ exact-source Alpha result.
   [physical validation](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
   The scoped PASS does not upgrade product readiness.
 
-#### T2-L2C — hands-free controls and scoped physical closure (FUNCTIONAL PASS / LATENCY PARTIAL, 2026-08-20)
+#### T2-L2C — hands-free controls and scoped physical functional result (FUNCTIONAL PASS / LATENCY PARTIAL, 2026-08-20)
 
 - **Source:** `e1df8b452` exposes the existing exact-response interrupt-and-speak
   and Stop controls on the formal hands-free surface; automatic playout-time
@@ -388,12 +408,13 @@ exact-source Alpha result.
    migrating each still-applicable
    historical oracle with its first owning package; perform code placement,
    duplicate consolidation and entrypoint/document retirement only after
-   replacement without deleting live coverage. The remaining bounded routes
-   are: owner-scoped P1/P2 repair/quality packets grounded in the
-   [deferred continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
-   and [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md),
-   plus P3-7 formal carrier → P3-8B composition/retirement → P3-9 cumulative
-   complete-P3 acceptance under the
+   replacement without deleting live coverage. The P1/P2 post-TTS source
+   repair and scoped physical continuation are integrated; remaining P1/P2
+   work is the separately scoped P2 notification latency repair, mounted
+   Exit/re-enable, generation-time interruption and fixed-corpus/generalization
+   evidence under the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
+   The remaining P3 route is P3-7 formal carrier → P3-8B composition/retirement
+   → P3-9 cumulative complete-P3 acceptance under the
    [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md). P1/P2 and
    P3-7 work may overlap only when owners/files are disjoint. A positive
    `provide_input`, pause or resume claim first requires a separately accepted
@@ -460,10 +481,11 @@ exact-source Alpha result.
   organization batch; authority handlers remain explicit unless semantics match.
 - **Latency:** the code-fact diagnosis and implementation approach are now
   defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
-  Establish its current physical baseline first, then execute low-risk pipeline
-  work, truthful acknowledgement and formal sentence-level Agent→TTS overlap.
-  This remains queued P1/P2 quality work, not completion credit or part of the
-  current product-truth repair packet.
+  The first physical diagnosis found the dominant P2 one-notification-per-RPC
+  tail; scope and repair that shared delivery owner first, then evaluate VAD
+  finalization, first-audio startup and formal sentence-level Agent→TTS overlap
+  against a frozen corpus with p50/p95. This remains queued P1/P2 quality work,
+  not completion credit.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.
@@ -480,6 +502,15 @@ exact-source Alpha result.
 
 ## Verification and runtime truth
 
+- Integrated P1/P2 source `8846862f009d332761763f887c38ce6486f3ee90`
+  passes browser audio `103/103`, the affected five-file backend set `194/194`,
+  the Live Voice production build and Formal Web `422/423`. The sole failure is
+  the unchanged mounted Exit/immediate-re-enable case. Stable source/test patch
+  IDs match the four original repair commits. Exact commands, mapping and
+  exclusions are in the
+  [W3 integration evidence](evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md).
+  The physical result remains source-bound to `e1df8b452`; no W3 physical or
+  combined Task-journey rerun is inferred.
 - `P3-4/P3-5B/P3-6` bounded Wave-3 source passes final affected automation,
   strict contracts, production build, S8 readiness, static checks and
   independent Tier-3/fix-only review. Broad Python and Formal Web completed
@@ -523,9 +554,10 @@ exact-source Alpha result.
   but its repeated physical continuation failure prevents immutable PASS.
 - D-086 records P3-G0 PASS only for the expansion-foundation Gate and originally
   activated P3-1; P3-1 and the Wave-2/Wave-3 source packages now pass their
-  scoped source evidence. It explicitly transfers, rather than passes, the
-  missing physical Journey and
-  [P1/P2 continuation defect](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
+  scoped source evidence. Its original transfer of the missing physical Journey
+  and [P1/P2 continuation defect](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
+  is now followed by a later scoped functional repair PASS; the combined P3
+  Task Journey and a new controlled candidate remain unrun.
 - A documentation-only commit never upgrades product readiness.
 - Runtime credentials, Provider settings, registered projects, device/browser
   state, Task databases and network state are machine-private. At the next

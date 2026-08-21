@@ -331,10 +331,14 @@ from the reference materials:
 
 This plan is queued under the `Observability, benchmark and latency` capability
 and dependency route to feature complete in [STATUS](../STATUS.md). The
-2026-08-21 routing record closes D-089/D-090 Wave 3 and activates no next packet.
-Latency implementation starts only when STATUS selects an owner-scoped P1/P2
-repair/quality packet with a fresh physical baseline, fixed corpus, applicable
-test-oracle migration, risk and acceptance. Compatible instrumentation may be
-included earlier in another affected packet only when its ownership and
-acceptance are explicit; this preparatory plan never outranks or activates the
-current STATUS route by itself.
+2026-08-21 routing record closes D-089/D-090 Wave 3 and the bounded P1/P2 repair
+integration, but activates no next packet. The `e1df8b452` physical run supplies
+a scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
+fixed-corpus baseline required by this plan. Latency implementation starts only
+when STATUS selects an owner-scoped P1/P2 packet with that diagnosis, a frozen
+corpus, applicable test-oracle migration, risk and acceptance. Its assigned
+batch/push/coalescing implementation must integrate and pass affected evidence
+before P1/P2 closeout validation. Compatible instrumentation may be included
+earlier in another affected packet only when its ownership and acceptance are
+explicit; this preparatory plan never outranks or activates the current STATUS
+route by itself.
