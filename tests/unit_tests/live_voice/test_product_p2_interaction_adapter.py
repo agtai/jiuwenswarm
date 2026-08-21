@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -318,6 +319,42 @@ def adapter_for(
         cleanup_timeout_seconds=0.02,
         close_poll_seconds=0.01,
     )
+
+
+_EAGER_TASK_FACTORY = getattr(asyncio, "eager_task_factory", None)
+
+
+@contextmanager
+def settled_rollback_scheduling() -> Iterator[None]:
+    """Take the wall clock out of a rollback that always settles at once.
+
+    ``P2FailedActivationCleanup.cleanup`` waits on a freshly created
+    coordinator Task with ``cleanup_timeout_seconds``.  A teardown double that
+    never suspends still needs one scheduler turn, so any scheduling stall
+    longer than that timeout downgrades the intended ``*_FAILED`` reason to
+    ``ROLLBACK_FAILED`` and makes the assertion depend on wall-clock luck
+    rather than on behaviour.
+
+    Starting Tasks eagerly settles such a teardown inside ``create_task``, so
+    the timed wait observes an already finished coordinator and never yields to
+    the loop at all.  The timeout becomes structurally unreachable instead of
+    merely unlikely.  Nothing is relaxed: the production default, this module's
+    adapter timeout and every assertion stay exactly as they were, and a
+    teardown that genuinely does suspend still falls back to ordinary
+    scheduling and still settles as a truthful pending ``ROLLBACK_FAILED``.
+    """
+
+    if _EAGER_TASK_FACTORY is None:
+        # Python 3.11 has no eager task factory; the wait behaves as before.
+        yield
+        return
+    loop = asyncio.get_running_loop()
+    previous = loop.get_task_factory()
+    loop.set_task_factory(_EAGER_TASK_FACTORY)
+    try:
+        yield
+    finally:
+        loop.set_task_factory(previous)
 
 
 @pytest.mark.asyncio
@@ -918,11 +955,12 @@ async def test_partial_activation_failure_rolls_back_runtime(
             raise RuntimeError("engine-secret")
         return engine_factory(context, binding)
 
-    result = await adapter_for(
-        resolver,
-        lambda _context, _binding: runtime,
-        interaction_engine_factory=make_engine,
-    ).activate(request())
+    with settled_rollback_scheduling():
+        result = await adapter_for(
+            resolver,
+            lambda _context, _binding: runtime,
+            interaction_engine_factory=make_engine,
+        ).activate(request())
 
     assert result.status is P2ActivationStatus.FAILED
     assert result.reason is expected_reason
@@ -937,7 +975,8 @@ async def test_notification_consumer_attach_failure_rolls_back_open_runtime() ->
     runtime = FakeRuntime(attach_failure=RuntimeError("attach-secret"))
     adapter = adapter_for(resolver, lambda _context, _binding: runtime)
 
-    result = await adapter.activate(request())
+    with settled_rollback_scheduling():
+        result = await adapter.activate(request())
 
     assert result.status is P2ActivationStatus.FAILED
     assert result.reason is P2ActivationReason.NOTIFICATION_CONSUMER_ATTACH_FAILED
