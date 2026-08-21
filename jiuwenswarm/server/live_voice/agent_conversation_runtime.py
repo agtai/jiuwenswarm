@@ -94,6 +94,21 @@ _MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
 _PROGRESS_CRITICAL_KIND = "task-progress-terminal"
 _CRITICAL_REPLAY_FENCE_ROWS = 4
 _CRITICAL_REPLAY_FENCE_WIDTH = 1 << 13
+# Teardown owners, in the exact order the retained shutdown coordinator settles
+# them.  The vocabulary is registered here rather than discovered while shutting
+# down, so a failing owner can never rename or hide its own phase in a public
+# diagnostic.
+_COMPOSITION_TEARDOWN_PHASES = (
+    "submissions",
+    "admissions",
+    "bridge",
+    "consumer",
+    "harness",
+    "acks",
+    "history",
+    "conversation",
+    "notifications",
+)
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -531,6 +546,8 @@ class AgentConversationRuntimeSnapshot:
     fenced_critical_identities: int
     bridge_publication_failures: int
     last_bridge_publication_failure: tuple[str, str, str] | None
+    teardown_owner_failures: int
+    first_teardown_owner_failure: tuple[str, str] | None
     pending_conversation_effects: int
     unacknowledged_effect_claims: int
     pending_history_intents: int
@@ -623,6 +640,77 @@ class _ResponseOutputState:
     terminal_event: EventEnvelope | None = None
 
 
+def _teardown_phase_name(phase: str) -> str:
+    """Keep a teardown diagnostic inside the registered owner vocabulary."""
+
+    if type(phase) is str and phase in _COMPOSITION_TEARDOWN_PHASES:
+        return phase
+    return "unknown"
+
+
+def _teardown_failure_name(error: BaseException) -> str:
+    """Name a failed owner's exception without touching its content.
+
+    Only the exception type name is read.  A hostile class whose ``__name__``
+    raises or is not a string must not be able to escape the teardown guard it
+    was raised inside, so any such lookup degrades to ``unknown``.
+    """
+
+    try:
+        name = type(error).__name__
+    except BaseException:  # noqa: BLE001 - a hostile class stays diagnosable
+        return "unknown"
+    return name if type(name) is str else "unknown"
+
+
+class _CompositionTeardownFailures:
+    """Ordered, content-free record of every failed composition teardown owner.
+
+    One failing owner must never skip a later one, so each owner is attempted
+    exactly once and its failure is recorded here instead of unwinding the rest
+    of the sequence.  Only the registered phase name and the exception type name
+    survive: no message, argument, traceback or exception object is retained, so
+    a failing owner cannot leak its own content into a public shutdown
+    diagnostic and cannot keep a teardown frame alive.
+
+    An external cancellation of the retained coordinator is caller truth rather
+    than an owner outcome.  It is distinguished from an owned child's
+    cancellation by this task's own cancellation counter, which is sampled once
+    per recorded failure so a child cancellation can never be mistaken for a
+    later caller cancellation.
+    """
+
+    __slots__ = ("_observed_cancellations", "caller_cancelled", "entries")
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str]] = []
+        self.caller_cancelled = False
+        current = asyncio.current_task()
+        self._observed_cancellations = 0 if current is None else current.cancelling()
+
+    def record(self, phase: str, error: BaseException) -> None:
+        caller_cancellation = self._observe_caller_cancellation(error)
+        if caller_cancellation and not self.entries:
+            self.caller_cancelled = True
+        self.entries.append(
+            (_teardown_phase_name(phase), _teardown_failure_name(error))
+        )
+
+    @property
+    def first(self) -> tuple[str, str] | None:
+        return self.entries[0] if self.entries else None
+
+    def _observe_caller_cancellation(self, error: BaseException) -> bool:
+        if not isinstance(error, asyncio.CancelledError):
+            return False
+        current = asyncio.current_task()
+        pending = 0 if current is None else current.cancelling()
+        if pending <= self._observed_cancellations:
+            return False
+        self._observed_cancellations = pending
+        return True
+
+
 class AgentConversationRuntime:
     """Strict two-phase composition without exposing raw mutable authorities."""
 
@@ -710,6 +798,7 @@ class AgentConversationRuntime:
         )
         self._bridge_publication_failures = 0
         self._last_bridge_publication_failure: tuple[str, str, str] | None = None
+        self._teardown_failures: tuple[tuple[str, str], ...] = ()
         self._commits: dict[str, TurnCommit] = {}
         self._turn_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._commit_identity_claims: dict[str, _TurnIdentityClaim] = {}
@@ -2615,6 +2704,10 @@ class AgentConversationRuntime:
             fenced_critical_identities=self._notifications.fenced_critical_identities,
             bridge_publication_failures=self._bridge_publication_failures,
             last_bridge_publication_failure=self._last_bridge_publication_failure,
+            teardown_owner_failures=len(self._teardown_failures),
+            first_teardown_owner_failure=(
+                self._teardown_failures[0] if self._teardown_failures else None
+            ),
             pending_conversation_effects=len(self._effect_backlog),
             unacknowledged_effect_claims=sum(
                 not entry.acknowledged and not entry.superseded
@@ -2973,81 +3066,194 @@ class AgentConversationRuntime:
     async def _shutdown_coordinator(
         self, *, closed_detail: str = "teardown_complete"
     ) -> AgentConversationShutdownResult:
+        """Settle every teardown owner in order under its own guard.
+
+        The Agent Bridge, its sole consumer, the Harness, the Conversation
+        Runtime and notification cleanup are five separate authorities, and the
+        submission, admission, presentation-ack and history writes they own are
+        their children.  A failure in one owner is never allowed to skip a later
+        one: each owner is attempted exactly once, its failure is recorded
+        content-free, and the timing-earliest failure stays authoritative, so a
+        secondary cleanup failure can never replace an earlier truth.
+
+        A failed teardown never reports CLOSED, which keeps the composition
+        permanently unrestartable, and an external cancellation of this retained
+        owner is re-raised instead of being downgraded into a result.
+        """
+
         final_drain_lease = self._final_notification_drain_lease
+        failures = _CompositionTeardownFailures()
+        await self._run_teardown_owner(
+            "submissions", self._settle_submission_coordinators, failures
+        )
+        await self._run_teardown_owner(
+            "admissions", self._settle_admission_coordinators, failures
+        )
+        bridge_closed = (
+            await self._run_teardown_owner("bridge", self._close_bridge, failures)
+            is True
+        )
+        await self._run_teardown_owner(
+            "consumer",
+            lambda: self._settle_bridge_consumer(bridge_closed=bridge_closed),
+            failures,
+        )
+        await self._run_teardown_owner("harness", self._harness.close, failures)
+        await self._run_teardown_owner("acks", self._settle_ack_coordinators, failures)
+        await self._run_teardown_owner("history", self._settle_history_tasks, failures)
+        await self._run_teardown_owner(
+            "conversation", self._close_conversation_runtime, failures
+        )
+        await self._run_teardown_owner(
+            "notifications",
+            lambda: self._close_notification_cleanup(final_drain_lease),
+            failures,
+        )
+        self._teardown_failures = tuple(failures.entries)
+        if failures.caller_cancelled:
+            # An external cancellation of the retained teardown owner is caller
+            # truth, not an owner outcome.  Every owner has still been attempted
+            # exactly once, but this coordinator must not claim it completed a
+            # teardown that was cancelled out from under it.
+            raise asyncio.CancelledError from None
+        final_drain_capability = self._final_drain_capability(final_drain_lease)
+        first_failure = failures.first
+        if first_failure is not None:
+            return AgentConversationShutdownResult(
+                AgentConversationShutdownStatus.FAILED,
+                f"teardown_failed:{first_failure[1]}",
+                final_drain_capability,
+            )
+        if self._pending_history or self._pending_user_history:
+            return AgentConversationShutdownResult(
+                AgentConversationShutdownStatus.FAILED,
+                "history_write_intents_pending",
+                final_drain_capability,
+            )
+        self._closed = True
+        return AgentConversationShutdownResult(
+            AgentConversationShutdownStatus.CLOSED,
+            closed_detail,
+            final_drain_capability,
+        )
+
+    async def _run_teardown_owner(
+        self,
+        phase: str,
+        owner: Callable[[], Awaitable[object]],
+        failures: _CompositionTeardownFailures,
+    ) -> object:
+        """Run one teardown owner without letting it skip any later owner."""
+
         try:
-            submission_tasks = tuple(
-                entry.coordinator
-                for entry in self._committed_turn_submissions.values()
-                if entry.coordinator is not None
+            return await owner()
+        except BaseException as error:  # noqa: BLE001 - later owners must run
+            failures.record(phase, error)
+            return None
+
+    async def _settle_submission_coordinators(self) -> None:
+        submission_tasks = tuple(
+            entry.coordinator
+            for entry in self._committed_turn_submissions.values()
+            if entry.coordinator is not None
+        )
+        if submission_tasks:
+            await asyncio.shield(
+                asyncio.gather(*submission_tasks, return_exceptions=True)
             )
-            if submission_tasks:
+
+    async def _settle_admission_coordinators(self) -> None:
+        admission_tasks = tuple(
+            entry.coordinator
+            for entry in self._admissions.values()
+            if entry.coordinator is not None and not entry.coordinator.done()
+        )
+        if admission_tasks:
+            await asyncio.shield(
+                asyncio.gather(*admission_tasks, return_exceptions=True)
+            )
+
+    async def _close_bridge(self) -> bool:
+        await self._bridge.close()
+        return True
+
+    async def _settle_bridge_consumer(self, *, bridge_closed: bool) -> None:
+        """Settle the sole bridge consumer even when its terminal never arrives.
+
+        ``_consume_bridge`` is the only long-lived reader of this composition and
+        it ends exactly when the Agent Bridge reports its closed terminal.  A
+        bridge owner that failed before publishing that terminal can never
+        release the consumer, so awaiting it here would retain the owned child
+        forever; cancelling settles it instead.  The bridge's own closed truth is
+        still consulted, under its own guard, so a bridge that closed and then
+        reported a secondary failure keeps draining normally.
+        """
+
+        consumer = self._consumer
+        if consumer is None:
+            return
+        if bridge_closed or consumer.done() or self._bridge_reports_closed():
+            await asyncio.shield(consumer)
+            return
+        consumer.cancel()
+        await asyncio.shield(consumer)
+
+    def _bridge_reports_closed(self) -> bool:
+        try:
+            return self._bridge.snapshot().closed is True
+        except BaseException:  # noqa: BLE001 - a failed probe is not a terminal
+            return False
+
+    async def _settle_ack_coordinators(self) -> None:
+        ack_tasks = tuple(
+            entry.coordinator
+            for entry in self._ack_entries.values()
+            if entry.coordinator is not None and not entry.coordinator.done()
+        )
+        if ack_tasks:
+            await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
+
+    async def _settle_history_tasks(self) -> None:
+        async with self._ack_lock:
+            history_tasks = tuple(self._history_tasks)
+            if history_tasks:
                 await asyncio.shield(
-                    asyncio.gather(*submission_tasks, return_exceptions=True)
+                    asyncio.gather(*history_tasks, return_exceptions=True)
                 )
-            admission_tasks = tuple(
-                entry.coordinator
-                for entry in self._admissions.values()
-                if entry.coordinator is not None and not entry.coordinator.done()
-            )
-            if admission_tasks:
-                await asyncio.shield(
-                    asyncio.gather(*admission_tasks, return_exceptions=True)
-                )
-            await self._bridge.close()
-            if self._consumer is not None:
-                await asyncio.shield(self._consumer)
-            await self._harness.close()
-            ack_tasks = tuple(
-                entry.coordinator
-                for entry in self._ack_entries.values()
-                if entry.coordinator is not None and not entry.coordinator.done()
-            )
-            if ack_tasks:
-                await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
-            async with self._ack_lock:
-                history_tasks = tuple(self._history_tasks)
-                if history_tasks:
-                    await asyncio.shield(
-                        asyncio.gather(*history_tasks, return_exceptions=True)
-                    )
-            shutdown_effects = await self._cr.close()
-            async with self._effect_lock:
-                self._retain_effects(shutdown_effects)
-                self._prune_invalid_output_effects()
+
+    async def _close_conversation_runtime(self) -> None:
+        shutdown_effects = await self._cr.close()
+        async with self._effect_lock:
+            self._retain_effects(shutdown_effects)
+            self._prune_invalid_output_effects()
+
+    async def _close_notification_cleanup(
+        self, final_drain_lease: _NotificationLeaseRecord | None
+    ) -> None:
+        """Retire invalidated output and hand close-drain ownership over once.
+
+        The producer stream is closed even when discarding or promoting fails,
+        so no consumer can ever wait on a notification producer that this
+        composition has already given up.
+        """
+
+        try:
             self._discarded_invalidated_presentations += (
                 self._notifications.discard_pending_presentations()
             )
             if final_drain_lease is not None:
                 final_drain_lease.drain_after_close = True
                 self._active_notification_lease = final_drain_lease
+        finally:
             self._notifications.close()
-            final_drain_capability = (
-                None if final_drain_lease is None else final_drain_lease.lease
-            )
-            if self._pending_history or self._pending_user_history:
-                return AgentConversationShutdownResult(
-                    AgentConversationShutdownStatus.FAILED,
-                    "history_write_intents_pending",
-                    final_drain_capability,
-                )
-            self._closed = True
-            return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.CLOSED,
-                closed_detail,
-                final_drain_capability,
-            )
-        except BaseException as error:  # noqa: BLE001
-            self._notifications.close()
-            return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.FAILED,
-                f"teardown_failed:{type(error).__name__}",
-                (
-                    None
-                    if final_drain_lease is None
-                    or not final_drain_lease.drain_after_close
-                    else final_drain_lease.lease
-                ),
-            )
+
+    @staticmethod
+    def _final_drain_capability(
+        final_drain_lease: _NotificationLeaseRecord | None,
+    ) -> AgentConversationNotificationLease | None:
+        if final_drain_lease is None or not final_drain_lease.drain_after_close:
+            return None
+        return final_drain_lease.lease
 
     def _response_record(self, ref: ResponseRef):
         for record in self._cr.snapshot().conversation.responses:
