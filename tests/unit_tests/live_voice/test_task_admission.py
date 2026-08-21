@@ -278,12 +278,23 @@ def _database_dump(database: Path) -> tuple[str, ...]:
         return tuple(connection.iterdump())
 
 
-def _downgrade_empty_v5_to_v4(database: Path) -> None:
+_V6_DURABILITY_TABLES = (
+    "durability_recovery_fences",
+    "durability_mutator_leases",
+    "durability_recoveries",
+    "durability_effect_facts",
+    "durability_checkpoints",
+)
+
+
+def _downgrade_empty_current_to_v4(database: Path) -> None:
     """Rebuild the exact empty v4 shape used by the accepted Task 2 baseline."""
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
         connection.execute("BEGIN IMMEDIATE")
+        for table in _V6_DURABILITY_TABLES:
+            connection.execute(f"DROP TABLE {table}")
         tables = {
             row[0]
             for row in connection.execute(
@@ -300,9 +311,7 @@ def _downgrade_empty_v5_to_v4(database: Path) -> None:
         }
         if "uq_task_events_exact" in indexes:
             connection.execute("DROP INDEX uq_task_events_exact")
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(attempts)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
         if set(ADMISSION_COLUMNS) & columns:
             connection.execute(
                 """CREATE TABLE attempts_v4 (
@@ -326,24 +335,22 @@ def _downgrade_empty_v5_to_v4(database: Path) -> None:
             )
             connection.execute("DROP TABLE attempts")
             connection.execute("ALTER TABLE attempts_v4 RENAME TO attempts")
-        connection.execute(
-            "UPDATE metadata SET value='4' WHERE key='schema_version'"
-        )
+        connection.execute("UPDATE metadata SET value='4' WHERE key='schema_version'")
         connection.commit()
 
 
-def test_fresh_v5_schema_has_exact_admission_and_consumption_shape(
+def test_fresh_v6_schema_has_exact_admission_consumption_and_durability_shape(
     tmp_path: Path,
 ) -> None:
-    """Catches a v5 bootstrap that omits, renames, or over-precreates DDL."""
+    """Catches a current bootstrap that omits or renames owned DDL."""
 
-    database = tmp_path / "fresh-v5.sqlite"
+    database = tmp_path / "fresh-v6.sqlite"
     SqliteTaskStore(database)
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
         attempt_columns = tuple(
             row[1] for row in connection.execute("PRAGMA table_info(attempts)")
         )
@@ -360,12 +367,10 @@ def test_fresh_v5_schema_has_exact_admission_and_consumption_shape(
             )
         }
         assert "task_event_consumption" in tables
-        assert not any("checkpoint" in table or "effect" in table for table in tables)
+        assert set(_V6_DURABILITY_TABLES) <= tables
         assert tuple(
             row[1]
-            for row in connection.execute(
-                "PRAGMA table_info(task_event_consumption)"
-            )
+            for row in connection.execute("PRAGMA table_info(task_event_consumption)")
         ) == (
             "subject_id",
             "project_id",
@@ -399,12 +404,12 @@ def test_fresh_v5_schema_has_exact_admission_and_consumption_shape(
         }
 
 
-def test_v4_to_v5_migration_is_atomic_and_metadata_is_last(tmp_path: Path) -> None:
-    """Catches a partial v5 promotion or metadata update before owned DDL."""
+def test_v4_to_v6_migration_is_atomic_and_metadata_is_last(tmp_path: Path) -> None:
+    """Catches a partial current-schema promotion or early metadata update."""
 
-    database = tmp_path / "v4-to-v5.sqlite"
+    database = tmp_path / "v4-to-v6.sqlite"
     SqliteTaskStore(database)
-    _downgrade_empty_v5_to_v4(database)
+    _downgrade_empty_current_to_v4(database)
 
     reopened = SqliteTaskStore(database)
 
@@ -412,11 +417,13 @@ def test_v4_to_v5_migration_is_atomic_and_metadata_is_last(tmp_path: Path) -> No
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("5",)
-        assert ADMISSION_COLUMNS == tuple(
-            row[1]
-            for row in connection.execute("PRAGMA table_info(attempts)")
-        )[-len(ADMISSION_COLUMNS) :]
+        ).fetchone() == ("6",)
+        assert (
+            ADMISSION_COLUMNS
+            == tuple(
+                row[1] for row in connection.execute("PRAGMA table_info(attempts)")
+            )[-len(ADMISSION_COLUMNS) :]
+        )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -430,14 +437,12 @@ def test_v4_to_v5_migration_is_atomic_and_metadata_is_last(tmp_path: Path) -> No
         "migration.v4_to_v5.before_metadata",
     ],
 )
-def test_v4_to_v5_failpoints_restore_exact_v4(
-    tmp_path: Path, failpoint: str
-) -> None:
+def test_v4_to_v5_failpoints_restore_exact_v4(tmp_path: Path, failpoint: str) -> None:
     """Catches any v5 failpoint that leaks DDL outside BEGIN EXCLUSIVE."""
 
     database = tmp_path / f"{failpoint}.sqlite"
     SqliteTaskStore(database)
-    _downgrade_empty_v5_to_v4(database)
+    _downgrade_empty_current_to_v4(database)
     before = _database_dump(database)
 
     def fail(name: str) -> None:
@@ -534,10 +539,10 @@ def test_v5_mislabeled_shape_without_owned_checks_fails_closed(
     assert _database_dump(database) == before
 
 
-def test_concurrent_initializers_converge_on_schema_v5(tmp_path: Path) -> None:
-    """Catches a fresh-schema race that exposes v4 or partially-created v5."""
+def test_concurrent_initializers_converge_on_schema_v6(tmp_path: Path) -> None:
+    """Catches a fresh-schema race that exposes a partial current schema."""
 
-    database = tmp_path / "concurrent-v5.sqlite"
+    database = tmp_path / "concurrent-v6.sqlite"
     with ThreadPoolExecutor(max_workers=2) as pool:
         stores = tuple(pool.map(lambda _index: SqliteTaskStore(database), range(2)))
 
@@ -545,7 +550,7 @@ def test_concurrent_initializers_converge_on_schema_v5(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
 
 
 def test_v4_legacy_attempt_migrates_with_all_ten_admission_columns_null(
@@ -564,7 +569,7 @@ def test_v4_legacy_attempt_migrates_with_all_ten_admission_columns_null(
     )
     assert created.ok and created.result is not None
     attempt_id = str(created.result["attempt_id"])
-    _downgrade_empty_v5_to_v4(database)
+    _downgrade_empty_current_to_v4(database)
 
     reopened = SqliteTaskStore(database)
 
@@ -604,9 +609,7 @@ def test_v5_partial_selection_group_fails_closed_on_reopen(tmp_path: Path) -> No
     assert _database_dump(database) == before
 
 
-def _selected_authority_attempt(
-    tmp_path: Path, lineage: str
-) -> tuple[Path, str]:
+def _selected_authority_attempt(tmp_path: Path, lineage: str) -> tuple[Path, str]:
     """Create one selected Attempt through the named immutable command lineage."""
 
     if lineage in {"create", "terminal"}:
@@ -618,9 +621,7 @@ def _selected_authority_attempt(
             suffix=f"-selected-authority-{lineage}",
         )
         if lineage == "terminal":
-            item = store.claim_outbox(
-                "selected-authority-terminal", observed_at=NOW
-            )
+            item = store.claim_outbox("selected-authority-terminal", observed_at=NOW)
             assert item is not None and item.selection is not None
             observations = tuple(
                 replace(
@@ -641,8 +642,8 @@ def _selected_authority_attempt(
             )
         return database, attempt_id
 
-    store, _executor, core, predecessor_id, predecessor_attempt_id = (
-        _terminal_task(tmp_path)
+    store, _executor, core, predecessor_id, predecessor_attempt_id = _terminal_task(
+        tmp_path
     )
     database = store.database_path
     selection = _selection()
@@ -970,8 +971,7 @@ def test_selected_create_persists_and_reopens_exact_canonical_bytes(
     assert admission.queued is True
     with sqlite3.connect(database) as connection:
         row = connection.execute(
-            f"SELECT {', '.join(ADMISSION_COLUMNS)} FROM attempts "
-            "WHERE attempt_id=?",
+            f"SELECT {', '.join(ADMISSION_COLUMNS)} FROM attempts WHERE attempt_id=?",
             (attempt_id,),
         ).fetchone()
     assert row == (
@@ -1054,9 +1054,7 @@ def test_selected_attempt_corruption_fails_closed_on_reopen(
                 "UPDATE attempts SET capability_profile_digest=?", ("0" * 64,)
             )
         else:
-            connection.execute(
-                "UPDATE attempts SET admission_attempt_count=0.5"
-            )
+            connection.execute("UPDATE attempts SET admission_attempt_count=0.5")
         connection.commit()
     before = _database_dump(database)
 
@@ -1338,12 +1336,15 @@ def test_admission_policy_defaults_and_all_four_configuration_inputs() -> None:
         max_backoff_seconds=60,
         max_attempts=120,
     )
-    assert AdmissionPolicy(
-        deadline_seconds=90,
-        initial_backoff_seconds=0.25,
-        max_backoff_seconds=8,
-        max_attempts=7,
-    ).max_attempts == 7
+    assert (
+        AdmissionPolicy(
+            deadline_seconds=90,
+            initial_backoff_seconds=0.25,
+            max_backoff_seconds=8,
+            max_attempts=7,
+        ).max_attempts
+        == 7
+    )
 
 
 def test_claim_orders_selected_dispatch_by_priority_then_immutable_fifo(
@@ -1425,12 +1426,15 @@ def test_claim_orders_selected_dispatch_by_priority_then_immutable_fifo(
         "deferred-fifo-first", observed_at="2026-08-05T12:00:02Z"
     )
     assert deferred is not None and deferred.attempt_id == deferred_first
-    assert deferred_store.defer_admission(
-        deferred,
-        reason="EXECUTOR_PROJECT_BUSY",
-        policy=AdmissionPolicy(),
-        observed_at="2026-08-05T12:00:02Z",
-    ) is AdmissionDisposition.DEFERRED
+    assert (
+        deferred_store.defer_admission(
+            deferred,
+            reason="EXECUTOR_PROJECT_BUSY",
+            policy=AdmissionPolicy(),
+            observed_at="2026-08-05T12:00:02Z",
+        )
+        is AdmissionDisposition.DEFERRED
+    )
     assert (
         deferred_store.claim_outbox(
             "deferred-fifo-again", observed_at="2026-08-05T12:00:03Z"
@@ -1460,9 +1464,7 @@ def test_defer_admission_keeps_attempt_and_outbox_with_bounded_backoff(
     item = store.claim_outbox("defer-1", observed_at=NOW)
     assert item is not None
 
-    first = store.defer_admission(
-        item, reason=reason, policy=policy, observed_at=NOW
-    )
+    first = store.defer_admission(item, reason=reason, policy=policy, observed_at=NOW)
 
     assert first is AdmissionDisposition.DEFERRED
     admission = store.admission_projection(task_id, _scope())
@@ -1472,12 +1474,11 @@ def test_defer_admission_keeps_attempt_and_outbox_with_bounded_backoff(
     assert admission.next_eligible_at == "2026-08-05T12:00:01Z"
     assert admission.deadline_at == "2026-08-05T12:00:30Z"
     assert admission.reason == reason
-    assert store.claim_outbox(
-        "too-early", observed_at="2026-08-05T12:00:00.999999Z"
-    ) is None
-    item = store.claim_outbox(
-        "defer-2", observed_at="2026-08-05T12:00:01Z"
+    assert (
+        store.claim_outbox("too-early", observed_at="2026-08-05T12:00:00.999999Z")
+        is None
     )
+    item = store.claim_outbox("defer-2", observed_at="2026-08-05T12:00:01Z")
     assert item is not None
     assert item.attempt_id == attempt_id
     assert item.delivery_count == 2
@@ -1527,20 +1528,23 @@ def test_defer_near_power_of_two_never_exceeds_max_backoff(tmp_path: Path) -> No
             f"near-power-of-two-{next_count}", observed_at=observed_at
         )
         assert item is not None and item.delivery_count == next_count
-        assert store.defer_admission(
-            item,
-            reason="EXECUTOR_PROJECT_BUSY",
-            policy=policy,
-            observed_at=observed_at,
-        ) is AdmissionDisposition.DEFERRED
+        assert (
+            store.defer_admission(
+                item,
+                reason="EXECUTOR_PROJECT_BUSY",
+                policy=policy,
+                observed_at=observed_at,
+            )
+            is AdmissionDisposition.DEFERRED
+        )
         admission = store.admission_projection(task_id, _scope())
         assert admission is not None and admission.attempt_count == next_count
         if next_count < 9:
             observed_at = admission.next_eligible_at
 
     observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-    exact_upper_bound = (observed + timedelta(seconds=maximum)).isoformat().replace(
-        "+00:00", "Z"
+    exact_upper_bound = (
+        (observed + timedelta(seconds=maximum)).isoformat().replace("+00:00", "Z")
     )
     assert admission.next_eligible_at == exact_upper_bound
     assert datetime.fromisoformat(
@@ -1584,15 +1588,16 @@ def test_safe_budget_exhaustion_atomically_terminalizes_without_result(
     )
     first = store.claim_outbox("budget-1", observed_at=NOW)
     assert first is not None
-    assert store.defer_admission(
-        first,
-        reason="EXECUTOR_CAPACITY_EXHAUSTED",
-        policy=policy,
-        observed_at=NOW,
-    ) is AdmissionDisposition.DEFERRED
-    second = store.claim_outbox(
-        "budget-2", observed_at="2026-08-05T12:00:01Z"
+    assert (
+        store.defer_admission(
+            first,
+            reason="EXECUTOR_CAPACITY_EXHAUSTED",
+            policy=policy,
+            observed_at=NOW,
+        )
+        is AdmissionDisposition.DEFERRED
     )
+    second = store.claim_outbox("budget-2", observed_at="2026-08-05T12:00:01Z")
     assert second is not None
 
     disposition = store.defer_admission(
@@ -1623,9 +1628,9 @@ def test_safe_budget_exhaustion_atomically_terminalizes_without_result(
         assert connection.execute(
             "SELECT state, claimed_by, claim_token FROM outbox"
         ).fetchone() == ("suppressed", None, None)
-    assert store.claim_outbox(
-        "budget-after", observed_at="2026-08-05T12:00:02Z"
-    ) is None
+    assert (
+        store.claim_outbox("budget-after", observed_at="2026-08-05T12:00:02Z") is None
+    )
 
 
 def test_first_closed_defer_can_safely_exhaust_configured_budget(
@@ -1671,9 +1676,9 @@ def test_deadline_claim_settles_only_proven_pre_effect_or_requires_manual_action
         suffix="-deadline-safe",
         policy=AdmissionPolicy(deadline_seconds=2),
     )
-    assert safe.claim_outbox(
-        "deadline-safe", observed_at="2026-08-05T12:00:02Z"
-    ) is None
+    assert (
+        safe.claim_outbox("deadline-safe", observed_at="2026-08-05T12:00:02Z") is None
+    )
     assert safe.get_task(safe_task, _scope()).state is FormalTaskState.TERMINAL
     assert safe.get_attempt(safe_attempt).outcome is TerminalOutcome.FAILED
 
@@ -1698,9 +1703,10 @@ def test_deadline_claim_settles_only_proven_pre_effect_or_requires_manual_action
         )
         connection.commit()
 
-    assert unknown.claim_outbox(
-        "deadline-unknown", observed_at="2026-08-05T12:00:02Z"
-    ) is None
+    assert (
+        unknown.claim_outbox("deadline-unknown", observed_at="2026-08-05T12:00:02Z")
+        is None
+    )
 
     task = unknown.get_task(unknown_task, _scope())
     assert task.state is FormalTaskState.ACCEPTED
@@ -1736,12 +1742,15 @@ def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
     )
     dispatch = store.claim_outbox("timeout-open-cancel", observed_at=NOW)
     assert dispatch is not None
-    assert store.defer_admission(
-        dispatch,
-        reason="EXECUTOR_PROJECT_BUSY",
-        policy=AdmissionPolicy(deadline_seconds=2),
-        observed_at=NOW,
-    ) is AdmissionDisposition.DEFERRED
+    assert (
+        store.defer_admission(
+            dispatch,
+            reason="EXECUTOR_PROJECT_BUSY",
+            policy=AdmissionPolicy(deadline_seconds=2),
+            observed_at=NOW,
+        )
+        is AdmissionDisposition.DEFERRED
+    )
     cancel = _cancel(task_id)
     accepted = core.execute(
         cancel.envelope,
@@ -1751,9 +1760,10 @@ def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
     assert accepted.ok and accepted.result is not None
     assert accepted.result["applied"] is False
 
-    assert store.claim_outbox(
-        "timeout-after-cancel", observed_at="2026-08-05T12:00:02Z"
-    ) is None
+    assert (
+        store.claim_outbox("timeout-after-cancel", observed_at="2026-08-05T12:00:02Z")
+        is None
+    )
 
     assert store.get_task(task_id, _scope()).outcome is TerminalOutcome.FAILED
     assert [event.event_type for event in store.events(task_id, _scope())] == [
@@ -1772,9 +1782,9 @@ def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
         assert connection.execute("SELECT COUNT(*) FROM task_results").fetchone() == (
             0,
         )
-        assert connection.execute("SELECT COUNT(*) FROM executor_events").fetchone() == (
-            0,
-        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM executor_events"
+        ).fetchone() == (0,)
     SqliteTaskStore(database)
 
 
@@ -1790,7 +1800,9 @@ async def test_core_defers_only_explicit_direct_pre_effect_capacity(
     class CapacityExecutor(_Executor):
         async def dispatch(self, item):
             self.dispatches.append(item.attempt_id)
-            raise FormalTaskViolation(reason, "closed pre-effect", ErrorCode.UNAVAILABLE)
+            raise FormalTaskViolation(
+                reason, "closed pre-effect", ErrorCode.UNAVAILABLE
+            )
 
     store = SqliteTaskStore(tmp_path / f"core-{reason}.sqlite")
     executor = CapacityExecutor()
@@ -1815,9 +1827,9 @@ async def test_core_defers_only_explicit_direct_pre_effect_capacity(
     assert admission.queued is True
     assert executor.dispatches == [created.result["attempt_id"]]
     with sqlite3.connect(store.database_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM executor_events").fetchone() == (
-            0,
-        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM executor_events"
+        ).fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_results").fetchone() == (
             0,
         )
@@ -1865,16 +1877,17 @@ async def test_core_does_not_reclassify_generic_unknown_delivery_as_capacity(
     assert admission.reason is None
     assert admission.reconciliation_required is True
     assert admission.manual_action == "verify_external_ownership_and_settle"
-    assert store.claim_outbox(
-        "core-unknown-reclaim", observed_at="2026-08-05T12:00:01Z"
-    ) is None
+    assert (
+        store.claim_outbox("core-unknown-reclaim", observed_at="2026-08-05T12:00:01Z")
+        is None
+    )
     with sqlite3.connect(store.database_path) as connection:
         assert connection.execute(
             "SELECT state, delivery_count FROM outbox"
         ).fetchone() == (OutboxState.SUPPRESSED.value, 1)
-        assert connection.execute("SELECT COUNT(*) FROM executor_events").fetchone() == (
-            0,
-        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM executor_events"
+        ).fetchone() == (0,)
     reopened = SqliteTaskStore(store.database_path)
     reopened_admission = reopened.admission_projection(
         str(created.result["task_id"]), _scope()
@@ -1924,9 +1937,12 @@ async def test_reconcile_preserves_manual_admission_reconciliation_required(
     assert admission is not None
     assert admission.reconciliation_required is True
     assert admission.manual_action == "verify_external_ownership_and_settle"
-    assert store.claim_outbox(
-        "reconcile-unknown-reclaim", observed_at="2026-08-05T12:00:01Z"
-    ) is None
+    assert (
+        store.claim_outbox(
+            "reconcile-unknown-reclaim", observed_at="2026-08-05T12:00:01Z"
+        )
+        is None
+    )
     reopened = SqliteTaskStore(database)
     reopened_admission = reopened.admission_projection(
         str(created.result["task_id"]), _scope()
@@ -2027,8 +2043,8 @@ async def test_selected_required_reconcile_rejects_unbound_status_observation(
 ) -> None:
     """Catches selected status evidence with absent or changed profile authority."""
 
-    database, task_id, attempt_id, selection = (
-        _selected_running_required_attempt(tmp_path, suffix=f"-{binding}")
+    database, task_id, attempt_id, selection = _selected_running_required_attempt(
+        tmp_path, suffix=f"-{binding}"
     )
 
     class UnboundStatusExecutor(_Executor):
@@ -2075,8 +2091,8 @@ async def test_selected_required_reconcile_accepts_exact_selection_observation(
 ) -> None:
     """Preserves automatic settlement when status carries exact selected authority."""
 
-    database, task_id, _attempt_id, selection = (
-        _selected_running_required_attempt(tmp_path, suffix="-exact")
+    database, task_id, _attempt_id, selection = _selected_running_required_attempt(
+        tmp_path, suffix="-exact"
     )
 
     class ExactStatusExecutor(_Executor):
@@ -2154,12 +2170,8 @@ def test_status_and_list_project_queued_without_new_canonical_state(
     status_query = _status(task_id)
     listed_query = _list_tasks(limit=10)
 
-    status = core.query(
-        status_query.envelope, status_query.authorization, now=NOW
-    )
-    listed = core.query(
-        listed_query.envelope, listed_query.authorization, now=NOW
-    )
+    status = core.query(status_query.envelope, status_query.authorization, now=NOW)
+    listed = core.query(listed_query.envelope, listed_query.authorization, now=NOW)
 
     assert status.ok and status.result is not None
     assert status.result["task"]["state"] == "accepted"
@@ -2199,9 +2211,7 @@ def test_status_projection_uses_one_snapshot_during_legal_retry(
         retried = external_core.execute(
             retry,
             grant,
-            context=replace(
-                _context(tmp_path), revision_value="status-snapshot-retry"
-            ),
+            context=replace(_context(tmp_path), revision_value="status-snapshot-retry"),
             now=NOW,
             selection=_selection(),
             admission_policy=AdmissionPolicy(),
@@ -2211,9 +2221,7 @@ def test_status_projection_uses_one_snapshot_during_legal_retry(
         post_race_dump.append(_database_dump(database))
 
     executor = _Executor()
-    core = PersistentTaskCore(
-        SqliteTaskStore(database, failpoint=failpoint), executor
-    )
+    core = PersistentTaskCore(SqliteTaskStore(database, failpoint=failpoint), executor)
     query = _status(task_id)
 
     status = core.query(query.envelope, query.authorization, now=NOW)
@@ -2247,9 +2255,7 @@ def test_list_projection_uses_one_snapshot_during_legal_mutation(
         expected_state = "accepted"
         expected_queued = True
     else:
-        seed_store, _executor, _core, task_id, attempt_id = _terminal_task(
-            tmp_path
-        )
+        seed_store, _executor, _core, task_id, attempt_id = _terminal_task(tmp_path)
         database = seed_store.database_path
         expected_state = "terminal"
         expected_queued = False
@@ -2312,9 +2318,7 @@ def test_list_projection_uses_one_snapshot_during_legal_mutation(
         post_race_dump.append(_database_dump(database))
 
     executor = _Executor()
-    core = PersistentTaskCore(
-        SqliteTaskStore(database, failpoint=failpoint), executor
-    )
+    core = PersistentTaskCore(SqliteTaskStore(database, failpoint=failpoint), executor)
     query = _list_tasks(limit=10)
 
     listed = core.query(query.envelope, query.authorization, now=NOW)
@@ -2331,7 +2335,9 @@ def test_list_projection_uses_one_snapshot_during_legal_mutation(
     if mutation == "settlement":
         assert task["admission"]["attempt_id"] == attempt_id
         assert task["admission"]["queued"] is True
-        assert external_store.get_task(task_id, _scope()).state is FormalTaskState.RUNNING
+        assert (
+            external_store.get_task(task_id, _scope()).state is FormalTaskState.RUNNING
+        )
     else:
         assert task["admission"] is None
     assert _database_dump(database) == post_race_dump[0]
@@ -2340,7 +2346,9 @@ def test_list_projection_uses_one_snapshot_during_legal_mutation(
     assert executor.adjustments == []
 
 
-def test_reconciliation_projection_exposes_bounded_manual_action(tmp_path: Path) -> None:
+def test_reconciliation_projection_exposes_bounded_manual_action(
+    tmp_path: Path,
+) -> None:
     store = SqliteTaskStore(tmp_path / "manual-projection.sqlite")
     task_id, attempt_id = _selected_create(
         store,
@@ -2353,9 +2361,10 @@ def test_reconciliation_projection_exposes_bounded_manual_action(tmp_path: Path)
             "UPDATE outbox SET delivery_count=1 WHERE attempt_id=?", (attempt_id,)
         )
         connection.commit()
-    assert store.claim_outbox(
-        "manual-projection", observed_at="2026-08-05T12:00:01Z"
-    ) is None
+    assert (
+        store.claim_outbox("manual-projection", observed_at="2026-08-05T12:00:01Z")
+        is None
+    )
 
     admission = store.admission_projection(task_id, _scope())
 
@@ -2437,9 +2446,12 @@ def test_reprioritize_pending_selected_attempt_is_atomic_replayable_and_reopens(
         "request_id": "request-reprioritize-replay",
     }
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT outbox_id, created_at, delivery_count FROM outbox"
-        ).fetchone() == original
+        assert (
+            connection.execute(
+                "SELECT outbox_id, created_at, delivery_count FROM outbox"
+            ).fetchone()
+            == original
+        )
         assert connection.execute(
             "SELECT COUNT(*) FROM commands WHERE command_id=?",
             (command.command_id,),
@@ -2475,12 +2487,15 @@ def test_reprioritize_after_closed_pre_effect_defer_preserves_queue_identity(
         original_identity = connection.execute(
             "SELECT outbox_id, created_at FROM outbox"
         ).fetchone()
-    assert store.defer_admission(
-        item,
-        reason="EXECUTOR_PROJECT_BUSY",
-        policy=AdmissionPolicy(),
-        observed_at=NOW,
-    ) is AdmissionDisposition.DEFERRED
+    assert (
+        store.defer_admission(
+            item,
+            reason="EXECUTOR_PROJECT_BUSY",
+            policy=AdmissionPolicy(),
+            observed_at=NOW,
+        )
+        is AdmissionDisposition.DEFERRED
+    )
     task = store.get_task(task_id, _scope())
     command, authorization = _reprioritize(
         task_id,
@@ -2559,9 +2574,7 @@ def test_reprioritize_conflicts_have_zero_queue_or_executor_effects(
             replace(
                 observation,
                 adapter_id=claimed.selection.adapter_id,
-                capability_profile_digest=(
-                    claimed.selection.capability_profile_digest
-                ),
+                capability_profile_digest=(claimed.selection.capability_profile_digest),
             )
             for observation in _observations(
                 claimed,
@@ -2584,10 +2597,13 @@ def test_reprioritize_conflicts_have_zero_queue_or_executor_effects(
                 (NOW, attempt_id),
             )
             connection.commit()
-        assert store.claim_outbox(
-            "reprioritize-reconciliation",
-            observed_at=NOW,
-        ) is None
+        assert (
+            store.claim_outbox(
+                "reprioritize-reconciliation",
+                observed_at=NOW,
+            )
+            is None
+        )
 
     task = store.get_task(task_id, _scope())
     addressed_attempt = "attempt-stale" if mode == "stale_attempt" else attempt_id
@@ -2675,12 +2691,13 @@ def test_admission_timeout_failpoints_roll_back_every_authority_surface(
 
     failing = SqliteTaskStore(database, failpoint=fail)
     with pytest.raises(RuntimeError, match=failpoint):
-        failing.claim_outbox(
-            "timeout-failpoint", observed_at="2026-08-05T12:00:01Z"
-        )
+        failing.claim_outbox("timeout-failpoint", observed_at="2026-08-05T12:00:01Z")
 
     assert _database_dump(database) == before
-    assert SqliteTaskStore(database).get_task(task_id, _scope()).state is FormalTaskState.ACCEPTED
+    assert (
+        SqliteTaskStore(database).get_task(task_id, _scope()).state
+        is FormalTaskState.ACCEPTED
+    )
 
 
 def test_concurrent_deadline_claimers_commit_one_terminal_settlement(
@@ -2735,9 +2752,7 @@ def test_expired_store_claim_never_proves_direct_lease_or_os_lock_release(
         policy=AdmissionPolicy(deadline_seconds=2),
     )
     assert store.claim_outbox("three-fence-owner", observed_at=NOW) is not None
-    assert store.reset_expired_outbox_claims(
-        claimed_before="2026-08-05T12:00:01Z"
-    ) == 1
+    assert store.reset_expired_outbox_claims(claimed_before="2026-08-05T12:00:01Z") == 1
 
     reset_task = store.get_task(task_id, _scope())
     reset_admission = store.admission_projection(task_id, _scope())
@@ -2746,9 +2761,10 @@ def test_expired_store_claim_never_proves_direct_lease_or_os_lock_release(
     assert reset_admission is not None
     assert reset_admission.reconciliation_required is True
     assert reset_admission.manual_action == "verify_external_ownership_and_settle"
-    assert store.claim_outbox(
-        "three-fence-reclaimer", observed_at="2026-08-05T12:00:01Z"
-    ) is None
+    assert (
+        store.claim_outbox("three-fence-reclaimer", observed_at="2026-08-05T12:00:01Z")
+        is None
+    )
 
     task = store.get_task(task_id, _scope())
     assert task.state is FormalTaskState.ACCEPTED
@@ -2853,17 +2869,20 @@ def test_concurrent_reprioritize_commands_have_one_applied_winner(
         )
 
     assert sum(result.ok for result in results) == 1
-    assert {
-        result.error.reason for result in results if result.error is not None
-    } == {"TASK_CONTROL_PRECONDITION_STALE"}
+    assert {result.error.reason for result in results if result.error is not None} == {
+        "TASK_CONTROL_PRECONDITION_STALE"
+    }
     reopened = SqliteTaskStore(database)
     admission = reopened.admission_projection(task_id, _scope())
     assert admission is not None
     assert admission.priority.value in {"high", "urgent"}
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT outbox_id, created_at, delivery_count FROM outbox"
-        ).fetchone() == before_outbox
+        assert (
+            connection.execute(
+                "SELECT outbox_id, created_at, delivery_count FROM outbox"
+            ).fetchone()
+            == before_outbox
+        )
         assert connection.execute(
             "SELECT COUNT(*) FROM commands WHERE command_type='task.reprioritize'"
         ).fetchone() == (2,)
