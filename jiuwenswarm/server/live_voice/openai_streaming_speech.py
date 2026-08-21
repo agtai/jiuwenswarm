@@ -50,6 +50,7 @@ from jiuwenswarm.server.live_voice.speech_ports import (
 from jiuwenswarm.server.live_voice.streaming_speech import (
     CapabilityProvenance,
     MAX_AUDIO_SAMPLES_PER_FRAME,
+    MAX_STREAMING_IDENTITY_LEDGER,
     NativeStreamingSpeechProvider,
     ProviderTransport,
     RecognitionCommitDisposition,
@@ -882,8 +883,16 @@ class OpenAIStreamingSpeechProvider:
                 chunk_text_spans=CapabilityProvenance.UNAVAILABLE,
             ),
         )
+        # The Gateway synthesis route opens at most eight concurrent Provider
+        # streams, which already matches the conformance session defaults, but
+        # it retains up to `MAX_STREAMING_IDENTITY_LEDGER` stream identities.
+        # Declaring the same identity budget here keeps the Provider from being
+        # the tighter wall for an identity the route still treats as live.
         self._conformance = StreamingSpeechConformance(
-            self._capability, enabled=True, monotonic=monotonic
+            self._capability,
+            enabled=True,
+            max_identity_tombstones=MAX_STREAMING_IDENTITY_LEDGER,
+            monotonic=monotonic,
         )
         self._recognition: dict[tuple[str, int], _RecognitionSession] = {}
         self._synthesis: dict[tuple[str, int], _SynthesisSession] = {}

@@ -43,11 +43,17 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannelConfig,
 )
 from jiuwenswarm.gateway.channel_manager.web import web_connect
+from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+    _MAX_ROUTE_IDENTITIES,
+)
 from jiuwenswarm.server.live_voice.batch_speech import (
     RECOGNIZE_OPERATION,
     SYNTHESIZE_OPERATION,
     SpeechAuthorizationBinding,
     SpeechRpcContext,
+)
+from jiuwenswarm.server.live_voice.streaming_speech import (
+    MAX_STREAMING_IDENTITY_LEDGER,
 )
 
 
@@ -1779,3 +1785,19 @@ def test_replacing_p2_activation_revokes_old_media_before_new_provider_use() -> 
     assert record.pcm == bytearray()
     assert record.recognition_content_sha256 is None
     assert record.synthesis_content_sha256 == {}
+
+
+def test_product_tts_identity_budget_is_aligned_with_the_synthesis_route() -> None:
+    """The product TTS allocation mints one fresh identity per request.
+
+    ``_handle_streaming_synthesis`` derives ``product-tts-<digest>`` from the
+    operation, response and unit of every accepted synthesize call and always
+    opens it at generation zero, so each product TTS request costs one new
+    streaming identity.  The ledgers upstream therefore decide how many product
+    TTS requests one long-lived registry can serve, and the Provider budget
+    must not be tighter than the route's own retained-binding ledger: a
+    Provider that refuses first becomes the wall for an identity the route
+    still treats as live.
+    """
+
+    assert MAX_STREAMING_IDENTITY_LEDGER == _MAX_ROUTE_IDENTITIES

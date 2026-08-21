@@ -53,6 +53,7 @@ from jiuwenswarm.server.live_voice.speech_ports import (
 )
 from jiuwenswarm.server.live_voice.streaming_speech import (
     CaptureRef,
+    MAX_STREAMING_IDENTITY_LEDGER,
     RecognitionCommitDisposition,
     RecognitionAudioFrame,
     RecognitionStreamRequest,
@@ -3596,3 +3597,79 @@ async def test_default_socket_close_timeout_fits_cleanup_attempt_budget(
     assert (
         REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS < TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
     )
+
+
+@pytest.mark.asyncio
+async def test_sequential_synthesis_outlives_the_declared_identity_ledger() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    frames = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        ),
+        "",
+        'data: {"type":"speech.audio.done","usage":{}}',
+        "",
+    )
+
+    async def sse_factory(url, headers, payload, timeout):
+        return FakeSseStream(frames)
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    for index in range(MAX_STREAMING_IDENTITY_LEDGER + 1):
+        response = ResponseRef(f"interaction-{index}", f"response-{index}", 0)
+        request = SynthesisStreamRequest(
+            ref=SynthesisStreamRef(
+                f"product-tts-{index}", 0, response, f"unit-{index}", 0
+            ),
+            display_text="API",
+            spoken_text="A P I",
+            display_span=TextSpan(10, 13),
+            sample_rate_hz=48_000,
+            event_timeout_seconds=1.0,
+        )
+        provider.conformance.activate_response(response)
+        await provider.open_synthesis(request)
+        kinds = [(await provider.next_synthesis_event(request.ref, timeout_seconds=1))]
+        while kinds[-1].kind is not SynthesisEventKind.COMPLETED:
+            kinds.append(
+                await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            )
+        assert kinds[0].kind is SynthesisEventKind.STARTED
+        # Draining the terminal event already retires the Provider session and
+        # reaps the conformance stream, which is what makes the identity
+        # releasable for the next stream.
+        with pytest.raises(OpenAIStreamingSpeechError) as retired:
+            await provider.cancel_synthesis(request.ref)
+        assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.retained_synthesis == 0
+    assert snapshot.retained_identity_tombstones <= 4 * MAX_STREAMING_IDENTITY_LEDGER
+    # A released stream identity is still refused with its exact reason.
+    replay_response = ResponseRef("interaction-replay", "response-replay", 0)
+    provider.conformance.activate_response(replay_response)
+    with pytest.raises(StreamingSpeechViolation) as released:
+        provider.conformance.start_synthesis(
+            SynthesisStreamRequest(
+                ref=SynthesisStreamRef(
+                    "product-tts-0", 0, replay_response, "unit-replay", 0
+                ),
+                display_text="API",
+                spoken_text="A P I",
+                display_span=TextSpan(10, 13),
+                sample_rate_hz=48_000,
+                event_timeout_seconds=1.0,
+            )
+        )
+    assert released.value.reason == "STALE_SYNTHESIS_GENERATION"
+    with pytest.raises(StreamingSpeechViolation) as reused:
+        provider.conformance.activate_response(
+            ResponseRef("interaction-0", "response-0", 1)
+        )
+    assert reused.value.reason == "RESPONSE_ID_REUSED"
+    assert_zero_business_effects(provider)
+    await provider.close()
