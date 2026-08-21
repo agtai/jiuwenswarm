@@ -19,6 +19,11 @@ sequential A reference is `1b0802cae9a6718c0d3326c1292f7475fdefe08c`. The
 checkpoint evidence documentation referenced here was recorded at
 `def1dc06bf93eaf9a35a2d6af0e8a7fcd9273c36`.
 
+The later stable-sentence screen is bound separately to tested JiuwenSwarm
+source `81903777f8dccb40ba2cb70fbe9b28d28d86c7f5` and Agent-Core
+`94e10cb6102c36fe78a64547957c0def97299273`. It did not modify the composed
+checkpoint or receive product-behaviour credit.
+
 Status terms used here:
 
 - **Accepted — causal component scope:** the named owner and boundary passed
@@ -26,6 +31,8 @@ Status terms used here:
   credit.
 - **Rejected:** the experiment produced evidence against the candidate; the
   product change was not retained.
+- **Screened out / materiality `STOP`:** the measurement path was valid, but
+  the observed headroom did not justify constructing the product candidate.
 - **Planned/conditional:** no product credit exists; implementation proceeds
   only after the stated measurement gate.
 - **Estimated:** planning headroom inferred from current code facts or
@@ -39,6 +46,7 @@ Status terms used here:
 | TTS downlink decoupled from successor-capture ACK | **ACCEPTED — first-audio causal component scope** | P1/P2 seam; `productP1VoiceRoute.ts`, `dedicated_media_registration.py` | First-source p50 saved **5.8 ms / 255.1 ms / 756.1 ms** under injected ACK delays of 0/250/750 ms | A1/B/A2 returned to the original timing; at 750 ms, first source changed from 756.5 to 0.48 ms | It improves first audio, but confirmed receipt remains ACK-delayed. Real E2E gain depends on the checkpoint and later physical validation. |
 | Fixed VAD reduction from 1200 to 900/800 ms | **REJECTED** | P1 input; `streaming_speech.py`, `openai_streaming_speech.py` | Successful turns exposed **285–412 ms** of potential endpointing headroom | Both candidates preserved only 15/20 turns; every 1000 ms natural-pause case failed 0/5 | The headroom is real, but a global fixed threshold cannot safely recover it. Keep 1200 ms. |
 | Application-level TTS HTTPX client reuse | **REJECTED AND REVERTED** | P1 TTS Provider; `openai_streaming_speech.py` | No gain; warm first-PCM regressed **57.8 ms / 7.0%** | B produced **0/3 warm TCP/TLS reuse**; 832.0→889.9 ms warm p50 | Do not reintroduce this implementation unchanged. |
+| Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP`** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Candidate→final/projected-gain p50 **177.2 ms**, p95 **425.3 ms**; relative p50 **7.43%** | 3/3 real pilot attempts completed, exact prefix 3/3, mismatch 0, zero forbidden effects | Failed the predeclared 500 ms headroom, 400 ms gain and 10% relative gates. Keep the screen assets; do not build the product candidate. |
 | Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves the composed controlled-owner gain. It remains non-physical: real Provider/network, Chrome/WebAudio, Agent/model execution and human-perceived first audio were out of scope. |
 
 ## Combined checkpoint result
@@ -190,6 +198,57 @@ connections. The proposed application-client retention therefore removed no
 connection-establishment stage and was reverted. A bounded post-`audio.done`
 EOF drain is only a separate hypothesis; it receives no headroom credit from
 this failed candidate.
+
+### Screened stable-sentence Agent→TTS overlap
+
+This no-Chrome screen asks whether a complete, exact-prefix sentence appears
+early enough in the real Agent stream to justify starting benchmark-only TTS
+before `chat.final`. It does **not** claim that the Runtime, P2 or Browser can
+already present such speech safely.
+
+The causal limit is simple: starting the same TTS request earlier can hide only
+the interval from stable-candidate detection to `chat.final`. It does not make
+Agent generation or TTS generation faster.
+
+```text
+final-gated path:  Agent ─────────────► chat.final ─► TTS ─► first PCM
+screened path:     Agent ─► candidate ──────────────► chat.final
+                               └────────► TTS ──────► first PCM
+maximum overlap gain = chat.final time - candidate time
+```
+
+All values below are milliseconds. Agent boundaries and candidate→final are
+**MEASURED** on one monotonic process. TTS request→first PCM is **MEASURED** on
+the real streaming Provider. Candidate-path first PCM is **DERIVED** by
+combining those measured intervals. The final-gated baseline is **ESTIMATED**
+as final time plus the same observed TTS duration; a second final-gated TTS
+request was intentionally not made. Browser first-audible and playout remain
+**UNKNOWN**.
+
+| Public case | Candidate | Final | Candidate→final | TTS request→first PCM | Candidate-path first PCM | Estimated final-gated first PCM | Projected gain |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Two-sentence explanation | 1896.5 | 2073.7 | **177.2** | 1777.4 | 3673.9 | 3851.1 | **177.2** |
+| Three-sentence comparison | 683.3 | 1108.5 | **425.3** | 1125.5 | 1808.8 | 2234.0 | **425.3** |
+| Short technical summary | 698.7 | 826.8 | **128.1** | 896.6 | 1595.3 | 1723.4 | **128.1** |
+| **p50** | **698.7** | **1108.5** | **177.2** | **1125.5** | **1808.8** | **2234.0** | **177.2** |
+| **p95 nearest-rank** | **1896.5** | **2073.7** | **425.3** | **1777.4** | **3673.9** | **3851.1** | **425.3** |
+
+| Materiality gate | Required | Observed | Result |
+|---|---:|---:|---|
+| Candidate→final p50 | at least 500 ms | 177.2 ms | fail |
+| Projected first-PCM gain p50 | at least 400 ms | 177.2 ms | fail |
+| Projected relative gain p50 | at least 10% | 7.43% | fail |
+| Useful trace classes | at least 2 | 3 | pass |
+| Prefix mismatches / forbidden effects | 0 / 0 | 0 / 0 | pass |
+
+The earlier 1.5–2.5 second ordinary estimate assumed that a stable sentence
+would precede final by roughly that amount. These short real responses did not
+support that assumption: the trustworthy sentence appeared only 128–425 ms
+before final. The screen therefore stopped before the high-risk authority,
+correction, cancellation, P2 and Browser work. This does not prove that every
+long-form workload has equally small headroom; reopening the lane requires a
+new representative workload/materiality hypothesis and the same exact-prefix
+gate. See the complete [causal result](../evidence/STABLE_SENTENCE_AGENT_TTS_CAUSAL_RESULT_2026-08-21.md).
 
 ## Recommended next optimization candidates
 
