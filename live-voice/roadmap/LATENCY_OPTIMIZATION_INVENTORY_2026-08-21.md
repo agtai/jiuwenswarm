@@ -200,7 +200,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | Ref | Candidate | Status | Expected headroom | Area / likely code | Current evidence and rationale |
 |---:|---|---|---:|---|---|
 | 1 | EOT/STT early result waiter with authoritative join | **PLANNED, CONDITIONAL — NEXT EVIDENCE STEP** | **0–150 ms** | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | The Gateway already collects Provider final concurrently. Implement only if A1 finds at least 80 ms and 10% removable serialization. |
-| 2 | Semantic/adaptive VAD with 1200 ms fallback | **PROPOSED** | **250–400 ms** | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, Browser P1 orchestration | Fixed 800/900 ms proved the latency opportunity but failed natural-pause integrity. Adaptive endpointing must preserve the safe fallback. |
+| 2 | [Provider-native Semantic VAD with 1200 ms fallback](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md) | **SPECIFIED — AFTER EOT/STT CLOSURE** | **250–400 ms** | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms proved the latency opportunity but failed natural-pause integrity. The approved screen compares separate `auto` and `high` A/B/A blocks without adding another model RPC; product activation remains excluded. |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **PROPOSED** | **700–840 ms estimated** | `browserAudioIOAdapter.ts`; current fixed `PLAYOUT_STARTUP_LEAD_SECONDS = 1.0` | Strong code-fact headroom. Start with roughly 160–300 ms contiguous decoded audio and a bounded reserve. Physical Chrome is ultimately required for underrun and first-audible acceptance. |
 | 5 | Separate receipt settlement from successor readiness | **OPEN AUTHORITY QUESTION** | Controlled wait exposed at approximately **254/754/1007 ms** for 250/750/1100 ms injected delays | `productP1VoiceRoute.ts`, P2 presentation ACK and next-turn ownership | First audio is already decoupled, but terminal receipt still follows successor readiness. Any optimization must retain truthful playout and interruption authority. |
@@ -243,7 +243,8 @@ replace the current product-truth execution packet in `live-voice/STATUS.md`.
 
 1. Run the EOT/STT A1 materiality screen; stop without a product change if the
    removable wait is below 80 ms or 10%.
-2. Evaluate semantic/adaptive VAD with the 1200 ms fallback.
+2. Run the separately specified Provider-native Semantic VAD `auto` and `high`
+   screens with the 1200 ms configuration fallback.
 3. Specify the Runtime-owned stable-sentence TTS path, the largest remaining
    real structural headroom.
 4. Add bounded sentence prefetch.
@@ -274,6 +275,8 @@ listed as branch-bound paths rather than current-tree links.
   `live-voice/roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md`
 - `latency/eot-stt-settlement-overlap`:
   `live-voice/roadmap/EOT_STT_SETTLEMENT_OVERLAP_SPEC_2026-08-21.md`
+- `latency_checkpoint_accepted_optimizations`:
+  `live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:
   `live-voice/roadmap/LATENCY_ACCEPTED_OPTIMIZATIONS_CHECKPOINT_SPEC_2026-08-21.md`
 - `latency_checkpoint_accepted_optimizations`:
