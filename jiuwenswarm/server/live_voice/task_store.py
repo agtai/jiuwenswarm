@@ -608,6 +608,21 @@ _TASK_STORE_UNIQUE_KEYS_V6 = {
     "durability_mutator_leases": frozenset({("task_id",)}),
     "durability_recovery_fences": frozenset({("task_id",)}),
 }
+_LEGACY_CANDIDATE_V6_RECOVERY_FENCE_UNIQUE_KEYS = frozenset(
+    {("task_id",), ("cancel_command_id",)}
+)
+_LEGACY_CANDIDATE_V6_RECOVERY_FENCE_SQL = (
+    "CREATETABLEDURABILITY_RECOVERY_FENCES("
+    "TASK_IDTEXTNOTNULLPRIMARYKEYREFERENCESTASKS(TASK_ID)ONDELETECASCADE,"
+    "PRODUCER_ATTEMPT_IDTEXTNOTNULLREFERENCESATTEMPTS(ATTEMPT_ID)ONDELETECASCADE,"
+    "CANCEL_COMMAND_IDTEXTNOTNULLUNIQUE,CREATED_ATTEXTNOTNULL)"
+)
+_LEGACY_CANDIDATE_V6_RECOVERY_FENCE_INDEXES = frozenset(
+    {
+        ("pk", True, False, ("task_id",)),
+        ("u", True, False, ("cancel_command_id",)),
+    }
+)
 _TASK_STORE_FOREIGN_KEYS_V3 = {
     "metadata": frozenset(),
     "commands": frozenset(),
@@ -1836,7 +1851,21 @@ class SqliteTaskStore:
                     self._verify_v5_semantics(connection)
                     self._migrate_v5_to_v6(connection)
                 elif version == _SCHEMA_VERSION:
-                    self._verify_schema_structure(connection, version=6)
+                    try:
+                        self._verify_schema_structure(connection, version=6)
+                    except FormalTaskViolation:
+                        self._verify_schema_structure(
+                            connection,
+                            version=6,
+                            legacy_candidate_v6=True,
+                        )
+                        self._verify_database(connection)
+                        self._verify_v4_lineage(connection)
+                        self._verify_v4_semantics(connection)
+                        self._verify_v5_semantics(connection)
+                        self._verify_v6_semantics(connection)
+                        self._normalize_legacy_candidate_v6(connection)
+                        self._verify_schema_structure(connection, version=6)
                     self._verify_database(connection)
                     self._verify_v4_lineage(connection)
                     self._verify_v4_semantics(connection)
@@ -1934,7 +1963,11 @@ class SqliteTaskStore:
 
     @classmethod
     def _verify_schema_structure(
-        cls, connection: sqlite3.Connection, *, version: int
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        version: int,
+        legacy_candidate_v6: bool = False,
     ) -> None:
         tables = {
             row["name"]
@@ -1986,6 +2019,14 @@ class SqliteTaskStore:
         )
         if version == 1:
             unique_keys["attempts"] = frozenset({("attempt_id",), ("task_id",)})
+        if legacy_candidate_v6:
+            if version != 6:
+                raise cls._schema_unsupported(
+                    "legacy candidate normalization requires schema v6"
+                )
+            unique_keys["durability_recovery_fences"] = (
+                _LEGACY_CANDIDATE_V6_RECOVERY_FENCE_UNIQUE_KEYS
+            )
         for table in sorted(expected_tables):
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             expected_columns = _TASK_STORE_COLUMNS[table]
@@ -2174,6 +2215,54 @@ class SqliteTaskStore:
                 raise cls._schema_unsupported(
                     "formal task Store consumer bounds are unsupported"
                 )
+
+        if legacy_candidate_v6:
+            cls._verify_legacy_candidate_v6_recovery_fence(connection)
+
+    @classmethod
+    def _verify_legacy_candidate_v6_recovery_fence(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        row = connection.execute(
+            """SELECT sql FROM sqlite_master
+               WHERE type='table' AND name='durability_recovery_fences'"""
+        ).fetchone()
+        sql = "" if row is None else str(row["sql"])
+        normalized_sql = "".join(sql.upper().split()).replace(
+            'CREATETABLE"DURABILITY_RECOVERY_FENCES"',
+            "CREATETABLEDURABILITY_RECOVERY_FENCES",
+            1,
+        )
+        if normalized_sql != _LEGACY_CANDIDATE_V6_RECOVERY_FENCE_SQL:
+            raise cls._schema_unsupported(
+                "legacy candidate v6 recovery fence definition is unsupported"
+            )
+
+        index_rows = connection.execute(
+            "PRAGMA index_list(durability_recovery_fences)"
+        ).fetchall()
+        indexes = frozenset(
+            (
+                str(index["origin"]),
+                bool(index["unique"]),
+                bool(index["partial"]),
+                tuple(
+                    column["name"]
+                    for column in connection.execute(
+                        f"PRAGMA index_info({index['name']})"
+                    ).fetchall()
+                ),
+            )
+            for index in index_rows
+        )
+        if (
+            len(index_rows) != len(_LEGACY_CANDIDATE_V6_RECOVERY_FENCE_INDEXES)
+            or indexes != _LEGACY_CANDIDATE_V6_RECOVERY_FENCE_INDEXES
+        ):
+            raise cls._schema_unsupported(
+                "legacy candidate v6 recovery fence indexes are unsupported"
+            )
 
     @staticmethod
     def _create_schema_v6(connection: sqlite3.Connection) -> None:
@@ -2636,6 +2725,32 @@ class SqliteTaskStore:
                 "formal task Store changed during v6 migration",
                 ErrorCode.UNSUPPORTED,
             )
+
+    def _normalize_legacy_candidate_v6(self, connection: sqlite3.Connection) -> None:
+        """Remove the released candidate's cross-scope cancel uniqueness only."""
+
+        replacement = "durability_recovery_fences_v6_final"
+        self._hit("migration.legacy_v6_to_final_v6.before_replace")
+        connection.execute(
+            f"""CREATE TABLE {replacement} (
+                task_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                cancel_command_id TEXT NOT NULL,
+                created_at TEXT NOT NULL)"""
+        )
+        connection.execute(
+            f"""INSERT INTO {replacement}(
+                       task_id, producer_attempt_id, cancel_command_id, created_at)
+                   SELECT task_id, producer_attempt_id, cancel_command_id, created_at
+                   FROM durability_recovery_fences"""
+        )
+        connection.execute("DROP TABLE durability_recovery_fences")
+        connection.execute(
+            f"ALTER TABLE {replacement} RENAME TO durability_recovery_fences"
+        )
+        self._hit("migration.legacy_v6_to_final_v6.after_replace")
 
     @staticmethod
     def _verify_database(connection: sqlite3.Connection) -> None:

@@ -75,6 +75,20 @@ _V6_TABLES = (
     "durability_effect_facts",
     "durability_checkpoints",
 )
+_TASK_STORE_DATA_TABLES = (
+    "metadata",
+    "commands",
+    "tasks",
+    "attempts",
+    "task_events",
+    "executor_events",
+    "outbox",
+    "current_background_tasks",
+    "task_results",
+    "task_event_consumption",
+    *_V6_TABLES,
+)
+_LEGACY_V6_FENCE_TEMP_TABLE = "durability_recovery_fences_legacy_candidate"
 
 
 def _profile() -> ExecutorCapabilityProfile:
@@ -320,6 +334,112 @@ def _recovery_authorization(
     )
 
 
+def _task_store_rows(database: Path) -> tuple[tuple[str, tuple[tuple, ...]], ...]:
+    with sqlite3.connect(database) as connection:
+        return tuple(
+            (
+                table,
+                tuple(
+                    connection.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    ).fetchall()
+                ),
+            )
+            for table in _TASK_STORE_DATA_TABLES
+        )
+
+
+def _task_store_schema(database: Path) -> tuple[tuple, ...]:
+    with sqlite3.connect(database) as connection:
+        return tuple(
+            connection.execute(
+                """SELECT type, name, tbl_name, sql FROM sqlite_master
+                   WHERE name NOT LIKE 'sqlite_%'
+                   ORDER BY type, name"""
+            ).fetchall()
+        )
+
+
+def _recovery_fence_unique_keys(database: Path) -> frozenset[tuple[str, ...]]:
+    with sqlite3.connect(database) as connection:
+        return frozenset(
+            tuple(
+                row[2] for row in connection.execute(f"PRAGMA index_info({index[1]})")
+            )
+            for index in connection.execute(
+                "PRAGMA index_list(durability_recovery_fences)"
+            )
+            if index[2]
+        )
+
+
+def _replace_with_legacy_candidate_v6_recovery_fence(
+    database: Path,
+    *,
+    with_extra_check: bool = False,
+) -> None:
+    """Recreate the one released candidate-v6 difference exactly."""
+
+    created_at_definition = (
+        "created_at TEXT NOT NULL CHECK(length(created_at) > 0)"
+        if with_extra_check
+        else "created_at TEXT NOT NULL"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            f"""CREATE TABLE {_LEGACY_V6_FENCE_TEMP_TABLE} (
+                task_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                producer_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                cancel_command_id TEXT NOT NULL UNIQUE,
+                {created_at_definition})"""
+        )
+        connection.execute(
+            f"""INSERT INTO {_LEGACY_V6_FENCE_TEMP_TABLE}(
+                       task_id, producer_attempt_id, cancel_command_id, created_at)
+                   SELECT task_id, producer_attempt_id, cancel_command_id, created_at
+                   FROM durability_recovery_fences"""
+        )
+        connection.execute("DROP TABLE durability_recovery_fences")
+        connection.execute(
+            f"ALTER TABLE {_LEGACY_V6_FENCE_TEMP_TABLE} "
+            "RENAME TO durability_recovery_fences"
+        )
+        connection.commit()
+
+
+def _populated_legacy_candidate_v6(tmp_path: Path):
+    store, selection, task, binding = _selected_task(tmp_path)
+    _safe_recovery_prefix(store, task, binding)
+    item = store.claim_outbox("legacy-v6-producer", observed_at=NOW)
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=tuple(
+            replace(
+                observation,
+                adapter_id=selection.adapter_id,
+                capability_profile_digest=selection.capability_profile_digest,
+            )
+            for observation in _observations(item, outcome=TerminalOutcome.INTERRUPTED)
+        ),
+    )
+    cancelled = store.cancel(_cancel(task.task_id).envelope, observed_at=LATER)
+    assert not cancelled.ok
+    assert cancelled.error is not None
+    assert cancelled.error.reason == "TASK_ALREADY_TERMINAL"
+    database = Path(store.database_path)
+    _replace_with_legacy_candidate_v6_recovery_fence(database)
+    assert _recovery_fence_unique_keys(database) == frozenset(
+        {("task_id",), ("cancel_command_id",)}
+    )
+    return database, task, binding
+
+
 def test_v6_bootstrap_and_v5_migration_rollback_then_reopen(tmp_path: Path) -> None:
     database = tmp_path / "migration.sqlite"
     SqliteTaskStore(database)
@@ -548,6 +668,139 @@ def test_same_cancel_command_id_is_scoped_across_v5_migration_and_reopen(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_populated_legacy_candidate_v6_normalizes_without_changing_truth(
+    tmp_path: Path,
+) -> None:
+    database, task, binding = _populated_legacy_candidate_v6(tmp_path)
+    before = _task_store_rows(database)
+
+    normalized = SqliteTaskStore(database)
+    reopened = SqliteTaskStore(database)
+
+    assert _task_store_rows(database) == before
+    assert _recovery_fence_unique_keys(database) == frozenset({("task_id",)})
+    assert normalized.get_task(task.task_id, task.scope).attempt_id == task.attempt_id
+    assert reopened.get_task(task.task_id, task.scope).outcome is (
+        TerminalOutcome.INTERRUPTED
+    )
+    assert len(reopened.read_durability_checkpoints(binding).records) == 1
+    assert len(reopened.read_durability_effects(binding).records) == 3
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_legacy_candidate_v6_after_replace_failpoint_rolls_back_without_temp(
+    tmp_path: Path,
+) -> None:
+    database, _task, _binding_value = _populated_legacy_candidate_v6(tmp_path)
+    before = _task_store_rows(database)
+
+    def fail(name: str) -> None:
+        if name == "migration.legacy_v6_to_final_v6.after_replace":
+            raise RuntimeError("expected legacy-v6 normalization failpoint")
+
+    with pytest.raises(RuntimeError, match="expected legacy-v6 normalization"):
+        SqliteTaskStore(database, failpoint=fail)
+
+    assert _task_store_rows(database) == before
+    assert _recovery_fence_unique_keys(database) == frozenset(
+        {("task_id",), ("cancel_command_id",)}
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert (
+            connection.execute(
+                """SELECT name FROM sqlite_master
+               WHERE type='table' AND name LIKE 'durability_recovery_fences_%'"""
+            ).fetchall()
+            == []
+        )
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    SqliteTaskStore(database)
+    assert _task_store_rows(database) == before
+    assert _recovery_fence_unique_keys(database) == frozenset({("task_id",)})
+
+
+def test_two_concurrent_initializers_normalize_one_populated_legacy_candidate_v6(
+    tmp_path: Path,
+) -> None:
+    database, task, _binding_value = _populated_legacy_candidate_v6(tmp_path)
+    before = _task_store_rows(database)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stores = tuple(pool.map(lambda _index: SqliteTaskStore(database), range(2)))
+
+    assert _task_store_rows(database) == before
+    assert _recovery_fence_unique_keys(database) == frozenset({("task_id",)})
+    assert all(
+        store.get_task(task.task_id, task.scope).outcome is TerminalOutcome.INTERRUPTED
+        for store in stores
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("schema_drift", ("extra_index", "extra_check"))
+def test_legacy_candidate_v6_rejects_noncanonical_fence_schema_before_replacement(
+    tmp_path: Path,
+    schema_drift: str,
+) -> None:
+    database, _task, _binding_value = _populated_legacy_candidate_v6(tmp_path)
+    if schema_drift == "extra_index":
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                """CREATE INDEX idx_legacy_recovery_fence_created
+                   ON durability_recovery_fences(created_at)"""
+            )
+    else:
+        _replace_with_legacy_candidate_v6_recovery_fence(
+            database,
+            with_extra_check=True,
+        )
+    before_rows = _task_store_rows(database)
+    before_schema = _task_store_schema(database)
+    failpoints: list[str] = []
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database, failpoint=failpoints.append)
+
+    assert rejected.value.reason == "TASK_STORE_SCHEMA_UNSUPPORTED"
+    assert _task_store_rows(database) == before_rows
+    assert _task_store_schema(database) == before_schema
+    assert _recovery_fence_unique_keys(database) == frozenset(
+        {("task_id",), ("cancel_command_id",)}
+    )
+    assert not any(
+        name.startswith("migration.legacy_v6_to_final_v6") for name in failpoints
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert (
+            connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table'
+                     AND name LIKE 'durability_recovery_fences_%'"""
+            ).fetchall()
+            == []
+        )
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 @pytest.mark.parametrize(
     "version,downgrade",
     (
@@ -575,8 +828,6 @@ def test_v1_v4_reopen_migrates_once_to_v6_with_task_truth_preserved(
     before = store.get_task(task.task_id, task.scope)
     downgrade(Path(store.database_path))
     with sqlite3.connect(store.database_path) as connection:
-        for table in _V6_TABLES:
-            connection.execute(f"DROP TABLE {table}")
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
         ).fetchone() == (str(version),)
