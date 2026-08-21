@@ -7,31 +7,34 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.symphony import OrchestrationPlan, SymphonyRuntime
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.symphony import (
+    FINGERPRINT_ARTIFACT_FILENAME,
+    CapabilityDescriptor,
+    CapabilityFingerprint,
+    CapabilityIO,
+    FingerprintArtifact,
+    OrchestrationPlan,
+    ScanResult,
+    SkillFolderScanner,
+    SymphonyRuntime,
+)
 
 from jiuwenswarm.symphony.adapter import (
     candidate_ids_from_skill_ids,
-    capability_from_skill,
     graph_build_orchestration_config_from_swarm,
     llm_config_signature,
     orchestration_config_from_swarm,
 )
 from jiuwenswarm.symphony.build import (
+    _copy_fingerprint_artifact,
     _relation_cache_counts,
     build_graph,
     graph_status,
 )
 from jiuwenswarm.symphony.config import symphony_config_from_dict
-from jiuwenswarm.symphony.fingerprint import (
-    ArtifactSpec,
-    Fingerprint,
-    ParameterSpec,
-    SkillFolderScanner,
-)
-from jiuwenswarm.symphony.graph_state import GraphStateBuilder, load_graph_state
-from jiuwenswarm.symphony.fingerprint.artifacts import (
-    write_extraction_result as real_write_extraction_result,
-)
+from jiuwenswarm.symphony.graph_state import load_graph_state
 from jiuwenswarm.symphony.llm import LLMConfig
 from jiuwenswarm.symphony.service import (
     SwarmSymphonyService,
@@ -95,6 +98,93 @@ class _CountingGraphModel(_FakeGraphModel):
         self.model_client_config = SimpleNamespace(**config.model_client_kwargs())
 
 
+class _FakeFingerprintService:
+    def __init__(self, scan_result, artifact_root, fingerprints, progress_events=()):
+        self.scan_result = scan_result
+        self.artifact_root = Path(artifact_root)
+        self.fingerprints = fingerprints
+        self.progress_events = tuple(progress_events)
+
+    async def build(self, *, force=False, progress_callback=None):
+        del force
+        if progress_callback is not None:
+            for event in self.progress_events:
+                progress_callback(event)
+        content_hashes = self.scan_result.content_hashes
+        fingerprints = tuple(
+            item.model_copy(
+                update={
+                    "content_hash": content_hashes.get(
+                        item.capability_id,
+                        item.content_hash,
+                    )
+                }
+            )
+            for item in self.fingerprints
+        )
+        artifact = FingerprintArtifact(
+            source_snapshot=self.scan_result.source_snapshot,
+            fingerprints=fingerprints,
+        )
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        (self.artifact_root / FINGERPRINT_ARTIFACT_FILENAME).write_text(
+            artifact.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        return artifact
+
+
+class _FakeGraphBuildRuntimeFactory:
+    """Keep graph integration tests on the public core fingerprint boundary."""
+
+    def __init__(
+        self,
+        fingerprint_batches,
+        *,
+        scan_real_root=False,
+        fingerprint_progress=(),
+    ):
+        self.fingerprint_batches = [tuple(batch) for batch in fingerprint_batches]
+        self.scan_real_root = scan_real_root
+        self.fingerprint_progress = tuple(fingerprint_progress)
+        self.build_index = 0
+        self.last_scan_result = None
+
+    def scan(self, skills_root, *, max_depth):
+        if self.scan_real_root:
+            result = SkillFolderScanner(
+                skills_root,
+                max_depth=max_depth,
+            ).scan()
+        else:
+            result = _scan_result(self._current_batch())
+        self.last_scan_result = result
+        return result
+
+    def fingerprint_service(
+        self,
+        scan_result,
+        artifact_root,
+        *,
+        llm_config,
+        runtime_config,
+    ):
+        del llm_config, runtime_config
+        batch = self._current_batch()
+        self.build_index += 1
+        return _FakeFingerprintService(
+            scan_result,
+            artifact_root,
+            batch,
+            self.fingerprint_progress,
+        )
+
+    def _current_batch(self):
+        return self.fingerprint_batches[
+            min(self.build_index, len(self.fingerprint_batches) - 1)
+        ]
+
+
 def _forbidden_symphony_import(
     node,
     *,
@@ -153,23 +243,7 @@ def _config(tmp_path, *, evolution=True):
     )
 
 
-def test_adapter_maps_skill_contract_to_public_capability():
-    capability = capability_from_skill(
-        Fingerprint(
-            type="skill",
-            id="writer",
-            name="Writer",
-            description="Write markdown.",
-            version="1.0.0",
-            inputs=[ParameterSpec(name="topic", type="text")],
-            outputs=[ArtifactSpec(name="document", type="markdown")],
-        )
-    )
-
-    assert capability.capability_id == "writer"
-    assert capability.capability_type == "skill"
-    assert capability.inputs[0].name == "topic"
-    assert capability.outputs[0].type == "markdown"
+def test_adapter_deduplicates_candidate_skill_ids():
     assert candidate_ids_from_skill_ids(["writer", "writer", "reviewer"]) == [
         "writer",
         "reviewer",
@@ -226,19 +300,19 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
         "nodes": [
             {
                 "id": "capability:writer",
-                "type": "skill",
+                "type": "capability",
                 "label": "Writer",
                 "properties": {},
             },
             {
                 "id": "capability:reviewer",
-                "type": "skill",
+                "type": "capability",
                 "label": "Reviewer",
                 "properties": {},
             },
             {
                 "id": "capability:disabled",
-                "type": "skill",
+                "type": "capability",
                 "label": "Disabled",
                 "properties": {},
             },
@@ -280,17 +354,27 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
     assert result["success"] is True
     assert [item["id"] for item in result["skills"]] == ["writer", "reviewer"]
     assert [item["id"] for item in result["graph"]["nodes"]] == [
-        "capability:writer",
-        "capability:reviewer",
+        "skill:writer",
+        "skill:reviewer",
+    ]
+    assert [item["type"] for item in result["graph"]["nodes"]] == [
+        "skill",
+        "skill",
     ]
     assert result["graph"]["edges"] == [
         {
-            "source": "capability:writer",
-            "target": "capability:reviewer",
+            "source": "skill:writer",
+            "target": "skill:reviewer",
             "type": "can_feed",
             "runtime_weight": 0.7,
         }
     ]
+    skill_node_ids = {item["id"] for item in result["graph"]["nodes"]}
+    assert all(
+        edge[endpoint] in skill_node_ids
+        for edge in result["graph"]["edges"]
+        for endpoint in ("source", "target")
+    )
 
 
 @pytest.mark.asyncio
@@ -435,54 +519,41 @@ async def test_swarm_build_publishes_public_graph_artifact(
     fake_graph_llm,
 ):
     fake_graph_llm.confidences = [0.95, 0.1]
-    fingerprint = Fingerprint(
-        type="skill",
-        id="writer",
+    fingerprint = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
         name="Writer",
         description="Write markdown.",
         version="1.0.0",
-        outputs=[ArtifactSpec(name="document", type="markdown")],
+        outputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="writer-hash",
     )
-    reviewer = Fingerprint(
-        type="skill",
-        id="reviewer",
+    reviewer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="reviewer",
         name="Reviewer",
         description="Review markdown.",
         version="1.0.0",
-        inputs=[ParameterSpec(name="document", type="markdown")],
+        inputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="reviewer-hash",
     )
-    archiver = Fingerprint(
-        type="skill",
-        id="archiver",
+    archiver = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="archiver",
         name="Archiver",
         description="Archive markdown.",
         version="1.0.0",
-        inputs=[ParameterSpec(name="document", type="markdown")],
+        inputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="archiver-hash",
     )
-    extraction_result = SimpleNamespace(
-        fingerprints=[fingerprint, reviewer, archiver],
-        diagnostics=[],
-        reused_count=0,
-        extracted_count=3,
-        folders=[],
-        current_hashes={},
-        fingerprints_by_path={},
-        removed_paths=set(),
-        io_name_vocab={},
-    )
-
-    class FakeExtractor:
-        async def extract_from_root(self, *args, **kwargs):
-            del args, kwargs
-            return extraction_result
-
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.FingerprintExtractor",
-        lambda **kwargs: FakeExtractor(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.write_extraction_result",
-        lambda *args, **kwargs: None,
+    runtime_factory = _FakeGraphBuildRuntimeFactory(
+        [(fingerprint, reviewer, archiver)],
+        fingerprint_progress=(
+            {"event": "fingerprint.extract.progress", "current": 0, "total": 3},
+            {"event": "fingerprint.extract.progress", "current": 1, "total": 3},
+            {"event": "fingerprint.extract.progress", "current": 2, "total": 3},
+            {"event": "fingerprint.extract.progress", "current": 3, "total": 3},
+        ),
     )
     (tmp_path / "skills").mkdir()
     graph_dir = tmp_path / "graph"
@@ -501,11 +572,11 @@ async def test_swarm_build_publishes_public_graph_artifact(
     result = await build_graph(
         tmp_path / "skills",
         graph_dir,
+        llm_config=LLMConfig(model="test-model"),
         force=True,
-        schema_extractor=object(),
-        io_name_resolver=object(),
         build_log=lambda stage, **details: build_events.append((stage, details)),
         symphony_config=config,
+        runtime_factory=runtime_factory,
     )
 
     current = json.loads((graph_dir / "current.json").read_text(encoding="utf-8"))
@@ -553,6 +624,31 @@ async def test_swarm_build_publishes_public_graph_artifact(
     assert "build_started" not in stages
     assert "build_published" not in stages
     assert stages.count("graph.resolve.done") == 1
+    fingerprint_progress = [
+        details
+        for stage, details in build_events
+        if stage == "fingerprint.extract.start" and "current" in details
+    ]
+    assert [(item["current"], item["total"]) for item in fingerprint_progress] == [
+        (0, 3),
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert _build_progress(
+        [{"stage": "fingerprint.extract.start", **item} for item in fingerprint_progress[:3]]
+    )["percent"] < 48
+    assert _build_progress(
+        [{"stage": "fingerprint.extract.start", **item} for item in fingerprint_progress]
+    ) == {
+        "stage": "fingerprint.extract.start",
+        "label": "提取技能指纹",
+        "percent": 48,
+        "status": "running",
+        "current": 3,
+        "total": 3,
+        "ts": None,
+    }
     progress_entries = []
     percents = []
     for stage, details in build_events:
@@ -564,10 +660,12 @@ async def test_swarm_build_publishes_public_graph_artifact(
             tmp_path / "skills",
             graph_dir,
             symphony_config=config,
+            runtime_factory=runtime_factory,
         ).stale
         is False
     )
     assert (graph_path.parent / "graph_state.json").is_file()
+    assert (graph_path.parent / FINGERPRINT_ARTIFACT_FILENAME).is_file()
     assert graph_exists(graph_dir) is True
     assert not list((graph_dir / ".build_runs").glob("*/artifacts"))
 
@@ -578,46 +676,34 @@ async def test_swarm_build_relation_cache_reuses_unchanged_candidates(
     tmp_path,
     fake_graph_llm,
 ):
-    writer = Fingerprint(
-        type="skill",
-        id="writer",
+    writer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
         name="Writer",
         description="Write markdown.",
         version="1.0.0",
-        outputs=[ArtifactSpec(name="document", type="markdown")],
+        outputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="writer-hash",
     )
-    reviewer = Fingerprint(
-        type="skill",
-        id="reviewer",
+    reviewer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="reviewer",
         name="Reviewer",
         description="Review markdown.",
         version="1.0.0",
-        inputs=[ParameterSpec(name="document", type="markdown")],
+        inputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="reviewer-hash",
     )
-    unrelated = Fingerprint(
-        type="skill",
-        id="unrelated",
+    unrelated = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="unrelated",
         name="Unrelated",
         description="Unrelated capability.",
         version="1.0.0",
+        content_hash="unrelated-hash",
     )
-    results = [
-        _extraction_result([writer, reviewer]),
-        _extraction_result([writer, reviewer, unrelated]),
-    ]
-
-    class FakeExtractor:
-        async def extract_from_root(self, *args, **kwargs):
-            del args, kwargs
-            return results.pop(0)
-
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.FingerprintExtractor",
-        lambda **kwargs: FakeExtractor(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.write_extraction_result",
-        lambda *args, **kwargs: None,
+    runtime_factory = _FakeGraphBuildRuntimeFactory(
+        [(writer, reviewer), (writer, reviewer, unrelated)]
     )
     graph_dir = tmp_path / "graph"
     config = symphony_config_from_dict(
@@ -631,17 +717,17 @@ async def test_swarm_build_relation_cache_reuses_unchanged_candidates(
     first = await build_graph(
         tmp_path / "skills",
         graph_dir,
-        schema_extractor=object(),
-        io_name_resolver=object(),
+        llm_config=LLMConfig(model="test-model"),
         symphony_config=config,
+        runtime_factory=runtime_factory,
     )
     first_call_count = fake_graph_llm.call_count
     second = await build_graph(
         tmp_path / "skills",
         graph_dir,
-        schema_extractor=object(),
-        io_name_resolver=object(),
+        llm_config=LLMConfig(model="test-model"),
         symphony_config=config,
+        runtime_factory=runtime_factory,
     )
 
     assert first.relation_resolved_count > 0
@@ -655,37 +741,25 @@ async def test_real_core_relation_cache_invalidates_for_complete_llm_identity(
     monkeypatch,
     tmp_path,
 ):
-    writer = Fingerprint(
-        type="skill",
-        id="writer",
+    writer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
         name="Writer",
         description="Write markdown.",
         version="1.0.0",
-        outputs=[ArtifactSpec(name="document", type="markdown")],
+        outputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="writer-hash",
     )
-    reviewer = Fingerprint(
-        type="skill",
-        id="reviewer",
+    reviewer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="reviewer",
         name="Reviewer",
         description="Review markdown.",
         version="1.0.0",
-        inputs=[ParameterSpec(name="document", type="markdown")],
+        inputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="reviewer-hash",
     )
-    extraction_result = _extraction_result([writer, reviewer])
-
-    class FakeExtractor:
-        async def extract_from_root(self, *args, **kwargs):
-            del args, kwargs
-            return extraction_result
-
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.FingerprintExtractor",
-        lambda **kwargs: FakeExtractor(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.write_extraction_result",
-        lambda *args, **kwargs: None,
-    )
+    runtime_factory = _FakeGraphBuildRuntimeFactory([(writer, reviewer)])
     clients = []
 
     def create_counting_model(config):
@@ -752,9 +826,8 @@ async def test_real_core_relation_cache_invalidates_for_complete_llm_identity(
             skills_root,
             graph_dir,
             llm_config=llm_config_value,
-            schema_extractor=object(),
-            io_name_resolver=object(),
             symphony_config=config,
+            runtime_factory=runtime_factory,
         )
         results.append(result)
         artifacts.append(
@@ -792,39 +865,18 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
     skill_md = skills_root / "writer" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("---\nname: writer\n---\nWrite markdown.\n", encoding="utf-8")
-    fingerprint = Fingerprint(
-        type="skill",
-        id="writer",
+    fingerprint = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
         name="Writer",
         description="Write markdown.",
         version="1.0.0",
-        outputs=[ArtifactSpec(name="document", type="markdown")],
+        outputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="replaced-from-scan",
     )
-
-    class FakeExtractor:
-        async def extract_from_root(self, root, *args, **kwargs):
-            del args, kwargs
-            folders = SkillFolderScanner().scan(root)
-            current_hashes = GraphStateBuilder().folder_hashes(folders)
-            return SimpleNamespace(
-                fingerprints=[fingerprint],
-                diagnostics=[],
-                reused_count=1,
-                extracted_count=0,
-                folders=folders,
-                current_hashes=current_hashes,
-                fingerprints_by_path={"writer": fingerprint},
-                removed_paths=set(),
-                io_name_vocab={},
-            )
-
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.FingerprintExtractor",
-        lambda **kwargs: FakeExtractor(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.write_extraction_result",
-        lambda *args, **kwargs: None,
+    runtime_factory = _FakeGraphBuildRuntimeFactory(
+        [(fingerprint,)],
+        scan_real_root=True,
     )
     graph_dir = tmp_path / "graph"
     config = symphony_config_from_dict(
@@ -833,11 +885,11 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
     first = await build_graph(
         skills_root,
         graph_dir,
-        schema_extractor=object(),
-        io_name_resolver=object(),
+        llm_config=LLMConfig(model="test-model"),
         symphony_config=config,
+        runtime_factory=runtime_factory,
     )
-    old_hash = load_graph_state(graph_dir).active_entries()["writer"].skill_md_sha256
+    old_hash = load_graph_state(graph_dir).active_entries()["writer"].content_hash
     skill_md.write_text(
         "---\nname: writer\n---\nWrite markdown with revised guidance.\n",
         encoding="utf-8",
@@ -848,21 +900,22 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
             skills_root,
             graph_dir,
             symphony_config=config,
+            runtime_factory=runtime_factory,
         ).stale
         is True
     )
     second = await build_graph(
         skills_root,
         graph_dir,
-        schema_extractor=object(),
-        io_name_resolver=object(),
+        llm_config=LLMConfig(model="test-model"),
         symphony_config=config,
+        runtime_factory=runtime_factory,
     )
 
-    new_hash = load_graph_state(graph_dir).active_entries()["writer"].skill_md_sha256
+    new_hash = load_graph_state(graph_dir).active_entries()["writer"].content_hash
     assert second.version != first.version
     assert new_hash != old_hash
-    assert new_hash == GraphStateBuilder.file_sha256(skill_md)
+    assert new_hash == runtime_factory.last_scan_result.capabilities[0].content_hash
     current = json.loads((graph_dir / "current.json").read_text(encoding="utf-8"))
     artifact = json.loads((graph_dir / current["artifact"]).read_text(encoding="utf-8"))
     captured_status_snapshots = []
@@ -882,6 +935,7 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
             skills_root,
             graph_dir,
             symphony_config=config,
+            runtime_factory=runtime_factory,
         ).stale
         is False
     )
@@ -891,6 +945,8 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
         "schema_version",
         "capabilities_sha256",
         "current_hashes",
+        "fingerprint_schema_version",
+        "fingerprint_source_snapshot",
         "fingerprint_sha256",
         "fingerprint_config_sha256",
         "graph_config",
@@ -911,28 +967,15 @@ async def test_swarm_graph_identity_rebuilds_for_build_or_llm_config_change(
     tmp_path,
     change,
 ):
-    fingerprint = Fingerprint(
-        type="skill",
-        id="writer",
+    fingerprint = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
         name="Writer",
         description="Write markdown.",
         version="1.0.0",
+        content_hash="writer-hash",
     )
-    extraction_result = _extraction_result([fingerprint])
-
-    class FakeExtractor:
-        async def extract_from_root(self, *args, **kwargs):
-            del args, kwargs
-            return extraction_result
-
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.FingerprintExtractor",
-        lambda **kwargs: FakeExtractor(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.write_extraction_result",
-        lambda *args, **kwargs: None,
-    )
+    runtime_factory = _FakeGraphBuildRuntimeFactory([(fingerprint,)])
     graph_dir = tmp_path / "graph"
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
@@ -976,9 +1019,8 @@ async def test_swarm_graph_identity_rebuilds_for_build_or_llm_config_change(
         skills_root,
         graph_dir,
         llm_config=first_llm_config,
-        schema_extractor=object(),
-        io_name_resolver=object(),
         symphony_config=first_config,
+        runtime_factory=runtime_factory,
     )
     first_graph = json.loads(
         (graph_dir / "versions" / first.version / "graph.json").read_text()
@@ -990,6 +1032,7 @@ async def test_swarm_graph_identity_rebuilds_for_build_or_llm_config_change(
             graph_dir,
             llm_config=second_llm_config,
             symphony_config=second_config,
+            runtime_factory=runtime_factory,
         ).stale
         is True
     )
@@ -999,9 +1042,8 @@ async def test_swarm_graph_identity_rebuilds_for_build_or_llm_config_change(
         skills_root,
         graph_dir,
         llm_config=second_llm_config,
-        schema_extractor=object(),
-        io_name_resolver=object(),
         symphony_config=second_config,
+        runtime_factory=runtime_factory,
     )
     second_graph = json.loads(
         (graph_dir / "versions" / second.version / "graph.json").read_text()
@@ -1015,6 +1057,7 @@ async def test_swarm_graph_identity_rebuilds_for_build_or_llm_config_change(
             graph_dir,
             llm_config=second_llm_config,
             symphony_config=second_config,
+            runtime_factory=runtime_factory,
         ).stale
         is False
     )
@@ -1039,39 +1082,29 @@ async def test_swarm_auxiliary_prepare_failure_preserves_current(
     fake_graph_llm,
 ):
     del fake_graph_llm
-    writer = Fingerprint(
-        type="skill",
-        id="writer",
+    writer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
         name="Writer",
         description="Write markdown.",
         version="1.0.0",
-        outputs=[ArtifactSpec(name="document", type="markdown")],
+        outputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="writer-hash",
     )
-    results = [
-        _extraction_result([writer]),
-        _extraction_result(
-            [
-                writer,
-                Fingerprint(
-                    type="skill",
-                    id="reviewer",
-                    name="Reviewer",
-                    description="Review markdown.",
-                    version="1.0.0",
-                    inputs=[ParameterSpec(name="document", type="markdown")],
-                ),
-            ]
-        ),
-    ]
-
-    class FakeExtractor:
-        async def extract_from_root(self, *args, **kwargs):
-            del args, kwargs
-            return results.pop(0)
-
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.FingerprintExtractor",
-        lambda **kwargs: FakeExtractor(),
+    reviewer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="reviewer",
+        name="Reviewer",
+        description="Review markdown.",
+        version="1.0.0",
+        inputs=(CapabilityIO(name="document", type="markdown"),),
+        content_hash="reviewer-hash",
+    )
+    runtime_factory = _FakeGraphBuildRuntimeFactory(
+        [
+            (writer,),
+            (writer, reviewer),
+        ]
     )
     graph_dir = tmp_path / "graph"
     config = symphony_config_from_dict(
@@ -1086,37 +1119,107 @@ async def test_swarm_auxiliary_prepare_failure_preserves_current(
     await build_graph(
         tmp_path / "skills",
         graph_dir,
+        llm_config=LLMConfig(model="test-model"),
         force=True,
-        schema_extractor=object(),
-        io_name_resolver=object(),
         symphony_config=config,
+        runtime_factory=runtime_factory,
     )
     current_before = (graph_dir / "current.json").read_bytes()
 
-    def fail_staged_write(result, path):
-        path = Path(path)
-        if path.parent.name == "versions":
-            raise failure
-        real_write_extraction_result(result, path)
+    def fail_staged_copy(*args, **kwargs):
+        del args, kwargs
+        raise failure
 
     monkeypatch.setattr(
-        "jiuwenswarm.symphony.build.write_extraction_result",
-        fail_staged_write,
+        "jiuwenswarm.symphony.build._copy_fingerprint_artifact",
+        fail_staged_copy,
     )
     with pytest.raises(type(failure), match="prepare failed" if str(failure) else None):
         await build_graph(
             tmp_path / "skills",
             graph_dir,
+            llm_config=LLMConfig(model="test-model"),
             force=True,
-            schema_extractor=object(),
-            io_name_resolver=object(),
             symphony_config=config,
+            runtime_factory=runtime_factory,
         )
 
     assert (graph_dir / "current.json").read_bytes() == current_before
     resume_from = latest_incomplete_build(graph_dir)
     assert resume_from is not None
     assert (resume_from / "artifacts").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_swarm_graph_version_uses_run_snapshot_after_root_fingerprint_changes(
+    monkeypatch,
+    tmp_path,
+    fake_graph_llm,
+):
+    del fake_graph_llm
+    writer = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="writer",
+        name="Writer",
+        description="Write markdown.",
+        version="1.0.0",
+        content_hash="writer-hash",
+    )
+    concurrent = CapabilityFingerprint(
+        capability_type="skill",
+        capability_id="concurrent",
+        name="Concurrent",
+        description="Published by another fingerprint build.",
+        version="1.0.0",
+        content_hash="concurrent-hash",
+    )
+    runtime_factory = _FakeGraphBuildRuntimeFactory([(writer,)])
+    skills_root = tmp_path / "skills"
+    graph_dir = tmp_path / "graph"
+    config = symphony_config_from_dict(
+        {
+            "paths": {
+                "skills_root": str(skills_root),
+                "graph_dir": str(graph_dir),
+            }
+        }
+    )
+
+    def overwrite_root_before_copy(source_dir, target_dir):
+        assert source_dir.parent.parent == graph_dir / ".build_runs"
+        concurrent_artifact = FingerprintArtifact(
+            source_snapshot=runtime_factory.last_scan_result.source_snapshot,
+            fingerprints=(concurrent,),
+        )
+        (graph_dir / FINGERPRINT_ARTIFACT_FILENAME).write_text(
+            concurrent_artifact.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        _copy_fingerprint_artifact(source_dir, target_dir)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.build._copy_fingerprint_artifact",
+        overwrite_root_before_copy,
+    )
+    result = await build_graph(
+        skills_root,
+        graph_dir,
+        llm_config=LLMConfig(model="test-model"),
+        force=True,
+        symphony_config=config,
+        runtime_factory=runtime_factory,
+    )
+
+    version_payload = json.loads(
+        (
+            graph_dir / "versions" / result.version / FINGERPRINT_ARTIFACT_FILENAME
+        ).read_text(encoding="utf-8")
+    )
+    root_payload = json.loads(
+        (graph_dir / FINGERPRINT_ARTIFACT_FILENAME).read_text(encoding="utf-8")
+    )
+    assert version_payload["fingerprints"][0]["capability_id"] == "writer"
+    assert root_payload["fingerprints"][0]["capability_id"] == "concurrent"
 
 
 def test_incompatible_graph_pointer_forces_first_public_rebuild(tmp_path):
@@ -1224,10 +1327,16 @@ def test_runtime_cache_rebuilds_when_default_llm_changes(monkeypatch, tmp_path):
 def test_production_uses_only_stable_openjiuwen_symphony_imports():
     package_root = Path(__file__).parents[3] / "jiuwenswarm"
     allowed_symbols = {
-        "ArtifactSpec",
+        "FINGERPRINT_ARTIFACT_FILENAME",
+        "CapabilityDescriptor",
         "CapabilityFingerprint",
+        "FingerprintArtifact",
+        "FingerprintService",
+        "FingerprintSettings",
         "OrchestrationConfig",
-        "ParameterSpec",
+        "ScanResult",
+        "SkillFolderScanner",
+        "SourceSnapshot",
         "SymphonyRuntime",
     }
     offenders = []
@@ -1430,6 +1539,11 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     tmp_path,
 ):
     config = _config(tmp_path)
+    _BuildProcessLogger(config.paths.graph_dir / "build_log.jsonl").record(
+        "update.done",
+        success=True,
+        version="old",
+    )
     build_entered = asyncio.Event()
     release_build = asyncio.Event()
 
@@ -1460,6 +1574,7 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     assert started["background"] is True
     assert started["build_status"] == "running"
     assert started["build_progress"]["status"] == "running"
+    assert [entry["stage"] for entry in started["build_log"]] == ["update.start"]
     assert first_task is not None
     assert build_entered.is_set() is False
 
@@ -1469,6 +1584,7 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     assert reused["success"] is True
     assert reused["background"] is True
     assert reused["build_status"] == "running"
+    assert [entry["stage"] for entry in reused["build_log"]] == ["update.start"]
     assert service._active_build_task is first_task
 
     release_build.set()
@@ -1476,6 +1592,175 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
 
     assert result["success"] is True
     assert service._active_build_task is None
+
+
+@pytest.mark.asyncio
+async def test_start_refresh_graph_status_is_running_before_background_task_enters(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    _BuildProcessLogger(config.paths.graph_dir / "build_log.jsonl").record(
+        "update.done",
+        success=True,
+        version="old",
+    )
+    build_entered = asyncio.Event()
+    release_build = asyncio.Event()
+
+    async def fake_build_graph(*args, **kwargs):
+        del args, kwargs
+        build_entered.set()
+        await release_build.wait()
+        return SimpleNamespace(to_dict=lambda: {"success": True, "version": "new"})
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.service_build_graph",
+        fake_build_graph,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        lambda *args, **kwargs: SimpleNamespace(to_dict=lambda: {"success": True}),
+    )
+    service = SwarmSymphonyService()
+
+    started = await service.start_refresh_graph(force=True)
+    status = await service.graph_status()
+
+    assert started["build_progress"] == status["build_progress"]
+    assert status["build_progress"]["status"] == "running"
+    assert status["build_progress"]["stage"] == "update.start"
+    assert status["build_progress"]["percent"] == 3
+    assert [entry["stage"] for entry in status["build_log"]] == ["update.start"]
+
+    await build_entered.wait()
+    release_build.set()
+    result = await asyncio.wait_for(service._active_build_task, timeout=0.5)
+
+    assert result["success"] is True
+
+
+def test_build_progress_keeps_running_batch_at_relation_stage_start():
+    entries = [
+        {"stage": "graph.resolve.start"},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_start",
+            "current": 0,
+            "total": 1,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 1,
+        },
+    ]
+
+    assert _build_progress(entries)["percent"] == 72
+
+
+def test_build_progress_uses_completed_batches_and_never_regresses():
+    entries = [
+        {"stage": "graph.resolve.start"},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_start",
+            "current": 0,
+            "total": 4,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 2,
+            "total": 4,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 4,
+        },
+    ]
+
+    assert _build_progress(entries)["percent"] == 78
+
+    entries.append(
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 4,
+        }
+    )
+    assert _build_progress(entries)["percent"] == 78
+
+    entries.append(
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_done",
+            "current": 4,
+            "total": 4,
+        }
+    )
+    assert _build_progress(entries)["percent"] == 84
+
+
+def test_build_progress_uses_global_candidate_counts_across_matcher_windows():
+    entries = [
+        {"stage": "graph.resolve.start", "candidate_count": 143},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_done",
+            "current": 4,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 20,
+            "total_candidate_count": 143,
+        },
+    ]
+
+    progress = _build_progress(entries)
+
+    assert progress["percent"] == 74
+    assert progress["current"] == 20
+    assert progress["total"] == 143
+
+
+def test_build_progress_invalid_relation_totals_stay_at_stage_start():
+    entries = [
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 0,
+        }
+    ]
+
+    assert _build_progress(entries)["percent"] == 72
 
 
 @pytest.mark.asyncio
@@ -1616,6 +1901,43 @@ async def test_graph_status_repairs_interrupted_build_log(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_service_graph_status_does_not_bind_freshness_to_current_default_model(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    captured = {}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+
+    def fake_graph_status(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {"success": True, "exists": True, "stale": False}
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        fake_graph_status,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("default model must not affect graph status")
+        ),
+    )
+
+    result = await SwarmSymphonyService().graph_status()
+
+    assert result["stale"] is False
+    assert captured.get("llm_config") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_build_failure_returns_business_payload(monkeypatch, tmp_path):
     config = _config(tmp_path)
 
@@ -1643,6 +1965,105 @@ async def test_refresh_build_failure_returns_business_payload(monkeypatch, tmp_p
     assert result["build_progress"]["status"] == "error"
 
 
+@pytest.mark.asyncio
+async def test_refresh_preserves_downstream_failure_result(monkeypatch, tmp_path):
+    config = _config(tmp_path)
+
+    async def return_failed_build(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "success": False,
+                "graph_dir": str(config.paths.graph_dir),
+                "detail": "fingerprint model failed",
+            }
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.service_build_graph",
+        return_failed_build,
+    )
+
+    result = await SwarmSymphonyService().refresh_graph()
+
+    assert result["success"] is False
+    assert result["detail"] == "fingerprint model failed"
+    assert result["build_progress"]["status"] == "error"
+    assert result["build_log"][-1]["stage"] == "update.failed"
+
+
+@pytest.mark.asyncio
+async def test_refresh_propagates_framework_model_failure_from_core(monkeypatch, tmp_path):
+    config = symphony_config_from_dict(
+        {
+            "paths": {
+                "skills_root": str(tmp_path / "skills"),
+                "graph_dir": str(tmp_path / "graph"),
+            }
+        }
+    )
+    skill_md = config.paths.skills_root / "writer" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: writer\n---\nWrite markdown.\n", encoding="utf-8")
+
+    class FrameworkFailingModel:
+        async def invoke(self, messages, **kwargs):
+            del messages, kwargs
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg="model unavailable",
+            )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: LLMConfig(model="failing-model"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.build.model_from_config",
+        lambda _config: FrameworkFailingModel(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.adapter.model_from_config",
+        lambda _config: FrameworkFailingModel(),
+    )
+
+    result = await SwarmSymphonyService().refresh_graph()
+
+    assert result["success"] is False
+    assert "model unavailable" in result["detail"]
+    assert result["build_progress"]["status"] == "error"
+    assert result["build_log"][-1]["stage"] == "update.failed"
+    assert not (config.paths.graph_dir / "current.json").exists()
+
+
+def test_build_progress_treats_false_done_payload_as_error() -> None:
+    progress = _build_progress(
+        [
+            {
+                "stage": "update.done",
+                "success": False,
+                "label": "构建完成",
+                "current": 1,
+                "total": 1,
+            }
+        ]
+    )
+
+    assert progress["status"] == "error"
+
+
 def _named_progress_tasks():
     return [
         task
@@ -1651,17 +2072,23 @@ def _named_progress_tasks():
     ]
 
 
-def _extraction_result(fingerprints):
-    return SimpleNamespace(
-        fingerprints=fingerprints,
-        diagnostics=[],
-        normalization_decisions=[],
-        llm_token_usage={},
-        reused_count=0,
-        extracted_count=len(fingerprints),
-        folders=[],
-        current_hashes={},
-        fingerprints_by_path={},
-        removed_paths=set(),
-        io_name_vocab={},
+def _scan_result(fingerprints):
+    return ScanResult(
+        capabilities=tuple(
+            CapabilityDescriptor(
+                capability_id=item.capability_id,
+                capability_type=item.capability_type,
+                name=item.name,
+                description=item.description,
+                source="test",
+                inputs=item.inputs,
+                outputs=item.outputs,
+                classification=item.classification,
+                tags=item.tags,
+                content_hash=item.content_hash,
+                semantic_content=item.semantic_content,
+                metadata={"entrypoint": f"{item.capability_id}/SKILL.md"},
+            )
+            for item in fingerprints
+        )
     )
