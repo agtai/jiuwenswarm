@@ -57,6 +57,16 @@
 > retained. This is Speech-Provider component evidence, not Browser or E2E
 > credit. See the [VAD/EOT causal result](../evidence/VAD_EOT_CAUSAL_RESULT_2026-08-21.md).
 
+> **2026-08-21 non-Agent priority reconciliation:** current source already
+> collects Provider final concurrently with uplink media, so EOT result-waiter
+> overlap is a conditional 0–150 ms hypothesis, not the next presumed large
+> gain. The current causal line also lacks Hongxing's later TTS/capture commits
+> `874cf327c` and `35cae3d9a`. The next no-Chrome packet therefore compares and
+> ports those current-contract changes and establishes TTS first-audio causal
+> boundaries. EOT A1 proceeds only behind its 80 ms/10% materiality gate. Full
+> ranking and estimates are in the
+> [non-Agent P1/P2/P3 brainstorm](NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -96,12 +106,12 @@ Important code facts are:
 |---|---|---|
 | Capture | `formal/audioPort.ts` produces 20 ms PCM frames. `browserAudioIOAdapter.ts` requests AEC/NS/AGC and uses the actual AudioContext sample rate; 48 kHz is not a product invariant. | Frame size is already suitable for streaming; codec replacement is not the first lever. |
 | End of turn | `streaming_speech.py::ServerVadConfig` defaults to `silence_duration_ms=1_200`. [D115](../D115_S6_02_BREATH_PAUSE_VAD_REPAIR_2026-08-13.md) raised it from 500 ms after physical breath-pause failures. | A global return to 500 ms would trade latency for false commits. |
-| Recognition final | `productP1VoiceRoute.ts::#stopAndRecognizeOnce` stops capture, drains and ACKs every frame, closes uplink, then calls `recognizeStreamingFinal`. | Local media settlement and Provider-final retrieval are unnecessarily serial after server VAD has committed the turn. |
+| Recognition final | `productP1VoiceRoute.ts::#stopAndRecognizeOnce` starts its result RPC after local drain/ACK/close, but Gateway's Provider event collector already runs concurrently with media. | Only result-request scheduling and residual finish work remain candidate overlap; A1 must prove ≥80 ms/10% before protocol change. |
 | Submit | `components/ChatPanel/index.tsx` enables `handsFree: true`; `components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx` automatically submits the recognized final through the unified owner. The manual surface is hidden diagnostic compatibility. | The supplied analyses' “click Send” delay is stale for the formal product path. |
 | Agent | `agent_conversation_runtime.py::_consume_agent_event` creates the text `PresentationUnit` only for `chat.final`; `chat.delta` is observation only. | The Agent's full 6–8 second historical generation time is silent before TTS starts. |
 | Task commands | `voice_task_bridge.py::resolve_unified` already has a structured Task route and short authoritative speech for supported Task operations. | A new generic “fast Task route” is not the first task; its truth and latency should be measured and repaired where necessary. |
 | TTS start | `productP1VoiceRoute.ts::playAgentText` sends the complete authoritative text. The Gateway pulls the first Provider audio before returning the downlink ticket. | Streaming exists below the full-text gate, so first audio still waits for `chat.final`. |
-| Capture/playback overlap | Before opening a streaming downlink, `playAgentText` awaits `#startConcurrentCapture`, including device capture and media activation/readiness. | Preparing barge-in capture can delay first audible output and needs its own timing seam. |
+| Capture/playback overlap | Current causal source waits on successor-capture readiness before downlink. Hongxing's divergent `874cf327c` decouples that ACK but is not present here. | Reconcile/port the accepted contract and measure `PresentationUnit → Provider first chunk → downlink ready` before inventing another fix. |
 | Browser playout | `browserAudioIOAdapter.ts::PLAYOUT_STARTUP_LEAD_SECONDS` is fixed at `1.0`; its test schedules the first two 20 ms sources at 11.00 and 11.02 when current time is 10. | This deliberately adds one second to first audible to mask Provider burst gaps. |
 | Backpressure | the synthesis media queues default to eight frames, or 160 ms at 20 ms/frame. | Raising every queue to 64 frames would add up to 1.28 seconds of stale/cancel backlog and does not by itself solve Provider seed gaps. |
 
@@ -391,17 +401,21 @@ Work should be packetized in this dependency order:
 2. ~~one named bounded P2 transport candidate B, followed by unchanged-source
    A2 and an A1/B/A2 accept/revise/discard decision;~~ **ACCEPTED — causal
    component evidence only**
-3. clean physical Browser confirmation of an accepted P2 candidate, without
-   retroactively relabelling the causal run as E2E evidence;
-4. ~~no-Browser real-Provider fixed-threshold VAD screen;~~ **DONE — 800/900
+3. ~~no-Browser real-Provider fixed-threshold VAD screen;~~ **DONE — 800/900
    rejected, retain 1200; component evidence only**
-5. physical fixed-corpus baseline for capture/STT/TTS/playout work when the
-   Browser lane is available, while no-Browser work may continue with EOT
-   settlement overlap and a separately specified semantic/adaptive VAD owner;
-6. authoritative acknowledgement for genuinely long operations;
-7. Conversation Runtime-owned sentence streaming with bounded semantic
+4. reconcile Hongxing's divergent TTS/successor-capture and playout-receipt
+   commits against current source, then establish a no-Chrome TTS first-audio
+   A1 before porting one candidate;
+5. run the no-Chrome EOT waiter A1 and change protocol only if its 80 ms/10%
+   materiality gate passes;
+6. evaluate TTS connection prewarm/reuse and semantic/adaptive VAD as separate
+   owner-scoped A1/B/A2 packets;
+7. authoritative acknowledgement for genuinely long operations;
+8. Conversation Runtime-owned sentence streaming with bounded semantic
    prefetch;
-8. Agent/model/tool-path changes only where the preceding evidence still shows
+9. clean physical Browser confirmation of accepted causal candidates, without
+   retroactively relabelling component evidence as E2E;
+10. Agent/model/tool-path changes only where the preceding evidence still shows
    material delay.
 
 This is an order of proof, not a request for one large patch. Each packet names

@@ -2,6 +2,12 @@
 
 Date: 2026-08-21
 
+> **Priority note:** after current-code and Hongxing-commit reconciliation,
+> this remains a valid measurement-first packet but is conditional rather than
+> the next presumed large optimization. TTS/capture reconciliation and the
+> no-Chrome TTS first-audio A1 precede it. See the
+> [non-Agent P1/P2/P3 brainstorm](NON_AGENT_P1_P2_P3_LATENCY_OPTIMIZATION_BRAINSTORM_2026-08-21.md).
+
 ## 1. Goal and decision boundary
 
 Determine whether starting the exact streaming-result waiter before local
