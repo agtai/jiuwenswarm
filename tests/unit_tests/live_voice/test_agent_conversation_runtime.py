@@ -6470,3 +6470,641 @@ async def test_harness_capacity_failure_precedes_cr_mutation_and_agent_effect() 
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+class CountingCloseBridge(AgentBridgeRuntime):
+    """Count Agent Bridge teardown owner calls without changing its behaviour."""
+
+    def __init__(self, *, instance_id: str = "counting-close-bridge") -> None:
+        super().__init__(instance_id=instance_id)
+        self.close_calls = 0
+        self.close_observer: Callable[[], None] | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_observer is not None:
+            self.close_observer()
+        await AgentBridgeRuntime.close(self)
+
+
+class TeardownFailingBridge(CountingCloseBridge):
+    """Fail the Agent Bridge teardown owner before or after its real close."""
+
+    def __init__(
+        self,
+        *,
+        close_error: BaseException,
+        close_first: bool = True,
+        instance_id: str = "teardown-failing-bridge",
+    ) -> None:
+        super().__init__(instance_id=instance_id)
+        self.close_error = close_error
+        self.close_first = close_first
+        self.close_entered = asyncio.Event()
+        self.close_gate: asyncio.Event | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_entered.set()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        if self.close_first:
+            await AgentBridgeRuntime.close(self)
+        raise self.close_error
+
+    async def settle_real_close(self) -> None:
+        await AgentBridgeRuntime.close(self)
+
+
+class FaultyDeliveryBridge(CountingCloseBridge):
+    """Fail the sole bridge consumer without failing any teardown owner."""
+
+    def __init__(self) -> None:
+        super().__init__(instance_id="faulty-delivery-bridge")
+        self.delivery_calls = 0
+        self.delivery_error = RuntimeError("bridge delivery owner failed")
+
+    async def next_delivery(self):
+        self.delivery_calls += 1
+        raise self.delivery_error
+
+
+class CountingCloseHarness(JiuWenSwarmRoundHarness):
+    """Count Harness teardown owner calls without changing its behaviour."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.close_calls = 0
+        self.close_entered = asyncio.Event()
+        self.close_gate: asyncio.Event | None = None
+        self.close_observer: Callable[[], None] | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_entered.set()
+        if self.close_observer is not None:
+            self.close_observer()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        await JiuWenSwarmRoundHarness.close(self)
+
+
+class TeardownFailingHarness(CountingCloseHarness):
+    """Fail the Harness teardown owner after its real close finishes."""
+
+    def __init__(self, *, close_error: BaseException, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.close_error = close_error
+
+    async def close(self) -> None:
+        await super().close()
+        raise self.close_error
+
+
+def teardown_harness(suffix: str, *, close_error: BaseException | None = None):
+    kwargs = {
+        "instance_id": f"teardown-harness-{suffix}",
+        "max_active_rounds": 2,
+        "id_factory": id_factory(),
+    }
+    if close_error is None:
+        return CountingCloseHarness(**kwargs)
+    return TeardownFailingHarness(close_error=close_error, **kwargs)
+
+
+def teardown_composition(
+    lower: LowerFormalAdapter,
+    history: RecordingHistoryWriter,
+    *,
+    suffix: str,
+    bridge: AgentBridgeRuntime,
+    harness: JiuWenSwarmRoundHarness,
+) -> AgentConversationRuntime:
+    return AgentConversationRuntime(
+        scope(),
+        instance_id=f"teardown-composition-{suffix}",
+        facade=facade(lower),
+        max_requests=8,
+        notification_capacity=8,
+        history_writer=history,
+        harness=harness,
+        bridge=bridge,
+    )
+
+
+def observe_conversation_close(
+    current: AgentConversationRuntime,
+    *,
+    error: BaseException | None = None,
+    observer: Callable[[], None] | None = None,
+) -> list[str]:
+    """Observe, and optionally fail, the Conversation Runtime teardown owner."""
+
+    original = current._cr.close
+    calls: list[str] = []
+
+    async def observed_close():
+        calls.append("conversation")
+        if observer is not None:
+            observer()
+        effects = await original()
+        if error is not None:
+            raise error
+        return effects
+
+    current._cr.close = observed_close  # type: ignore[method-assign]
+    return calls
+
+
+_TEARDOWN_OWNER_PHASES = ("bridge", "consumer", "harness", "conversation")
+
+
+@pytest.mark.parametrize("failure_phase", _TEARDOWN_OWNER_PHASES)
+@pytest.mark.asyncio
+async def test_teardown_owner_failure_still_settles_every_later_owner_once(
+    failure_phase: str,
+) -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    error: BaseException = RuntimeError(f"{failure_phase} teardown owner failed")
+    if failure_phase == "bridge":
+        bridge: CountingCloseBridge = TeardownFailingBridge(close_error=error)
+    elif failure_phase == "consumer":
+        bridge = FaultyDeliveryBridge()
+        error = bridge.delivery_error
+    else:
+        bridge = CountingCloseBridge(instance_id=f"counting-bridge-{failure_phase}")
+    harness = teardown_harness(
+        failure_phase,
+        close_error=error if failure_phase == "harness" else None,
+    )
+    current = teardown_composition(
+        lower,
+        history,
+        suffix=failure_phase,
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(
+        current, error=error if failure_phase == "conversation" else None
+    )
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    lease = current.attach_notification_consumer(
+        consumer_id="teardown-consumer", connection_epoch=1
+    )
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert bridge.close_calls == 1
+    assert consumer.done() is True
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert current.snapshot().conversation.closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().bridge.closed is True
+    assert failed.final_drain_lease is not None
+    assert failed.final_drain_lease is not lease
+    assert failed.final_drain_lease.consumer_id == lease.consumer_id
+    assert current.snapshot().notification_stream_closed is True
+
+    settled = current.snapshot()
+    assert settled.closed is False
+    assert settled.closing is True
+    with pytest.raises(AgentConversationRuntimeViolation) as restart:
+        await current.start()
+    assert restart.value.reason == "COMPOSITION_CLOSING"
+
+    assert await current.close(timeout_seconds=1) == failed
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert settled.harness.cancel_effects == 0
+    assert settled.conversation.conversation.responses == ()
+
+
+@pytest.mark.asyncio
+async def test_failed_bridge_owner_settles_the_sole_consumer_instead_of_leaking_it() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    error = RuntimeError("bridge close failed before its closed terminal")
+    bridge = TeardownFailingBridge(close_error=error, close_first=False)
+    harness = teardown_harness("orphan-consumer")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="orphan-consumer",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    assert consumer.done() is False
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert current.snapshot().conversation.closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().notification_stream_closed is True
+    assert current.snapshot().closed is False
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await bridge.settle_real_close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_teardown_owner_settles_every_owner_and_stays_cancelled() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=RuntimeError("bridge close owner is gated, never reached"),
+        close_first=False,
+    )
+    bridge.close_gate = asyncio.Event()
+    harness = teardown_harness("cancelled-owner")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="cancelled-owner",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+
+    closing = asyncio.create_task(current.close(timeout_seconds=5))
+    await asyncio.wait_for(bridge.close_entered.wait(), timeout=1)
+    retained = current._shutdown
+    assert retained is not None
+    retained.cancel()
+    outcome = (await asyncio.gather(closing, return_exceptions=True))[0]
+
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert current.snapshot().conversation.closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().notification_stream_closed is True
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert retained.cancelled() is True
+    assert current.snapshot().closed is False
+    with pytest.raises(AgentConversationRuntimeViolation) as restart:
+        await current.start()
+    assert restart.value.reason == "COMPOSITION_CLOSING"
+    with pytest.raises(asyncio.CancelledError):
+        await current.close(timeout_seconds=1)
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    bridge.close_gate.set()
+    await bridge.settle_real_close()
+
+
+class HostileNameMeta(type):
+    @property
+    def __name__(cls) -> str:
+        raise RuntimeError("private-hostile-class-name")
+
+
+class HostileTeardownError(Exception, metaclass=HostileNameMeta):
+    """An owner failure whose class refuses to expose a usable type name."""
+
+
+@pytest.mark.asyncio
+async def test_clean_teardown_keeps_the_registered_owner_order_and_closed_truth() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingCloseBridge(instance_id="counting-bridge-order")
+    harness = teardown_harness("order")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="order",
+        bridge=bridge,
+        harness=harness,
+    )
+    order: list[str] = []
+    observed: dict[str, object] = {}
+    bridge.close_observer = lambda: order.append("bridge")
+
+    def on_harness_close() -> None:
+        order.append("harness")
+        consumer = current._consumer
+        observed["consumer_settled_before_harness"] = (
+            consumer is not None and consumer.done()
+        )
+
+    def on_conversation_close() -> None:
+        order.append("conversation")
+        observed["notifications_open_at_conversation_close"] = (
+            current.snapshot().notification_stream_closed is False
+        )
+
+    harness.close_observer = on_harness_close
+    conversation_closes = observe_conversation_close(
+        current, observer=on_conversation_close
+    )
+    assert await current.start() is True
+    lease = current.attach_notification_consumer(
+        consumer_id="order-consumer", connection_epoch=1
+    )
+
+    closed = await current.close(timeout_seconds=1)
+
+    assert order == ["bridge", "harness", "conversation"]
+    assert observed["consumer_settled_before_harness"] is True
+    assert observed["notifications_open_at_conversation_close"] is True
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert closed.detail == "teardown_complete"
+    assert closed.final_drain_lease is not None
+    assert closed.final_drain_lease.consumer_id == lease.consumer_id
+    settled = current.snapshot()
+    assert settled.closed is True
+    assert settled.closing is False
+    assert settled.teardown_owner_failures == 0
+    assert settled.first_teardown_owner_failure is None
+    assert settled.notification_stream_closed is True
+    assert await current.close(timeout_seconds=1) == closed
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_first_teardown_failure_wins_and_later_failures_stay_diagnosable() -> (
+    None
+):
+    first_marker = "private-bridge-teardown-detail"
+    later_marker = "private-harness-teardown-detail"
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(close_error=RuntimeError(first_marker))
+    harness = teardown_harness("first-failure", close_error=OSError(later_marker))
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="first-failure",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.teardown_owner_failures == 2
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    rendered = repr(
+        (
+            failed,
+            settled.first_teardown_owner_failure,
+            settled.teardown_owner_failures,
+        )
+    )
+    assert first_marker not in rendered
+    assert later_marker not in rendered
+    assert "OSError" not in rendered
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_process_control_teardown_failure_keeps_its_identity_and_priority() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(close_error=KeyboardInterrupt())
+    harness = teardown_harness(
+        "process-control", close_error=RuntimeError("private-later-detail")
+    )
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="process-control",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:KeyboardInterrupt"
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "KeyboardInterrupt")
+    assert settled.teardown_owner_failures == 2
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_hostile_owner_exception_class_cannot_escape_the_teardown_guard() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(close_error=HostileTeardownError("hostile"))
+    harness = teardown_harness("hostile")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="hostile",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:unknown"
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "unknown")
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert "private-hostile-class-name" not in repr(
+        (failed, settled.first_teardown_owner_failure)
+    )
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_externally_cancelled_consumer_is_an_owner_failure_not_caller_truth() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingCloseBridge(instance_id="counting-bridge-cancelled-consumer")
+    harness = teardown_harness("cancelled-consumer")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="cancelled-consumer",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    consumer.cancel()
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:CancelledError"
+    assert consumer.cancelled() is True
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    retained = current._shutdown
+    assert retained is not None
+    assert retained.cancelled() is False
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("consumer", "CancelledError")
+    assert settled.teardown_owner_failures == 1
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert await current.close(timeout_seconds=1) == failed
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_first_teardown_failure_wins_over_a_later_caller_cancellation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=RuntimeError("private-first-teardown-detail")
+    )
+    harness = teardown_harness("late-cancel")
+    harness.close_gate = asyncio.Event()
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="late-cancel",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    closing = asyncio.create_task(current.close(timeout_seconds=5))
+    await asyncio.wait_for(harness.close_entered.wait(), timeout=1)
+    retained = current._shutdown
+    assert retained is not None
+    retained.cancel()
+    failed = await closing
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert retained.cancelled() is False
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.teardown_owner_failures == 2
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+    harness.close_gate.set()
+
+
+@pytest.mark.asyncio
+async def test_notification_cleanup_closes_the_producer_even_when_discard_fails() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingCloseBridge(instance_id="counting-bridge-discard")
+    harness = teardown_harness("discard")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="discard",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    lease = current.attach_notification_consumer(
+        consumer_id="discard-consumer", connection_epoch=1
+    )
+
+    def failing_discard() -> int:
+        raise RuntimeError("private-discard-detail")
+
+    current._notifications.discard_pending_presentations = failing_discard
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert failed.final_drain_lease is None
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.notification_stream_closed is True
+    assert settled.first_teardown_owner_failure == ("notifications", "RuntimeError")
+    assert settled.teardown_owner_failures == 1
+    assert settled.closed is False
+    with pytest.raises(AgentConversationRuntimeViolation) as detached:
+        await current.next_notification_for(lease)
+    assert detached.value.reason == "NOTIFICATION_CONSUMER_DETACHED"
+    assert lower.calls == 0
+    assert history.users == []
