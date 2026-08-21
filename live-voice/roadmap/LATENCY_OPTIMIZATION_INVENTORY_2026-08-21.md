@@ -199,8 +199,8 @@ dependencies, risk, evidence gates and whether Chrome is required.
 
 | Ref | Candidate | Status | Expected headroom | Area / likely code | Current evidence and rationale |
 |---:|---|---|---:|---|---|
-| 1 | EOT/STT early result waiter with authoritative join | **PLANNED, CONDITIONAL — NEXT EVIDENCE STEP** | **0–150 ms** | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | The Gateway already collects Provider final concurrently. Implement only if A1 finds at least 80 ms and 10% removable serialization. |
-| 2 | [Provider-native Semantic VAD with 1200 ms fallback](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md) | **SPECIFIED — AFTER EOT/STT CLOSURE** | **250–400 ms** | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms proved the latency opportunity but failed natural-pause integrity. The approved screen compares separate `auto` and `high` A/B/A blocks without adding another model RPC; product activation remains excluded. |
+| 1 | [EOT/STT early result waiter with authoritative join](../evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md) | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Fresh A1 at `bdd57bb6d` completed 20/20 exact cleanup-complete attempts with zero forbidden effects. Every removable-gap p50/fraction p50 was below 80 ms/0.10; the 450.924 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
+| 2 | [Provider-native Semantic VAD with 1200 ms fallback](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md) | **SPECIFIED — AFTER EOT/STT SCREEN CLOSED** | **250–400 ms** | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms proved the latency opportunity but failed natural-pause integrity. The approved screen compares separate `auto` and `high` A/B/A blocks without adding another model RPC; product activation remains excluded. |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **PROPOSED** | **700–840 ms estimated** | `browserAudioIOAdapter.ts`; current fixed `PLAYOUT_STARTUP_LEAD_SECONDS = 1.0` | Strong code-fact headroom. Start with roughly 160–300 ms contiguous decoded audio and a bounded reserve. Physical Chrome is ultimately required for underrun and first-audible acceptance. |
 | 5 | Separate receipt settlement from successor readiness | **OPEN AUTHORITY QUESTION** | Controlled wait exposed at approximately **254/754/1007 ms** for 250/750/1100 ms injected delays | `productP1VoiceRoute.ts`, P2 presentation ACK and next-turn ownership | First audio is already decoupled, but terminal receipt still follows successor readiness. Any optimization must retain truthful playout and interruption authority. |
@@ -241,8 +241,8 @@ workloads still show substantial P2 backlog.
 This order applies only after the latency workstream is activated. It does not
 replace the current product-truth execution packet in `live-voice/STATUS.md`.
 
-1. Run the EOT/STT A1 materiality screen; stop without a product change if the
-   removable wait is below 80 ms or 10%.
+1. EOT/STT A1 is closed as `NO_MATERIAL_SERIAL_GAP`; no early-wait product
+   candidate is permitted.
 2. Run the separately specified Provider-native Semantic VAD `auto` and `high`
    screens with the 1200 ms configuration fallback.
 3. Specify the Runtime-owned stable-sentence TTS path, the largest remaining
@@ -298,5 +298,6 @@ controlled full-round gains of 1.015–8.570 seconds across W1–W3, with longer
 notification-heavy workloads benefiting most. The strongest remaining
 non-Agent opportunities are adaptive WebAudio startup, safe endpointing and
 sentence-level Runtime-to-TTS overlap. Sentence-level TTS has the largest
-likely structural headroom; the immediate next measurement gate is the
-conditional EOT/STT A1 screen.
+likely structural headroom; the conditional EOT/STT A1 screen is closed with
+no material removable serial gap, so it does not authorize an early-wait
+product change.

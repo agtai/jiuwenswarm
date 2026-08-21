@@ -15,13 +15,13 @@
 - `ServerVadConfig.silence_duration_ms` remains exactly `1200`.
 - Reuse `LatencyProbeRuntime`, existing correlation identities and report reduction; add no second event protocol.
 - Browser, WebAudio, microphone, Agent, Tool, Task, TTS and product submission are forbidden effects in the causal runner.
-- A product candidate is forbidden unless A1 has p50 at least 80 ms and at least 10% of `EOT -> recognized final` in a declared fixture.
+- A product candidate is forbidden unless A1 has a removable serial-gap p50 at least 80 ms and a removable serial-gap-fraction p50 at least 10% of `EOT -> recognized final` in a declared fixture. The removable gap is `streaming result returned - max(uplink closed, Provider final ready)`; route-settled-to-result-returned is diagnostic only.
 - A result becomes visible only after both local uplink settlement and the matching Provider final succeed.
 - Preserve the current `live_voice.speech.recognize_streaming_result` path byte-for-byte while the candidate is off.
 
 ---
 
-### Task 1: Extend the existing latency probe at the missing waiter boundaries
+### Task 1: Extend the existing latency probe at the missing waiter boundaries — COMPLETE
 
 **Files:**
 - Modify: `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/latencyProbe.ts`
@@ -37,7 +37,7 @@
 - Consumes: existing `BrowserLatencyRound.mark()` and `LatencyProbeRuntime` batch ingestion.
 - Produces: core points `browser.streaming_result_request_started` and `browser.streaming_result_returned`; segments `streaming_result_wait`, `streaming_result_validation`, and `uplink_settled_to_stt_final`.
 
-- [ ] **Step 1: Add RED point-catalog and report-segment tests**
+- [x] **Step 1: Add RED point-catalog and report-segment tests**
 
 ```python
 assert "browser.streaming_result_request_started" in CORE_POINTS_BY_COMPONENT["browser"]
@@ -49,7 +49,7 @@ assert _segment_by_id("streaming_result_validation").end_point == "browser.stt_f
 
 Add the corresponding Node assertions that both new names are members of `BROWSER_LATENCY_CORE_POINTS` and reject duplicate/private observations exactly like existing core points.
 
-- [ ] **Step 2: Run the RED tests**
+- [x] **Step 2: Run the RED tests**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_latency_probe.py tests/unit_tests/live_voice/test_latency_probe_report.py -q --no-cov
@@ -58,7 +58,7 @@ cd jiuwenswarm/channels/web/frontend && npm run test:live-voice-latency-probe
 
 Expected: fail because the two points and derived segments are absent.
 
-- [ ] **Step 3: Add only the missing points and segments**
+- [x] **Step 3: Add only the missing points and segments**
 
 ```typescript
 export const BROWSER_LATENCY_CORE_POINTS = Object.freeze([
@@ -81,7 +81,7 @@ _segment(
 
 Add `streaming_result_validation` from returned to `browser.stt_final_received` and `uplink_settled_to_stt_final` from `browser.uplink_closed` to `browser.stt_final_received`.
 
-- [ ] **Step 4: Mark the exact existing request without changing its order**
+- [x] **Step 4: Mark the exact existing request without changing its order**
 
 ```typescript
 this.#markLatency(latencyRound, 'browser.streaming_result_request_started');
@@ -92,7 +92,7 @@ this.#requireCurrent(operationGeneration);
 
 The current `browser.stt_final_received` remains the accepted/validated product boundary.
 
-- [ ] **Step 5: Run GREEN and focused regressions**
+- [x] **Step 5: Run GREEN and focused regressions**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_latency_probe.py tests/unit_tests/live_voice/test_latency_probe_report.py -q --no-cov
@@ -101,14 +101,14 @@ cd jiuwenswarm/channels/web/frontend && npm run test:live-voice-latency-probe &&
 
 Expected: all selected tests pass and the legacy recognition order is unchanged.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/latencyProbe.ts jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts jiuwenswarm/server/live_voice/latency_probe.py jiuwenswarm/server/live_voice/latency_probe_report.py jiuwenswarm/channels/web/frontend/tests/liveVoiceLatencyProbe.test.mjs jiuwenswarm/channels/web/frontend/tests/productP1VoiceRoute.test.mjs tests/unit_tests/live_voice/test_latency_probe.py tests/unit_tests/live_voice/test_latency_probe_report.py
 git commit -m "test(live-voice): expose EOT result wait boundaries"
 ```
 
-### Task 2: Add the candidate-neutral A1 causal benchmark
+### Task 2: Add the candidate-neutral A1 causal benchmark — COMPLETE
 
 **Files:**
 - Create: `jiuwenswarm/channels/web/frontend/src/features/live-voice/benchmark/eotSttSettlementBenchmark.ts`
@@ -124,7 +124,7 @@ git commit -m "test(live-voice): expose EOT result wait boundaries"
   Browser latency marks and deterministic audio/media/Provider dependencies.
 - Produces: `runEotSttSettlementBenchmark(config): Promise<EotSttBenchmarkReport>` and a mode-600 JSON report containing closed per-attempt marks and p50/nearest-rank-p95 summaries.
 
-- [ ] **Step 1: Write RED validation and reduction tests**
+- [x] **Step 1: Write RED validation and reduction tests**
 
 ```typescript
 const fixtures = Object.freeze([
@@ -146,7 +146,7 @@ Add Python RED tests for a JSON-line fixture process whose exact result request
 delegates to the real registry method. It must reject unknown operations and
 private/extra fields, and it must expose only content-free timing/result facts.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -158,7 +158,7 @@ cd ../../../.. && uv run pytest tests/unit_tests/live_voice/test_eot_stt_registr
 Expected: compilation/test failure because the benchmark and registry fixture
 owners are absent.
 
-- [ ] **Step 3: Implement the closed benchmark model and reducer**
+- [x] **Step 3: Implement the closed benchmark model and reducer**
 
 ```typescript
 export interface EotSttFixture {
@@ -180,7 +180,7 @@ export interface EotSttAttempt {
 
 Use one monotonic clock, nearest-rank p95, exclusive file creation and `chmod(0o600)`. The report must contain no frames, transcript, item ID, exception text or credentials.
 
-- [ ] **Step 4: Implement the real-registry fixture boundary**
+- [x] **Step 4: Implement the real-registry fixture boundary**
 
 `EotSttRegistryFixture` must build a `DedicatedMediaProductRegistry` using the
 same exact authority/record factory as its focused tests. Its closed operations
@@ -202,7 +202,7 @@ return {"status": payload["status"], "exact_result": fixture.is_exact(payload)}
 The command process reads/writes one bounded JSON object per line, uses no
 shell, emits no transcript or identity value, and closes every registry task.
 
-- [ ] **Step 5: Compose the real Product P1 owner with the real registry seam**
+- [x] **Step 5: Compose the real Product P1 owner with the real registry seam**
 
 The benchmark script must use the same owner factory pattern as `productP1VoiceRoute.test.mjs`. The Speech transport delays result readiness by `providerFinalMs`; the media leaf delays `completeUplink()` by `localSettlementMs`; both expose exact event callbacks to the existing latency round. Return the fixed text only inside the fake and persist only `exact_result=true`.
 
@@ -228,7 +228,7 @@ assert.equal(effects.agent_submit, 0);
 assert.equal(effects.tts_request, 0);
 ```
 
-- [ ] **Step 6: Add package commands and run GREEN**
+- [x] **Step 6: Add package commands and run GREEN**
 
 ```json
 "test:live-voice-eot-stt-benchmark": "tsc src/features/live-voice/benchmark/eotSttSettlementBenchmark.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src/features/live-voice/benchmark --outDir node_modules/.cache/live-voice-eot-stt-benchmark --lib ES2020,DOM --skipLibCheck --noEmitOnError --strict --noUnusedLocals --noUnusedParameters && node --test tests/liveVoiceEotSttSettlementBenchmark.test.mjs",
@@ -240,14 +240,14 @@ cd jiuwenswarm/channels/web/frontend && npm run test:live-voice-eot-stt-benchmar
 cd ../../../.. && uv run pytest tests/unit_tests/live_voice/test_eot_stt_registry_fixture.py -q --no-cov
 ```
 
-- [ ] **Step 7: Commit Task 2**
+- [x] **Step 7: Commit Task 2**
 
 ```bash
 git add jiuwenswarm/channels/web/frontend/src/features/live-voice/benchmark/eotSttSettlementBenchmark.ts jiuwenswarm/channels/web/frontend/tests/liveVoiceEotSttSettlementBenchmark.test.mjs jiuwenswarm/channels/web/frontend/scripts/liveVoiceEotSttSettlementBenchmark.mjs scripts/live_voice/eot_stt_registry_fixture.py tests/unit_tests/live_voice/test_eot_stt_registry_fixture.py jiuwenswarm/channels/web/frontend/package.json
 git commit -m "test(live-voice): add EOT settlement materiality benchmark"
 ```
 
-### Task 3: Run and decide A1 before touching the product protocol
+### Task 3: Run and decide A1 before touching the product protocol — COMPLETE (`NO_MATERIAL_SERIAL_GAP`)
 
 **Files:**
 - Create after run: `live-voice/evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md`
@@ -257,39 +257,46 @@ git commit -m "test(live-voice): add EOT settlement materiality benchmark"
 - Consumes: Task 2 benchmark at one exact clean commit.
 - Produces: one of `NO_MATERIAL_SERIAL_GAP`, `JOIN_CANDIDATE_ELIGIBLE`, or `INCONCLUSIVE`.
 
-- [ ] **Step 1: Verify clean source and run A1**
+- [x] **Step 1: Verify clean source and run A1**
 
 ```bash
 test -z "$(git status --porcelain)"
 git rev-parse HEAD
 cd jiuwenswarm/channels/web/frontend
-npm run benchmark:live-voice-eot-stt -- --candidate A1 --attempts 5 --python-executable /home/renan/openJiuwen-ai/jiuwenswarm/.venv/bin/python --output-root /home/renan/openJiuwen-ai/live-voice-latency-runs/eot-stt
+npm run benchmark:live-voice-eot-stt -- --candidate A1 --attempts 5 --git-commit bdd57bb6dd2418fcbbfb87ed2df7c27e08de9a0f --run-id eot-stt-a1-materiality-bdd57bb6d --output /home/renan/openJiuwen-ai/live-voice-latency-runs/eot-stt-a1-materiality-bdd57bb6d.json --python-executable /home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/live-voice-eot-stt-overlap/.venv/bin/python3
 ```
 
-- [ ] **Step 2: Apply the closed materiality rule**
+- [x] **Step 2: Apply the closed materiality rule**
 
 ```text
-eligible = route_settled_to_result_returned_p50_ms >= 80
-           AND route_settled_to_result_returned_p50_ms
-               / eot_to_recognized_final_p50_ms >= 0.10
+eligible = removable_serial_gap_p50_ms >= 80
+           AND removable_serial_gap_fraction_p50 >= 0.10
+
+removable_serial_gap_ms = streaming_result_returned
+                          - max(uplink_closed, provider_final_ready)
+removable_serial_gap_fraction = removable_serial_gap_ms
+                                / (stt_final_received - eot_received)
 ```
 
 Any failed/invalid attempt, incomplete cleanup or control inconsistency produces `INCONCLUSIVE`, not eligibility.
+`route_settled_to_result_returned` remains diagnostic only and cannot authorize B.
 
-- [ ] **Step 3: Record sanitized evidence**
+- [x] **Step 3: Record sanitized evidence**
 
 Record exact source commit, runner command, machine/runtime labels, all four fixture tables, p50/p95, RPC counts, zero forbidden effects and the closed decision. Do not copy raw JSON or private values into Git.
 
-- [ ] **Step 4: Commit the decision**
+- [x] **Step 4: Commit the decision**
 
 ```bash
 git add live-voice/evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md live-voice/roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md
 git commit -m "docs(live-voice): record EOT settlement materiality"
 ```
 
-If the result is `NO_MATERIAL_SERIAL_GAP`, stop this plan here. Tasks 4--6 are forbidden.
+Result: all four removable p50/fraction pairs were below the 80 ms/0.10 gate;
+the closed decision is `NO_MATERIAL_SERIAL_GAP`. Stop this plan here. Tasks
+4–6 are skipped and forbidden.
 
-### Task 4: Add the conditional Gateway early-wait join
+### Task 4: Add the conditional Gateway early-wait join — SKIPPED (`NO_MATERIAL_SERIAL_GAP`)
 
 **Files:**
 - Modify: `jiuwenswarm/gateway/live_voice/dedicated_media_registration.py`
@@ -359,7 +366,7 @@ git add jiuwenswarm/gateway/live_voice/dedicated_media_registration.py tests/uni
 git commit -m "feat(live-voice): add bounded streaming result waiter"
 ```
 
-### Task 5: Start the waiter early in Product P1 behind exact capability agreement
+### Task 5: Start the waiter early in Product P1 behind exact capability agreement — SKIPPED (`NO_MATERIAL_SERIAL_GAP`)
 
 **Files:**
 - Modify: `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/gatewayBatchSpeechClient.ts`
@@ -431,7 +438,7 @@ git add jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/gateway
 git commit -m "perf(live-voice): overlap result wait with uplink settlement"
 ```
 
-### Task 6: Run A1/B/A2, review and close the packet
+### Task 6: Run A1/B/A2, review and close the packet — SKIPPED (`NO_MATERIAL_SERIAL_GAP`)
 
 **Files:**
 - Modify: `live-voice/evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md`

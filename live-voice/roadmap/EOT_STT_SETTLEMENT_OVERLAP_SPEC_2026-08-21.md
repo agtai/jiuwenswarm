@@ -172,9 +172,12 @@ Derived segments:
 The benchmark also records RPC count and exact outcome, but no transcript,
 audio payload or private exception text.
 
-Materiality gate: the candidate proceeds only when `route settled → result
-returned` has p50 at least 80 ms and represents at least 10% of EOT → recognized
-final in one or more declared fixtures, with A1 pacing and cleanup valid.
+Materiality gate: the candidate proceeds only when the removable serial gap
+`streaming result returned − max(uplink closed, Provider final ready)` has p50
+at least 80 ms and its fraction of `EOT → recognized final` has p50 at least
+10% in one or more declared fixtures, with A1 pacing and cleanup valid.
+`route settled → result returned` is diagnostic only: it can include legitimate
+remaining Provider-final wait and cannot authorize the candidate.
 
 ## 7. B candidate data flow
 
