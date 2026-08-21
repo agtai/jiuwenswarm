@@ -28,7 +28,7 @@ from vad_eot_benchmark_support import (
     VadCorpusManifest,
     load_vad_corpus_manifest,
     normalize_transcript,
-    read_pcm16_mono_wav,
+    read_verified_vad_corpus_case,
 )
 
 from jiuwenswarm.server.live_voice.openai_streaming_speech import (
@@ -420,6 +420,7 @@ def _jsonable(value):
 def write_vad_benchmark_report(path: Path, report: VadBenchmarkReport) -> None:
     if not isinstance(path, Path) or not path.is_absolute() or not isinstance(report, VadBenchmarkReport):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    _validate_report_semantics(report)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     expected = _jsonable(report)
     payload = json.dumps(expected, separators=(",", ":"), sort_keys=True) + "\n"
@@ -450,6 +451,91 @@ def _contains_timeout(error: BaseException) -> bool:
 
 def _pacing_is_valid(lateness: Sequence[float]) -> bool:
     return bool(lateness) and (_nearest_rank(lateness, 0.95) or 0.0) <= 20.0 and max(lateness) <= 50.0
+
+
+def _validate_report_semantics(report: VadBenchmarkReport) -> None:
+    if (
+        report.schema_version != REPORT_SCHEMA_VERSION
+        or report.source_clean is not True
+        or dict(report.forbidden_effects) != FORBIDDEN_EFFECTS
+        or report.summaries != _safe_summary(report.attempts)
+    ):
+        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    expected_attempts = 16 if report.mode == "pilot" else 80
+    if len(report.attempts) != expected_attempts:
+        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    expected_slots = {
+        (configuration_id, threshold, case_id, attempt_index)
+        for configuration_id, threshold in CONFIGURATION_SEQUENCE
+        for case_id in (
+            "no-internal-pause",
+            "internal-pause-300",
+            "internal-pause-600",
+            "internal-pause-1000",
+        )
+        for attempt_index in range(1 if report.mode == "pilot" else 5)
+    }
+    actual_slots = {
+        (
+            attempt.configuration_id,
+            attempt.silence_duration_ms,
+            attempt.case_id,
+            attempt.attempt_index,
+        )
+        for attempt in report.attempts
+    }
+    if (
+        actual_slots != expected_slots
+        or any(
+            attempt.outcome in {VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID}
+            or not attempt.cleanup_complete
+            or not attempt.pacing_valid
+            for attempt in report.attempts
+        )
+    ):
+        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    config = VadBenchmarkConfig(
+        report.run_id,
+        report.mode,
+        Path("/private/manifest.json"),
+        Path("/private/report.json"),
+        report.git_commit,
+        True,
+    )
+    if report.decision != _decision(config, report.attempts):
+        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+
+
+async def _bounded_call(
+    awaitable: Awaitable,
+    *,
+    timeout_seconds: float,
+    retained: set[asyncio.Task],
+):
+    task = asyncio.create_task(awaitable)
+
+    def settle(completed: asyncio.Task) -> None:
+        retained.discard(completed)
+        if completed.cancelled():
+            return
+        try:
+            completed.exception()
+        except BaseException:
+            return
+
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+    except BaseException:
+        task.cancel()
+        retained.add(task)
+        task.add_done_callback(settle)
+        raise
+    if task not in done:
+        task.cancel()
+        retained.add(task)
+        task.add_done_callback(settle)
+        raise TimeoutError
+    return task.result()
 
 
 async def run_vad_attempt(
@@ -494,6 +580,7 @@ async def run_vad_attempt(
     commit_checked = asyncio.Event()
     final_text = ""
     disposition: RecognitionCommitDisposition | None = None
+    retained_calls: set[asyncio.Task] = set()
     try:
         current_manifest = load_vad_corpus_manifest(config.manifest_path)
         current_case = next(
@@ -502,17 +589,20 @@ async def run_vad_attempt(
         )
         if current_case != case:
             raise ValueError("corpus")
-        provider = await asyncio.wait_for(
-            provider_factory(turn_detection), timeout=operation_timeout_seconds
+        decoded = read_verified_vad_corpus_case(case)
+        provider = await _bounded_call(
+            provider_factory(turn_detection),
+            timeout_seconds=operation_timeout_seconds,
+            retained=retained_calls,
         )
-        await asyncio.wait_for(
+        await _bounded_call(
             provider.open_recognition(
                 RecognitionStreamRequest(ref, turn_detection),
                 timeout_seconds=10.0,
             ),
-            timeout=operation_timeout_seconds,
+            timeout_seconds=operation_timeout_seconds,
+            retained=retained_calls,
         )
-        decoded = read_pcm16_mono_wav(case.wav_path)
         epoch = monotonic()
         final_voice_at = epoch + case.final_voiced_frame / 48_000.0
 
@@ -526,7 +616,7 @@ async def run_vad_attempt(
                 lateness.append(max(0.0, (monotonic() - deadline) * 1000.0))
                 samples = decoded.samples[offset : offset + FRAME_SAMPLES]
                 floats = tuple(sample / 32768.0 for sample in samples)
-                await asyncio.wait_for(
+                await _bounded_call(
                     provider.send_recognition_audio(
                         RecognitionAudioFrame(
                             ref,
@@ -536,12 +626,15 @@ async def run_vad_attempt(
                             struct.pack(f"<{len(floats)}f", *floats),
                         )
                     ),
-                    timeout=operation_timeout_seconds,
+                    timeout_seconds=operation_timeout_seconds,
+                    retained=retained_calls,
                 )
                 sent_cursor = offset + len(samples)
                 await asyncio.sleep(0)
-            disposition = await asyncio.wait_for(
-                provider.commit_recognition(ref), timeout=operation_timeout_seconds
+            disposition = await _bounded_call(
+                provider.commit_recognition(ref),
+                timeout_seconds=operation_timeout_seconds,
+                retained=retained_calls,
             )
             commit_checked.set()
 
@@ -550,11 +643,12 @@ async def run_vad_attempt(
             nonlocal transcript_complete, eot_at, final_at, provider_end_ms
             nonlocal item_id, early_eot, final_text
             while final == 0:
-                event = await asyncio.wait_for(
+                event = await _bounded_call(
                     provider.next_recognition_event(
                         ref, timeout_seconds=EVENT_TIMEOUT_SECONDS
                     ),
-                    timeout=operation_timeout_seconds,
+                    timeout_seconds=operation_timeout_seconds,
+                    retained=retained_calls,
                 )
                 if event.ref != ref:
                     exact_identity = False
@@ -602,7 +696,11 @@ async def run_vad_attempt(
         maximum = max(lateness, default=0.0)
         pacing_valid = _pacing_is_valid(lateness)
         del final_text
-        await asyncio.wait_for(provider.close(), timeout=close_timeout_seconds)
+        await _bounded_call(
+            provider.close(),
+            timeout_seconds=close_timeout_seconds,
+            retained=retained_calls,
+        )
         clean = provider.cleanup_snapshot.clean
         if not clean:
             reason = VadAttemptReason.CLEANUP_INCOMPLETE
@@ -673,10 +771,19 @@ async def run_vad_attempt(
         commit_checked.set()
         if provider is not None and not getattr(provider, "closed", False):
             try:
-                await asyncio.wait_for(provider.close(), timeout=close_timeout_seconds)
+                await _bounded_call(
+                    provider.close(),
+                    timeout_seconds=close_timeout_seconds,
+                    retained=retained_calls,
+                )
             except Exception:
                 pass
-    cleanup = bool(provider is not None and provider.cleanup_snapshot.clean)
+    await asyncio.sleep(0)
+    cleanup = bool(
+        provider is not None
+        and provider.cleanup_snapshot.clean
+        and not retained_calls
+    )
     pacing_valid = _pacing_is_valid(lateness)
     if not cleanup:
         return VadAttemptResult.failed(

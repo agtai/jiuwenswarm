@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -139,6 +140,13 @@ def read_pcm16_mono_wav(path: Path) -> Pcm16MonoWav:
         raise ValueError("VAD_CORPUS_WAV_INVALID")
     try:
         with wave.open(str(path), "rb") as source:
+            return _decode_pcm16_mono_wav(source)
+    except (EOFError, wave.Error) as error:
+        raise ValueError("VAD_CORPUS_WAV_INVALID") from error
+
+
+def _decode_pcm16_mono_wav(source: wave.Wave_read) -> Pcm16MonoWav:
+    try:
             if (
                 source.getnchannels() != CHANNEL_COUNT
                 or source.getsampwidth() != SAMPLE_WIDTH_BYTES
@@ -157,6 +165,23 @@ def read_pcm16_mono_wav(path: Path) -> Pcm16MonoWav:
     if len(payload) != frame_count * SAMPLE_WIDTH_BYTES:
         raise ValueError("VAD_CORPUS_WAV_INVALID")
     return Pcm16MonoWav(struct.unpack(f"<{frame_count}h", payload))
+
+
+def read_verified_vad_corpus_case(case: VadCorpusCase) -> Pcm16MonoWav:
+    if not isinstance(case, VadCorpusCase) or not _private_regular_file(case.wav_path):
+        raise ValueError("VAD_CORPUS_WAV_INVALID")
+    try:
+        payload = case.wav_path.read_bytes()
+    except OSError as error:
+        raise ValueError("VAD_CORPUS_WAV_INVALID") from error
+    if hashlib.sha256(payload).hexdigest() != case.wav_sha256:
+        raise ValueError("VAD_CORPUS_FILE_INVALID")
+    try:
+        with wave.open(io.BytesIO(payload), "rb") as source:
+            decoded = _decode_pcm16_mono_wav(source)
+    finally:
+        payload = b""
+    return decoded
 
 
 def _require_exact_dict(value: object, keys: frozenset[str], reason: str) -> dict[str, object]:
@@ -451,4 +476,5 @@ __all__ = [
     "normalize_transcript",
     "prepare_vad_corpus",
     "read_pcm16_mono_wav",
+    "read_verified_vad_corpus_case",
 ]
