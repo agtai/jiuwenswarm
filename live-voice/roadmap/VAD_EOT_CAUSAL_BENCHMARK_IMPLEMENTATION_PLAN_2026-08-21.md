@@ -192,7 +192,7 @@ git commit -m "test(live-voice): add private VAD pause corpus builder"
   `run_vad_attempt(config, case, attempt_index, *, provider_factory,
   monotonic, sleep)`.
 
-- [ ] **Step 1: Write RED tests for exact configuration and CLI parsing**
+- [x] **Step 1: Write RED tests for exact configuration and CLI parsing**
 
 Require absolute manifest/output paths, unique bounded run ID, exact Git SHA,
 clean source, modes `pilot|run`, exact threshold sequence and sample counts
@@ -208,7 +208,7 @@ def test_cli_freezes_pilot_and_formal_sequences(tmp_path: Path) -> None:
     assert formal.attempts_per_case == 5
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py -q --no-cov
@@ -216,7 +216,7 @@ uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py -q --
 
 Expected: module/file missing.
 
-- [ ] **Step 3: Implement closed dataclasses and result invariants**
+- [x] **Step 3: Implement closed dataclasses and result invariants**
 
 Use explicit enums:
 
@@ -256,21 +256,21 @@ reason text. Reasons are a closed enum such as `OK`, `EARLY_EOT`,
 `PROVIDER_UNAVAILABLE`, `PROVIDER_PROTOCOL`, `TIMEOUT` and
 `CLEANUP_INCOMPLETE`.
 
-- [ ] **Step 4: Write RED privacy/report tests**
+- [x] **Step 4: Write RED privacy/report tests**
 
 Test exclusive create, mode 600, closed top/attempt/summary fields,
 nearest-rank p50/p95, per-case aggregation and absence of private sentinels in
 JSON/stdout/logs. A failed or invalid attempt must be counted but excluded from
 latency samples.
 
-- [ ] **Step 5: Implement report reduction and writer**
+- [x] **Step 5: Implement report reduction and writer**
 
 The report schema is `live-voice.vad-eot-causal-report.v0`. Summaries are keyed
 by `(configuration_id, silence_duration_ms, case_id)` and retain attempts,
 completed/failed/unknown/invalid counts plus p50/p95 only when every sample is
 eligible. `forbidden_effects` is the exact zero-valued map from the spec.
 
-- [ ] **Step 6: Run GREEN and commit Task 2**
+- [x] **Step 6: Run GREEN and commit Task 2**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py -q --no-cov
@@ -301,7 +301,7 @@ git commit -m "test(live-voice): add closed VAD benchmark report"
   Awaitable[VadRecognitionProvider]` returns a fresh exact owner per attempt.
 - Task 4 supplies the real OpenAI factory and Task 5 orchestrates attempts.
 
-- [ ] **Step 1: Write RED positive pacing/event test**
+- [x] **Step 1: Write RED positive pacing/event test**
 
 Use an injected fake Provider that records frames and returns exact
 `SPEECH_STARTED`, `SPEECH_STOPPED`, `COMMITTED`, `FINAL`. Use a manual clock and
@@ -321,7 +321,7 @@ async def test_attempt_paces_contiguous_frames_and_accepts_one_exact_turn() -> N
     assert result.final_voiced_frame_to_eot_ms == 1200.0
 ```
 
-- [ ] **Step 2: Write RED turn-integrity and timing-failure matrix**
+- [x] **Step 2: Write RED turn-integrity and timing-failure matrix**
 
 Separate tests for EOT before the last post-pause voiced frame, two speech
 items, missing committed/final, wrong ref/item, tail transcript missing,
@@ -329,7 +329,7 @@ non-server disposition, send/event timeout, Provider exception, pacing p95
 over 20 ms, pacing max over 50 ms and incomplete cleanup. Assert stable outcome
 and zero latency samples for each rejection.
 
-- [ ] **Step 3: Implement the attempt state machine**
+- [x] **Step 3: Implement the attempt state machine**
 
 Start the event collector before frame pacing. Store transcript only in a local
 variable marked `repr=False` or ordinary local scope; normalize/compare, then
@@ -347,14 +347,14 @@ lateness_ms = max(0.0, (monotonic() - deadline) * 1000.0)
 await provider.send_recognition_audio(frame)
 ```
 
-- [ ] **Step 4: Write RED wire-authority test with real Adapter + fake socket**
+- [x] **Step 4: Write RED wire-authority test with real Adapter + fake socket**
 
 Instantiate the actual `OpenAIStreamingSpeechProvider` around a fake
 `RealtimeSocket`. Assert the session update carries the requested threshold,
 the fake echo mismatch fails, server VAD sends zero client commit, and frames
 offered after `speech_stopped` generate no append message.
 
-- [ ] **Step 5: Implement the Provider-facing request/event mapping**
+- [x] **Step 5: Implement the Provider-facing request/event mapping**
 
 Build one `RecognitionStreamRequest` with a fresh `RecognitionStreamRef` and
 `ServerVadConfig(threshold=0.5, prefix_padding_ms=300,
@@ -363,7 +363,7 @@ interrupt_response=False)`. Accept only typed current-ref boundaries and one
 cursorless Provider-time final. `commit_recognition` must return
 `SERVER_VAD_PENDING|SERVER_VAD_OBSERVED`.
 
-- [ ] **Step 6: Run Task 3 regression and commit**
+- [x] **Step 6: Run Task 3 regression and commit**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py tests/unit_tests/live_voice/test_openai_streaming_speech.py -q --no-cov
@@ -394,14 +394,14 @@ git commit -m "test(live-voice): execute paced VAD attempts"
   `_main(argv, *, environ, provider_factory, monotonic, sleep) -> Awaitable[int]`
   is the non-exported injected test seam.
 
-- [ ] **Step 1: Write RED real-factory selection tests**
+- [x] **Step 1: Write RED real-factory selection tests**
 
 Test feature/provider/base/key/model absence, wrong provider, invalid URL and
 selector degradation. Assert zero socket allocation and no secret in
 exception/repr/log/stdout. The success test injects a socket factory and
 requires `SpeechRouteTier.STREAMING` with no degradation fact.
 
-- [ ] **Step 2: Implement real Provider selection**
+- [x] **Step 2: Implement real Provider selection**
 
 Call `select_environment_streaming_speech(environ=environ,
 batch_available=False, socket_factory=optional_test_factory)` with a private
@@ -409,7 +409,7 @@ copy containing only the existing Speech configuration entries plus
 `LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED=1`. Reject any non-streaming
 selection with stable `PROVIDER_UNAVAILABLE`.
 
-- [ ] **Step 3: Write RED orchestration/order tests**
+- [x] **Step 3: Write RED orchestration/order tests**
 
 For pilot, assert calls are exactly:
 
@@ -425,7 +425,7 @@ failure in pilot stops before the next paid attempt and produces no success
 report. Formal attempts continue after a truthful turn failure so the report
 can reject a threshold, but abort on infrastructure-invalid/unknown outcomes.
 
-- [ ] **Step 4: Implement screening orchestration and interpretation**
+- [x] **Step 4: Implement screening orchestration and interpretation**
 
 Use unique recognition identities for every attempt. Compare A1/A2 per case.
 Return exactly one decision:
@@ -433,7 +433,7 @@ Return exactly one decision:
 `FIXED_THRESHOLD_REJECTED` or `INCONCLUSIVE` for formal. Apply the spec's 10%
 control-stability and 80 ms conservative tie-break literally.
 
-- [ ] **Step 5: Write RED CLI process/privacy tests**
+- [x] **Step 5: Write RED CLI process/privacy tests**
 
 Exercise `_main` with the injected fake Provider and run subprocess tests only
 for pre-Provider argument/source/output failures. No fake-Provider CLI flag or
@@ -441,7 +441,7 @@ environment switch may exist. Assert clean in-process exit/written report,
 dirty-source rejection, mismatched `--git-commit`, existing output, cancellation
 cleanup and a private Provider sentinel absent from stderr/stdout/report.
 
-- [ ] **Step 6: Implement `main`, signal cleanup and output settlement**
+- [x] **Step 6: Implement `main`, signal cleanup and output settlement**
 
 The CLI prints only:
 
@@ -453,7 +453,7 @@ It writes the report only after all active Provider resources settle and the
 report validates by reparsing. Any failure prints `VAD_EOT_BENCHMARK_FAILED`
 and exits nonzero without a partial report.
 
-- [ ] **Step 7: Run Task 4 gates and commit**
+- [x] **Step 7: Run Task 4 gates and commit**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py -q --no-cov
