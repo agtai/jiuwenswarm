@@ -10,7 +10,7 @@ Date: 2026-08-21
 
 > **Closed-result note:** complete A1 source `8e5dab8b8` retained all ten marks
 > and eight segments in 20/20 exact cleanup-complete attempts. The largest
-> respective removable-gap/fraction p50 values were 0.880 ms and 0.015, so the decision is
+> respective removable-gap/fraction p50 values were 0.885 ms and 0.015, so the decision is
 > `NO_MATERIAL_SERIAL_GAP`; no product candidate is permitted. The next latency
 > screen is Provider-native Semantic VAD with the 1200 ms fallback retained.
 

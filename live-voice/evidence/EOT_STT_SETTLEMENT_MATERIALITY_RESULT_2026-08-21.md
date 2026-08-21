@@ -21,7 +21,7 @@ removable_serial_gap_fraction = removable_serial_gap_ms
 
 A fixture is material only when both removable-gap p50 is at least 80 ms and
 removable-gap-fraction p50 is at least 0.10. The largest respective p50 values
-across the table were 0.880 ms and 0.015, so no fixture qualifies. The 450.782 ms
+across the table were 0.885 ms and 0.015, so no fixture qualifies. The 450.782 ms
 `route_settled_to_result_returned` diagnostic in local-fast/provider-slow is
 legitimate remaining Provider wait and cannot authorize B.
 

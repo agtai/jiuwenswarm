@@ -80,7 +80,7 @@
 > **2026-08-21 EOT/STT materiality decision:** the complete deterministic A1
 > at `8e5dab8b8c6651b2be784cf103df9239a93814a0` retained all ten owner/fixture
 > marks and eight derived segments across 20/20 exact cleanup-complete attempts.
-> The largest removable-gap p50 was 0.880 ms and the largest removable fraction
+> The largest removable-gap p50 was 0.885 ms and the largest removable fraction
 > p50 was 0.015, below the 80 ms/0.10 gate. The packet is closed as
 > `NO_MATERIAL_SERIAL_GAP`; no early-wait candidate is permitted. The next
 > latency screen is [Provider-native Semantic VAD](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md)
@@ -314,7 +314,7 @@ The complete A1 confirmed that Gateway Provider-final collection already
 overlaps local media settlement. Local-fast/provider-slow retained a large
 450.782 ms p50 route-settled-to-result-returned diagnostic, but its removable
 tail was only 0.885 ms / 0.002 of EOT-to-final. Across all four fixtures the
-largest respective p50 values were 0.880 ms and 0.015, so no fixture passed both the
+largest respective p50 values were 0.885 ms and 0.015, so no fixture passed both the
 80 ms and 0.10 gates.
 
 Do not add an early result waiter or weaken complete-frame/ACK proof. Keep the

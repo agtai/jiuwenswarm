@@ -13,7 +13,7 @@
 > **Final closure:** complete A1 source
 > `8e5dab8b8c6651b2be784cf103df9239a93814a0` produced 20/20 exact,
 > cleanup-complete attempts with all ten marks and eight segments. The largest
-> respective removable-gap/fraction p50 values were 0.880 ms and 0.015, so the packet is closed as
+> respective removable-gap/fraction p50 values were 0.885 ms and 0.015, so the packet is closed as
 > `NO_MATERIAL_SERIAL_GAP`; Tasks 4–6 remain skipped.
 
 ## Global Constraints
@@ -313,7 +313,7 @@ the closed decision is `NO_MATERIAL_SERIAL_GAP`. Stop this plan here. Tasks
 4–6 are skipped and forbidden.
 
 Final exact result: 20/20 attempts retained all ten marks and eight segments;
-the largest removable-gap p50 was 0.880 ms and the largest removable fraction
+the largest removable-gap p50 was 0.885 ms and the largest removable fraction
 p50 was 0.015. See the
 [sanitized result](../evidence/EOT_STT_SETTLEMENT_MATERIALITY_RESULT_2026-08-21.md).
 
