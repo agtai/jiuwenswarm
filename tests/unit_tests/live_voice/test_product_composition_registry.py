@@ -18,7 +18,7 @@ from typing import Callable, Mapping, NoReturn, cast
 
 import pytest
 
-from jiuwenswarm.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
@@ -53,7 +53,19 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
 )
+from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+    LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+    AuthenticationMode,
+    DurabilityLevel,
+    ExecutorCapability,
+    LiveVoiceCapability,
+    LiveVoiceDeploymentProfile,
+    ValidatedAuthenticationConfiguration,
+    ValidatedExecutorConfiguration,
+    ValidatedLiveVoiceConfiguration,
+)
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
+from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice.batch_speech import (
     FormalBatchSpeechService,
     UnavailableBatchSpeechProvider,
@@ -80,6 +92,15 @@ from jiuwenswarm.server.live_voice.p3_product_confirmation import (
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityResourceBinding,
     TrustedAuthorityCandidate,
+)
+from jiuwenswarm.server.live_voice.product_observability_runtime import (
+    BoundedInMemoryOtelBackend,
+    PRODUCT_OBSERVABILITY_BACKEND_ENV,
+    PRODUCT_OBSERVABILITY_BACKEND_ID,
+    PRODUCT_OBSERVABILITY_ENABLE_ENV,
+    PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV,
+    ProductObservabilityRuntime,
+    create_product_observability_runtime_from_environment,
 )
 from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
@@ -154,6 +175,47 @@ ITINERARY_RESULT_TEXT = (
 )
 ITINERARY_DAY_TWO_ANSWER = "第二天最早的固定安排是 08:30 参观博物馆。"
 ITINERARY_DAY_TWO_FACT = "08:30 参观博物馆"
+
+
+def _observability_runtime_configuration(
+    backend: BoundedInMemoryOtelBackend,
+) -> ValidatedLiveVoiceConfiguration:
+    digest = hashlib.sha256(b"registry-owning-adapters-v1").hexdigest()
+    return ValidatedLiveVoiceConfiguration(
+        contract_version=LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+        configuration_id="test.registry.owning-adapters.v1",
+        configuration_digest=digest,
+        profile=LiveVoiceDeploymentProfile.FORMAL_LIVE_VOICE,
+        enabled=True,
+        ordinary_production_default_off=True,
+        authentication=ValidatedAuthenticationConfiguration(
+            mode=AuthenticationMode.SCOPED_BEARER,
+            validation_receipt_id="test-registry-auth-owner.v1",
+            scope_digest=hashlib.sha256(b"registry-auth-scope").hexdigest(),
+        ),
+        executor=ValidatedExecutorConfiguration(
+            executor_id="direct-project-code",
+            adapter_id="live-voice.direct-project-code",
+            durability_level=DurabilityLevel.D2,
+            capabilities=tuple(sorted(ExecutorCapability, key=lambda item: item.value)),
+            validation_receipt_id="test-registry-executor-owner.v1",
+            configuration_digest=hashlib.sha256(b"registry-executor").hexdigest(),
+        ),
+        providers=(backend.validated_provider_configuration(),),
+        capabilities=tuple(
+            sorted(
+                (
+                    LiveVoiceCapability.AUTHENTICATED,
+                    LiveVoiceCapability.EXECUTOR_D2,
+                    LiveVoiceCapability.FORMAL_WEB,
+                    LiveVoiceCapability.TASK_MUTATION,
+                    LiveVoiceCapability.TASK_QUERY,
+                    LiveVoiceCapability.TELEMETRY_EXPORT,
+                ),
+                key=lambda item: item.value,
+            )
+        ),
+    )
 
 
 def _resource(task_id: str) -> AuthorityResourceBinding:
@@ -428,6 +490,9 @@ class _P3Composition(P3AuthenticatedComposition):
                         allowed_operations=frozenset(
                             {
                                 "agent.chat",
+                                "task.get",
+                                "task.status",
+                                "task.list",
                                 "task.events",
                                 "task.unread_events",
                                 "task.result",
@@ -1069,6 +1134,28 @@ class _StoreBackedUnifiedP3(_UnifiedP3Composition):
         )
 
 
+class _StoreQueryP3Composition(_P3Composition):
+    def query(
+        self,
+        query: ProductP3AuthorizedQuery,
+        *,
+        now: str | None = None,
+    ) -> ResultEnvelope:
+        assert self._presentation_delegate is not None
+        return P3AuthenticatedComposition.query(
+            self._presentation_delegate,
+            query,
+            now=now,
+        )
+
+    def prepare_production_intent_authority(self, **kwargs: object):
+        assert self._presentation_delegate is not None
+        return P3AuthenticatedComposition.prepare_production_intent_authority(
+            self._presentation_delegate,
+            **kwargs,
+        )
+
+
 class _MutationP3Composition(_P3Composition):
     def __init__(
         self,
@@ -1195,6 +1282,107 @@ class _MutationP3Composition(_P3Composition):
                 "error": None,
             },
         )
+
+
+class _StoreMutationP3Composition(_MutationP3Composition):
+    def __init__(
+        self,
+        project_dir: Path,
+        verifier: ProductP3ConfirmationForwarder,
+        store: SqliteTaskStore,
+    ) -> None:
+        _P3Composition.__init__(
+            self,
+            project_dir,
+            presentation_store=store,
+        )
+        self.verifier = verifier
+        self.prepare_calls = []
+        self.mutation_calls = []
+        self.replay_authority_revoked = False
+        self.store = store
+
+    def query(
+        self,
+        query: ProductP3AuthorizedQuery,
+        *,
+        now: str | None = None,
+    ) -> ResultEnvelope:
+        assert self._presentation_delegate is not None
+        return P3AuthenticatedComposition.query(
+            self._presentation_delegate,
+            query,
+            now=now,
+        )
+
+    def prepare_production_intent_authority(self, **kwargs: object):
+        assert self._presentation_delegate is not None
+        return P3AuthenticatedComposition.prepare_production_intent_authority(
+            self._presentation_delegate,
+            **kwargs,
+        )
+
+    async def handle(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        if operation != "task.create" or session_id != SCOPE.session_id:
+            raise AssertionError("Store mutation fixture accepts only exact create")
+        prepared = await self.prepare_mutation_confirmation(
+            operation=operation,
+            params=params,
+            session_id=session_id,
+        )
+        self.verifier.verify_and_consume(
+            str(params["confirmation_id"]),
+            prepared.binding,
+            now=NOW,
+        )
+        spec = _itinerary_spec(self.project_dir)
+        if (
+            params.get("name") != spec.name
+            or params.get("instruction") != spec.instruction
+        ):
+            raise AssertionError("Store mutation fixture changed the exact spec")
+        command = CommandEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": request_id,
+                "command_id": params["command_id"],
+                "command_type": "task.create",
+                "issued_at": params["issued_at"],
+                "scope": SCOPE.to_dict(),
+                "correlation_id": params["correlation_id"],
+                "causation_id": None,
+                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+                "target_ref": {
+                    "kind": "task",
+                    "id": f"create:{params['command_id']}",
+                },
+                "context_refs": [],
+                "required_capabilities": ["task.create"],
+                "payload": {
+                    "name": spec.name,
+                    "instruction": spec.instruction,
+                    "executor_id": spec.executor_id,
+                    "side_effect_class": spec.side_effect_class,
+                    "attributes": dict(spec.attributes),
+                },
+                "extensions": {},
+            }
+        )
+        stored = self.store.create(
+            command,
+            spec,
+            observed_at=NOW,
+            current_background_session_id=session_id,
+        )
+        self.mutation_calls.append((operation, dict(params)))
+        return P3RouteResult(stored.ok, stored.to_dict())
 
 
 def _voice_mutation_registry(
@@ -5080,6 +5268,332 @@ async def test_p2_composes_observability_worker_into_the_same_root_lease(
 
 
 @pytest.mark.asyncio
+async def test_p2_real_authority_adapter_runtime_codec_backend_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p3 = _P3Composition(tmp_path)
+    manager = _AgentManager()
+    backend = BoundedInMemoryOtelBackend(capacity=4)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "4d" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready is True
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=False,
+        ),
+        p3_composition=p3,
+        agent_manager=manager,
+        push_text_event=push,
+        observability_runtime=runtime,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-observability-runtime",
+        session_id="session-product",
+        channel_id="web",
+    )
+    for _ in range(100):
+        if backend.records():
+            break
+        await asyncio.sleep(0.01)
+
+    assert activated.ok is True
+    assert _route(activated.payload, "observability")["truth"] == "formal"
+    assert runtime.health().authority_bindings == 1
+    retained = registry._p2_routes[("session-product", "interaction-1")]
+    adapter_snapshot = retained.observability_adapter.snapshot()
+    assert adapter_snapshot.exporter.worker_running is True
+    assert adapter_snapshot.exporter.state == "running"
+    assert adapter_snapshot.exporter.stats.accepted_records == 1
+    assert not hasattr(runtime.health(), "exporter")
+    assert len(backend.records()) == 1
+    envelope = backend.records()[0]
+    assert envelope.seam.value == "queue"
+    assert envelope.trace_identities
+    payload = envelope.record.canonical_bytes
+    for raw in (
+        SCOPE.subject_id,
+        SCOPE.project_id or "",
+        SCOPE.session_id or "",
+        "correlation-p2",
+        "interaction-1",
+    ):
+        assert raw.encode() not in payload
+
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._live_voice_product_composition = registry
+    server._live_voice_product_observability = runtime
+    task_payload: dict[str, object] = {
+        "request_id": "request-p3-observability-runtime",
+        "ok": True,
+        "result": {
+            "status": "dispatched",
+            "operation": "task.create",
+            "origin_kind": "voice",
+            "origin_id": "interaction-1",
+            "resolution_id": "a" * 64,
+            "commit_sha256": "b" * 64,
+            "task_id": "task-observed",
+            "formal_task_result": {
+                "task_id": "task-observed",
+                "state": "accepted",
+            },
+        },
+    }
+    task_request = AgentRequest(
+        request_id="request-p3-observability-runtime",
+        channel_id="web",
+        session_id="session-product",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+        params={
+            "correlation_id": "correlation-p2",
+            "operation_hint": "task.create",
+            "task_id_hint": None,
+        },
+    )
+    server._observe_live_voice_task_product_result(
+        request=task_request,
+        params=task_request.params,
+        payload=task_payload,
+        result_ok=True,
+        duration_ms=1.0,
+    )
+    for _ in range(100):
+        if len(backend.records()) == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(backend.records()) == 2
+    command = backend.records()[1]
+    assert command.seam.value == "command"
+    assert dict(command.trace_identities)["task_id"].startswith("lvpub:task:")
+    assert dict(command.trace_identities)["command_id"].startswith("lvpub:command:")
+    assert (
+        retained.observability_adapter.snapshot().exporter.stats.accepted_records == 2
+    )
+
+    progress_request = AgentRequest(
+        request_id="request-p3-generation-observability-runtime",
+        channel_id="web",
+        session_id="session-product",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
+        params={
+            "session_id": "session-product",
+            "task_id": "task-observed",
+            "correlation_id": "correlation-p2",
+            "origin_id": "interaction-1",
+            "generation_id": "generation-observed",
+            "generation": 1,
+            "origin_kind": "voice",
+        },
+    )
+    progress_payload: dict[str, object] = {
+        "request_id": progress_request.request_id,
+        "ok": True,
+        "result": {
+            "status": "active",
+            "session_id": "session-product",
+            "task_id": "task-observed",
+            "correlation_id": "correlation-p2",
+            "origin_id": "interaction-1",
+            "generation_id": "generation-observed",
+            "generation": 1,
+            "requested_origin_kind": "voice",
+            "origin_kind": "text",
+            "voice_progress": "unavailable",
+            "fallback_reason": "VOICE_PROGRESS_UNAVAILABLE",
+            "voice_reason": "VOICE_PROGRESS_UNAVAILABLE",
+        },
+    }
+    server._observe_live_voice_task_product_result(
+        request=progress_request,
+        params=progress_request.params,
+        payload=progress_payload,
+        result_ok=True,
+        duration_ms=1.0,
+    )
+    for _ in range(100):
+        if len(backend.records()) == 4:
+            break
+        await asyncio.sleep(0.01)
+    assert len(backend.records()) == 4
+    generation_span, generation_metric = backend.records()[2:]
+    assert generation_span.seam.value == "generation"
+    assert dict(generation_span.trace_identities)["task_id"].startswith("lvpub:task:")
+    assert generation_metric.seam.value == "generation"
+    assert generation_metric.trace_identities == ()
+    assert (
+        retained.observability_adapter.snapshot().exporter.stats.accepted_records == 4
+    )
+
+    # Backend saturation fails only the diagnostic attempt.  The already
+    # returned business payload and the adapter's sole FIFO/worker stay owned
+    # by their existing lifecycles.
+    failure_payload = json.loads(json.dumps(task_payload))
+    failure_payload["request_id"] = "request-p3-observability-backend-full"
+    before_business = json.loads(json.dumps(failure_payload))
+    failure_request = AgentRequest(
+        request_id="request-p3-observability-backend-full",
+        channel_id="web",
+        session_id="session-product",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+        params=task_request.params,
+    )
+    server._observe_live_voice_task_product_result(
+        request=failure_request,
+        params=failure_request.params,
+        payload=failure_payload,
+        result_ok=True,
+        duration_ms=1.0,
+    )
+    for _ in range(100):
+        exporter = retained.observability_adapter.snapshot().exporter
+        if exporter.stats.failed_records == 1:
+            break
+        await asyncio.sleep(0.01)
+    assert failure_payload == before_business
+    assert len(backend.records()) == 4
+    assert retained.observability_adapter.snapshot().exporter.stats.failed_records == 1
+
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-p2-observability-runtime-close",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+    await registry.stop()
+    final = await runtime.close()
+    assert final.state.value == "closed"
+    assert final.backend.state.value == "closed"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_consume_requires_one_open_session_correlation_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = BoundedInMemoryOtelBackend(capacity=16)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "8b" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=False),
+        p3_composition=_P3Composition(tmp_path),
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        observability_runtime=runtime,
+    )
+
+    def emit(stem: str) -> bool:
+        return registry._emit_authoritative_route_diagnostic(
+            session_id=SCOPE.session_id or "",
+            correlation_id="correlation-p2",
+            segment_name="task.attempt",
+            seam_name="executor",
+            seam_id=f"executor-{stem}",
+            task_id="task-route-selection",
+            attempt_id="attempt-route-selection",
+            source_record_id=f"event-{stem}",
+            event_id=f"event-{stem}",
+            executor_id=f"executor-{stem}",
+        )
+
+    assert emit("absent") is False
+    assert runtime.health().diagnostic_identities == 0
+    first_params = _p2_params()
+    assert (
+        await registry.handle_p2_activate(
+            params=first_params,
+            request_id="request-route-selection-first",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    assert emit("unique") is True
+    for _ in range(200):
+        if any(record.seam.value == "executor" for record in backend.records()):
+            break
+        await asyncio.sleep(0.01)
+
+    second_params = _p2_params(
+        interaction_id="interaction-route-selection-second",
+        activation_id="activation-route-selection-second",
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=second_params,
+            request_id="request-route-selection-second",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    for _ in range(200):
+        snapshots = [
+            route.observability_adapter.snapshot()
+            for route in registry._p2_routes.values()
+            if route.observability_adapter is not None
+        ]
+        if (
+            len(snapshots) == 2
+            and all(
+                snapshot.exporter.stats.accepted_records >= 1 for snapshot in snapshots
+            )
+            and len(backend.records()) >= 3
+        ):
+            break
+        await asyncio.sleep(0.01)
+    identities_before = runtime.health().diagnostic_identities
+    backend_before = len(backend.records())
+    assert emit("ambiguous") is False
+    await asyncio.sleep(0.05)
+    assert runtime.health().diagnostic_identities == identities_before
+    assert len(backend.records()) == backend_before
+
+    for params, stem in (
+        (second_params, "second"),
+        (first_params, "first"),
+    ):
+        assert (
+            await registry.handle_p2_close(
+                params=params,
+                request_id=f"request-route-selection-close-{stem}",
+                session_id=SCOPE.session_id,
+            )
+        ).ok
+    assert emit("closed") is False
+    assert runtime.health().diagnostic_identities == identities_before
+    await registry.stop()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_p2_denied_or_unavailable_authority_has_zero_downstream_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5959,6 +6473,456 @@ def _running_presentation_store(
         "task.running",
     ]
     return project, store, task_id, source_events
+
+
+@pytest.mark.asyncio
+async def test_real_store_failed_journey_links_mutation_executor_generation_and_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        lambda: ACK_NOW,
+    )
+    project = tmp_path / "actual-failed-journey-project"
+    project.mkdir()
+    store = SqliteTaskStore(tmp_path / "actual-failed-journey.sqlite3")
+    owner = BoundedP3ConfirmationOwner(
+        tmp_path / "actual-failed-journey-confirmations.sqlite3",
+        enabled=True,
+    )
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _StoreMutationP3Composition(project, forwarder, store)
+    backend = BoundedInMemoryOtelBackend(capacity=64)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "6f" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready
+    pushed: list[dict[str, object]] = []
+
+    async def push(message: dict[str, object]) -> bool:
+        pushed.append(message)
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        observability_runtime=runtime,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-actual-chain-p2",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    spec = _itinerary_spec(project)
+    issue_params = _mutation_params(
+        operation="task.create",
+        command_id="command-actual-failed-create",
+        correlation_id="correlation-p2",
+        task_id=None,
+        name=spec.name,
+        instruction=spec.instruction,
+    )
+    issue_params.pop("task_id")
+    issued = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-actual-failed-confirmation",
+        session_id=SCOPE.session_id,
+    )
+    receipt = cast(Mapping[str, object], issued.payload["result"])
+    mutated = await registry.handle_p3_mutation(
+        params={**issue_params, "confirmation_id": receipt["confirmation_id"]},
+        request_id="request-actual-failed-mutation",
+        session_id=SCOPE.session_id,
+    )
+    assert issued.ok and mutated.ok
+    mutation_result = cast(Mapping[str, object], mutated.payload["result"])
+    formal_result = cast(Mapping[str, object], mutation_result["formal_task_result"])
+    task_id = cast(str, formal_result["task_id"])
+    task = store.get_task(task_id, SCOPE)
+    assert task.attempt_id == formal_result["attempt_id"]
+    item = store.claim_outbox("actual-failed-journey-worker")
+    assert item is not None and item.task_id == task_id
+    executor_ref = f"actual-failed-journey:{task.attempt_id}"
+    store.complete_outbox(
+        item,
+        executor_ref=executor_ref,
+        observations=(
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=task.spec.executor_id,
+                executor_ref=executor_ref,
+                task_id=task_id,
+                attempt_id=task.attempt_id,
+                source_event_id=f"{executor_ref}:0",
+                source_seq=0,
+                attempt_state=FormalAttemptState.RUNNING,
+                attempt_outcome=None,
+                occurred_at=NOW,
+                raw_status="running",
+            ),
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=task.spec.executor_id,
+                executor_ref=executor_ref,
+                task_id=task_id,
+                attempt_id=task.attempt_id,
+                source_event_id=f"{executor_ref}:1",
+                source_seq=1,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.FAILED,
+                occurred_at=NOW,
+                raw_status="failed",
+                error="private executor failure detail",
+            ),
+        ),
+    )
+    source_events = store.events(task_id, SCOPE)
+    running_event = next(
+        event for event in source_events if event.event_type == "task.running"
+    )
+    terminal_event = source_events[-1]
+    assert terminal_event.event_type == "task.terminal"
+    assert terminal_event.outcome == TerminalOutcome.FAILED.value
+    preconsumed = store.ack_events(
+        CommandEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": "request-failed-prefix-consumed",
+                "command_id": "command-failed-prefix-consumed",
+                "command_type": "task.ack_events",
+                "issued_at": ACK_NOW,
+                "scope": SCOPE.to_dict(),
+                "correlation_id": "correlation-p2",
+                "causation_id": running_event.event_id,
+                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+                "target_ref": {"kind": "task", "id": task_id},
+                "context_refs": [],
+                "required_capabilities": ["task.ack_events"],
+                "payload": {
+                    "presentation_class": "text",
+                    "acked_through_seq": running_event.seq,
+                    "acked_event_id": running_event.event_id,
+                    "expected_event_head": terminal_event.seq,
+                },
+                "extensions": {},
+            }
+        ),
+        observed_at=ACK_NOW,
+    )
+    assert preconsumed.ok
+    composition.subscription_events = (terminal_event,)
+    assert (
+        await registry.handle_p3_progress_activate(
+            params=_progress_params(task_id=task_id, correlation_id="correlation-p2"),
+            request_id="request-actual-chain-progress",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    for _ in range(200):
+        if pushed and any(
+            record.seam.value == "generation" for record in backend.records()
+        ):
+            break
+        await asyncio.sleep(0.01)
+    assert pushed
+
+    status = await registry.handle_p3_query(
+        operation="task.status",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": SCOPE.session_id,
+            "task_id": task_id,
+        },
+        request_id="request-actual-chain-status",
+        session_id=SCOPE.session_id,
+    )
+    events = await registry.handle_p3_query(
+        operation="task.events",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": SCOPE.session_id,
+            "task_id": task_id,
+            "after_seq": -1,
+            "limit": 20,
+        },
+        request_id="request-actual-chain-events",
+        session_id=SCOPE.session_id,
+    )
+    unavailable_result = await registry.handle_p3_query(
+        operation="task.result",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": SCOPE.session_id,
+            "task_id": task_id,
+        },
+        request_id="request-actual-chain-result-unavailable",
+        session_id=SCOPE.session_id,
+    )
+    assert status.ok and events.ok and unavailable_result.ok
+    assert (
+        cast(Mapping[str, object], unavailable_result.payload["result"])["availability"]
+        == TaskResultAvailability.UNAVAILABLE.value
+    )
+
+    terminal_payload: Mapping[str, object] | None = None
+    for _ in range(200):
+        progress_payloads = [
+            cast(Mapping[str, object], message["payload"])
+            for message in pushed
+            if isinstance(message.get("payload"), Mapping)
+            and cast(Mapping[str, object], message["payload"]).get("event_type")
+            == "live_voice.task.progress"
+        ]
+        terminal_payload = next(
+            (
+                payload
+                for payload in progress_payloads
+                if cast(Mapping[str, object], payload["source_event"])["event_type"]
+                == "task.terminal"
+            ),
+            None,
+        )
+        if terminal_payload is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert terminal_payload is not None
+    assert cast(Mapping[str, object], terminal_payload["source_event"])["payload"] == {
+        "state": "terminal",
+        "outcome": "failed",
+    }
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_presentation_progress_ack_params(registry, terminal_payload),
+        request_id="request-actual-chain-terminal-ack",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert acknowledged.ok
+
+    for _ in range(200):
+        seams = {record.seam.value for record in backend.records()}
+        if {
+            "command",
+            "outbox",
+            "executor",
+            "event",
+            "generation",
+            "ack",
+        } <= seams:
+            break
+        await asyncio.sleep(0.01)
+    records = backend.records()
+    seams = {record.seam.value for record in records}
+    assert {
+        "queue",
+        "command",
+        "outbox",
+        "executor",
+        "event",
+        "generation",
+        "ack",
+    } <= seams
+    command = next(record for record in records if record.seam.value == "command")
+    outbox = next(record for record in records if record.seam.value == "outbox")
+    executor = next(record for record in records if record.seam.value == "executor")
+    assert {"task_id", "attempt_id", "command_id", "executor_id"} <= dict(
+        executor.trace_identities
+    ).keys()
+    failure_generation = next(
+        record
+        for record in records
+        if record.seam.value == "generation"
+        and b'"live_voice.outcome":"failed"' in record.record.canonical_bytes
+    )
+    assert {"task_id", "attempt_id", "event_id", "presentation_id"} <= dict(
+        failure_generation.trace_identities
+    ).keys()
+    failure_event = next(
+        record
+        for record in records
+        if record.seam.value == "event"
+        and b'"live_voice.outcome":"failed"' in record.record.canonical_bytes
+    )
+    assert {"task_id", "attempt_id", "event_id"} <= dict(
+        failure_event.trace_identities
+    ).keys()
+    terminal_event_id = cast(Mapping[str, object], terminal_payload["source_event"])[
+        "event_id"
+    ]
+    ack = next(
+        record
+        for record in records
+        if record.seam.value == "ack"
+        and dict(record.trace_identities).get("event_id")
+        == dict(failure_generation.trace_identities).get("event_id")
+    )
+    assert {
+        "task_id",
+        "attempt_id",
+        "command_id",
+        "event_id",
+        "presentation_id",
+    } <= dict(ack.trace_identities).keys()
+    command_identities = dict(command.trace_identities)
+    outbox_identities = dict(outbox.trace_identities)
+    executor_identities = dict(executor.trace_identities)
+    for key in ("task_id", "attempt_id", "command_id"):
+        assert command_identities[key] == outbox_identities[key]
+        assert command_identities[key] == executor_identities[key]
+    assert (
+        dict(failure_event.trace_identities)["task_id"] == command_identities["task_id"]
+    )
+    assert (
+        dict(failure_generation.trace_identities)["task_id"]
+        == (command_identities["task_id"])
+    )
+    assert dict(ack.trace_identities)["task_id"] == command_identities["task_id"]
+    serialized = b"\n".join(record.record.canonical_bytes for record in records)
+    for forbidden in (
+        task_id,
+        task.attempt_id,
+        task.spec.instruction,
+        task.spec.name,
+        task.spec.context.uri,
+        "command-actual-failed-create",
+        str(terminal_event_id),
+        "private executor failure detail",
+    ):
+        assert forbidden.encode() not in serialized
+
+    await registry.stop()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_real_store_result_query_exports_identity_without_result_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, store, task_id, _source_events = _running_presentation_store(tmp_path)
+    task = store.get_task(task_id, SCOPE)
+    attempt = store.get_attempt(task.attempt_id)
+    assert attempt.executor_ref is not None
+    artifact = TaskResultArtifact(
+        relative_path="private-result-artifact.txt",
+        sha256=hashlib.sha256(b"private artifact bytes").hexdigest(),
+    )
+    store.apply_observations(
+        (
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=attempt.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=f"{attempt.executor_ref}:2",
+                source_seq=2,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=ACK_NOW,
+                raw_status="completed",
+                result_text="private completed result sentinel",
+                result_artifacts=(artifact,),
+            ),
+        )
+    )
+    composition = _StoreQueryP3Composition(project, presentation_store=store)
+    backend = BoundedInMemoryOtelBackend(capacity=16)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "9c" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        observability_runtime=runtime,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-result-hook-p2",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    queried = await registry.handle_p3_query(
+        operation="task.result",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": SCOPE.session_id,
+            "task_id": task_id,
+        },
+        request_id="request-result-hook-query",
+        session_id=SCOPE.session_id,
+    )
+    assert queried.ok
+    query_result = cast(Mapping[str, object], queried.payload["result"])
+    assert query_result["availability"] == TaskResultAvailability.AVAILABLE.value
+    returned_result = cast(Mapping[str, object], query_result["task_result"])
+    assert returned_result["result_text"] == "private completed result sentinel"
+    assert returned_result["artifacts"] == [artifact.to_dict()]
+    for _ in range(200):
+        if any(record.seam.value == "result" for record in backend.records()):
+            break
+        await asyncio.sleep(0.01)
+    result_record = next(
+        record for record in backend.records() if record.seam.value == "result"
+    )
+    assert {"task_id", "attempt_id", "event_id"} <= dict(
+        result_record.trace_identities
+    ).keys()
+    serialized = b"\n".join(
+        record.record.canonical_bytes for record in backend.records()
+    )
+    for forbidden in (
+        task_id,
+        attempt.attempt_id,
+        "private completed result sentinel",
+        artifact.relative_path,
+        artifact.sha256,
+        task.spec.name,
+        task.spec.instruction,
+        task.spec.context.uri,
+        "trusted-token",
+    ):
+        assert forbidden.encode() not in serialized
+
+    await registry.stop()
+    await runtime.close()
 
 
 def _cancelled_retry_presentation_store(
@@ -6974,6 +7938,19 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
     composition.subscription_events = source_events
     manager = _AgentManager()
     pushed: list[dict[str, object]] = []
+    backend = BoundedInMemoryOtelBackend(capacity=64)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "7a" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready
 
     async def push(message: dict[str, object]) -> bool:
         pushed.append(message)
@@ -6984,6 +7961,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
         p3_composition=composition,
         agent_manager=manager,
         push_text_event=push,
+        observability_runtime=runtime,
     )
     assert (
         await registry.handle_p2_activate(
@@ -7124,7 +8102,39 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
         call["operation"] == "task.events" and call.get("consumer_task_access") is True
         for call in session_b_calls
     )
+    for _ in range(200):
+        if len(
+            [
+                record
+                for record in backend.records()
+                if record.seam.value == "generation"
+            ]
+        ) >= 2 and any(record.seam.value == "ack" for record in backend.records()):
+            break
+        await asyncio.sleep(0.01)
+    generations = [
+        record for record in backend.records() if record.seam.value == "generation"
+    ]
+    ack = next(record for record in backend.records() if record.seam.value == "ack")
+    generation_sessions = {
+        dict(record.trace_identities)["session_id"] for record in generations
+    }
+    ack_session = dict(ack.trace_identities)["session_id"]
+    assert len(generation_sessions) == 2
+    assert ack_session in generation_sessions
+    serialized = b"\n".join(
+        record.record.canonical_bytes for record in backend.records()
+    )
+    for forbidden in (
+        SCOPE.session_id or "",
+        session_b,
+        "correlation-p2",
+        "correlation-p2-reconnected",
+        task_id,
+    ):
+        assert forbidden.encode() not in serialized
     await registry.stop()
+    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -11541,6 +12551,130 @@ async def test_p3_confirmation_issue_and_mutation_use_current_owner_permit(
     assert len(composition.mutation_calls) == 1
     assert _route(mutated.payload, "authority")["truth"] == "formal"
     assert _route(mutated.payload, "p3.control")["truth"] == "formal"
+
+
+@pytest.mark.asyncio
+async def test_real_store_mutation_exports_exact_command_and_initial_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "actual-mutation-project"
+    project.mkdir()
+    store = SqliteTaskStore(tmp_path / "actual-mutation.sqlite3")
+    owner = BoundedP3ConfirmationOwner(
+        tmp_path / "actual-mutation-confirmations.sqlite3",
+        enabled=True,
+    )
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _StoreMutationP3Composition(project, forwarder, store)
+    backend = BoundedInMemoryOtelBackend(capacity=16)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "5e" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=False,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        observability_runtime=runtime,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-actual-mutation-p2",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    spec = _itinerary_spec(project)
+    issue_params = _mutation_params(
+        operation="task.create",
+        command_id="command-actual-store-create",
+        correlation_id="correlation-p2",
+        task_id=None,
+        name=spec.name,
+        instruction=spec.instruction,
+    )
+    issue_params.pop("task_id")
+    issued = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-actual-mutation-confirmation",
+        session_id=SCOPE.session_id,
+    )
+    receipt = cast(Mapping[str, object], issued.payload["result"])
+    mutated = await registry.handle_p3_mutation(
+        params={**issue_params, "confirmation_id": receipt["confirmation_id"]},
+        request_id="request-actual-mutation",
+        session_id=SCOPE.session_id,
+    )
+    assert issued.ok and mutated.ok
+    result = cast(Mapping[str, object], mutated.payload["result"])
+    formal_result = cast(Mapping[str, object], result["formal_task_result"])
+    task_id = cast(str, formal_result["task_id"])
+    attempt_id = cast(str, formal_result["attempt_id"])
+    outbox_id = cast(str, formal_result["outbox_id"])
+    assert store.get_task(task_id, SCOPE).attempt_id == attempt_id
+
+    for _ in range(200):
+        if {record.seam.value for record in backend.records()} >= {
+            "command",
+            "outbox",
+        }:
+            break
+        await asyncio.sleep(0.01)
+    command = next(
+        record for record in backend.records() if record.seam.value == "command"
+    )
+    outbox = next(
+        record for record in backend.records() if record.seam.value == "outbox"
+    )
+    for envelope in (command, outbox):
+        identities = dict(envelope.trace_identities)
+        assert {
+            "task_id",
+            "attempt_id",
+            "command_id",
+            "outbox_id",
+        } <= identities.keys()
+        assert all(
+            str(identities[key]).startswith("lvpub:")
+            for key in ("task_id", "attempt_id", "command_id", "outbox_id")
+        )
+    serialized = b"\n".join(
+        record.record.canonical_bytes for record in backend.records()
+    )
+    for forbidden in (
+        task_id,
+        attempt_id,
+        outbox_id,
+        "command-actual-store-create",
+        spec.name,
+        spec.instruction,
+        str(project),
+    ):
+        assert forbidden.encode() not in serialized
+
+    await registry.stop()
+    await runtime.close()
 
 
 @pytest.mark.asyncio

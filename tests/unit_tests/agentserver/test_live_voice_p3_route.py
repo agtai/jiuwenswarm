@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import hashlib
-import inspect
 import json
 from pathlib import Path
 
@@ -23,8 +23,25 @@ from jiuwenswarm.server.live_voice import product_composition_registry as produc
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
 from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservabilityCollector,
-    create_metric,
-    create_observation,
+)
+from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+    LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+    AuthenticationMode,
+    DurabilityLevel,
+    ExecutorCapability,
+    LiveVoiceCapability,
+    LiveVoiceDeploymentProfile,
+    ValidatedAuthenticationConfiguration,
+    ValidatedExecutorConfiguration,
+    ValidatedLiveVoiceConfiguration,
+)
+from jiuwenswarm.server.live_voice.product_observability_runtime import (
+    PRODUCT_OBSERVABILITY_BACKEND_ENV,
+    PRODUCT_OBSERVABILITY_BACKEND_ID,
+    PRODUCT_OBSERVABILITY_ENABLE_ENV,
+    PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV,
+    ProductObservabilityRuntime,
+    ProductObservabilityRuntimeState,
 )
 
 
@@ -601,31 +618,155 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
     )
 
     await server._start_live_voice_product_composition()
-    collector = server._live_voice_product_observability
-    exporter = captured[0]["observability_exporter"]
-    fixture = json.loads(
-        (
-            Path(__file__).resolve().parents[2]
-            / "fixtures"
-            / "live_voice_observability_v1"
-            / "contract.json"
-        ).read_text(encoding="utf-8")
-    )
-    observation = create_observation(fixture["observation"])
-    metric = create_metric(fixture["metric"])
-    await exporter(observation)
-    await exporter(metric)
     await server._stop_live_voice_product_composition()
     await server._stop_live_voice_product_composition()
 
     assert registry.stop_calls == 1
     assert server._live_voice_product_composition is None
-    assert isinstance(collector, LiveVoiceObservabilityCollector)
-    assert collector.observations() == (observation,)
-    assert collector.metrics() == (metric,)
     assert server._live_voice_product_observability is None
     assert captured[0]["commit_ledger"] is commit_ledger
-    assert inspect.iscoroutinefunction(exporter)
+    assert captured[0]["observability_runtime"] is None
+
+
+@pytest.mark.asyncio
+async def test_observability_flag_off_does_not_import_or_touch_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._agent_manager = object()
+    monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
+    monkeypatch.delenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, raising=False)
+    monkeypatch.setattr(
+        product_module,
+        "create_product_composition_registry_from_environment",
+        lambda **_kwargs: registry,
+    )
+    original_import = builtins.__import__
+
+    def poison_runtime_import(name: str, *args: object, **kwargs: object):
+        if name == "jiuwenswarm.server.live_voice.product_observability_runtime":
+            raise AssertionError("flag-off imported the product observability runtime")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", poison_runtime_import)
+
+    await server._start_live_voice_product_composition()
+
+    assert server._live_voice_product_composition is registry
+    assert server._live_voice_product_observability is None
+    await server._stop_live_voice_product_composition()
+
+
+@pytest.mark.asyncio
+async def test_agentserver_composes_only_owner_validated_ready_observability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _ProductRegistry()
+    captured: list[dict[str, object]] = []
+
+    class ConfigurationOwner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def validated_live_voice_configuration(self, *, provider):
+            self.calls += 1
+            digest = hashlib.sha256(b"agentserver-config-owner").hexdigest()
+            return ValidatedLiveVoiceConfiguration(
+                contract_version=LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+                configuration_id="test.agentserver.owner.v1",
+                configuration_digest=digest,
+                profile=LiveVoiceDeploymentProfile.FORMAL_LIVE_VOICE,
+                enabled=True,
+                ordinary_production_default_off=True,
+                authentication=ValidatedAuthenticationConfiguration(
+                    mode=AuthenticationMode.SCOPED_BEARER,
+                    validation_receipt_id="test-auth-owner.v1",
+                    scope_digest=hashlib.sha256(b"scope").hexdigest(),
+                ),
+                executor=ValidatedExecutorConfiguration(
+                    executor_id="direct-project-code",
+                    adapter_id="live-voice.direct-project-code",
+                    durability_level=DurabilityLevel.D2,
+                    capabilities=tuple(
+                        sorted(ExecutorCapability, key=lambda item: item.value)
+                    ),
+                    validation_receipt_id="test-executor-owner.v1",
+                    configuration_digest=hashlib.sha256(b"executor").hexdigest(),
+                ),
+                providers=(provider,),
+                capabilities=tuple(
+                    sorted(
+                        (
+                            LiveVoiceCapability.AUTHENTICATED,
+                            LiveVoiceCapability.EXECUTOR_D2,
+                            LiveVoiceCapability.FORMAL_WEB,
+                            LiveVoiceCapability.TASK_MUTATION,
+                            LiveVoiceCapability.TASK_QUERY,
+                            LiveVoiceCapability.TELEMETRY_EXPORT,
+                        ),
+                        key=lambda item: item.value,
+                    )
+                ),
+            )
+
+    owner = ConfigurationOwner()
+    server = _server(owner)
+    server._agent_manager = object()
+    server._live_voice_turn_commit_ledger = object()
+    monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "4b" * 32)
+    monkeypatch.setattr(
+        product_module,
+        "create_product_composition_registry_from_environment",
+        lambda **kwargs: captured.append(kwargs) or registry,
+    )
+
+    await server._start_live_voice_product_composition()
+
+    runtime = server._live_voice_product_observability
+    assert type(runtime) is ProductObservabilityRuntime
+    assert runtime.health().ready is True
+    assert captured[0]["observability_runtime"] is runtime
+    assert "observability_exporter" not in captured[0]
+    assert owner.calls == 1
+
+    assert await server._stop_live_voice_product_composition() is True
+    assert runtime.health().state is ProductObservabilityRuntimeState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_enabled_observability_without_configuration_owner_stays_unregistered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _ProductRegistry()
+    captured: list[dict[str, object]] = []
+    server = _server(object())
+    server._agent_manager = object()
+    monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "4c" * 32)
+    monkeypatch.setattr(
+        product_module,
+        "create_product_composition_registry_from_environment",
+        lambda **kwargs: captured.append(kwargs) or registry,
+    )
+
+    await server._start_live_voice_product_composition()
+
+    assert server._live_voice_product_composition is registry
+    assert server._live_voice_product_observability is None
+    assert captured[0]["observability_runtime"] is None
+    await server._stop_live_voice_product_composition()
 
 
 @pytest.mark.asyncio

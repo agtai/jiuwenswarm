@@ -56,6 +56,11 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
 from jiuwenswarm.server.live_voice.executor_capabilities import (
     ExecutorCapabilityProfile,
 )
+from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+    AuthenticationMode,
+    DurabilityLevel,
+    LiveVoiceCapability,
+)
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
     AuthenticatedPrincipal,
@@ -95,6 +100,9 @@ from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityRouteContext,
     ProductAuthorityRequest,
     ProductAuthorityService,
+)
+from jiuwenswarm.server.live_voice.product_observability_runtime import (
+    BoundedInMemoryOtelBackend,
 )
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     BoundedP3ConfirmationOwner,
@@ -672,7 +680,7 @@ async def _stop_test_reconciliation_worker(
 class _Harness:
     composition: P3AuthenticatedComposition
     database: Path
-    executor: _Executor
+    executor: object
     authority: _AuthorityResolver
     closer: _CloseRecorder
     telemetry: _Telemetry
@@ -694,6 +702,9 @@ def _principal(
     )
 
 
+_DEFAULT_CONFIRMATION_VERIFIER = object()
+
+
 def _harness(
     tmp_path: Path,
     *,
@@ -703,10 +714,12 @@ def _harness(
     allowed_operations: frozenset[str] = P3_OPERATIONS,
     commit_ledger: TurnCommitLedger | None = None,
     executor_profiles: tuple[ExecutorCapabilityProfile, ...] | None = None,
+    executor_override: object | None = None,
+    confirmation_verifier: object = _DEFAULT_CONFIRMATION_VERIFIER,
     clock=None,
 ) -> _Harness:
     database = tmp_path / "formal-tasks.sqlite3"
-    executor = _Executor()
+    executor = executor_override or _Executor()
     authority = _AuthorityResolver(
         contexts
         or {
@@ -731,7 +744,11 @@ def _harness(
         ),
         authority_resolver=authority,
         core=PersistentTaskCore(SqliteTaskStore(database), executor),
-        confirmation_verifier=confirmations,
+        confirmation_verifier=(
+            confirmations
+            if confirmation_verifier is _DEFAULT_CONFIRMATION_VERIFIER
+            else confirmation_verifier
+        ),
         model_resolver=models,
         binding_resolver=closer,
         telemetry=telemetry,
@@ -772,6 +789,173 @@ def _production_registry_text_params(
     if continuation_id is not None:
         params["continuation_id"] = continuation_id
     return params
+
+
+@pytest.mark.asyncio
+async def test_accepting_p3_owner_projects_exact_auth_executor_and_backend_configuration(
+    tmp_path: Path,
+) -> None:
+    profile = DirectProjectCodeExecutorAdapter.capability_profile()
+    backend = BoundedInMemoryOtelBackend(capacity=7)
+
+    query_root = tmp_path / "query-only"
+    query_root.mkdir()
+    query_only = _harness(
+        query_root,
+        executor_profiles=(profile,),
+        confirmation_verifier=None,
+    )
+    await query_only.composition.start()
+    await _stop_test_reconciliation_worker(query_only.composition)
+    try:
+        configuration = query_only.composition.validated_live_voice_configuration(
+            provider=backend.validated_provider_configuration()
+        )
+
+        assert configuration.authentication is not None
+        assert configuration.authentication.mode is AuthenticationMode.SCOPED_BEARER
+        assert TOKEN not in repr(configuration)
+        assert configuration.executor is None
+        assert configuration.providers == (backend.validated_provider_configuration(),)
+        assert set(configuration.capabilities) == {
+            LiveVoiceCapability.AUTHENTICATED,
+            LiveVoiceCapability.FORMAL_WEB,
+            LiveVoiceCapability.TASK_QUERY,
+            LiveVoiceCapability.TELEMETRY_EXPORT,
+        }
+        assert configuration.ordinary_production_default_off is True
+    finally:
+        await query_only.composition.stop()
+
+    with pytest.raises(FormalTaskViolation) as stopped:
+        query_only.composition.validated_live_voice_configuration(
+            provider=backend.validated_provider_configuration()
+        )
+    assert stopped.value.reason == "P3_CONFIGURATION_OWNER_UNAVAILABLE"
+
+    expired_root = tmp_path / "expired-auth"
+    expired_root.mkdir()
+    expired = _harness(
+        expired_root,
+        expires_at="2025-01-01T00:00:00Z",
+        executor_profiles=(profile,),
+        confirmation_verifier=None,
+    )
+    await expired.composition.start()
+    await _stop_test_reconciliation_worker(expired.composition)
+    try:
+        with pytest.raises(FormalTaskViolation) as invalid_auth:
+            expired.composition.validated_live_voice_configuration(
+                provider=backend.validated_provider_configuration()
+            )
+        assert invalid_auth.value.reason == "FORMAL_TASK_AUTHORIZATION_EXPIRED"
+        assert backend.health().state.value == "created"
+        assert backend.health().accepted == 0
+    finally:
+        await expired.composition.stop()
+
+    revoked_root = tmp_path / "incomplete-query-scope"
+    revoked_root.mkdir()
+    revoked = _harness(
+        revoked_root,
+        allowed_operations=frozenset({"task.status"}),
+        executor_profiles=(profile,),
+        confirmation_verifier=None,
+    )
+    await revoked.composition.start()
+    await _stop_test_reconciliation_worker(revoked.composition)
+    try:
+        with pytest.raises(FormalTaskViolation) as incomplete_scope:
+            revoked.composition.validated_live_voice_configuration(
+                provider=backend.validated_provider_configuration()
+            )
+        assert incomplete_scope.value.reason == "P3_QUERY_CONFIGURATION_UNAVAILABLE"
+        assert backend.health().state.value == "created"
+        assert backend.health().accepted == 0
+    finally:
+        await revoked.composition.stop()
+
+    poison_root = tmp_path / "poison-confirmation"
+    poison_root.mkdir()
+    poison = _harness(
+        poison_root,
+        executor_profiles=(profile,),
+        confirmation_verifier=object(),
+    )
+    await poison.composition.start()
+    await _stop_test_reconciliation_worker(poison.composition)
+    try:
+        with pytest.raises(FormalTaskViolation) as invalid_confirmation:
+            poison.composition.validated_live_voice_configuration(
+                provider=backend.validated_provider_configuration()
+            )
+        assert (
+            invalid_confirmation.value.reason
+            == "P3_CONFIRMATION_CONFIGURATION_UNAVAILABLE"
+        )
+        assert backend.health().state.value == "created"
+        assert backend.health().accepted == 0
+    finally:
+        await poison.composition.stop()
+
+    mutation_root = tmp_path / "trusted-mutation"
+    mutation_root.mkdir()
+    direct = object.__new__(DirectProjectCodeExecutorAdapter)
+    direct._durability_store = None
+    trusted = _harness(
+        mutation_root,
+        executor_profiles=(profile,),
+        executor_override=direct,
+    )
+    await trusted.composition.start()
+    await _stop_test_reconciliation_worker(trusted.composition)
+    try:
+        with pytest.raises(FormalTaskViolation) as unprepared_direct:
+            trusted.composition.validated_live_voice_configuration(
+                provider=backend.validated_provider_configuration()
+            )
+        assert unprepared_direct.value.reason == "P3_EXECUTOR_CONFIGURATION_UNAVAILABLE"
+        assert backend.health().state.value == "created"
+        assert backend.health().accepted == 0
+    finally:
+        await trusted.composition.stop()
+
+    missing_root = tmp_path / "missing-direct"
+    missing_root.mkdir()
+    missing = _harness(missing_root, executor_profiles=(profile,))
+    await missing.composition.start()
+    await _stop_test_reconciliation_worker(missing.composition)
+    try:
+        with pytest.raises(FormalTaskViolation) as unavailable:
+            missing.composition.validated_live_voice_configuration(
+                provider=backend.validated_provider_configuration()
+            )
+        assert unavailable.value.reason == "P3_EXECUTOR_CONFIGURATION_UNAVAILABLE"
+    finally:
+        await missing.composition.stop()
+
+    conflict_root = tmp_path / "conflicting-profile"
+    conflict_root.mkdir()
+    d2_profile = DirectProjectCodeExecutorAdapter.construction_capability_profiles(
+        store_backed=True
+    )[-1]
+    conflict_direct = object.__new__(DirectProjectCodeExecutorAdapter)
+    conflict_direct._durability_store = None
+    conflict = _harness(
+        conflict_root,
+        executor_profiles=(d2_profile,),
+        executor_override=conflict_direct,
+    )
+    await conflict.composition.start()
+    await _stop_test_reconciliation_worker(conflict.composition)
+    try:
+        with pytest.raises(FormalTaskViolation) as mismatched:
+            conflict.composition.validated_live_voice_configuration(
+                provider=backend.validated_provider_configuration()
+            )
+        assert mismatched.value.reason == "P3_EXECUTOR_CONFIGURATION_UNAVAILABLE"
+    finally:
+        await conflict.composition.stop()
 
 
 @pytest.mark.asyncio
@@ -5850,13 +6034,31 @@ async def test_factory_direct_executor_lifecycle_releases_agent_bindings(
             self.cleanup_calls += 1
 
     manager = Manager()
+    confirmation_verifier = SqliteP3ConfirmationLedger(database)
     composition = create_p3_composition_from_environment(
         agent_manager=manager,
         model_resolver=_ModelResolver(),
+        confirmation_verifier=confirmation_verifier,
     )
 
     assert composition is not None
     await composition.start()
+    backend = BoundedInMemoryOtelBackend(capacity=7)
+    configuration = composition.validated_live_voice_configuration(
+        provider=backend.validated_provider_configuration()
+    )
+    assert configuration.executor is not None
+    assert configuration.executor.durability_level is DurabilityLevel.D2
+    assert set(configuration.capabilities) == {
+        LiveVoiceCapability.AUTHENTICATED,
+        LiveVoiceCapability.EXECUTOR_D2,
+        LiveVoiceCapability.FORMAL_WEB,
+        LiveVoiceCapability.TASK_MUTATION,
+        LiveVoiceCapability.TASK_QUERY,
+        LiveVoiceCapability.TELEMETRY_EXPORT,
+    }
+    assert backend.health().state.value == "created"
+    assert backend.health().accepted == 0
     await composition.stop()
     await composition.stop()
 

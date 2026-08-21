@@ -21,7 +21,7 @@ from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
@@ -116,7 +116,13 @@ from .product_composition_contract import (
     create_product_composition_manifest,
 )
 from .observability_exporter import ExportRecord
-from .observability import create_observation
+from .observability import (
+    OBSERVABILITY_SCHEMA_VERSION,
+    LiveVoiceMetric,
+    LiveVoiceObservation,
+    create_observation,
+    observation_from_task_event,
+)
 from .product_composition_root import (
     ProductCompositionActivationError,
     ProductCompositionContext,
@@ -202,6 +208,9 @@ from .voice_task_bridge import (
     VoiceTaskBridge,
     VoiceTaskBridgeViolation,
 )
+
+if TYPE_CHECKING:
+    from .product_observability_runtime import ProductObservabilityRuntime
 from .unified_committed_input import SqliteUnifiedCommittedInputJournal
 
 logger = logging.getLogger(__name__)
@@ -847,6 +856,7 @@ class AgentServerProductCompositionRegistry:
         observability_exporter: (
             Callable[[ExportRecord], Awaitable[None]] | None
         ) = None,
+        observability_runtime: ProductObservabilityRuntime | None = None,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -863,7 +873,19 @@ class AgentServerProductCompositionRegistry:
         )
         self._agent_manager = agent_manager
         self._push_text_event = push_text_event
-        self._observability_exporter = observability_exporter
+        if observability_exporter is not None and observability_runtime is not None:
+            raise ValueError("observability has one selected exporter owner")
+        if observability_runtime is not None:
+            from .product_observability_runtime import ProductObservabilityRuntime
+
+            if type(observability_runtime) is not ProductObservabilityRuntime:
+                raise ValueError("observability runtime must use the exact owner")
+        self._observability_runtime = observability_runtime
+        self._observability_exporter = (
+            observability_runtime.export
+            if observability_runtime is not None
+            else observability_exporter
+        )
         self._p3_confirmation_owner = p3_confirmation_owner
         self._p3_confirmation_forwarder = p3_confirmation_forwarder
         self._commit_ledger = commit_ledger or TurnCommitLedger(
@@ -1059,6 +1081,473 @@ class AgentServerProductCompositionRegistry:
     @property
     def p3_mutation_enabled(self) -> bool:
         return self._settings.p3_mutation_enabled
+
+    def consume_product_observation(
+        self,
+        *,
+        session_id: object,
+        correlation_id: object,
+        observation: object,
+        diagnostic_identity: object,
+    ) -> bool:
+        """Send one AgentServer producer fact through its active X-OBS lease.
+
+        The product adapter remains the sole FIFO/worker owner.  This hook can
+        only consume a fact whose session, correlation and interaction bind an
+        already-active P2 observability context; it cannot create or widen an
+        authority, adapter, route, or lifecycle lease.
+        """
+
+        if type(observation) is not LiveVoiceObservation:
+            return False
+        return self._consume_product_observability_fact(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            fact=observation,
+            diagnostic_identity=diagnostic_identity,
+        )
+
+    def consume_product_metric(
+        self,
+        *,
+        session_id: object,
+        correlation_id: object,
+        metric: object,
+        diagnostic_identity: object,
+    ) -> bool:
+        """Send one metric through the exact active product adapter FIFO."""
+
+        if type(metric) is not LiveVoiceMetric:
+            return False
+        return self._consume_product_observability_fact(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            fact=metric,
+            diagnostic_identity=diagnostic_identity,
+        )
+
+    def _consume_product_observability_fact(
+        self,
+        *,
+        session_id: object,
+        correlation_id: object,
+        fact: LiveVoiceObservation | LiveVoiceMetric,
+        diagnostic_identity: object,
+    ) -> bool:
+        runtime = self._observability_runtime
+        binding = fact.binding
+        interaction_id = binding.interaction_id
+        if (
+            runtime is None
+            or self._stopped
+            or type(session_id) is not str
+            or not session_id
+            or type(correlation_id) is not str
+            or not correlation_id
+            or binding.correlation_id != correlation_id
+        ):
+            return False
+        from .product_observability_runtime import (
+            ProductDiagnosticIdentity,
+            ProductDiagnosticSeam,
+        )
+
+        if type(diagnostic_identity) is not ProductDiagnosticIdentity:
+            return False
+        owned_identity = diagnostic_identity
+        if diagnostic_identity.seam is ProductDiagnosticSeam.COMMAND:
+            resolution_id = fact.source_record_id
+            if diagnostic_identity.command_id is None:
+                if (
+                    type(fact) is not LiveVoiceObservation
+                    or fact.segment_name != "task.command"
+                    or type(resolution_id) is not str
+                    or len(resolution_id) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in resolution_id
+                    )
+                    or diagnostic_identity.seam_id != resolution_id
+                ):
+                    return False
+                # This registry owns the intent continuation which dispatches
+                # ``intent-{resolution_id}``; AgentServer never derives it.
+                owned_identity = replace(
+                    diagnostic_identity,
+                    command_id=f"intent-{resolution_id}",
+                )
+            elif (
+                type(fact) is not LiveVoiceObservation
+                or fact.event_name != "segment.completed"
+                or fact.segment_name != "task.command"
+                or fact.source_component != "product.composition.registry"
+                or fact.route.implementation_class != "formal"
+                or fact.route.owner_module != "product.composition.registry"
+                or fact.binding.task_id is None
+                or fact.binding.attempt_id is None
+                or diagnostic_identity.seam_id != diagnostic_identity.command_id
+                or type(resolution_id) is not str
+                or not resolution_id
+                or diagnostic_identity.outbox_id != resolution_id
+            ):
+                return False
+        candidates = tuple(
+            retained
+            for (retained_session, _retained_interaction), retained in tuple(
+                self._p2_routes.items()
+            )
+            if retained_session == session_id
+            and retained.binding.correlation_id == correlation_id
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            and retained.observability_context is not None
+            and retained.observability_adapter is not None
+        )
+        # A diagnostic producer is not an interaction router.  Select only the
+        # unique OPEN authority route for this Session/correlation; ambiguity,
+        # absence, closing and closed leases all fail before identity
+        # registration, so no stale or foreign diagnostic can reach a backend.
+        if len(candidates) != 1:
+            return False
+        retained = candidates[0]
+        if (
+            interaction_id is not None
+            and interaction_id != retained.binding.interaction_id
+        ):
+            return False
+        source_id = (
+            fact.event_id if type(fact) is LiveVoiceObservation else fact.measurement_id
+        )
+        if (
+            runtime.register_diagnostic_identity(
+                source_id,
+                owned_identity,
+                correlation_id=correlation_id,
+            )
+            is not True
+        ):
+            return False
+        disposition = (
+            retained.observability_adapter.consume_observation(
+                context=retained.observability_context,
+                observation=fact,
+            )
+            if type(fact) is LiveVoiceObservation
+            else retained.observability_adapter.consume_metric(
+                context=retained.observability_context,
+                metric=fact,
+            )
+        )
+        return disposition.accepted_for_export
+
+    @staticmethod
+    def _diagnostic_route() -> dict[str, object]:
+        return {
+            "implementation_class": "formal",
+            "owner_module": "product.composition.registry",
+            "capability_provider": "jiuwenswarm-runtime",
+            "contract_version": CONTRACT_VERSION,
+            "reason_code": None,
+        }
+
+    def _current_observability_correlation(
+        self,
+        *,
+        session_id: str,
+        scope: ScopeRef,
+    ) -> str | None:
+        candidates = tuple(
+            retained.binding.correlation_id
+            for (candidate_session, _interaction), retained in tuple(
+                self._p2_routes.items()
+            )
+            if candidate_session == session_id
+            and retained.binding.scope == scope
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            and retained.observability_context is not None
+            and retained.observability_adapter is not None
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _emit_authoritative_route_diagnostic(
+        self,
+        *,
+        session_id: str,
+        correlation_id: str,
+        segment_name: str,
+        seam_name: str,
+        seam_id: str,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        response_ref: ResponseRef | None = None,
+        source_record_id: str | None = None,
+        command_id: str | None = None,
+        event_id: str | None = None,
+        outbox_id: str | None = None,
+        executor_id: str | None = None,
+        presentation_id: str | None = None,
+        completed: bool = False,
+        observed_at: str | None = None,
+    ) -> bool:
+        """Project one owner-validated identity set without business content."""
+
+        if self._observability_runtime is None:
+            return False
+        try:
+            from .product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
+
+            binding: dict[str, object] = {"correlation_id": correlation_id}
+            if task_id is not None:
+                binding["task_id"] = task_id
+            if attempt_id is not None:
+                binding["attempt_id"] = attempt_id
+            if response_ref is not None:
+                binding.update(
+                    {
+                        "interaction_id": response_ref.interaction_id,
+                        "response_id": response_ref.response_id,
+                        "response_generation": response_ref.response_generation,
+                    }
+                )
+            observation_id = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "correlation_id": correlation_id,
+                        "segment_name": segment_name,
+                        "seam_name": seam_name,
+                        "seam_id": seam_id,
+                        "source_record_id": source_record_id,
+                    }
+                )
+            ).hexdigest()
+            payload: dict[str, object] = {
+                "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                "event_id": observation_id,
+                "event_name": "segment.completed" if completed else "route.selected",
+                "segment_name": segment_name,
+                "observed_at": observed_at or utc_now(),
+                "monotonic_ms": 0.0,
+                "binding": binding,
+                "route": self._diagnostic_route(),
+                "source_component": "product.composition.registry",
+            }
+            if source_record_id is not None:
+                payload["source_record_id"] = source_record_id
+            if completed:
+                payload.update(
+                    {"state": "terminal", "outcome": "completed", "duration_ms": 0.0}
+                )
+            observation = create_observation(payload)
+            return self.consume_product_observation(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                observation=observation,
+                diagnostic_identity=ProductDiagnosticIdentity(
+                    seam=ProductDiagnosticSeam(seam_name),
+                    seam_id=seam_id,
+                    command_id=command_id,
+                    event_id=event_id,
+                    outbox_id=outbox_id,
+                    executor_id=executor_id,
+                    presentation_id=presentation_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- diagnostics never rewrite business truth
+            logger.warning(
+                "[LiveVoiceProduct] authoritative diagnostic rejected; "
+                "reason=FACT_REJECTED"
+            )
+            return False
+
+    def _emit_authoritative_task_event(
+        self,
+        event: PersistentTaskEvent,
+        *,
+        session_id: str,
+        correlation_id: str,
+    ) -> bool:
+        """Project one exact Store event with content-free causal identities."""
+
+        if self._observability_runtime is None:
+            return False
+        try:
+            from .product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
+
+            command_id = (
+                event.causation_id
+                if event.event_type in {"task.accepted", "task.retry_accepted"}
+                else None
+            )
+            candidates = tuple(
+                retained
+                for (candidate_session, _interaction), retained in tuple(
+                    self._p2_routes.items()
+                )
+                if candidate_session == session_id
+                and retained.binding.correlation_id == correlation_id
+                and retained.binding.scope.subject_id == event.scope.subject_id
+                and retained.binding.scope.project_id == event.scope.project_id
+                and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            )
+            if len(candidates) != 1:
+                return False
+            observation_payload = observation_from_task_event(
+                event,
+                observation_id=hashlib.sha256(
+                    f"store-event\0{event.event_id}".encode("utf-8")
+                ).hexdigest(),
+                observed_at=event.occurred_at,
+                monotonic_ms=0.0,
+                route=self._diagnostic_route(),
+            ).to_dict()
+            observation_binding = observation_payload.get("binding")
+            if not isinstance(observation_binding, dict):
+                return False
+            observation_binding["correlation_id"] = correlation_id
+            observation = create_observation(observation_payload)
+            return self.consume_product_observation(
+                # A fresh authenticated Session may read an older Task event.
+                # Attribution follows the unique current OPEN route while the
+                # Store-owned Task scope still proves subject/project identity.
+                session_id=session_id,
+                correlation_id=correlation_id,
+                observation=observation,
+                diagnostic_identity=ProductDiagnosticIdentity(
+                    seam=ProductDiagnosticSeam.EVENT,
+                    seam_id=event.event_id,
+                    command_id=command_id,
+                    event_id=event.event_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- diagnostics never rewrite business truth
+            logger.warning(
+                "[LiveVoiceProduct] authoritative task event diagnostic rejected; "
+                "reason=FACT_REJECTED"
+            )
+            return False
+
+    def _emit_authoritative_progress_generation(
+        self,
+        *,
+        event: TaskProgressTextEvent | TaskProgressNotificationIntent,
+        generation_id: str,
+        delivery: _ProgressDelivery,
+    ) -> bool:
+        if self._observability_runtime is None:
+            return False
+        try:
+            from .product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
+
+            key = self._progress_key_for_delivery(delivery)
+            retained = None if key is None else self._progress_routes.get(key)
+            if retained is None:
+                return False
+            binding = retained.binding
+            task_event = event.task_event
+            source_event = event.source_event
+            if (
+                task_event.task_id != binding.task_id
+                or source_event.event_id != task_event.event_id
+                or source_event.stream_ref.id != task_event.task_id
+                or source_event.correlation_id != binding.correlation_id
+                or source_event.scope != binding.scope
+                or task_event.scope.subject_id != binding.scope.subject_id
+                or task_event.scope.project_id != binding.scope.project_id
+            ):
+                return False
+
+            observation_payload = observation_from_task_event(
+                task_event,
+                observation_id=hashlib.sha256(
+                    f"progress-generation\0{generation_id}\0{delivery.delivery_id}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+                observed_at=task_event.occurred_at,
+                monotonic_ms=0.0,
+                route=self._diagnostic_route(),
+            ).to_dict()
+            observation_binding = observation_payload.get("binding")
+            if not isinstance(observation_binding, dict):
+                return False
+            observation_binding["correlation_id"] = binding.correlation_id
+            presentation = delivery.presentation
+            if presentation is not None:
+                observation_binding.update(
+                    {
+                        "interaction_id": presentation.response_ref.interaction_id,
+                        "response_id": presentation.response_ref.response_id,
+                        "response_generation": (
+                            presentation.response_ref.response_generation
+                        ),
+                    }
+                )
+            observation = create_observation(observation_payload)
+            return self.consume_product_observation(
+                session_id=binding.session_id,
+                correlation_id=binding.correlation_id,
+                observation=observation,
+                diagnostic_identity=ProductDiagnosticIdentity(
+                    seam=ProductDiagnosticSeam.GENERATION,
+                    seam_id=generation_id,
+                    event_id=task_event.event_id,
+                    presentation_id=(
+                        None if presentation is None else presentation.delivery_id
+                    ),
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- diagnostics never rewrite business truth
+            logger.warning(
+                "[LiveVoiceProduct] authoritative generation diagnostic rejected; "
+                "reason=FACT_REJECTED"
+            )
+            return False
+
+    def _emit_authoritative_progress_ack(
+        self,
+        *,
+        delivery: _ProgressDelivery,
+        presentation: TaskPresentationDelivery | None,
+        observed_at: str,
+    ) -> bool:
+        """Project an ACK only from a retained, consumed progress delivery."""
+
+        key = self._progress_key_for_delivery(delivery)
+        retained = None if key is None else self._progress_routes.get(key)
+        if retained is None:
+            return False
+        binding = retained.binding
+        response_ref = None if presentation is None else presentation.response_ref
+        return self._emit_authoritative_route_diagnostic(
+            session_id=binding.session_id,
+            correlation_id=binding.correlation_id,
+            segment_name=(
+                "task.progress" if presentation is None else "runtime.presentation"
+            ),
+            seam_name="ack",
+            seam_id=delivery.delivery_id,
+            task_id=binding.task_id,
+            attempt_id=delivery.attempt_id,
+            response_ref=response_ref,
+            source_record_id=delivery.delivery_id,
+            command_id=(
+                None if delivery.command is None else delivery.command.command_id
+            ),
+            event_id=delivery.source_event_id,
+            presentation_id=(
+                None if presentation is None else presentation.delivery_id
+            ),
+            completed=presentation is not None,
+            observed_at=observed_at,
+        )
 
     def _create_p2_runtime(
         self,
@@ -1717,6 +2206,11 @@ class AgentServerProductCompositionRegistry:
                 deliveries.pop(delivery_id, None)
             raise RuntimeError("text progress Web sink is unavailable")
         delivery.delivered = True
+        self._emit_authoritative_progress_generation(
+            event=event,
+            generation_id=binding.generation_id,
+            delivery=delivery,
+        )
         if (
             not self._p3_presentation_consumption_available
             and event.task_event.event_type == "task.terminal"
@@ -2498,6 +2992,11 @@ class AgentServerProductCompositionRegistry:
                 audio_ack=ack,
                 audio_outcome=accepted_outcome,
             )
+            self._emit_authoritative_progress_ack(
+                delivery=progress_delivery,
+                presentation=presentation,
+                observed_at=ack.presented_at,
+            )
             return accepted_outcome
         finally:
             if authority.lease is not None:
@@ -2772,6 +3271,11 @@ class AgentServerProductCompositionRegistry:
                         surface=PresentationSurface.AUDIO,
                     )
                     delivery.delivered = True
+                    self._emit_authoritative_progress_generation(
+                        event=intent,
+                        generation_id=binding.generation_id,
+                        delivery=delivery,
+                    )
                 return
             except _ProgressPresentationConsumed:
                 assert voice_key is not None
@@ -2944,6 +3448,15 @@ class AgentServerProductCompositionRegistry:
         state.canonical = decision.authority
         state.context = resolved_context
         state.service = service
+        runtime = self._observability_runtime
+        if (
+            runtime is not None
+            and runtime.bind_authority(decision.authority) is not True
+        ):
+            # Diagnostics fail closed independently and never alter authority.
+            logger.warning(
+                "[LiveVoiceProduct] observability authority projection rejected"
+            )
         return ProductSegmentActivation(
             _formal_fact(ProductSegment.AUTHORITY),
             _AuthorityLease(state),
@@ -8041,6 +8554,48 @@ class AgentServerProductCompositionRegistry:
                         commit = self._accepted_turn_commits_by_commit.get(commit_id)
                         if commit is not None and commit.turn_id == turn_id:
                             self._consume_voice_origin_locked(commit)
+                formal_result = result.payload.get("result")
+                if isinstance(formal_result, Mapping):
+                    task_id = formal_result.get("task_id")
+                    attempt_id = formal_result.get("attempt_id")
+                    outbox_id = formal_result.get("outbox_id")
+                    state = formal_result.get("state")
+                    if (
+                        type(task_id) is str
+                        and task_id
+                        and type(attempt_id) is str
+                        and attempt_id
+                        and type(outbox_id) is str
+                        and outbox_id
+                        and state == FormalTaskState.ACCEPTED.value
+                    ):
+                        self._emit_authoritative_route_diagnostic(
+                            session_id=session_id,
+                            correlation_id=prepared.correlation_id,
+                            segment_name="task.command",
+                            seam_name="command",
+                            seam_id=prepared.binding.command_id,
+                            task_id=task_id,
+                            attempt_id=attempt_id,
+                            source_record_id=outbox_id,
+                            command_id=prepared.binding.command_id,
+                            outbox_id=outbox_id,
+                            completed=True,
+                            observed_at=prepared.observed_at,
+                        )
+                        self._emit_authoritative_route_diagnostic(
+                            session_id=session_id,
+                            correlation_id=prepared.correlation_id,
+                            segment_name="task.queue",
+                            seam_name="outbox",
+                            seam_id=outbox_id,
+                            task_id=task_id,
+                            attempt_id=attempt_id,
+                            source_record_id=outbox_id,
+                            command_id=prepared.binding.command_id,
+                            outbox_id=outbox_id,
+                            observed_at=prepared.observed_at,
+                        )
                 return _success_result(
                     request_id,
                     {
@@ -11066,6 +11621,14 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
+            diagnostic_correlation = (
+                None
+                if state.canonical is None
+                else self._current_observability_correlation(
+                    session_id=routed_session,
+                    scope=state.canonical.scope,
+                )
+            )
             if operation == "task.list" and envelope.ok:
                 result_payload = payload.get("result")
                 if not isinstance(result_payload, dict):
@@ -11202,6 +11765,158 @@ class AgentServerProductCompositionRegistry:
                         manifest=activation.manifest,
                     )
                 payload["result"] = result_payload
+                raw_task = result_payload.get("task")
+                raw_attempt = result_payload.get("attempt")
+                if isinstance(raw_task, Mapping) and isinstance(raw_attempt, Mapping):
+                    status_correlation = raw_task.get("correlation_id")
+                    status_task_id = raw_task.get("task_id")
+                    status_attempt_id = raw_attempt.get("attempt_id")
+                    executor_id = raw_attempt.get("executor_id")
+                    revision = raw_task.get("revision")
+                    create_command_id = (
+                        revision.get("create_command_id")
+                        if isinstance(revision, Mapping)
+                        else None
+                    )
+                    if diagnostic_correlation is not None and all(
+                        type(value) is str and bool(value)
+                        for value in (
+                            status_correlation,
+                            status_task_id,
+                            status_attempt_id,
+                            executor_id,
+                        )
+                    ):
+                        self._emit_authoritative_route_diagnostic(
+                            session_id=routed_session,
+                            correlation_id=diagnostic_correlation,
+                            segment_name="task.attempt",
+                            seam_name="executor",
+                            seam_id=str(executor_id),
+                            task_id=str(status_task_id),
+                            attempt_id=str(status_attempt_id),
+                            source_record_id=authority_fact.event_head_id,
+                            command_id=(
+                                create_command_id
+                                if type(create_command_id) is str and create_command_id
+                                else None
+                            ),
+                            event_id=authority_fact.event_head_id,
+                            executor_id=str(executor_id),
+                            observed_at=envelope.observed_at,
+                        )
+            elif operation == "task.events" and envelope.ok:
+                result_payload = payload.get("result")
+                raw_events = (
+                    result_payload.get("events")
+                    if isinstance(result_payload, Mapping)
+                    else None
+                )
+                if isinstance(raw_events, list):
+                    for raw_event in raw_events:
+                        try:
+                            if not isinstance(raw_event, Mapping) or set(raw_event) != {
+                                "event_id",
+                                "task_id",
+                                "attempt_id",
+                                "scope",
+                                "seq",
+                                "event_type",
+                                "state",
+                                "outcome",
+                                "producer",
+                                "source_event_id",
+                                "causation_id",
+                                "correlation_id",
+                                "occurred_at",
+                                "details",
+                            }:
+                                raise ValueError("non-canonical event projection")
+                            event = PersistentTaskEvent(
+                                event_id=raw_event["event_id"],  # type: ignore[arg-type]
+                                task_id=raw_event["task_id"],  # type: ignore[arg-type]
+                                attempt_id=raw_event["attempt_id"],  # type: ignore[arg-type]
+                                scope=ScopeRef.from_dict(raw_event["scope"]),
+                                seq=raw_event["seq"],  # type: ignore[arg-type]
+                                event_type=raw_event["event_type"],  # type: ignore[arg-type]
+                                state=raw_event["state"],  # type: ignore[arg-type]
+                                outcome=raw_event["outcome"],  # type: ignore[arg-type]
+                                producer=raw_event["producer"],  # type: ignore[arg-type]
+                                source_event_id=raw_event["source_event_id"],  # type: ignore[arg-type]
+                                causation_id=raw_event["causation_id"],  # type: ignore[arg-type]
+                                correlation_id=raw_event["correlation_id"],  # type: ignore[arg-type]
+                                occurred_at=raw_event["occurred_at"],  # type: ignore[arg-type]
+                                details=raw_event["details"],  # type: ignore[arg-type]
+                            )
+                        except Exception:  # noqa: BLE001 -- projection only
+                            continue
+                        if event.task_id == task_id:
+                            if diagnostic_correlation is not None:
+                                self._emit_authoritative_task_event(
+                                    event,
+                                    session_id=routed_session,
+                                    correlation_id=diagnostic_correlation,
+                                )
+            elif operation == "task.result" and envelope.ok:
+                result_payload = payload.get("result")
+                raw_result = (
+                    result_payload.get("task_result")
+                    if isinstance(result_payload, Mapping)
+                    and result_payload.get("availability")
+                    == TaskResultAvailability.AVAILABLE.value
+                    else None
+                )
+                try:
+                    if not isinstance(raw_result, Mapping) or set(raw_result) != {
+                        "task_id",
+                        "attempt_id",
+                        "source_event_id",
+                        "result_text",
+                        "artifacts",
+                        "completed_at",
+                    }:
+                        raise ValueError("non-canonical result projection")
+                    artifacts = raw_result["artifacts"]
+                    if not isinstance(artifacts, list):
+                        raise ValueError("non-canonical artifact projection")
+                    result_record = TaskResultRecord(
+                        task_id=raw_result["task_id"],  # type: ignore[arg-type]
+                        attempt_id=raw_result["attempt_id"],  # type: ignore[arg-type]
+                        source_event_id=raw_result["source_event_id"],  # type: ignore[arg-type]
+                        result_text=raw_result["result_text"],  # type: ignore[arg-type]
+                        artifacts=tuple(
+                            TaskResultArtifact(
+                                relative_path=item["relative_path"],
+                                sha256=item["sha256"],
+                            )
+                            for item in artifacts
+                            if isinstance(item, Mapping)
+                            and set(item) == {"relative_path", "sha256"}
+                        ),
+                        completed_at=raw_result["completed_at"],  # type: ignore[arg-type]
+                    )
+                    if len(result_record.artifacts) != len(artifacts):
+                        raise ValueError("non-canonical artifact projection")
+                except Exception:  # noqa: BLE001 -- projection only
+                    result_record = None
+                if (
+                    result_record is not None
+                    and result_record.task_id == task_id
+                    and diagnostic_correlation is not None
+                ):
+                    self._emit_authoritative_route_diagnostic(
+                        session_id=routed_session,
+                        correlation_id=diagnostic_correlation,
+                        segment_name="task.attempt",
+                        seam_name="result",
+                        seam_id=result_record.source_event_id,
+                        task_id=result_record.task_id,
+                        attempt_id=result_record.attempt_id,
+                        source_record_id=result_record.source_event_id,
+                        event_id=result_record.source_event_id,
+                        completed=True,
+                        observed_at=result_record.completed_at,
+                    )
             payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
         finally:
@@ -12090,6 +12805,12 @@ class AgentServerProductCompositionRegistry:
                 if not presentation_enabled:
                     replayed = delivery.acknowledged
                     delivery.acknowledged = True
+                    if not replayed:
+                        self._emit_authoritative_progress_ack(
+                            delivery=delivery,
+                            presentation=None,
+                            observed_at=utc_now(),
+                        )
                     return _success_result(
                         request_id,
                         {
@@ -12285,6 +13006,11 @@ class AgentServerProductCompositionRegistry:
                     )
                 replayed = False
                 self._settle_consumed_task_presentation(delivery, presentation)
+                self._emit_authoritative_progress_ack(
+                    delivery=delivery,
+                    presentation=presentation,
+                    observed_at=runtime_ack.presented_at,
+                )
                 return _success_result(
                     request_id,
                     {
@@ -12629,6 +13355,7 @@ def create_product_composition_registry_from_environment(
     commit_ledger: TurnCommitLedger | None = None,
     critical_token_gate: CriticalTokenSafetyGate | None = None,
     observability_exporter: (Callable[[ExportRecord], Awaitable[None]] | None) = None,
+    observability_runtime: ProductObservabilityRuntime | None = None,
 ) -> AgentServerProductCompositionRegistry | None:
     """Construct no registry or Adapter unless the master gate is explicit."""
 
@@ -12650,6 +13377,7 @@ def create_product_composition_registry_from_environment(
         commit_ledger=commit_ledger,
         critical_token_gate=critical_token_gate,
         observability_exporter=observability_exporter,
+        observability_runtime=observability_runtime,
     )
 
 

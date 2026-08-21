@@ -57,6 +57,19 @@ from .formal_task_models import (
     TaskUnreadPage,
     utc_now,
 )
+from .live_voice_configuration_declaration import (
+    LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+    AuthenticationMode,
+    DurabilityLevel,
+    ExecutorCapability,
+    LiveVoiceCapability,
+    LiveVoiceDeploymentProfile,
+    ProviderCapability,
+    ValidatedAuthenticationConfiguration,
+    ValidatedExecutorConfiguration,
+    ValidatedLiveVoiceConfiguration,
+    ValidatedProviderConfiguration,
+)
 from .executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
@@ -363,6 +376,36 @@ class StaticBearerAuthenticator:
             )
         self._principal.require_usable(operation=operation, now=now)
         return self._principal
+
+    def validated_configuration_fact(self) -> ValidatedAuthenticationConfiguration:
+        """Project exact owner-held authentication configuration without its secret."""
+
+        scope_projection = canonical_json_bytes(
+            {
+                "principal_id": self._principal.principal_id,
+                "allowed_project_ids": sorted(self._principal.allowed_project_ids),
+                "allowed_operations": sorted(self._principal.allowed_operations),
+                "expires_at": self._principal.expires_at,
+                "mode": AuthenticationMode.SCOPED_BEARER.value,
+            }
+        )
+        scope_digest = hashlib.sha256(scope_projection).hexdigest()
+        receipt = hmac.new(
+            self._token.encode("utf-8"),
+            f"live-voice-auth-config\0{scope_digest}".encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        return ValidatedAuthenticationConfiguration(
+            mode=AuthenticationMode.SCOPED_BEARER,
+            validation_receipt_id=f"auth-owner.v1.{receipt}",
+            scope_digest=scope_digest,
+        )
+
+    def validated_allowed_operations(self, *, now: str) -> frozenset[str]:
+        """Return the exact currently active operation scope held by this owner."""
+
+        self._principal.require_active(now=now)
+        return self._principal.allowed_operations
 
 
 @dataclass(frozen=True, slots=True)
@@ -1163,6 +1206,169 @@ class P3AuthenticatedComposition:
         """Report whether the formal Store-backed production resolver can run."""
 
         return isinstance(getattr(self._core, "store", None), SqliteTaskStore)
+
+    def validated_live_voice_configuration(
+        self,
+        *,
+        provider: ValidatedProviderConfiguration,
+    ) -> ValidatedLiveVoiceConfiguration:
+        """Project exact auth/Executor facts for a non-authoritative declaration.
+
+        The provider fact is issued separately by its owning backend.  This
+        method never starts it and cannot turn the resulting declaration into
+        authorization.
+        """
+
+        if not self._accepting or self._closed:
+            raise FormalTaskViolation(
+                "P3_CONFIGURATION_OWNER_UNAVAILABLE",
+                "formal configuration owner is not accepting",
+                ErrorCode.UNAVAILABLE,
+            )
+        if type(self._authenticator) is not StaticBearerAuthenticator:
+            raise FormalTaskViolation(
+                "P3_AUTH_CONFIGURATION_UNAVAILABLE",
+                "authentication owner cannot project validated configuration",
+                ErrorCode.UNAVAILABLE,
+            )
+        if type(provider) is not ValidatedProviderConfiguration:
+            raise FormalTaskViolation(
+                "P3_PROVIDER_CONFIGURATION_UNAVAILABLE",
+                "provider owner did not supply an exact validated fact",
+                ErrorCode.UNAVAILABLE,
+            )
+        authentication = self._authenticator.validated_configuration_fact()
+        allowed_operations = self._authenticator.validated_allowed_operations(
+            now=self._clock()
+        )
+        if not P3_QUERY_OPERATIONS.issubset(allowed_operations):
+            raise FormalTaskViolation(
+                "P3_QUERY_CONFIGURATION_UNAVAILABLE",
+                "authenticated query scope is incomplete",
+                ErrorCode.UNAVAILABLE,
+            )
+        capability_values = [
+            LiveVoiceCapability.AUTHENTICATED,
+            LiveVoiceCapability.FORMAL_WEB,
+            LiveVoiceCapability.TASK_QUERY,
+        ]
+        executor: ValidatedExecutorConfiguration | None = None
+        executor_digest: str | None = None
+        mutation_scope = allowed_operations.intersection(
+            P3_MUTATIONS | P3_PRODUCTION_MUTATIONS
+        )
+        confirmation_consumer = getattr(
+            self._confirmation_verifier, "verify_and_consume", None
+        )
+        if self._confirmation_verifier is not None and not callable(
+            confirmation_consumer
+        ):
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_CONFIGURATION_UNAVAILABLE",
+                "trusted confirmation consumer is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        mutation_ready = callable(confirmation_consumer) and bool(mutation_scope)
+        if mutation_ready:
+            if (
+                self._executor_profiles is None
+                or len(self._executor_profiles) != 1
+                or type(self._executor_profiles[0]) is not ExecutorCapabilityProfile
+            ):
+                raise FormalTaskViolation(
+                    "P3_EXECUTOR_CONFIGURATION_UNAVAILABLE",
+                    "selected Executor profile is unavailable",
+                    ErrorCode.UNAVAILABLE,
+                )
+            profile = self._executor_profiles[0]
+            constructed_executor = self._core.executor
+            runtime_owner = self._binding_resolver
+            if (
+                type(constructed_executor) is not DirectProjectCodeExecutorAdapter
+                or type(runtime_owner) is not _DirectP3RuntimeOwner
+                or runtime_owner._executor is not constructed_executor
+                or self._direct_runtime_prepared is not True
+            ):
+                raise FormalTaskViolation(
+                    "P3_EXECUTOR_CONFIGURATION_UNAVAILABLE",
+                    "prepared Direct Executor runtime owner is unavailable",
+                    ErrorCode.UNAVAILABLE,
+                )
+            owner_profiles = constructed_executor.capability_profiles()
+            if profile not in owner_profiles:
+                raise FormalTaskViolation(
+                    "P3_EXECUTOR_CONFIGURATION_CONFLICT",
+                    "selected Executor profile does not match its constructed owner",
+                    ErrorCode.CONFLICT,
+                )
+            if profile.durability_level != self._execution_durability_level:
+                raise FormalTaskViolation(
+                    "P3_EXECUTOR_CONFIGURATION_CONFLICT",
+                    "Executor durability does not match the selected runtime",
+                    ErrorCode.CONFLICT,
+                )
+            durability = DurabilityLevel(profile.durability_level)
+            executor_capabilities = {
+                DurabilityLevel.D0: (
+                    ExecutorCapability.CANCEL,
+                    ExecutorCapability.DISPATCH,
+                    ExecutorCapability.STATUS,
+                ),
+                DurabilityLevel.D1: (
+                    ExecutorCapability.CANCEL,
+                    ExecutorCapability.CHECKPOINT,
+                    ExecutorCapability.DISPATCH,
+                    ExecutorCapability.RECOVERY,
+                    ExecutorCapability.STATUS,
+                ),
+                DurabilityLevel.D2: tuple(
+                    sorted(ExecutorCapability, key=lambda item: item.value)
+                ),
+            }[durability]
+            executor_digest = profile.digest_sha256()
+            executor = ValidatedExecutorConfiguration(
+                executor_id=profile.executor_id,
+                adapter_id=profile.adapter_id,
+                durability_level=durability,
+                capabilities=executor_capabilities,
+                validation_receipt_id=f"executor-profile.v1.{executor_digest[:32]}",
+                configuration_digest=executor_digest,
+            )
+            capability_values.extend(
+                (
+                    LiveVoiceCapability.TASK_MUTATION,
+                    {
+                        DurabilityLevel.D0: LiveVoiceCapability.EXECUTOR_D0,
+                        DurabilityLevel.D1: LiveVoiceCapability.EXECUTOR_D1,
+                        DurabilityLevel.D2: LiveVoiceCapability.EXECUTOR_D2,
+                    }[durability],
+                )
+            )
+        if ProviderCapability.TELEMETRY_EXPORT in provider.capabilities:
+            capability_values.append(LiveVoiceCapability.TELEMETRY_EXPORT)
+        capabilities = tuple(sorted(capability_values, key=lambda item: item.value))
+        configuration_projection = canonical_json_bytes(
+            {
+                "authentication_scope_digest": authentication.scope_digest,
+                "executor_profile_digest": executor_digest,
+                "provider_id": provider.provider_id,
+                "provider_configuration_digest": provider.configuration_digest,
+                "capabilities": [item.value for item in capabilities],
+            }
+        )
+        configuration_digest = hashlib.sha256(configuration_projection).hexdigest()
+        return ValidatedLiveVoiceConfiguration(
+            contract_version=LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+            configuration_id="agentserver.formal.live-voice.v1",
+            configuration_digest=configuration_digest,
+            profile=LiveVoiceDeploymentProfile.FORMAL_LIVE_VOICE,
+            enabled=True,
+            ordinary_production_default_off=True,
+            authentication=authentication,
+            executor=executor,
+            providers=(provider,),
+            capabilities=capabilities,
+        )
 
     def prepare_production_intent_authority(
         self,
