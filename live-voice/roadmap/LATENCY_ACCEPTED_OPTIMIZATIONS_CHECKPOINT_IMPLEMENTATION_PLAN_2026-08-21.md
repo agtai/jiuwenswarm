@@ -482,7 +482,7 @@ Voice P1/P2 owners and latency contracts.
 - Produces three private reports, one private comparison and one sanitized
   English evidence document.
 
-- [ ] **Step 1: Run A1 on exact clean A**
+- [x] **Step 1: Run A1 on exact clean A**
 
   From the A worktree:
 
@@ -501,20 +501,20 @@ Voice P1/P2 owners and latency contracts.
 
   Require 15/15 completed, A RPC counts 10/50/100 and clean exact settlement.
 
-- [ ] **Step 2: Run B on exact clean optimized source**
+- [x] **Step 2: Run B on exact clean optimized source**
 
   From the checkpoint worktree, run the same command with population `B`, mode
   `optimized`, the exact clean B HEAD obtained with `git rev-parse HEAD`, run ID
   `accepted-checkpoint-b-20260821` and B output path. Require 15/15 completed,
   B RPC counts 1/4/8, exact barriers and overlap.
 
-- [ ] **Step 3: Run A2 on unchanged exact A**
+- [x] **Step 3: Run A2 on unchanged exact A**
 
   Return to the A worktree and repeat Step 1 with population `A2`, run ID
   `accepted-checkpoint-a2-20260821` and A2 output. Verify HEAD and runner hash
   equal A1 before execution.
 
-- [ ] **Step 4: Compare A1/B/A2**
+- [x] **Step 4: Compare A1/B/A2**
 
   ```bash
   cd jiuwenswarm/channels/web/frontend
@@ -525,20 +525,20 @@ Voice P1/P2 owners and latency contracts.
     --output /home/renan/openJiuwen-ai/live-voice-latency-runs/accepted-checkpoint-20260821/comparison.json
   ```
 
-- [ ] **Step 5: Render and verify the English update**
+- [x] **Step 5: Render and verify the English update**
 
   Generate the evidence file from the closed comparison, then manually verify
   every headline against private report aggregates. It must lead with absolute
   W1/W2/W3 `round_total` p50/p95 and only then percentages. Separate measured,
   controlled, derived, estimated and out-of-scope tables.
 
-- [ ] **Step 6: Run independent evidence review**
+- [x] **Step 6: Run independent evidence review**
 
   The reviewer recalculates p50/p95/deltas/drift, verifies direct total samples,
   hashes/mode0600, denominator, RPC/barrier counts and no forbidden effects.
   Any source-affecting remediation invalidates B and requires a rerun.
 
-- [ ] **Step 7: Commit checkpoint evidence**
+- [x] **Step 7: Commit checkpoint evidence**
 
   ```bash
   git add live-voice/evidence/LATENCY_ACCEPTED_OPTIMIZATIONS_CHECKPOINT_2026-08-21.md
