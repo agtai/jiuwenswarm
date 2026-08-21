@@ -36,6 +36,7 @@ export type CheckpointSegment = keyof typeof CHECKPOINT_SEGMENTS;
 export const CHECKPOINT_WORKLOADS = Object.freeze({
   W1: Object.freeze({
     id: 'W1',
+    recognized_prompt: 'In two short sentences, please introduce Paris.',
     notification_count: 10,
     successor_ack_delay_ms: 250,
     playout_duration_ms: 3000,
@@ -43,6 +44,7 @@ export const CHECKPOINT_WORKLOADS = Object.freeze({
   }),
   W2: Object.freeze({
     id: 'W2',
+    recognized_prompt: 'Plan a three-day itinerary for Paris with morning, afternoon, and evening activities.',
     notification_count: 50,
     successor_ack_delay_ms: 750,
     playout_duration_ms: 6000,
@@ -50,6 +52,7 @@ export const CHECKPOINT_WORKLOADS = Object.freeze({
   }),
   W3: Object.freeze({
     id: 'W3',
+    recognized_prompt: 'What is the weather today in Paris, and should I carry an umbrella?',
     notification_count: 100,
     successor_ack_delay_ms: 750,
     playout_duration_ms: 4000,
@@ -89,6 +92,7 @@ export interface CheckpointOptimizationMode {
 }
 
 export interface CheckpointAttemptConfig {
+  readonly run_id: string;
   readonly population: CheckpointPopulation;
   readonly workload_id: CheckpointWorkloadId;
   readonly attempt_index: number;
@@ -100,14 +104,37 @@ export interface CheckpointAttemptConfig {
 }
 
 export interface CheckpointP2Facts {
+  readonly truth_class: 'measured';
   readonly notification_rpc_count: number;
   readonly notification_batch_count: number;
   readonly ordered_barriers: readonly number[];
+  readonly batches: readonly Readonly<{
+    rpc_index: number;
+    start_publish_seq: number;
+    end_publish_seq: number;
+    count: number;
+    duration_ms: number;
+  }>[];
+  readonly response: Readonly<{
+    session_id: string;
+    correlation_id: string;
+    interaction_id: string;
+    activation_id: string;
+    response_id: string;
+    response_generation: number;
+    unit_id: string;
+  }>;
 }
 
 export interface CheckpointP1Facts {
   readonly successor_ack_confirmed: boolean;
   readonly next_turn_ready: boolean;
+  readonly downlink_opened_before_successor_ack: boolean;
+  readonly product_owner: 'ProductP1VoiceRouteOwner';
+  readonly successor_ack_observed_ms: number;
+  readonly interaction_id: string;
+  readonly response_id: string;
+  readonly unit_id: string;
 }
 
 export interface CheckpointAttemptDependencies {
@@ -117,6 +144,7 @@ export interface CheckpointAttemptDependencies {
     input: Readonly<{
       workload: (typeof CHECKPOINT_WORKLOADS)[CheckpointWorkloadId];
       mark(point: CheckpointPoint): void;
+      p2: CheckpointP2Facts;
     }>,
   ): Promise<CheckpointP1Facts>;
 }
@@ -133,9 +161,15 @@ export interface CheckpointDuration {
 }
 
 export interface CheckpointAttempt {
+  readonly run_id: string;
   readonly population: CheckpointPopulation;
   readonly workload_id: CheckpointWorkloadId;
   readonly attempt_index: number;
+  readonly source_commit: string;
+  readonly runner_fingerprint: string;
+  readonly fixture_fingerprint: string;
+  readonly timing_fingerprint: string;
+  readonly optimization_mode: CheckpointOptimizationMode;
   readonly outcome: 'completed' | 'invalid' | 'failed' | 'unknown';
   readonly reason: string | null;
   readonly events: readonly CheckpointEvent[];
@@ -208,13 +242,18 @@ export async function runCheckpointAttempt(config: CheckpointAttemptConfig, depe
     mark('stt_final');
     await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.admission_ms);
     mark('admission_accepted');
-    await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms);
+    if (config.workload_id === 'W3') {
+      await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms);
+      await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms - CHECKPOINT_CONTROLLED_TARGETS.tool_interval_ms);
+    } else {
+      await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.agent_model_ms);
+    }
     mark('model_complete_and_notifications_enqueued');
     p2 = Object.freeze(await dependencies.deliverPresentation({ workload }));
     mark('presentation_final_consumed');
     await controlledWait(dependencies.clock, CHECKPOINT_CONTROLLED_TARGETS.tts_generation_ms);
     mark('tts_ready_and_successor_capture_requested');
-    p1 = Object.freeze(await dependencies.playResponse({ workload, mark }));
+    p1 = Object.freeze(await dependencies.playResponse({ workload, mark, p2 }));
     if (events.length !== CHECKPOINT_POINTS.length || !p1.successor_ack_confirmed || !p1.next_turn_ready)
       throw new AttemptInvalid('ATTEMPT_SETTLEMENT_INCOMPLETE');
   } catch (error) {
@@ -228,9 +267,15 @@ export async function runCheckpointAttempt(config: CheckpointAttemptConfig, depe
   }
 
   return Object.freeze({
+    run_id: config.run_id,
     population: config.population,
     workload_id: config.workload_id,
     attempt_index: config.attempt_index,
+    source_commit: config.source_commit,
+    runner_fingerprint: config.runner_fingerprint,
+    fixture_fingerprint: config.fixture_fingerprint,
+    timing_fingerprint: config.timing_fingerprint,
+    optimization_mode: Object.freeze({ ...config.optimization_mode }),
     outcome,
     reason,
     events: Object.freeze([...events]),
@@ -367,12 +412,150 @@ function buildWorkloadSummary(workloadId: CheckpointWorkloadId, attempts: readon
   });
 }
 
+const ATTEMPT_KEYS = Object.freeze([
+  'run_id',
+  'population',
+  'workload_id',
+  'attempt_index',
+  'source_commit',
+  'runner_fingerprint',
+  'fixture_fingerprint',
+  'timing_fingerprint',
+  'optimization_mode',
+  'outcome',
+  'reason',
+  'events',
+  'segments',
+  'controlled_targets',
+  'p2',
+  'p1',
+]);
+const EVENT_KEYS = Object.freeze(['point', 'monotonic_ms', 'truth_class']);
+const P2_KEYS = Object.freeze(['truth_class', 'notification_rpc_count', 'notification_batch_count', 'ordered_barriers', 'batches', 'response']);
+const P1_KEYS = Object.freeze([
+  'successor_ack_confirmed',
+  'next_turn_ready',
+  'downlink_opened_before_successor_ack',
+  'product_owner',
+  'successor_ack_observed_ms',
+  'interaction_id',
+  'response_id',
+  'unit_id',
+]);
+const ATTEMPT_REASONS = new Set([
+  'CONTROLLED_WAIT_EARLY',
+  'CONTROLLED_WAIT_LATE',
+  'MONOTONIC_CLOCK_INVALID',
+  'MONOTONIC_CLOCK_REWOUND',
+  'EVENT_ORDER_INVALID',
+  'ATTEMPT_SETTLEMENT_INCOMPLETE',
+  'CHECKPOINT_DEPENDENCY_FAILED',
+]);
+
+function expectedP2RpcCount(config: CheckpointReportConfig, workloadId: CheckpointWorkloadId): number {
+  if (config.optimization_mode.p2_notification_batch_size === 1) return CHECKPOINT_WORKLOADS[workloadId].notification_count;
+  return workloadId === 'W1' ? 1 : workloadId === 'W2' ? 4 : 8;
+}
+
+function expectedBatchTails(config: CheckpointReportConfig, workloadId: CheckpointWorkloadId): readonly number[] {
+  if (config.optimization_mode.p2_notification_batch_size === 1)
+    return Object.freeze(Array.from({ length: CHECKPOINT_WORKLOADS[workloadId].notification_count }, (_, index) => index));
+  return workloadId === 'W1' ? Object.freeze([9]) : workloadId === 'W2' ? Object.freeze([15, 31, 47, 49]) : Object.freeze([15, 31, 40, 41, 57, 73, 89, 99]);
+}
+
+function validateAttemptForReport(attempt: CheckpointAttempt, config: CheckpointReportConfig): void {
+  if (attempt === null || typeof attempt !== 'object' || Array.isArray(attempt) || !exactKeys(attempt as unknown as Record<string, unknown>, ATTEMPT_KEYS))
+    reportViolation('CHECKPOINT_ATTEMPT_INVALID');
+  if (
+    attempt.run_id !== config.run_id ||
+    attempt.population !== config.population ||
+    attempt.source_commit !== config.source_commit ||
+    attempt.runner_fingerprint !== config.runner_fingerprint ||
+    attempt.fixture_fingerprint !== config.fixture_fingerprint ||
+    attempt.timing_fingerprint !== config.timing_fingerprint ||
+    JSON.stringify(attempt.optimization_mode) !== JSON.stringify(config.optimization_mode) ||
+    !Object.prototype.hasOwnProperty.call(CHECKPOINT_WORKLOADS, attempt.workload_id) ||
+    !['completed', 'invalid', 'failed', 'unknown'].includes(attempt.outcome) ||
+    (attempt.outcome === 'completed' ? attempt.reason !== null : typeof attempt.reason !== 'string' || !ATTEMPT_REASONS.has(attempt.reason))
+  )
+    reportViolation('CHECKPOINT_ATTEMPT_INVALID');
+  if (!Array.isArray(attempt.events) || attempt.events.length > CHECKPOINT_POINTS.length) reportViolation('CHECKPOINT_ATTEMPT_EVENTS_INVALID');
+  for (let index = 0; index < attempt.events.length; index += 1) {
+    const event = attempt.events[index];
+    if (
+      event === null ||
+      typeof event !== 'object' ||
+      Array.isArray(event) ||
+      !exactKeys(event as unknown as Record<string, unknown>, EVENT_KEYS) ||
+      event.point !== CHECKPOINT_POINTS[index] ||
+      event.truth_class !== 'measured' ||
+      !Number.isFinite(event.monotonic_ms) ||
+      event.monotonic_ms < 0 ||
+      (index > 0 && event.monotonic_ms < attempt.events[index - 1].monotonic_ms)
+    )
+      reportViolation('CHECKPOINT_ATTEMPT_EVENTS_INVALID');
+  }
+  if (attempt.outcome === 'completed' && attempt.events.length !== CHECKPOINT_POINTS.length) reportViolation('CHECKPOINT_ATTEMPT_EVENTS_INVALID');
+  if (JSON.stringify(attempt.segments) !== JSON.stringify(measuredSegments(attempt.events))) reportViolation('CHECKPOINT_ATTEMPT_SEGMENTS_INVALID');
+  if (JSON.stringify(attempt.controlled_targets) !== JSON.stringify(frozenControlledTargets())) reportViolation('CHECKPOINT_ATTEMPT_TARGETS_INVALID');
+  if (attempt.p2 !== null) {
+    const expectedRpcCount = expectedP2RpcCount(config, attempt.workload_id);
+    if (
+      typeof attempt.p2 !== 'object' ||
+      Array.isArray(attempt.p2) ||
+      !exactKeys(attempt.p2 as unknown as Record<string, unknown>, P2_KEYS) ||
+      attempt.p2.truth_class !== 'measured' ||
+      attempt.p2.notification_rpc_count !== expectedRpcCount ||
+      attempt.p2.notification_batch_count !== expectedRpcCount ||
+      JSON.stringify(attempt.p2.ordered_barriers) !== JSON.stringify(CHECKPOINT_WORKLOADS[attempt.workload_id].tool_barriers) ||
+      !Array.isArray(attempt.p2.batches) ||
+      JSON.stringify(attempt.p2.batches.map(batch => batch.end_publish_seq)) !== JSON.stringify(expectedBatchTails(config, attempt.workload_id)) ||
+      attempt.p2.batches.some(
+        (batch, index) =>
+          batch.rpc_index !== index + 1 ||
+          batch.start_publish_seq !== (index === 0 ? 0 : attempt.p2!.batches[index - 1].end_publish_seq + 1) ||
+          batch.count !== batch.end_publish_seq - batch.start_publish_seq + 1 ||
+          batch.duration_ms !== CHECKPOINT_CONTROLLED_TARGETS.p2_rpc_ms,
+      ) ||
+      attempt.p2.response === null ||
+      typeof attempt.p2.response !== 'object' ||
+      !['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'response_id', 'unit_id'].every(key =>
+        TOKEN.test(attempt.p2!.response[key as keyof typeof attempt.p2.response] as string),
+      ) ||
+      attempt.p2.response.response_generation !== 0
+    )
+      reportViolation('CHECKPOINT_ATTEMPT_P2_INVALID');
+  }
+  if (attempt.p1 !== null) {
+    if (
+      typeof attempt.p1 !== 'object' ||
+      Array.isArray(attempt.p1) ||
+      !exactKeys(attempt.p1 as unknown as Record<string, unknown>, P1_KEYS) ||
+      attempt.p1.successor_ack_confirmed !== true ||
+      attempt.p1.next_turn_ready !== true ||
+      attempt.p1.downlink_opened_before_successor_ack !== config.optimization_mode.tts_successor_ack_overlap ||
+      attempt.p1.product_owner !== 'ProductP1VoiceRouteOwner' ||
+      attempt.p1.successor_ack_observed_ms !== CHECKPOINT_WORKLOADS[attempt.workload_id].successor_ack_delay_ms ||
+      attempt.p2 === null ||
+      attempt.p1.interaction_id !== attempt.p2.response.interaction_id ||
+      attempt.p1.response_id !== attempt.p2.response.response_id ||
+      attempt.p1.unit_id !== attempt.p2.response.unit_id
+    )
+      reportViolation('CHECKPOINT_ATTEMPT_P1_INVALID');
+  }
+  if (attempt.outcome === 'completed' && (attempt.p2 === null || attempt.p1 === null)) reportViolation('CHECKPOINT_ATTEMPT_SETTLEMENT_INVALID');
+  if (
+    attempt.outcome === 'completed' &&
+    attempt.segments.first_source_to_playout?.duration_ms !== CHECKPOINT_WORKLOADS[attempt.workload_id].playout_duration_ms
+  )
+    reportViolation('CHECKPOINT_ATTEMPT_PLAYOUT_INVALID');
+}
+
 export function buildCheckpointReport(config: CheckpointReportConfig, attempts: readonly CheckpointAttempt[]): CheckpointReport {
   validateReportConfig(config);
   const seen = new Set<string>();
   for (const attempt of attempts) {
-    if (attempt.population !== config.population || !Object.prototype.hasOwnProperty.call(CHECKPOINT_WORKLOADS, attempt.workload_id))
-      reportViolation('CHECKPOINT_ATTEMPT_IDENTITY_INVALID');
+    validateAttemptForReport(attempt, config);
     const key = `${attempt.workload_id}:${attempt.attempt_index}`;
     if (!Number.isSafeInteger(attempt.attempt_index) || attempt.attempt_index < 0 || attempt.attempt_index >= config.samples_per_workload || seen.has(key))
       reportViolation('CHECKPOINT_ATTEMPT_IDENTITY_INVALID');
@@ -449,22 +632,46 @@ export function parseCheckpointReport(value: unknown): CheckpointReport {
   return rebuilt;
 }
 
+export type CheckpointComparisonResult = 'IMPROVED' | 'REGRESSED' | 'UNCHANGED' | 'INCONCLUSIVE';
+
 export interface CheckpointComparisonRow {
-  readonly truth_class: 'derived';
-  readonly a1_p50_ms: number;
-  readonly b_p50_ms: number;
-  readonly a2_p50_ms: number;
-  readonly b_minus_a1_ms: number;
-  readonly b_minus_a2_ms: number;
-  readonly b_minus_a1_percent: number;
-  readonly b_minus_a2_percent: number;
-  readonly baseline_drift_ms: number;
-  readonly baseline_drift_percent: number;
+  readonly result: CheckpointComparisonResult;
+  readonly measurements: Readonly<{
+    a1: Readonly<{ truth_class: 'measured'; p50_ms: number; p95_ms: number }>;
+    b: Readonly<{ truth_class: 'measured'; p50_ms: number; p95_ms: number }>;
+    a2: Readonly<{ truth_class: 'measured'; p50_ms: number; p95_ms: number }>;
+  }>;
+  readonly deltas: Readonly<{
+    truth_class: 'derived';
+    b_minus_a1_p50_ms: number;
+    b_minus_a2_p50_ms: number;
+    b_minus_a1_p95_ms: number;
+    b_minus_a2_p95_ms: number;
+    b_minus_a1_p50_percent: number | null;
+    b_minus_a2_p50_percent: number | null;
+    baseline_drift_p50_ms: number;
+    baseline_drift_p50_percent: number | null;
+  }>;
 }
 
 export interface CheckpointComparison {
   readonly schema_version: 'live-voice.accepted-optimizations-checkpoint-comparison.v0';
-  readonly decision: 'accepted' | 'rejected' | 'inconclusive';
+  readonly decision: Exclude<CheckpointComparisonResult, 'UNCHANGED'>;
+  readonly populations_complete: boolean;
+  readonly inputs: Readonly<
+    Record<
+      'a1' | 'b' | 'a2',
+      Readonly<{
+        run_id: string;
+        source_commit: string;
+        runner_fingerprint: string;
+        fixture_fingerprint: string;
+        timing_fingerprint: string;
+        optimization_mode: CheckpointOptimizationMode;
+        report_sha256: string | null;
+      }>
+    >
+  >;
   readonly workloads: Readonly<Record<CheckpointWorkloadId, Readonly<{ segments: Readonly<Record<CheckpointSegment, CheckpointComparisonRow>> }>>>;
 }
 
@@ -509,38 +716,80 @@ export function compareCheckpointReports(a1: CheckpointReport, b: CheckpointRepo
         );
       }),
   );
-  let decision: CheckpointComparison['decision'] = populationsComplete ? 'accepted' : 'inconclusive';
+  let anyImproved = false;
+  let anyRegressed = false;
+  let anyInconclusive = false;
   for (const workloadId of Object.keys(CHECKPOINT_WORKLOADS) as CheckpointWorkloadId[]) {
     const segments = {} as Record<CheckpointSegment, CheckpointComparisonRow>;
     for (const segment of Object.keys(CHECKPOINT_SEGMENTS) as CheckpointSegment[]) {
-      const a1Value = a1.summaries[workloadId].segments[segment].p50_ms;
-      const bValue = b.summaries[workloadId].segments[segment].p50_ms;
-      const a2Value = a2.summaries[workloadId].segments[segment].p50_ms;
-      if (a1Value === null || bValue === null || a2Value === null || a1Value === 0 || a2Value === 0) {
-        decision = 'inconclusive';
+      const a1Summary = a1.summaries[workloadId].segments[segment];
+      const bSummary = b.summaries[workloadId].segments[segment];
+      const a2Summary = a2.summaries[workloadId].segments[segment];
+      const values = [a1Summary.p50_ms, a1Summary.p95_ms, bSummary.p50_ms, bSummary.p95_ms, a2Summary.p50_ms, a2Summary.p95_ms];
+      if (values.some(value => value === null)) {
+        anyInconclusive = true;
         continue;
       }
-      const driftPercent = rounded(((a2Value - a1Value) / a1Value) * 100);
+      const [a1P50, a1P95, bP50, bP95, a2P50, a2P95] = values as number[];
+      const directions = [bP50 - a1P50, bP50 - a2P50, bP95 - a1P95, bP95 - a2P95];
+      const result: CheckpointComparisonResult =
+        directions.every(value => value <= 0) && directions.some(value => value < 0)
+          ? 'IMPROVED'
+          : directions.every(value => value >= 0) && directions.some(value => value > 0)
+            ? 'REGRESSED'
+            : directions.every(value => value === 0)
+              ? 'UNCHANGED'
+              : 'INCONCLUSIVE';
+      const driftPercent = a1P50 === 0 ? null : rounded(((a2P50 - a1P50) / a1P50) * 100);
       const row = Object.freeze({
-        truth_class: 'derived' as const,
-        a1_p50_ms: a1Value,
-        b_p50_ms: bValue,
-        a2_p50_ms: a2Value,
-        b_minus_a1_ms: bValue - a1Value,
-        b_minus_a2_ms: bValue - a2Value,
-        b_minus_a1_percent: rounded(((bValue - a1Value) / a1Value) * 100),
-        b_minus_a2_percent: rounded(((bValue - a2Value) / a2Value) * 100),
-        baseline_drift_ms: a2Value - a1Value,
-        baseline_drift_percent: driftPercent,
+        result,
+        measurements: Object.freeze({
+          a1: Object.freeze({ truth_class: 'measured' as const, p50_ms: a1P50, p95_ms: a1P95 }),
+          b: Object.freeze({ truth_class: 'measured' as const, p50_ms: bP50, p95_ms: bP95 }),
+          a2: Object.freeze({ truth_class: 'measured' as const, p50_ms: a2P50, p95_ms: a2P95 }),
+        }),
+        deltas: Object.freeze({
+          truth_class: 'derived' as const,
+          b_minus_a1_p50_ms: bP50 - a1P50,
+          b_minus_a2_p50_ms: bP50 - a2P50,
+          b_minus_a1_p95_ms: bP95 - a1P95,
+          b_minus_a2_p95_ms: bP95 - a2P95,
+          b_minus_a1_p50_percent: a1P50 === 0 ? null : rounded(((bP50 - a1P50) / a1P50) * 100),
+          b_minus_a2_p50_percent: a2P50 === 0 ? null : rounded(((bP50 - a2P50) / a2P50) * 100),
+          baseline_drift_p50_ms: a2P50 - a1P50,
+          baseline_drift_p50_percent: driftPercent,
+        }),
       });
       segments[segment] = row;
-      if (decision !== 'inconclusive' && (Math.abs(driftPercent) > 10 || bValue > Math.max(a1Value, a2Value))) decision = 'rejected';
+      anyImproved ||= result === 'IMPROVED';
+      anyRegressed ||= result === 'REGRESSED';
+      anyInconclusive ||= result === 'INCONCLUSIVE' || (driftPercent !== null && Math.abs(driftPercent) > 10);
     }
     workloads[workloadId] = Object.freeze({ segments: Object.freeze(segments) });
   }
+  const decision: CheckpointComparison['decision'] =
+    !populationsComplete || anyInconclusive || (anyImproved && anyRegressed)
+      ? 'INCONCLUSIVE'
+      : anyRegressed
+        ? 'REGRESSED'
+        : anyImproved
+          ? 'IMPROVED'
+          : 'INCONCLUSIVE';
+  const inputIdentity = (report: CheckpointReport) =>
+    Object.freeze({
+      run_id: report.run_id,
+      source_commit: report.source_commit,
+      runner_fingerprint: report.runner_fingerprint,
+      fixture_fingerprint: report.fixture_fingerprint,
+      timing_fingerprint: report.timing_fingerprint,
+      optimization_mode: Object.freeze({ ...report.optimization_mode }),
+      report_sha256: null,
+    });
   return Object.freeze({
     schema_version: 'live-voice.accepted-optimizations-checkpoint-comparison.v0',
     decision,
+    populations_complete: populationsComplete,
+    inputs: Object.freeze({ a1: inputIdentity(a1), b: inputIdentity(b), a2: inputIdentity(a2) }),
     workloads: Object.freeze(workloads),
   });
 }
@@ -549,9 +798,13 @@ export function parseCheckpointComparison(value: unknown): CheckpointComparison 
   if (value === null || typeof value !== 'object' || Array.isArray(value)) reportViolation('CHECKPOINT_COMPARISON_INVALID');
   const raw = value as Record<string, unknown>;
   if (
-    !exactKeys(raw, ['schema_version', 'decision', 'workloads']) ||
+    !exactKeys(raw, ['schema_version', 'decision', 'populations_complete', 'inputs', 'workloads']) ||
     raw.schema_version !== 'live-voice.accepted-optimizations-checkpoint-comparison.v0' ||
-    !['accepted', 'rejected', 'inconclusive'].includes(raw.decision as string) ||
+    !['IMPROVED', 'REGRESSED', 'INCONCLUSIVE'].includes(raw.decision as string) ||
+    typeof raw.populations_complete !== 'boolean' ||
+    raw.inputs === null ||
+    typeof raw.inputs !== 'object' ||
+    Array.isArray(raw.inputs) ||
     raw.workloads === null ||
     typeof raw.workloads !== 'object' ||
     Array.isArray(raw.workloads)
@@ -559,34 +812,120 @@ export function parseCheckpointComparison(value: unknown): CheckpointComparison 
     reportViolation('CHECKPOINT_COMPARISON_INVALID');
   const workloads = raw.workloads as Record<string, unknown>;
   if (!exactKeys(workloads, Object.keys(CHECKPOINT_WORKLOADS))) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  const inputs = raw.inputs as Record<string, unknown>;
+  if (!exactKeys(inputs, ['a1', 'b', 'a2'])) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  for (const input of Object.values(inputs)) {
+    if (
+      input === null ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      !exactKeys(input as Record<string, unknown>, [
+        'run_id',
+        'source_commit',
+        'runner_fingerprint',
+        'fixture_fingerprint',
+        'timing_fingerprint',
+        'optimization_mode',
+        'report_sha256',
+      ])
+    )
+      reportViolation('CHECKPOINT_COMPARISON_INVALID');
+    const identity = input as CheckpointComparison['inputs']['a1'];
+    if (
+      !TOKEN.test(identity.run_id) ||
+      !SHA40.test(identity.source_commit) ||
+      !SHA64.test(identity.runner_fingerprint) ||
+      !SHA64.test(identity.fixture_fingerprint) ||
+      !SHA64.test(identity.timing_fingerprint) ||
+      (identity.report_sha256 !== null && !SHA64.test(identity.report_sha256))
+    )
+      reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  }
   for (const workloadId of Object.keys(CHECKPOINT_WORKLOADS)) {
     const workload = workloads[workloadId];
     if (workload === null || typeof workload !== 'object' || Array.isArray(workload) || !exactKeys(workload as Record<string, unknown>, ['segments']))
       reportViolation('CHECKPOINT_COMPARISON_INVALID');
     const segments = (workload as { segments: unknown }).segments;
-    if (segments === null || typeof segments !== 'object' || Array.isArray(segments)) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+    if (
+      segments === null ||
+      typeof segments !== 'object' ||
+      Array.isArray(segments) ||
+      !exactKeys(segments as Record<string, unknown>, Object.keys(CHECKPOINT_SEGMENTS))
+    )
+      reportViolation('CHECKPOINT_COMPARISON_INVALID');
     for (const row of Object.values(segments as Record<string, unknown>)) {
       if (
         row === null ||
         typeof row !== 'object' ||
         Array.isArray(row) ||
-        !exactKeys(row as Record<string, unknown>, [
-          'truth_class',
-          'a1_p50_ms',
-          'b_p50_ms',
-          'a2_p50_ms',
-          'b_minus_a1_ms',
-          'b_minus_a2_ms',
-          'b_minus_a1_percent',
-          'b_minus_a2_percent',
-          'baseline_drift_ms',
-          'baseline_drift_percent',
-        ]) ||
-        (row as { truth_class?: unknown }).truth_class !== 'derived' ||
-        Object.entries(row as Record<string, unknown>).some(([key, item]) => key !== 'truth_class' && (typeof item !== 'number' || !Number.isFinite(item)))
+        !exactKeys(row as Record<string, unknown>, ['result', 'measurements', 'deltas']) ||
+        !['IMPROVED', 'REGRESSED', 'UNCHANGED', 'INCONCLUSIVE'].includes((row as { result?: unknown }).result as string)
       )
+        reportViolation('CHECKPOINT_COMPARISON_INVALID');
+      const parsedRow = row as CheckpointComparisonRow;
+      if (
+        !exactKeys(parsedRow.measurements as unknown as Record<string, unknown>, ['a1', 'b', 'a2']) ||
+        !exactKeys(parsedRow.deltas as unknown as Record<string, unknown>, [
+          'truth_class',
+          'b_minus_a1_p50_ms',
+          'b_minus_a2_p50_ms',
+          'b_minus_a1_p95_ms',
+          'b_minus_a2_p95_ms',
+          'b_minus_a1_p50_percent',
+          'b_minus_a2_p50_percent',
+          'baseline_drift_p50_ms',
+          'baseline_drift_p50_percent',
+        ]) ||
+        parsedRow.deltas.truth_class !== 'derived'
+      )
+        reportViolation('CHECKPOINT_COMPARISON_INVALID');
+      for (const measurement of Object.values(parsedRow.measurements)) {
+        if (
+          !exactKeys(measurement as unknown as Record<string, unknown>, ['truth_class', 'p50_ms', 'p95_ms']) ||
+          measurement.truth_class !== 'measured' ||
+          !Number.isFinite(measurement.p50_ms) ||
+          !Number.isFinite(measurement.p95_ms)
+        )
+          reportViolation('CHECKPOINT_COMPARISON_INVALID');
+      }
+      const { a1, b, a2 } = parsedRow.measurements;
+      const directions = [b.p50_ms - a1.p50_ms, b.p50_ms - a2.p50_ms, b.p95_ms - a1.p95_ms, b.p95_ms - a2.p95_ms];
+      const expectedResult: CheckpointComparisonResult =
+        directions.every(item => item <= 0) && directions.some(item => item < 0)
+          ? 'IMPROVED'
+          : directions.every(item => item >= 0) && directions.some(item => item > 0)
+            ? 'REGRESSED'
+            : directions.every(item => item === 0)
+              ? 'UNCHANGED'
+              : 'INCONCLUSIVE';
+      const expectedDeltas = {
+        truth_class: 'derived',
+        b_minus_a1_p50_ms: b.p50_ms - a1.p50_ms,
+        b_minus_a2_p50_ms: b.p50_ms - a2.p50_ms,
+        b_minus_a1_p95_ms: b.p95_ms - a1.p95_ms,
+        b_minus_a2_p95_ms: b.p95_ms - a2.p95_ms,
+        b_minus_a1_p50_percent: a1.p50_ms === 0 ? null : rounded(((b.p50_ms - a1.p50_ms) / a1.p50_ms) * 100),
+        b_minus_a2_p50_percent: a2.p50_ms === 0 ? null : rounded(((b.p50_ms - a2.p50_ms) / a2.p50_ms) * 100),
+        baseline_drift_p50_ms: a2.p50_ms - a1.p50_ms,
+        baseline_drift_p50_percent: a1.p50_ms === 0 ? null : rounded(((a2.p50_ms - a1.p50_ms) / a1.p50_ms) * 100),
+      };
+      if (parsedRow.result !== expectedResult || JSON.stringify(parsedRow.deltas) !== JSON.stringify(expectedDeltas))
         reportViolation('CHECKPOINT_COMPARISON_INVALID');
     }
   }
-  return Object.freeze(value as CheckpointComparison);
+  const parsed = value as CheckpointComparison;
+  const results = Object.values(parsed.workloads).flatMap(workload => Object.values(workload.segments).map(row => row.result));
+  const excessiveDrift = Object.values(parsed.workloads).some(workload =>
+    Object.values(workload.segments).some(row => row.deltas.baseline_drift_p50_percent !== null && Math.abs(row.deltas.baseline_drift_p50_percent) > 10),
+  );
+  const recomputed: CheckpointComparison['decision'] =
+    !parsed.populations_complete || excessiveDrift || results.includes('INCONCLUSIVE') || (results.includes('IMPROVED') && results.includes('REGRESSED'))
+      ? 'INCONCLUSIVE'
+      : results.includes('REGRESSED')
+        ? 'REGRESSED'
+        : results.includes('IMPROVED')
+          ? 'IMPROVED'
+          : 'INCONCLUSIVE';
+  if (parsed.decision !== recomputed) reportViolation('CHECKPOINT_COMPARISON_INVALID');
+  return Object.freeze(parsed);
 }

@@ -26,6 +26,9 @@ import { runTtsFirstAudioCausalBenchmark } from './liveVoiceTtsFirstAudioCausalB
 
 class ControlledMonotonicClock {
   #monotonicMs = 0;
+  #scheduled = [];
+  #drainScheduled = false;
+  #sequence = 0;
 
   nowMs() {
     return this.#monotonicMs;
@@ -34,6 +37,29 @@ class ControlledMonotonicClock {
   async waitMs(delayMs) {
     if (!Number.isFinite(delayMs) || delayMs < 0) throw new Error('CHECKPOINT_CLOCK_DELAY_INVALID');
     this.#monotonicMs += delayMs;
+  }
+
+  scheduleMs(delayMs, callback) {
+    if (!Number.isFinite(delayMs) || delayMs < 0 || typeof callback !== 'function') throw new Error('CHECKPOINT_CLOCK_SCHEDULE_INVALID');
+    this.#scheduled.push({ dueMs: this.#monotonicMs + delayMs, sequence: this.#sequence++, callback });
+    this.#scheduleDrain();
+  }
+
+  #scheduleDrain() {
+    if (this.#drainScheduled || this.#scheduled.length === 0) return;
+    this.#drainScheduled = true;
+    setImmediate(() => {
+      setImmediate(() => {
+        this.#scheduled.sort((left, right) => left.dueMs - right.dueMs || left.sequence - right.sequence);
+        const next = this.#scheduled.shift();
+        if (next !== undefined) {
+          this.#monotonicMs = Math.max(this.#monotonicMs, next.dueMs);
+          next.callback();
+        }
+        this.#drainScheduled = false;
+        queueMicrotask(() => this.#scheduleDrain());
+      });
+    });
   }
 }
 
@@ -69,7 +95,7 @@ export function parseAcceptedCheckpointArgs(argv) {
     const values = closedFlags(tail, new Set(['--population', '--mode', '--samples', '--git-commit', '--run-id', '--output']));
     const population = values.get('--population');
     const mode = values.get('--mode');
-    const samples = canonicalInteger(values.get('--samples'), 1, 30);
+    const samples = canonicalInteger(values.get('--samples'), 5, 5);
     const gitCommit = values.get('--git-commit');
     const runId = values.get('--run-id');
     const output = values.get('--output');
@@ -112,12 +138,32 @@ export function parseAcceptedCheckpointArgs(argv) {
       fail('CHECKPOINT_ARGUMENT_INVALID');
     return Object.freeze(result);
   }
+  if (command === 'render-markdown') {
+    const values = closedFlags(tail, new Set(['--comparison', '--output']));
+    const comparison = values.get('--comparison');
+    const output = values.get('--output');
+    if (
+      typeof comparison !== 'string' ||
+      typeof output !== 'string' ||
+      !path.isAbsolute(comparison) ||
+      !path.isAbsolute(output) ||
+      comparison === output ||
+      comparison.includes('\n') ||
+      comparison.includes('\r') ||
+      output.includes('\n') ||
+      output.includes('\r')
+    )
+      fail('CHECKPOINT_ARGUMENT_INVALID');
+    return Object.freeze({ command: 'render-markdown', comparison, output });
+  }
   fail('CHECKPOINT_ARGUMENT_INVALID');
 }
 
 export async function writePrivateCheckpointReport(output, report) {
   return writePrivateJson(output, report, parseCheckpointReport, 'CHECKPOINT_REPORT_INVALID');
 }
+
+const MAX_PRIVATE_REPORT_BYTES = 8 * 1024 * 1024;
 
 async function writePrivateJson(output, value, parser, invalidReason) {
   if (typeof output !== 'string' || !path.isAbsolute(output) || output.includes('\n') || output.includes('\r')) fail(invalidReason);
@@ -127,37 +173,85 @@ async function writePrivateJson(output, value, parser, invalidReason) {
   } catch {
     fail(invalidReason);
   }
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_PRIVATE_REPORT_BYTES) fail(invalidReason);
   const temporary = `${output}.tmp-${process.pid}-${randomUUID()}`;
   let handle = null;
+  let linked = false;
+  let failed = false;
   try {
     handle = await fs.open(temporary, 'wx', 0o600);
+    await handle.chmod(0o600);
     await handle.writeFile(serialized, 'utf8');
     await handle.sync();
+    const temporaryStat = await handle.stat();
+    if (!temporaryStat.isFile() || (temporaryStat.mode & 0o777) !== 0o600 || temporaryStat.size > MAX_PRIVATE_REPORT_BYTES) fail(invalidReason);
     await handle.close();
     handle = null;
     parser(JSON.parse(await fs.readFile(temporary, 'utf8')));
     await fs.link(temporary, output);
+    linked = true;
+    const directoryHandle = await fs.open(path.dirname(output), 'r');
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+    const installed = await fs.lstat(output);
+    if (!installed.isFile() || installed.isSymbolicLink() || (installed.mode & 0o777) !== 0o600 || installed.size > MAX_PRIVATE_REPORT_BYTES)
+      fail(invalidReason);
   } catch (error) {
+    failed = true;
     if (error?.code === 'EEXIST') fail('CHECKPOINT_OUTPUT_EXISTS');
     if (error instanceof Error && error.message.startsWith('CHECKPOINT_')) throw error;
     fail(invalidReason);
   } finally {
     if (handle !== null) await handle.close().catch(() => undefined);
     await fs.unlink(temporary).catch(() => undefined);
+    if (failed && linked) await fs.unlink(output).catch(() => undefined);
   }
 }
 
 export async function readPrivateCheckpointReport(input) {
+  return (await readPrivateCheckpointReportWithHash(input)).report;
+}
+
+async function readPrivateCheckpointReportWithHash(input) {
   try {
-    return parseCheckpointReport(JSON.parse(await fs.readFile(input, 'utf8')));
+    const stat = await fs.lstat(input);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600 || stat.size < 1 || stat.size > MAX_PRIVATE_REPORT_BYTES)
+      fail('CHECKPOINT_REPORT_INVALID');
+    const bytes = await fs.readFile(input);
+    return Object.freeze({ report: parseCheckpointReport(JSON.parse(bytes.toString('utf8'))), sha256: sha256(bytes) });
   } catch (error) {
     if (error instanceof Error && error.message === 'CHECKPOINT_REPORT_INVALID') throw error;
     fail('CHECKPOINT_REPORT_INVALID');
   }
 }
 
+export function assertCheckpointOutputOutsideGit(output, gitRoot) {
+  const resolvedOutput = path.resolve(output);
+  const resolvedRoot = path.resolve(gitRoot);
+  const relative = path.relative(resolvedRoot, resolvedOutput);
+  if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) fail('CHECKPOINT_OUTPUT_INSIDE_GIT');
+  return resolvedOutput;
+}
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+async function neutralRunnerFingerprint() {
+  const files = [
+    ['checkpoint-runner', new URL(import.meta.url)],
+    ['checkpoint-core', new URL('../src/features/live-voice/benchmark/acceptedOptimizationsCheckpoint.ts', import.meta.url)],
+    ['tts-controlled-owner-seam', new URL('./liveVoiceTtsFirstAudioCausalBenchmark.mjs', import.meta.url)],
+  ];
+  const hash = createHash('sha256');
+  for (const [label, file] of files) {
+    hash.update(label);
+    hash.update(await fs.readFile(file));
+  }
+  return hash.digest('hex');
 }
 
 export async function runAcceptedCheckpointPopulation(input) {
@@ -175,8 +269,7 @@ export async function runAcceptedCheckpointPopulation(input) {
     !RUN_ID.test(input.run_id ?? '')
   )
     fail('CHECKPOINT_RUN_INPUT_INVALID');
-  const runnerBytes = await fs.readFile(new URL(import.meta.url));
-  const runnerFingerprint = sha256(runnerBytes);
+  const runnerFingerprint = await neutralRunnerFingerprint();
   const fixtureFingerprint = sha256(JSON.stringify(CHECKPOINT_WORKLOADS));
   const timingFingerprint = sha256(JSON.stringify(CHECKPOINT_CONTROLLED_TARGETS));
   const attempts = [];
@@ -184,6 +277,7 @@ export async function runAcceptedCheckpointPopulation(input) {
     for (let attemptIndex = 0; attemptIndex < input.samples; attemptIndex += 1) {
       attempts.push(
         await runControlledOwnerAttempt({
+          run_id: input.run_id,
           population: input.population,
           workload_id: workloadId,
           attempt_index: attemptIndex,
@@ -213,14 +307,49 @@ export async function runAcceptedCheckpointPopulation(input) {
 }
 
 export async function comparePrivateCheckpointReports(input) {
-  const [a1, b, a2] = await Promise.all([
-    readPrivateCheckpointReport(input.baseline_before),
-    readPrivateCheckpointReport(input.candidate),
-    readPrivateCheckpointReport(input.baseline_after),
+  const [a1Input, bInput, a2Input] = await Promise.all([
+    readPrivateCheckpointReportWithHash(input.baseline_before),
+    readPrivateCheckpointReportWithHash(input.candidate),
+    readPrivateCheckpointReportWithHash(input.baseline_after),
   ]);
-  const comparison = compareCheckpointReports(a1, b, a2);
-  await writePrivateJson(input.output, comparison, parseCheckpointComparison, 'CHECKPOINT_COMPARISON_INVALID');
-  return comparison;
+  const comparison = compareCheckpointReports(a1Input.report, bInput.report, a2Input.report);
+  const boundComparison = Object.freeze({
+    ...comparison,
+    inputs: Object.freeze({
+      a1: Object.freeze({ ...comparison.inputs.a1, report_sha256: a1Input.sha256 }),
+      b: Object.freeze({ ...comparison.inputs.b, report_sha256: bInput.sha256 }),
+      a2: Object.freeze({ ...comparison.inputs.a2, report_sha256: a2Input.sha256 }),
+    }),
+  });
+  await writePrivateJson(input.output, boundComparison, parseCheckpointComparison, 'CHECKPOINT_COMPARISON_INVALID');
+  return boundComparison;
+}
+
+async function readPrivateCheckpointComparison(input) {
+  try {
+    const stat = await fs.lstat(input);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600 || stat.size < 1 || stat.size > MAX_PRIVATE_REPORT_BYTES)
+      fail('CHECKPOINT_COMPARISON_INVALID');
+    return parseCheckpointComparison(JSON.parse(await fs.readFile(input, 'utf8')));
+  } catch (error) {
+    if (error instanceof Error && error.message === 'CHECKPOINT_COMPARISON_INVALID') throw error;
+    fail('CHECKPOINT_COMPARISON_INVALID');
+  }
+}
+
+async function writeRenderedMarkdown(output, markdown) {
+  let handle = null;
+  try {
+    handle = await fs.open(output, 'wx', 0o644);
+    await handle.chmod(0o644);
+    await handle.writeFile(markdown, 'utf8');
+    await handle.sync();
+  } catch (error) {
+    if (error?.code === 'EEXIST') fail('CHECKPOINT_OUTPUT_EXISTS');
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 function fixed(value) {
@@ -234,13 +363,13 @@ export function renderCheckpointComparisonMarkdown(comparison) {
     '',
     `Decision: **${parsed.decision}**`,
     '',
-    '| Workload | Stage | A1 p50 ms | B p50 ms | A2 p50 ms | B−A1 ms | B−A2 ms | B−A1 % | B−A2 % | A drift % | Truth |',
+    '| Workload | Stage | A1 p50/p95 ms | B p50/p95 ms | A2 p50/p95 ms | B−A1 ms | B−A2 ms | B−A1 % | B−A2 % | A drift % | Result | Truth |',
     '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|',
   ];
   for (const [workloadId, workload] of Object.entries(parsed.workloads)) {
     for (const [segment, row] of Object.entries(workload.segments)) {
       lines.push(
-        `| ${workloadId} | ${segment} | ${fixed(row.a1_p50_ms)} | ${fixed(row.b_p50_ms)} | ${fixed(row.a2_p50_ms)} | ${fixed(row.b_minus_a1_ms)} | ${fixed(row.b_minus_a2_ms)} | ${fixed(row.b_minus_a1_percent)} | ${fixed(row.b_minus_a2_percent)} | ${fixed(row.baseline_drift_percent)} | DERIVED |`,
+        `| ${workloadId} | ${segment} | ${fixed(row.measurements.a1.p50_ms)}/${fixed(row.measurements.a1.p95_ms)} | ${fixed(row.measurements.b.p50_ms)}/${fixed(row.measurements.b.p95_ms)} | ${fixed(row.measurements.a2.p50_ms)}/${fixed(row.measurements.a2.p95_ms)} | ${fixed(row.deltas.b_minus_a1_p50_ms)} | ${fixed(row.deltas.b_minus_a2_p50_ms)} | ${row.deltas.b_minus_a1_p50_percent === null ? 'n/a' : fixed(row.deltas.b_minus_a1_p50_percent)} | ${row.deltas.b_minus_a2_p50_percent === null ? 'n/a' : fixed(row.deltas.b_minus_a2_p50_percent)} | ${row.deltas.baseline_drift_p50_percent === null ? 'n/a' : fixed(row.deltas.baseline_drift_p50_percent)} | ${row.result} | MEASURED + DERIVED |`,
       );
     }
   }
@@ -252,12 +381,24 @@ const USAGE = `Usage: liveVoiceAcceptedOptimizationsCheckpoint <command> [option
 Commands:
   run --population A1|B|A2 --mode baseline|optimized --samples N --git-commit SHA --run-id ID --output PATH
   compare-a-b-a --baseline-before PATH --candidate PATH --baseline-after PATH --output PATH
+  render-markdown --comparison PATH --output PATH
 `;
 
-function assertExactCleanSource(expectedCommit) {
+function captureSourceState() {
   const actualCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
-  if (actualCommit !== expectedCommit || status !== '') fail('CHECKPOINT_SOURCE_NOT_CLEAN');
+  return Object.freeze({ actualCommit, status });
+}
+
+function assertExactCleanSource(expectedCommit, expectedSnapshot = null) {
+  const snapshot = captureSourceState();
+  if (
+    snapshot.actualCommit !== expectedCommit ||
+    snapshot.status !== '' ||
+    (expectedSnapshot !== null && (snapshot.actualCommit !== expectedSnapshot.actualCommit || snapshot.status !== expectedSnapshot.status))
+  )
+    fail('CHECKPOINT_SOURCE_NOT_CLEAN');
+  return snapshot;
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -266,10 +407,25 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   const args = parseAcceptedCheckpointArgs(argv);
+  if (args.command === 'render-markdown') {
+    const comparison = await readPrivateCheckpointComparison(args.comparison);
+    await writeRenderedMarkdown(args.output, renderCheckpointComparisonMarkdown(comparison));
+    process.stdout.write(`${JSON.stringify({ decision: comparison.decision })}\n`);
+    return;
+  }
+  const gitRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+  assertCheckpointOutputOutsideGit(args.output, gitRoot);
   if (args.command === 'run') {
-    assertExactCleanSource(args.git_commit);
+    const sourceBefore = assertExactCleanSource(args.git_commit);
     const report = await runAcceptedCheckpointPopulation(args);
+    assertExactCleanSource(args.git_commit, sourceBefore);
     await writePrivateCheckpointReport(args.output, report);
+    try {
+      assertExactCleanSource(args.git_commit, sourceBefore);
+    } catch (error) {
+      await fs.unlink(args.output).catch(() => undefined);
+      throw error;
+    }
     const completed = report.attempts.filter(attempt => attempt.outcome === 'completed').length;
     process.stdout.write(`${JSON.stringify({ run_id: report.run_id, completed, intended: report.attempts.length })}\n`);
     if (completed !== report.attempts.length) fail('CHECKPOINT_POPULATION_INCOMPLETE');
@@ -288,7 +444,7 @@ if (invokedDirectly) {
 }
 
 function bindingFor(config) {
-  const suffix = `${config.workload_id}-${config.attempt_index}`;
+  const suffix = `${config.run_id}-${config.population}-${config.workload_id}-${config.attempt_index}`;
   return Object.freeze({
     session_id: `checkpoint-session-${suffix}`,
     correlation_id: `checkpoint-correlation-${suffix}`,
@@ -323,14 +479,14 @@ function sameBinding(params, binding) {
   );
 }
 
-function checkpointNotification(binding, requestId, publishSeq, workload) {
+function checkpointNotification(binding, publishSeq, workload) {
   const final = publishSeq === workload.notification_count - 1;
   const toolStarted = workload.id === 'W3' && publishSeq === 40;
   const toolCompleted = workload.id === 'W3' && publishSeq === 41;
   const eventType = final ? 'chat.final' : toolStarted ? 'tool_execution_started' : toolCompleted ? 'tool_execution_completed' : 'chat.delta';
   return boundResult(binding, 'notification', {
     kind: 'agent.output',
-    request_id: requestId,
+    request_id: `checkpoint-notification-${workload.id}-${publishSeq}`,
     round_id: `checkpoint-round-${workload.id}`,
     response: {
       interaction_id: binding.interaction_id,
@@ -376,14 +532,19 @@ function batchLength(delivered, requested, workload) {
 
 async function deliverWithRealP2Owner(config, workload, clock, diagnostics) {
   const binding = bindingFor(config);
+  const backlog = Object.freeze(
+    Array.from({ length: workload.notification_count }, (_, publishSeq) => Object.freeze(checkpointNotification(binding, publishSeq, workload))),
+  );
   let delivered = 0;
   let notificationRpcCount = 0;
   const observedBarriers = [];
+  const batches = [];
+  let finalNotification = null;
   const batchSize = config.optimization_mode.p2_notification_batch_size;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
     notification_batch_size: batchSize,
-    request: async (method, params, requestId) => {
+    request: async (method, params) => {
       if (!sameBinding(params, binding)) fail('CHECKPOINT_P2_BINDING_MISMATCH');
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return boundResult(binding, 'active', { replayed: false });
       if (method === PRODUCT_P2_CLOSE_METHOD) return boundResult(binding, 'closed');
@@ -391,16 +552,25 @@ async function deliverWithRealP2Owner(config, workload, clock, diagnostics) {
         const requested = params.max_notifications ?? 1;
         if (params.notification_sequence !== notificationRpcCount + 1 || requested !== batchSize || delivered >= workload.notification_count)
           fail('CHECKPOINT_P2_SEQUENCE_INVALID');
+        const startedAt = clock.nowMs();
         await clock.waitMs(CHECKPOINT_CONTROLLED_TARGETS.p2_rpc_ms);
+        const completedAt = clock.nowMs();
         notificationRpcCount += 1;
         const length = batchLength(delivered, requested, workload);
-        const notifications = [];
-        for (let index = 0; index < length; index += 1) {
-          const publishSeq = delivered;
-          delivered += 1;
-          const notification = checkpointNotification(binding, requestId, publishSeq, workload);
-          notifications.push(typeof diagnostics.p2NotificationMutator === 'function' ? diagnostics.p2NotificationMutator(notification) : notification);
-        }
+        const startPublishSeq = delivered;
+        const notifications = backlog
+          .slice(delivered, delivered + length)
+          .map(notification => (typeof diagnostics.p2NotificationMutator === 'function' ? diagnostics.p2NotificationMutator(notification) : notification));
+        delivered += length;
+        batches.push(
+          Object.freeze({
+            rpc_index: notificationRpcCount,
+            start_publish_seq: startPublishSeq,
+            end_publish_seq: delivered - 1,
+            count: length,
+            duration_ms: completedAt - startedAt,
+          }),
+        );
         return requested === 1 ? { ok: true, result: notifications[0] } : boundResult(binding, 'notification_batch', { notifications });
       }
       if (
@@ -426,6 +596,7 @@ async function deliverWithRealP2Owner(config, workload, clock, diagnostics) {
       if ((notification.agent_event?.event_type === 'chat.final') !== final || (notification.presentation_unit !== null) !== final || finalSeen)
         fail('CHECKPOINT_P2_FINAL_INVALID');
       finalSeen = final;
+      if (final) finalNotification = notification;
     }
     if (!finalSeen || delivered !== workload.notification_count) fail('CHECKPOINT_P2_INCOMPLETE');
   } finally {
@@ -435,44 +606,75 @@ async function deliverWithRealP2Owner(config, workload, clock, diagnostics) {
       diagnostics.onP2Close?.();
     }
   }
+  if (finalNotification === null) fail('CHECKPOINT_P2_FINAL_INVALID');
   return Object.freeze({
+    truth_class: 'measured',
     notification_rpc_count: notificationRpcCount,
     notification_batch_count: notificationRpcCount,
     ordered_barriers: Object.freeze(observedBarriers),
+    batches: Object.freeze(batches),
+    response: Object.freeze({
+      session_id: binding.session_id,
+      correlation_id: binding.correlation_id,
+      interaction_id: finalNotification.response.interaction_id,
+      activation_id: binding.activation_id,
+      response_id: finalNotification.response.response_id,
+      response_generation: finalNotification.response.response_generation,
+      unit_id: finalNotification.presentation_unit.unit_id,
+    }),
   });
 }
 
-async function advanceObserved(clock, priorMs, nextMs) {
-  if (typeof nextMs !== 'number' || !Number.isFinite(nextMs) || nextMs < priorMs) fail('CHECKPOINT_P1_TIMING_INVALID');
-  await clock.waitMs(nextMs - priorMs);
-  return nextMs;
-}
-
-async function playWithRealP1Owner(config, workload, clock, mark) {
+async function playWithRealP1Owner(config, workload, clock, mark, p2) {
+  const pointMap = new Map([
+    ['browser.downlink_attach_started', 'downlink_opened'],
+    ['browser.downlink_first_frame_received', 'first_frame_received'],
+    ['browser.playout_first_frame_scheduled', 'first_source_scheduled'],
+    ['browser.playout_completed', 'playout_completed'],
+    ['browser.playout_ack_received', 'confirmed_ack_and_next_turn_ready'],
+  ]);
+  const marked = new Set();
   const report = await runTtsFirstAudioCausalBenchmark({
     runId: `checkpoint-${config.workload_id}-${config.attempt_index}`,
     gitCommit: config.source_commit,
     samples: 1,
     successorAckDelaysMs: [workload.successor_ack_delay_ms],
+    identity: {
+      session_id: p2.response.session_id,
+      correlation_id: p2.response.correlation_id,
+      interaction_id: p2.response.interaction_id,
+      activation_id: p2.response.activation_id,
+      turn_id: `checkpoint-turn-${config.run_id}-${config.workload_id}-${config.attempt_index}`,
+      response_id: p2.response.response_id,
+      response_generation: p2.response.response_generation,
+      unit_id: p2.response.unit_id,
+    },
+    timing: {
+      now: () => clock.nowMs(),
+      scheduleAck: (delayMs, callback) => clock.scheduleMs(delayMs, callback),
+      schedulePlayout: (delayMs, callback) => clock.scheduleMs(delayMs, callback),
+      playoutDurationMs: workload.playout_duration_ms,
+      onPoint(point) {
+        const checkpointPoint = pointMap.get(point);
+        if (checkpointPoint === undefined || marked.has(checkpointPoint)) return;
+        marked.add(checkpointPoint);
+        mark(checkpointPoint);
+      },
+    },
   });
   const attempt = report.populations[0]?.attempts[0];
   const expectedMode = config.optimization_mode.tts_successor_ack_overlap ? 'successor_ack_decoupled' : 'legacy_sequential';
   if (report.candidate_mode !== expectedMode || attempt?.outcome !== 'completed') fail('CHECKPOINT_P1_SOURCE_MODE_INVALID');
-  let prior = 0;
-  prior = await advanceObserved(clock, prior, attempt.downlink_opened_ms);
-  mark('downlink_opened');
-  prior = await advanceObserved(clock, prior, attempt.downlink_first_frame_received_ms);
-  mark('first_frame_received');
-  prior = await advanceObserved(clock, prior, attempt.first_source_scheduled_ms);
-  mark('first_source_scheduled');
-  await clock.waitMs(workload.playout_duration_ms);
-  mark('playout_completed');
-  mark('confirmed_ack_and_next_turn_ready');
+  if (marked.size !== pointMap.size) fail('CHECKPOINT_P1_TIMING_INCOMPLETE');
   return Object.freeze({
     successor_ack_confirmed: typeof attempt.successor_first_ack_ms === 'number',
     next_turn_ready: typeof attempt.playout_receipt_accepted_ms === 'number',
     downlink_opened_before_successor_ack: typeof attempt.successor_first_ack_ms === 'number' && attempt.downlink_opened_ms < attempt.successor_first_ack_ms,
     product_owner: 'ProductP1VoiceRouteOwner',
+    successor_ack_observed_ms: attempt.successor_first_ack_ms,
+    interaction_id: attempt.interaction_id,
+    response_id: attempt.response_id,
+    unit_id: attempt.unit_id,
   });
 }
 
@@ -481,6 +683,6 @@ export async function runControlledOwnerAttempt(config, dependencies = {}) {
   return runCheckpointAttempt(config, {
     clock,
     deliverPresentation: ({ workload }) => deliverWithRealP2Owner(config, workload, clock, dependencies),
-    playResponse: ({ workload, mark }) => playWithRealP1Owner(config, workload, clock, mark),
+    playResponse: ({ workload, mark, p2 }) => playWithRealP1Owner(config, workload, clock, mark, p2),
   });
 }

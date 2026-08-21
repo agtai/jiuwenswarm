@@ -94,7 +94,7 @@ class FakeTrack extends FakeEventTarget {
 }
 
 class FakeAudioContext {
-  constructor(onSourceScheduled) {
+  constructor(onSourceScheduled, schedulePlayout, playoutDurationMs) {
     this.sampleRate = 48_000;
     this.currentTime = 0;
     this.destination = Object.freeze({ kind: 'destination' });
@@ -102,6 +102,8 @@ class FakeAudioContext {
     this.onstatechange = null;
     this.audioWorklet = { addModule: async () => undefined };
     this.onSourceScheduled = onSourceScheduled;
+    this.schedulePlayout = schedulePlayout;
+    this.playoutDurationMs = playoutDurationMs;
   }
 
   async resume() {
@@ -129,7 +131,7 @@ class FakeAudioContext {
       disconnect() {},
       start() {
         context.onSourceScheduled();
-        queueMicrotask(() => source.onended?.());
+        context.schedulePlayout(context.playoutDurationMs, () => source.onended?.());
       },
       stop() {},
     };
@@ -166,17 +168,17 @@ function bindingForCapture(params, index) {
   };
 }
 
-function downlinkBinding(response) {
+function downlinkBinding(response, identity) {
   return {
     lease_id: 'tts-benchmark-downlink-lease',
     authority_evidence_id: 'tts-benchmark-downlink-authority',
     connection_id: 'tts-benchmark-connection',
     connection_epoch: 0,
-    session_id: 'tts-benchmark-session',
+    session_id: identity.session_id,
     media_session_id: 'tts-benchmark-downlink-session',
     interaction_id: response.interaction_id,
     track_id: 'tts-benchmark-playout-track',
-    correlation_id: 'tts-benchmark-correlation',
+    correlation_id: identity.correlation_id,
     direction: 'downlink',
     generation: {
       kind: 'response',
@@ -194,7 +196,7 @@ function downlinkBinding(response) {
     playout: {
       response_id: response.response_id,
       response_generation: response.response_generation,
-      unit_id: 'tts-benchmark-unit',
+      unit_id: identity.unit_id,
     },
   };
 }
@@ -219,7 +221,7 @@ function nearestRank(values, percentile) {
   return rounded(sorted[Math.ceil((percentile / 100) * sorted.length) - 1]);
 }
 
-function makeLatencyProbe(points, elapsed, measurementOrigin) {
+function makeLatencyProbe(points, elapsed, measurementOrigin, onPoint) {
   let roundIndex = 0;
   const pointMap = new Map([
     ['browser.presentation_received', 'presentation_received_ms'],
@@ -247,10 +249,13 @@ function makeLatencyProbe(points, elapsed, measurementOrigin) {
         mark(point, _identity, observation) {
           if (finished) return false;
           const target = pointMap.get(point);
+          let pointElapsed = elapsed();
           if (target !== undefined && points[target] === null) {
             const observed = observation?.monotonic_ms;
-            points[target] = rounded(typeof observed === 'number' && Number.isFinite(observed) ? Math.max(0, observed - measurementOrigin()) : elapsed());
+            pointElapsed = rounded(typeof observed === 'number' && Number.isFinite(observed) ? Math.max(0, observed - measurementOrigin()) : elapsed());
+            points[target] = pointElapsed;
           }
+          onPoint?.(point, pointElapsed);
           return true;
         },
         commit() {
@@ -272,7 +277,7 @@ function makeLatencyProbe(points, elapsed, measurementOrigin) {
   };
 }
 
-function makeAudioEnvironment(points, elapsed) {
+function makeAudioEnvironment(points, elapsed, timing) {
   const document = new FakeEventTarget();
   document.visibilityState = 'visible';
   const mediaDevices = new FakeEventTarget();
@@ -292,11 +297,15 @@ function makeAudioEnvironment(points, elapsed) {
     mediaDevices,
     permissions: null,
     createAudioContext: () =>
-      new FakeAudioContext(() => {
-        if (points.first_source_scheduled_ms === null) {
-          points.first_source_scheduled_ms = rounded(elapsed());
-        }
-      }),
+      new FakeAudioContext(
+        () => {
+          if (points.first_source_scheduled_ms === null) {
+            points.first_source_scheduled_ms = rounded(elapsed());
+          }
+        },
+        timing.schedulePlayout,
+        timing.playoutDurationMs,
+      ),
     createAudioWorkletNode: (_context, _name, options) => {
       const node = new FakeAudioNode();
       node.captureGeneration = options.processorOptions.captureGeneration;
@@ -332,10 +341,11 @@ function makeAudioEnvironment(points, elapsed) {
 }
 
 class BenchmarkMediaSocket {
-  constructor({ ackDelayMs, points, elapsed }) {
+  constructor({ ackDelayMs, points, elapsed, scheduleAck }) {
     this.ackDelayMs = ackDelayMs;
     this.points = points;
     this.elapsed = elapsed;
+    this.scheduleAck = scheduleAck;
     this.readyState = 0;
     this.bufferedAmount = 0;
     this.protocol = '';
@@ -378,7 +388,7 @@ class BenchmarkMediaSocket {
     const throughSeq = decodeAudioFrame(this.binding, value).seq;
     const successor = this.binding.generation.id === 'tts-benchmark-capture-2';
     const delay = successor ? this.ackDelayMs : 0;
-    setTimeout(() => {
+    this.scheduleAck(delay, () => {
       if (this.readyState !== 1) return;
       if (successor && this.points.successor_first_ack_ms === null) {
         this.points.successor_first_ack_ms = rounded(this.elapsed());
@@ -425,7 +435,7 @@ class BenchmarkMediaSocket {
           }),
         });
       }
-    }, delay);
+    });
   }
 
   open() {
@@ -456,9 +466,19 @@ class BenchmarkMediaSocket {
   }
 }
 
-async function runAttempt(ackDelayMs, attemptIndex) {
+function defaultTiming() {
+  return Object.freeze({
+    now: () => performance.now(),
+    scheduleAck: (delayMs, callback) => setTimeout(callback, delayMs),
+    schedulePlayout: (_delayMs, callback) => queueMicrotask(callback),
+    playoutDurationMs: 0,
+    onPoint: null,
+  });
+}
+
+async function runAttempt(ackDelayMs, attemptIndex, timing, identity) {
   let measurementOrigin = null;
-  const elapsed = () => (measurementOrigin === null ? 0 : Math.max(0, performance.now() - measurementOrigin));
+  const elapsed = () => (measurementOrigin === null ? 0 : Math.max(0, timing.now() - measurementOrigin));
   const points = {
     presentation_received_ms: null,
     tts_request_started_ms: null,
@@ -471,22 +491,22 @@ async function runAttempt(ackDelayMs, attemptIndex) {
     playout_receipt_accepted_ms: null,
   };
   const response = Object.freeze({
-    interaction_id: 'tts-benchmark-interaction',
-    response_id: `tts-benchmark-response-${ackDelayMs}-${attemptIndex}`,
-    response_generation: 1,
+    interaction_id: identity.interaction_id,
+    response_id: identity.response_id,
+    response_generation: identity.response_generation,
   });
-  const downlink = downlinkBinding(response);
-  const environment = makeAudioEnvironment(points, elapsed);
-  const latencyProbe = makeLatencyProbe(points, elapsed, () => measurementOrigin ?? performance.now());
+  const downlink = downlinkBinding(response, identity);
+  const environment = makeAudioEnvironment(points, elapsed, timing);
+  const latencyProbe = makeLatencyProbe(points, elapsed, () => measurementOrigin ?? timing.now(), timing.onPoint);
   let activationCount = 0;
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
     latency_probe: latencyProbe,
-    latency_monotonic_ms: elapsed,
+    latency_monotonic_ms: timing.now,
     audio_environment: environment,
     socket_factory: () => {
-      const socket = new BenchmarkMediaSocket({ ackDelayMs, points, elapsed });
+      const socket = new BenchmarkMediaSocket({ ackDelayMs, points, elapsed, scheduleAck: timing.scheduleAck });
       queueMicrotask(() => socket.open());
       return socket;
     },
@@ -548,7 +568,7 @@ async function runAttempt(ackDelayMs, attemptIndex) {
         };
       }
       if (method === 'live_voice.speech.synthesize_batch') {
-        measurementOrigin ??= performance.now();
+        measurementOrigin ??= timing.now();
         points.tts_request_started_ms = 0;
         points.tts_descriptor_ready_ms = rounded(elapsed());
         return {
@@ -619,15 +639,15 @@ async function runAttempt(ackDelayMs, attemptIndex) {
   let reason = null;
   try {
     await owner.startCapture({
-      session_id: 'tts-benchmark-session',
+      session_id: identity.session_id,
       interaction_id: response.interaction_id,
-      correlation_id: 'tts-benchmark-correlation',
-      activation_id: 'tts-benchmark-activation',
+      correlation_id: identity.correlation_id,
+      activation_id: identity.activation_id,
       activation_generation: 1,
       locale: 'en-US',
     });
     await owner.stopAndRecognize();
-    const context = owner.prepareUnifiedSubmitLatency(`tts-benchmark-turn-${attemptIndex}`);
+    const context = owner.prepareUnifiedSubmitLatency(identity.turn_id);
     if (context === null || !owner.bindUnifiedSubmitLatency(response, null)) {
       fail('TTS_FIRST_AUDIO_RESPONSE_BINDING_FAILED');
     }
@@ -637,7 +657,7 @@ async function runAttempt(ackDelayMs, attemptIndex) {
     }
     await owner.playAgentText({
       response,
-      unit_id: 'tts-benchmark-unit',
+      unit_id: identity.unit_id,
       text: 'Content-free deterministic benchmark response.',
     });
     const terminal = owner.status();
@@ -664,19 +684,48 @@ async function runAttempt(ackDelayMs, attemptIndex) {
     attempt: attemptIndex,
     outcome,
     reason,
+    interaction_id: identity.interaction_id,
+    response_id: identity.response_id,
+    unit_id: identity.unit_id,
     ...points,
   });
 }
 
 function validateRunInput(input) {
   const delays = Array.isArray(input?.successorAckDelaysMs) ? [...input.successorAckDelaysMs] : [...SUCCESSOR_ACK_DELAYS_MS];
+  const timing = input?.timing ?? defaultTiming();
+  const identity =
+    input?.identity ??
+    Object.freeze({
+      session_id: 'tts-benchmark-session',
+      correlation_id: 'tts-benchmark-correlation',
+      interaction_id: 'tts-benchmark-interaction',
+      activation_id: 'tts-benchmark-activation',
+      turn_id: 'tts-benchmark-turn',
+      response_id: 'tts-benchmark-response',
+      response_generation: 1,
+      unit_id: 'tts-benchmark-unit',
+    });
   if (
     !RUN_ID.test(input?.runId ?? '') ||
     !GIT_COMMIT.test(input?.gitCommit ?? '') ||
     canonicalInteger(input?.samples, 1, 30) === null ||
     delays.length === 0 ||
     delays.some(delay => !ALLOWED_ACK_DELAYS_MS.has(delay)) ||
-    new Set(delays).size !== delays.length
+    new Set(delays).size !== delays.length ||
+    timing === null ||
+    typeof timing !== 'object' ||
+    typeof timing.now !== 'function' ||
+    typeof timing.scheduleAck !== 'function' ||
+    typeof timing.schedulePlayout !== 'function' ||
+    (timing.onPoint !== null && typeof timing.onPoint !== 'function') ||
+    canonicalInteger(timing.playoutDurationMs, 0, 10_000) === null ||
+    identity === null ||
+    typeof identity !== 'object' ||
+    !['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'turn_id', 'response_id', 'unit_id'].every(
+      key => typeof identity[key] === 'string' && RUN_ID.test(identity[key]),
+    ) ||
+    canonicalInteger(identity.response_generation, 0, 1_000_000) === null
   ) {
     fail('TTS_FIRST_AUDIO_INPUT_INVALID');
   }
@@ -685,6 +734,8 @@ function validateRunInput(input) {
     gitCommit: input.gitCommit,
     samples: input.samples,
     delays: Object.freeze(delays),
+    timing: Object.freeze({ ...timing }),
+    identity: Object.freeze({ ...identity }),
   });
 }
 
@@ -694,7 +745,7 @@ export async function runTtsFirstAudioCausalBenchmark(input) {
   for (const delay of config.delays) {
     const attempts = [];
     for (let attempt = 0; attempt < config.samples; attempt += 1) {
-      attempts.push(await runAttempt(delay, attempt));
+      attempts.push(await runAttempt(delay, attempt, config.timing, config.identity));
     }
     populations.push(
       Object.freeze({

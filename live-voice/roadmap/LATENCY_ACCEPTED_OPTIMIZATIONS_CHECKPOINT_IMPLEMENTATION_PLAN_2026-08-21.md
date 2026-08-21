@@ -388,14 +388,14 @@ Voice P1/P2 owners and latency contracts.
 - Produces branch `latency_checkpoint_accepted_optimizations_a_reference` and
   its exact clean 40-character A checkpoint source.
 
-- [ ] **Step 1: Request independent Tier-3 review**
+- [x] **Step 1: Request independent Tier-3 review**
 
   Review spec/plan, complete diff from `5b87a5992` to
   the exact B checkpoint source, P/N/B/S/T/C/R/I/F/K/X evidence, privacy, owner
   authority and comparer neutrality. No A1 call runs with open
   Critical/Important findings.
 
-- [ ] **Step 2: Reproduce and remediate findings with TDD**
+- [x] **Step 2: Reproduce and remediate findings with TDD**
 
   Every material finding receives one causal RED before minimal remediation.
   Rerun Tasks 1–3 gates and record the final clean reviewed B source.
