@@ -72,7 +72,7 @@ constructor field and therefore must retain 50/250/500 RPCs.
   85 ms delay, batch size 16. Mark the earlier `a9142dd2d` A1 preliminary and
   record the new exact reference commit/result.
 
-**Replacement A1:** `PASS — P2 CAUSAL BASELINE ONLY`
+**Pre-correction A1:** `PASS — P2 CAUSAL BASELINE ONLY`
 
 - Exact reference: `c8f24834bb92205c6a23a85035066ea8f0b3e8cc`
 - Run ID: `p2-a1-batch16-20260820T233928Z-c8f24834b`
@@ -80,6 +80,22 @@ constructor field and therefore must retain 50/250/500 RPCs.
 - RPC totals: 50 / 250 / 500
 - p50: 863.272 / 4,330.481 / 8,649.853 ms
 - p95: 869.882 / 4,365.143 / 8,700.057 ms
+- All forbidden effects: zero
+
+The GREEN B run exposed that this otherwise valid legacy measurement used a
+runner completion oracle tied to delivered item count. That is equivalent for
+the one-item legacy owner but cannot execute a batch candidate. Commit
+`31f9209d66682d19745acd1d2c15a16b59fc75e2` repairs only that candidate-neutral
+oracle; it is now the exact A1/A2 reference.
+
+**Corrected-harness A1:** `PASS — P2 CAUSAL BASELINE ONLY`
+
+- Exact reference: `31f9209d66682d19745acd1d2c15a16b59fc75e2`
+- Run ID: `p2-a1-r-batch16-20260821T001711Z-31f9209d6`
+- Five attempts per population; batch-size input 16; owner remained legacy
+- RPC totals: 50 / 250 / 500
+- p50: 864.293 / 4,348.227 / 8,658.478 ms
+- p95: 873.600 / 4,351.440 / 8,700.760 ms
 - All forbidden effects: zero
 
 ## Task 2: Bounded runtime drain
@@ -97,13 +113,13 @@ constructor field and therefore must retain 50/250/500 RPCs.
 - `AgentConversationRuntime.drain_notifications_for(lease, *, limit) -> tuple[AgentConversationNotification, ...]`
 - `P2ActivationLease.next_notifications(binding, *, limit) -> tuple[AgentConversationNotification, ...]`
 
-- [ ] RED: exact lease drains queued notifications in publish order, returns
+- [x] RED: exact lease drains queued notifications in publish order, returns
   immediately below the limit, and rejects `0`, `17`, bool, detached, stale and
   foreign leases with zero consumption.
-- [ ] GREEN: add only the nonblocking drain methods; retain the existing
+- [x] GREEN: add only the nonblocking drain methods; retain the existing
   `next_notification*` behavior unchanged.
-- [ ] Verify close/detach races cannot consume after the lease fence.
-- [ ] Run the two focused Python suites, Ruff, py_compile and diff check.
+- [x] Verify close/detach races cannot consume after the lease fence.
+- [x] Run the two focused Python suites, Ruff, py_compile and diff check.
 
 ## Task 3: Server batch protocol and replay
 
@@ -137,15 +153,15 @@ constructor field and therefore must retain 50/250/500 RPCs.
 }
 ```
 
-- [ ] RED: flag-off rejects `max_notifications` before dequeue; legacy request
+- [x] RED: flag-off rejects `max_notifications` before dequeue; legacy request
   remains exact. Flag-on returns up to the requested limit, includes full bound
   items, stops after the first authoritative barrier and never waits to fill.
-- [ ] RED: same request ID replays identical bytes; changed limit conflicts;
+- [x] RED: same request ID replays identical bytes; changed limit conflicts;
   wrong sequence/generation/scope, concurrent predecessor and invalid bounds
   consume zero notifications.
-- [ ] GREEN: add the setting/env flag, closed parameter parser, barrier-aware
+- [x] GREEN: add the setting/env flag, closed parameter parser, barrier-aware
   drain and retained batch response.
-- [ ] Run the complete registry suite, related P2 adapter/runtime suites, Ruff,
+- [x] Run the complete registry suite, related P2 adapter/runtime suites, Ruff,
   py_compile and diff check.
 
 ## Task 4: Web owner queue and feature flag
@@ -167,17 +183,36 @@ constructor field and therefore must retain 50/250/500 RPCs.
 is 1. `nextNotification()` returns queued items without another RPC, but one
 in-flight call still coalesces to one first result.
 
-- [ ] RED: batch 16 turns 10/50/100 items into 1/4/7 RPCs, preserves ordered
+- [x] RED: batch 16 turns 10/50/100 items into 1/4/7 RPCs, preserves ordered
   item delivery and stops each server batch at an authoritative barrier.
-- [ ] RED: empty, oversized, open, foreign, duplicated or decreasing batch
+- [x] RED: empty, oversized, open, foreign, duplicated or decreasing batch
   items fail closed; response loss retries the same request; close/stale
   generation clears the local queue.
-- [ ] RED: flag-off Panel constructors omit batch size; flag-on recovery,
+- [x] RED: flag-off Panel constructors omit batch size; flag-on recovery,
   initial and successor owners all pass exactly 16.
-- [ ] GREEN: implement the bounded local queue/parser and pass the flag at all
+- [x] GREEN: implement the bounded local queue/parser and pass the flag at all
   three owner construction seams.
-- [ ] Run focused owner/Panel tests, full integrated Web, frontend build,
+- [x] Run focused owner/Panel tests, full integrated Web, frontend build,
   Prettier and diff check.
+
+**Implementation checkpoint (2026-08-21):** Tasks 2–4 are GREEN in the B
+worktree. The complete affected Python set passed 255/255; Integrated Web
+passed 421/421; the production frontend build completed with 4,645 modules.
+Ruff, `py_compile`, scoped Prettier and `git diff --check` passed. The frozen
+runner exposed one candidate-neutral defect during the first B rerun: it tied
+`notification_sequence` and its completion oracle to delivered item count
+instead of transport-RPC count. The correction leaves legacy A1 timings and
+effects unchanged, permits the contracted per-RPC sequence under batching, and
+derives expected serial wait from observed RPC count. It is part of the
+reviewed benchmark harness, not product optimization credit. The committed
+B/A2 measurements remain open.
+
+The independent Tier-3 review then returned `READY` after one Important
+finding was reproduced and fixed in RED/GREEN: a nested
+`agent_event.error_reason` is now an authoritative barrier on the server and
+cannot precede a Web batch tail. No Critical, Important or Minor finding
+remains. This grants code-review readiness only; performance still depends on
+B and unchanged-source A2 below.
 
 ## Task 5: Candidate B and unchanged A2
 

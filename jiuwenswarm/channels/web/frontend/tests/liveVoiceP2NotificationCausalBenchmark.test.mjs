@@ -10,7 +10,7 @@ import {
   writeP2NotificationCausalReport,
 } from '../scripts/liveVoiceP2NotificationCausalBenchmark.mjs';
 
-test('real P2 owner exposes linear serial notification cost with zero forbidden effects', async () => {
+test('real P2 owner exposes bounded notification cost with zero forbidden effects', async () => {
   let monotonicMs = 0;
   const report = await runP2NotificationCausalBenchmark({
     runId: 'p2-a1-test',
@@ -44,21 +44,21 @@ test('real P2 owner exposes linear serial notification cost with zero forbidden 
       notification_count: 2,
       attempts: 2,
       successful: 2,
-      notification_rpc_count: 4,
-      expected_serial_ms: 170,
-      samples_ms: [170, 170],
-      p50_ms: 170,
-      p95_ms: 170,
+      notification_rpc_count: 2,
+      expected_serial_ms: 85,
+      samples_ms: [85, 85],
+      p50_ms: 85,
+      p95_ms: 85,
     },
     {
       notification_count: 4,
       attempts: 2,
       successful: 2,
-      notification_rpc_count: 8,
-      expected_serial_ms: 340,
-      samples_ms: [340, 340],
-      p50_ms: 340,
-      p95_ms: 340,
+      notification_rpc_count: 2,
+      expected_serial_ms: 85,
+      samples_ms: [85, 85],
+      p50_ms: 85,
+      p95_ms: 85,
     },
   ]);
   assert.deepEqual(report.forbidden_effects, {

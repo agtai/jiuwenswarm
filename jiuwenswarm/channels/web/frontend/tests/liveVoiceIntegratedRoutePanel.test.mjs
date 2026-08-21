@@ -14,6 +14,7 @@ import {
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
   createProductLatencyProbe,
+  createProductP2ActivationOwner,
   selectProductPostCaptureBenchmark,
   extractWebErrorReason,
   formalTaskIntentResultSummary,
@@ -33,6 +34,35 @@ import {
   terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
+test('Panel P2 owner factory omits legacy batch input and passes exact feature-on size', async () => {
+  const binding = {
+    session_id: 'session-batch-panel',
+    correlation_id: 'correlation-batch-panel',
+    interaction_id: 'interaction-batch-panel',
+    activation_id: 'activation-batch-panel',
+    activation_generation: 1,
+  };
+  for (const enabled of [false, true]) {
+    const notificationParams = [];
+    const owner = createProductP2ActivationOwner({
+      enabled: true,
+      notification_batch_enabled: enabled,
+      request: async (method, params) => {
+        if (method === 'live_voice.composition.p2.activate') {
+          return { ok: true, result: { status: 'active', ...binding } };
+        }
+        notificationParams.push(params);
+        throw new Error('stop after request observation');
+      },
+    });
+    await owner.start(binding);
+    await assert.rejects(owner.nextNotification(), /stop after request observation/);
+    assert.equal(notificationParams.length, 1);
+    assert.equal('max_notifications' in notificationParams[0], enabled);
+    if (enabled) assert.equal(notificationParams[0].max_notifications, 16);
+  }
+});
 
 test('panel latency factory is side-effect free off and invalid query never reaches storage or clocks', () => {
   let browserReads = 0;

@@ -58,6 +58,7 @@ from .task_progress_return import TaskProgressNotificationIntent
 
 _P2_OPERATION = "agent.chat"
 _P2_CAPABILITIES = frozenset({_P2_OPERATION})
+_MAX_NOTIFICATION_BATCH = 16
 
 
 class ProductP2AdapterViolation(ValueError):
@@ -879,6 +880,48 @@ class P2ActivationLease:
                 ErrorCode.UNAVAILABLE,
             )
         return notification
+
+    async def next_notifications(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        limit: int,
+        continue_after: Callable[[AgentConversationNotification], bool] | None = None,
+    ) -> tuple[AgentConversationNotification, ...]:
+        """Wait for one notification, then drain only the already-queued tail."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_NOTIFICATION_BATCH:
+            raise _violation(
+                "INVALID_NOTIFICATION_BATCH_LIMIT",
+                "notification batch limit must be an integer from 1 to 16",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        first = await self.next_notification(binding)
+        if limit == 1 or (
+            continue_after is not None and not continue_after(first)
+        ):
+            return (first,)
+        drain = getattr(self._runtime, "drain_notifications_for", None)
+        if not callable(drain) or self._notification_lease is None:
+            return (first,)
+        notifications = [first]
+        while len(notifications) < limit:
+            tail = await drain(self._notification_lease, limit=1)
+            if not isinstance(tail, tuple) or any(
+                not isinstance(item, AgentConversationNotification) for item in tail
+            ):
+                raise _violation(
+                    "PRODUCT_NOTIFICATION_UNAVAILABLE",
+                    "retained runtime returned no canonical notification batch",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if not tail:
+                break
+            notification = tail[0]
+            notifications.append(notification)
+            if continue_after is not None and not continue_after(notification):
+                break
+        return tuple(notifications)
 
     async def acknowledge_presentation(
         self,
