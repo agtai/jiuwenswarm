@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 30/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 31/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -63,14 +63,15 @@ At the start of every new Session:
    `STATUS.md` `Current execution packet`, this checkpoint, §6 and §7. Read a
    closed wave record or the historical revalidation only for a disputed
    finding mechanism.
-3. Preserve the current **30/88 closed, 58 remaining** count. The closed set is
-   A2, A3, A4, A6, A8, A11, A12, A13, A16, A18, A20, A21, A23, A25, B2, B4, B6,
-   B7, B9, B10, B12, B13, B14, B16, B36, B41, C5, L14, L20 and L21. A8+B6 share
+3. Preserve the current **31/88 closed, 57 remaining** count. The closed set is
+   A1, A2, A3, A4, A6, A8, A11, A12, A13, A16, A18, A20, A21, A23, A25, B2, B4,
+   B6, B7, B9, B10, B12, B13, B14, B16, B36, B41, C5, L14, L20 and L21. A8+B6 share
    SRR-06, A2+B2 share SRR-10, B12+B13+B14 share SRR-20, B36+L20+L21 share
    SRR-21 and A6+B4 share SRR-22; each shared packet still counts one unique
    defect per finding.
-4. Wave 10 is in flight. SRR-22/A6+B4 closed at `935a4f74e` and SRR-23/A13 at
-   `1c860f980`. SRR-24/A1 remains open; see §5.10 for its exact state. No closure credit
+4. No candidate is implemented or awaiting review. Wave 10 closed with
+   SRR-22/A6+B4 at `935a4f74e`, SRR-23/A13 at `1c860f980` and SRR-24/A1 at
+   `05b59e317`; all three worker branches were left unmerged and must stay that way. No closure credit
    is granted before an independent reviewer who did not implement a packet
    passes its complete module diff.
 5. Activate one or more disjoint owner-scoped packets from §6. Freeze each
@@ -740,7 +741,7 @@ after that branch merges; B18 and D2 stay unactivated in §6.
   `LiveVoiceIntegratedRoutePanel.tsx` (owned by the parallel p1p2 branch), no
   other module owner.
 
-## 5.10 Wave 10 ownership record — ACTIVE
+## 5.10 Wave 10 ownership record — CLOSED
 
 Wave 10 is frozen from integration baseline `ab46ad3e4`, the Wave 9 closure
 record. Its three writer surfaces are disjoint. All three packets come from
@@ -848,6 +849,15 @@ routed after that branch merges. A5, A9, A15, A17 and B42 stay unactivated in §
   reason; provider and route capacities agree; identity/isolation across
   connections and sessions holds. Concurrency, restart/replay and zero
   forbidden effects are required.
+- **Closure boundary, stated so the numerator is not misread.** A1's acceptance
+  holds: the conformance owner no longer refuses streaming after 64 streams, more
+  than 64 sequential streams stay usable, and stale replay is still refused with
+  its exact existing reason. Product-side TTS end to end nevertheless remains
+  capped at **256 per channel owner** by
+  `StreamingSynthesisRouteOwner._retained_bindings`, which the strict review
+  already numbers separately as **A17** — its text ends "This is a separate second
+  limit from A1" — and which stays unactivated in §6. **31/88 must not be read as
+  "streaming capacity is fully solved."**
 - Exclusions: no new product policy or classifier, no protocol/schema change,
   no Gateway route source change, no physical Provider claim. SRR-10/A2+B2
   closed queued-terminal retirement in `openai_streaming_speech.py`; its
@@ -856,8 +866,8 @@ routed after that branch merges. A5, A9, A15, A17 and B42 stay unactivated in §
 
 ## 6. Queued repair programs
 
-The 58 remaining unique defects consist of the one still-open Wave 10
-candidate A1 plus the 57 unactivated defects below. These
+The 57 remaining unique defects are the unactivated defects below; no
+candidate is in flight. These
 groups are not worker write authority. Each activation removes its IDs from
 this queue and freezes smaller owner-specific packets before editing.
 
@@ -875,10 +885,9 @@ this queue and freezes smaller owner-specific packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 9 + 8 + 4 + 29 = 57`; adding the one still-open
-Wave 10 candidate gives the 58 unique remaining defects. By historical family
-that remainder is 9 A, 27 B, 19 L and three D findings, of which the
-unactivated 57 are 8 A, 27 B, 19 L and three D.
+The queue arithmetic is `7 + 9 + 8 + 4 + 29 = 57`, the complete remainder now
+that Wave 10 closed. By historical family that remainder is 8 A, 27 B, 19 L and
+three D findings.
 
 ### 6.1 Findings routed out of Wave 9
 
@@ -909,6 +918,16 @@ and risk checkpoint before activation.
   deterministically when that file runs alone, so it is a real defect rather
   than a load flake. It belongs to the panel owner on
   `agtai/hx/0819_live_voice_p1p2`.
+- **Reason-code drift on an admission-fence false positive (from SRR-24
+  review).** A never-seen identity that collides in the admission bitmap is
+  refused as `STALE_*_SESSION` / `STALE_*_STREAM` instead of
+  `*_NOT_FOUND` (`streaming_speech.py:1551-1560,1584-1593`). Both are
+  fail-closed refusals and the measured rate is ~0% at realistic volumes, but a
+  diagnostic consumer keying on the reason would observe the change. Related:
+  a released identity whose generation cell collided with a higher one can have
+  its own legitimate next generation refused, and
+  `retained_identity_tombstones` is no longer monotone because it now counts
+  exact entries only. No production consumer of that metric exists.
 - **`npm run lint` is unusable package-wide.** No ESLint configuration exists
   in `jiuwenswarm/channels/web/frontend` or any ancestor directory, so the
   script fails for reasons unrelated to any packet. Infrastructure gap.
@@ -968,6 +987,7 @@ and risk checkpoint before implementation.
 | SRR-20 / B12+B13+B14 | 27/88 | `950bb9830`…`0a2361f81`; progress-generation admission no longer erases its high-water when capacity evicts the heavy closed-route state, so a superseded generation can never activate again: the retired mark moves into the same conservative max sketch already used for the P2 fences, where collisions can only fail closed and the exact map still wins. Higher-generation P2 replacement now runs the same cleanup normal close runs, retiring every accepted voice commit bound to the superseded route by exact commit id, which releases the commit-level gate evidence while preserving the interaction's monotonic input-generation fence that the successor immediately reuses. A definite submit failure releases the critical-input maps and the token gate, while unknown outcomes and every successful dispatch keep theirs. Two review rounds: the first rejected the candidate for releasing gate evidence on the successful default Agent path and for an unproven B13 acceptance; the repair narrowed the release to the task branch and proved the acceptance end to end, showing that a superseded generation previously minted a redeemable `formal` confirmation token through the successor's route. Deterministic lock-barrier concurrency, both uint64 boundary sides, restart characterization and exactly-once subscription evidence; 161 focused plus 240 consumer tests passed with Ruff parity and the one disclosed `pywintypes` environment failure unchanged |
 | SRR-22 / A6+B4 | 29/88 | `935a4f74e`; the critical notification reserve stops being one set that is simultaneously a uniqueness ledger and a capacity counter and is never released. Capacity is now measured by queued items and returned on both removal paths, released identities move into an exact per-lane bounded tombstone, and only what that tombstone evicts folds into a conservative membership sketch, so eviction can never drop the fence and a collision can only refuse a never-published identity. Progress terminals get an independent reserve, so they can no longer starve presentation or terminal delivery. A publication failure inside the sole bridge consumer is now recorded as an attributable diagnostic instead of killing the consumer, which also lets teardown finish closing the Harness and CR that the escaping violation used to skip. Independent review reproduced six business REDs on baseline, confirmed the implementer's own declaration that two further tests are API-missing rather than defect reproductions, and killed six targeted mutants including a plain-LRU variant; 107 focused and 487 consumer tests passed with Ruff parity |
 | SRR-23 / A13 | 30/88 | `323e38dd5`…`1c860f980`; an accepted voice commit whose route has closed no longer holds a committed-turn slot for the registry lifetime. Abandoned origins keep a bounded count-based late-create grace, and past it the oldest surrenders its heavy state through the existing exact commit-id retirement while the compact replay fence keeps it refusable. The grace is global to the registry, matching the shared 128-slot ledger it protects. Delivered in the same packet but credited only in §6.1: superseded identities are now retired at route republication, which independent review confirmed is both the correct deviation from the recorded direction — close must not retire, because an accepted origin legitimately outlives it for the P3 create — and a complete one, since the whole file has exactly one `_p2_routes[key]` assignment and all three removal paths funnel back to it. Review reproduced six business REDs on baseline, ran the 128-route exhaustion for real, and independently probed the mid-flight retirement case to confirm at-most-once still holds through three fail-closed entries plus `TURN_COMMIT_RETIRED`; 167 focused, 240 consumer and 2061 live_voice tests passed with Ruff parity |
+| SRR-24 / A1 | 31/88 | `d5559d514`…`05b59e317`; the conformance identity ledgers no longer keep 64 entries for the instance lifetime, so a Provider owner stops losing streaming after 64 distinct streams. An identity owning no live stream surrenders its exact entry and keeps a compact tombstone: a fail-closed admission bitmap plus a conservative maximum generation sketch, 1.25 MiB per instance. Nothing is ever forgotten — LRU order only picks which identity gives up its exact entry — and both fences only rise, so stale replay is still refused with its exact original reason. The Provider identity budget mirrors the route's existing 256 rather than inventing a number, with a test pinning the two constants equal. Implementation also fixed an inherited ordering defect where a rejected start spent a ledger slot because the release ran before a clock read that can raise. Two review rounds: the first rejected the candidate because the only assertion of `RESPONSE_IDENTITY_CAPACITY_EXHAUSTED` had been deleted with a retired test and never re-homed, leaving live raise sites untested; the restored oracle drives both raise sites from one fixture and proves the refusal is non-mutating via zero pending Provider controls. 71 conformance, 95 Provider, 44 media and 185 gateway-seam cases pass with Ruff parity |
 
 ### 7.1 Closed-fix revalidation entrypoints
 
@@ -995,6 +1015,7 @@ mechanism and integration seam are reviewed again.
 | A2, B2 | `python -m pytest tests/unit_tests/live_voice/test_openai_streaming_speech.py --no-cov --asyncio-debug` |
 | A6, B4 | `python -m pytest tests/unit_tests/live_voice/test_agent_conversation_runtime.py --no-cov --asyncio-debug` |
 | A13 | `python -m pytest tests/unit_tests/live_voice/test_product_composition_registry.py --no-cov` |
+| A1 | `python -m pytest tests/unit_tests/live_voice/test_streaming_speech.py tests/unit_tests/live_voice/test_openai_streaming_speech.py tests/unit_tests/gateway/test_dedicated_media_registration.py --no-cov --asyncio-debug` |
 | B12, B13, B14 | `python -m pytest tests/unit_tests/live_voice/test_product_composition_registry.py --no-cov`; also rerun the `test_voice_task_bridge.py`, `test_p3_authenticated_composition.py` and `test_critical_token_safety.py` seams and compare the disclosed `pywintypes` failure with the baseline |
 | B36, L20, L21 | From `jiuwenswarm/channels/web/frontend`: `npm run test:live-voice-integrated-web`; require the formal task leaf and intent blocks to pass and compare any full-suite failure with the disclosed mounted-panel baseline below. A source-level baseline comparison **must recompile** first, because the tests import the tsc output under `node_modules/.cache/`. |
 | L14 | `python -m pytest tests/unit_tests/auto_harness/test_schedule_task_service.py --no-cov` |
