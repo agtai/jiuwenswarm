@@ -488,7 +488,14 @@ def _remove_owned_tree(path: Path) -> None:
         os.chmod(target, stat.S_IWRITE)
         function(target)
 
-    shutil.rmtree(path, onexc=remove_readonly)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=remove_readonly)
+    else:
+        # ``onexc`` replaced ``onerror`` in Python 3.12.  The repository still
+        # supports 3.11, and this callback deliberately accepts either form's
+        # third argument because the recovery action depends only on the exact
+        # validated target path.
+        shutil.rmtree(path, onerror=remove_readonly)
 
 
 def _create_windows_kill_job(process: subprocess.Popen[bytes]) -> object | None:
