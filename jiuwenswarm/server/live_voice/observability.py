@@ -78,6 +78,8 @@ EVENT_NAMES: Final = (
     "task.state_observed",
     "task.dispatch_outbox_observed",
     "task.cancel_outbox_observed",
+    "task.adjust_outbox_observed",
+    "task.reconciliation_observed",
     "degradation.activated",
     "degradation.recovered",
     "failure.observed",
@@ -94,6 +96,9 @@ OBSERVED_STATES: Final = (
     "playing",
     "closed",
     "pending",
+    "required",
+    "in_progress",
+    "resolved",
     "claimed",
     "delivered",
     "suppressed",
@@ -477,6 +482,22 @@ EVENT_SEMANTIC_MATRIX: Final[Mapping[str, Mapping[str, object]]] = MappingProxyT
             bindings=("task_id", "attempt_id"),
             source_kind="record",
             states=("pending", "claimed", "delivered", "suppressed"),
+        ),
+        "task.adjust_outbox_observed": _semantic_rule(
+            segments=("task.queue",),
+            required=("source_record_id", "source_seq", "state"),
+            allowed=("source_record_id", "source_seq", "state"),
+            bindings=("task_id", "attempt_id"),
+            source_kind="record",
+            states=("pending", "claimed", "delivered", "suppressed"),
+        ),
+        "task.reconciliation_observed": _semantic_rule(
+            segments=("task.attempt",),
+            required=("source_record_id", "source_seq", "state"),
+            allowed=("source_record_id", "source_seq", "state"),
+            bindings=("task_id", "attempt_id"),
+            source_kind="record",
+            states=("required", "in_progress", "pending", "resolved"),
         ),
         "degradation.activated": _semantic_rule(
             segments=("system.degradation",),
@@ -1840,11 +1861,11 @@ def observation_from_task_outbox(
             "TASK_OUTBOX_BINDING_MISMATCH",
             "outbox item must bind the exact task, attempt, and scope",
         )
-    event_name = (
-        "task.dispatch_outbox_observed"
-        if item.kind is OutboxKind.ATTEMPT_DISPATCH
-        else "task.cancel_outbox_observed"
-    )
+    event_name = {
+        OutboxKind.ATTEMPT_DISPATCH: "task.dispatch_outbox_observed",
+        OutboxKind.ATTEMPT_CANCEL: "task.cancel_outbox_observed",
+        OutboxKind.ATTEMPT_ADJUST: "task.adjust_outbox_observed",
+    }[item.kind]
     return create_observation(
         {
             "schema_version": OBSERVABILITY_SCHEMA_VERSION,

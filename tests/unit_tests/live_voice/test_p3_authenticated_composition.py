@@ -5415,6 +5415,10 @@ def _configure_enabled_factory(
     monkeypatch.setenv(
         "JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT", "2100-01-01T00:00:00Z"
     )
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE",
+        "live-voice.direct-project-code.d2.v1",
+    )
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS", str(interval))
 
 
@@ -5507,6 +5511,82 @@ def test_product_factory_selects_exact_same_store_backed_d2_candidate(
     assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
     assert composition._executor_profiles == (candidates[-1],)
     assert composition._execution_durability_level == "D2"
+    assert composition._validated_executor_configuration is not None
+    assert (
+        composition._validated_executor_configuration.configuration_digest
+        == candidates[-1].digest_sha256()
+    )
+
+
+@pytest.mark.parametrize(
+    "configured_profile",
+    [None, "live-voice.direct-project-code.d1.v1", "unknown-profile"],
+)
+def test_enabled_factory_fails_closed_without_one_available_exact_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_profile: str | None,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    if configured_profile is None:
+        monkeypatch.delenv(
+            "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", raising=False
+        )
+    else:
+        monkeypatch.setenv(
+            "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", configured_profile
+        )
+    database = tmp_path / "unselected-profile.sqlite3"
+    resolver_calls: list[str] = []
+
+    def forbidden_database_resolver(_configured: str) -> Path:
+        resolver_calls.append("database")
+        raise AssertionError("invalid profile reached database resolution")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        forbidden_database_resolver,
+    )
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert rejected.value.reason == "INVALID_P3_EXECUTOR_CONFIGURATION"
+    assert rejected.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert resolver_calls == []
+    assert database.exists() is False
+
+
+def test_factory_consumes_explicit_direct_d0_profile_without_d2_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE",
+        "live-voice.direct-project-code.d0.v1",
+    )
+    database = tmp_path / "factory-d0.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(), model_resolver=_ModelResolver()
+    )
+
+    assert composition is not None
+    assert composition._execution_durability_level == "D0"
+    assert composition._executor_profiles is not None
+    assert composition._executor_profiles[0].profile_id.endswith(".d0.v1")
+    assert composition._validated_executor_configuration is not None
+    assert (
+        composition._validated_executor_configuration.durability_level
+        is DurabilityLevel.D0
+    )
 
 
 def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
@@ -5841,6 +5921,27 @@ async def test_product_create_persists_exact_direct_selection_and_admission(
             max_backoff_seconds=60,
             max_attempts=120,
         )
+        diagnostics = await harness.composition.read_product_status_diagnostics(
+            bearer_token=TOKEN,
+            session_id="session-1",
+            task_id=task_id,
+        )
+        assert diagnostics.task_id == task_id
+        assert diagnostics.attempt_id == task.attempt_id
+        assert diagnostics.executor_id == FORMAL_PROJECT_EXECUTOR_ID
+        assert diagnostics.checkpoint_id is None
+        assert diagnostics.effect_id is None
+        assert diagnostics.recovery_id is None
+        assert diagnostics.outbox[0].kind.value == "attempt.dispatch"
+        assert diagnostics.outbox[0].state is OutboxState.SUPPRESSED
+        harness.authority.contexts["session-1"] = _context(tmp_path, redacted=True)
+        with pytest.raises(FormalTaskViolation) as rejected_diagnostics:
+            await harness.composition.read_product_status_diagnostics(
+                bearer_token=TOKEN,
+                session_id="session-1",
+                task_id=task_id,
+            )
+        assert rejected_diagnostics.value.reason == "TASK_CONTEXT_REDACTED"
         frozen_selection = selection
     finally:
         await harness.composition.stop()
@@ -6490,6 +6591,10 @@ def test_enabled_gate_rejects_store_artifact_outside_application_workspace(
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS", "project-1")
     monkeypatch.setenv(
         "JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT", "2100-01-01T00:00:00Z"
+    )
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE",
+        "live-voice.direct-project-code.d2.v1",
     )
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_DATABASE", str(database))
 

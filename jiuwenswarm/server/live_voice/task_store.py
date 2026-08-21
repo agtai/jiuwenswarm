@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -119,6 +119,39 @@ _CANONICAL_UTC_RE = re.compile(
     r"T(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})"
     r"(?:\.(?P<fraction>\d{1,9}))?Z$"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskOutboxDiagnosticFact:
+    """Content-free current state for one Store-owned outbox record."""
+
+    outbox_id: str
+    kind: OutboxKind
+    task_id: str
+    attempt_id: str
+    command_id: str
+    state: OutboxState
+    delivery_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDurabilityDiagnosticSnapshot:
+    """Authority-free identities for the current durability diagnostic seam."""
+
+    task_id: str
+    attempt_id: str
+    executor_id: str
+    event_head: int
+    event_head_id: str
+    checkpoint_id: str | None
+    checkpoint_attempt_id: str | None
+    effect_id: str | None
+    effect_attempt_id: str | None
+    recovery_id: str | None
+    reconciliation_state: ReconciliationState | None
+    outbox: tuple[TaskOutboxDiagnosticFact, ...]
+
+
 _RETRY_BUSINESS_DECISIONS = {
     "TASK_RETRY_LIMIT_EXCEEDED": (
         TaskCommandDisposition.CONFLICT,
@@ -5811,6 +5844,179 @@ class SqliteTaskStore:
                 connection,
                 task=task,
                 attempt=attempt,
+            )
+
+    def read_task_durability_diagnostics(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> TaskDurabilityDiagnosticSnapshot:
+        """Read only current, content-free durability diagnostic identities.
+
+        The snapshot is not mutation, recovery, reconciliation, or Executor
+        authority.  Prefixes are verified before their latest public identity
+        is returned; Task payload, checkpoint state, effect facts, errors and
+        outbox payloads never cross this seam.
+        """
+
+        with self._snapshot_reader() as connection:
+            task = self._require_task_row(connection, task_id, scope)
+            attempt_id = task["attempt_id"]
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE task_id=? AND attempt_id=?",
+                (task_id, attempt_id),
+            ).fetchone()
+            if attempt is None:
+                raise self._corrupt("current Task Attempt is missing")
+            event_head = int(task["event_head"])
+            event_head_row = connection.execute(
+                "SELECT event_id FROM task_events WHERE task_id=? AND seq=?",
+                (task_id, event_head),
+            ).fetchone()
+            if event_head_row is None:
+                raise self._corrupt("current Task event head is missing")
+            binding = self._durability_binding_from_connection(
+                connection,
+                scope=scope,
+                task_id=task_id,
+                origin_attempt_id=attempt_id,
+            )
+            checkpoints = self._verified_checkpoint_prefix(connection, binding)
+            effects = self._verified_effect_prefix(connection, binding)
+            diagnostic_checkpoints = checkpoints
+            diagnostic_effects = effects
+            diagnostic_checkpoint_attempt_id = attempt_id
+            diagnostic_effect_attempt_id = attempt_id
+
+            recovery = connection.execute(
+                """SELECT recovery_id, producer_attempt_id, checkpoint_head,
+                          checkpoint_prefix_digest, effect_head,
+                          effect_prefix_digest
+                   FROM durability_recoveries
+                   WHERE task_id=? AND recovery_attempt_id=?""",
+                (task_id, attempt_id),
+            ).fetchone()
+            recovery_id: str | None = None
+            if recovery is not None:
+                source_binding = self._durability_binding_from_connection(
+                    connection,
+                    scope=scope,
+                    task_id=task_id,
+                    origin_attempt_id=recovery["producer_attempt_id"],
+                )
+                source_checkpoints = self._verified_checkpoint_prefix(
+                    connection,
+                    source_binding,
+                    expected_head=int(recovery["checkpoint_head"]),
+                    expected_prefix_digest=recovery["checkpoint_prefix_digest"],
+                )
+                source_effects = self._verified_effect_prefix(
+                    connection,
+                    source_binding,
+                    expected_head=int(recovery["effect_head"]),
+                    expected_prefix_digest=recovery["effect_prefix_digest"],
+                )
+                if not diagnostic_checkpoints.records:
+                    diagnostic_checkpoints = source_checkpoints
+                    diagnostic_checkpoint_attempt_id = recovery["producer_attempt_id"]
+                if not diagnostic_effects.records:
+                    diagnostic_effects = source_effects
+                    diagnostic_effect_attempt_id = recovery["producer_attempt_id"]
+                recovery_id = recovery["recovery_id"]
+
+            outbox_rows = connection.execute(
+                _OUTBOX_BINDING_SELECT
+                + """ WHERE o.task_id=? AND o.attempt_id=?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM outbox AS newer
+                         WHERE newer.task_id=o.task_id
+                           AND newer.attempt_id=o.attempt_id
+                           AND newer.kind=o.kind
+                           AND (
+                               newer.created_at>o.created_at
+                               OR (newer.created_at=o.created_at
+                                   AND newer.outbox_id>o.outbox_id)
+                           )
+                     )
+                   ORDER BY o.kind""",
+                (task_id, attempt_id),
+            ).fetchall()
+            for row in outbox_rows:
+                if (
+                    row["canonical_attempt_id"] != row["attempt_id"]
+                    or row["attempt_task_id"] != row["task_id"]
+                    or row["canonical_task_id"] != row["task_id"]
+                    or row["task_attempt_id"] != row["attempt_id"]
+                    or row["task_scope_key"] != _scope_key(scope)
+                    or ScopeRef.from_dict(_json_load(row["task_scope_json"])) != scope
+                    or row["bound_executor_id"] != attempt["executor_id"]
+                    or int(row["delivery_count"]) < 0
+                ):
+                    raise self._corrupt(
+                        "current outbox diagnostic binding is inconsistent"
+                    )
+                if row["canonical_command_id"] != row["command_id"]:
+                    recovery_outbox = connection.execute(
+                        """SELECT 1 FROM durability_recoveries
+                           WHERE task_id=? AND recovery_attempt_id=?
+                             AND recovery_id=?""",
+                        (row["task_id"], row["attempt_id"], row["command_id"]),
+                    ).fetchone()
+                    if (
+                        OutboxKind(row["kind"]) is not OutboxKind.ATTEMPT_DISPATCH
+                        or row["canonical_command_id"] is not None
+                        or recovery_outbox is None
+                    ):
+                        raise self._corrupt(
+                            "current outbox diagnostic command binding is inconsistent"
+                        )
+            outbox = tuple(
+                TaskOutboxDiagnosticFact(
+                    outbox_id=row["outbox_id"],
+                    kind=OutboxKind(row["kind"]),
+                    task_id=row["task_id"],
+                    attempt_id=row["attempt_id"],
+                    command_id=row["command_id"],
+                    state=OutboxState(row["state"]),
+                    delivery_count=int(row["delivery_count"]),
+                )
+                for row in outbox_rows
+            )
+            reconciliation = task["reconciliation_state"]
+            return TaskDurabilityDiagnosticSnapshot(
+                task_id=task_id,
+                attempt_id=attempt_id,
+                executor_id=attempt["executor_id"],
+                event_head=event_head,
+                event_head_id=event_head_row["event_id"],
+                checkpoint_id=(
+                    None
+                    if not diagnostic_checkpoints.records
+                    else diagnostic_checkpoints.records[-1].checkpoint_id
+                ),
+                checkpoint_attempt_id=(
+                    None
+                    if not diagnostic_checkpoints.records
+                    else diagnostic_checkpoint_attempt_id
+                ),
+                effect_id=(
+                    None
+                    if not diagnostic_effects.records
+                    else diagnostic_effects.records[-1].binding.effect_id
+                ),
+                effect_attempt_id=(
+                    None
+                    if not diagnostic_effects.records
+                    else diagnostic_effect_attempt_id
+                ),
+                recovery_id=recovery_id,
+                reconciliation_state=(
+                    None
+                    if reconciliation is None
+                    else ReconciliationState(reconciliation)
+                ),
+                outbox=outbox,
             )
 
     def read_durable_recovery_dispatch(

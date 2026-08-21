@@ -44,8 +44,11 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     FormalTaskSpec,
     FormalTaskState,
     FormalTaskViolation,
+    OutboxKind,
+    OutboxState,
     PersistentTaskEvent,
     PersistentTaskRecord,
+    ReconciliationState,
     ResolvedTaskContext,
     TaskResultArtifact,
     TaskResultAvailability,
@@ -138,7 +141,11 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.live_voice.task_store import (
+    SqliteTaskStore,
+    TaskDurabilityDiagnosticSnapshot,
+    TaskOutboxDiagnosticFact,
+)
 from jiuwenswarm.server.live_voice.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
@@ -5589,6 +5596,124 @@ async def test_diagnostic_consume_requires_one_open_session_correlation_route(
         ).ok
     assert emit("closed") is False
     assert runtime.health().diagnostic_identities == identities_before
+    await registry.stop()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_current_durability_diagnostics_export_every_missing_seam_without_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = BoundedInMemoryOtelBackend(capacity=16)
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "7d" * 32)
+    runtime = create_product_observability_runtime_from_environment(
+        backend=backend,
+        validated_configuration=_observability_runtime_configuration(backend),
+    )
+    assert type(runtime) is ProductObservabilityRuntime
+    assert (await runtime.start()).ready
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=False),
+        p3_composition=_P3Composition(tmp_path),
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        observability_runtime=runtime,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-current-durability-p2",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    snapshot = TaskDurabilityDiagnosticSnapshot(
+        task_id="private-task-diagnostic",
+        attempt_id="private-attempt-diagnostic",
+        executor_id="private-executor-diagnostic",
+        event_head=1,
+        event_head_id="private-event-diagnostic",
+        checkpoint_id="private-checkpoint-diagnostic",
+        checkpoint_attempt_id="private-attempt-diagnostic",
+        effect_id="private-effect-diagnostic",
+        effect_attempt_id="private-attempt-diagnostic",
+        recovery_id="private-recovery-diagnostic",
+        reconciliation_state=ReconciliationState.PENDING,
+        outbox=(
+            TaskOutboxDiagnosticFact(
+                outbox_id="private-outbox-diagnostic",
+                kind=OutboxKind.ATTEMPT_DISPATCH,
+                task_id="private-task-diagnostic",
+                attempt_id="private-attempt-diagnostic",
+                command_id="private-command-diagnostic",
+                state=OutboxState.CLAIMED,
+                delivery_count=1,
+            ),
+        ),
+    )
+
+    registry._emit_authoritative_status_diagnostics(
+        session_id=SCOPE.session_id or "",
+        correlation_id="correlation-p2",
+        snapshot=snapshot,
+        event_id="private-event-diagnostic",
+        observed_at=NOW,
+    )
+    for _ in range(200):
+        if {record.seam.value for record in backend.records()} >= {
+            "outbox",
+            "checkpoint",
+            "effect",
+            "recovery",
+            "reconcile",
+        }:
+            break
+        await asyncio.sleep(0.01)
+
+    records = backend.records()
+    assert {
+        "outbox",
+        "checkpoint",
+        "effect",
+        "recovery",
+        "reconcile",
+    } <= {record.seam.value for record in records}
+    outbox_record = next(record for record in records if record.seam.value == "outbox")
+    assert b'"live_voice.state":"claimed"' in outbox_record.record.canonical_bytes
+    checkpoint_record = next(
+        record for record in records if record.seam.value == "checkpoint"
+    )
+    effect_record = next(record for record in records if record.seam.value == "effect")
+    reconcile_record = next(
+        record for record in records if record.seam.value == "reconcile"
+    )
+    assert "checkpoint_id" in dict(checkpoint_record.trace_identities)
+    assert "effect_id" in dict(effect_record.trace_identities)
+    assert b'"live_voice.state":"pending"' in reconcile_record.record.canonical_bytes
+    serialized = b"\n".join(record.record.canonical_bytes for record in records)
+    for forbidden in (
+        "private-task-diagnostic",
+        "private-attempt-diagnostic",
+        "private-executor-diagnostic",
+        "private-checkpoint-diagnostic",
+        "private-effect-diagnostic",
+        "private-recovery-diagnostic",
+        "private-outbox-diagnostic",
+        "private-command-diagnostic",
+        "private-event-diagnostic",
+    ):
+        assert forbidden.encode() not in serialized
+
     await registry.stop()
     await runtime.close()
 

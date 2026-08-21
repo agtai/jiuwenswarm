@@ -22,7 +22,10 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     ExternalEffectObservation,
     ExternalEffectSettlement,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.live_voice.formal_task_models import (
+    FormalTaskViolation,
+    ReconciliationState,
+)
 from jiuwenswarm.server.live_voice.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
@@ -157,7 +160,58 @@ async def test_direct_d2_public_dispatch_commits_checkpoint_and_intent_before_ap
     ]
     assert effects.records[-2].kind is EffectObservationKind.APPLIED
     assert effects.records[-1].kind is EffectSettlementKind.RESOLVED
+    diagnostics = store.read_task_durability_diagnostics(
+        scope=task.scope,
+        task_id=task.task_id,
+    )
+    assert diagnostics.checkpoint_id == checkpoints.records[-1].checkpoint_id
+    assert diagnostics.checkpoint_attempt_id == task.attempt_id
+    assert diagnostics.effect_id == effects.records[-1].binding.effect_id
+    assert diagnostics.effect_attempt_id == task.attempt_id
+    assert diagnostics.recovery_id is None
+    assert diagnostics.reconciliation_state is None
+    assert len(diagnostics.outbox) == 1
+    assert diagnostics.outbox[0].delivery_count == 1
+    assert diagnostics.outbox[0].state.value == "delivered"
     assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_store_diagnostic_snapshot_projects_current_reconcile_without_content(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "reconcile-project"
+    _git_project(project)
+    database = tmp_path / "reconcile-tasks.sqlite3"
+    store = SqliteTaskStore(database)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        database,
+        durability_store=store,
+    )
+    core = PersistentTaskCore(store, adapter)
+    _selection, task = _create_selected_task(store, core, project, adapter)
+
+    marked = store.mark_reconciliation_pending(
+        task.task_id,
+        task.attempt_id,
+        "private reconciliation reason",
+    )
+    diagnostics = store.read_task_durability_diagnostics(
+        scope=task.scope,
+        task_id=task.task_id,
+    )
+
+    assert marked.disposition.value == "applied"
+    assert diagnostics.reconciliation_state is ReconciliationState.PENDING
+    assert diagnostics.checkpoint_id is None
+    assert diagnostics.checkpoint_attempt_id is None
+    assert diagnostics.effect_id is None
+    assert diagnostics.effect_attempt_id is None
+    assert diagnostics.recovery_id is None
+    assert diagnostics.outbox[0].state.value == "pending"
+    assert "private reconciliation reason" not in repr(diagnostics)
     await adapter.close()
 
 
@@ -351,6 +405,19 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
     )
     assert linked.attempt_id != producer.attempt_id
     assert restarted._durability_store.get_attempt(producer.attempt_id) == producer
+    recovery_diagnostics = (
+        restarted._durability_store.read_task_durability_diagnostics(
+            scope=task.scope,
+            task_id=task.task_id,
+        )
+    )
+    assert recovery_diagnostics.attempt_id == linked.attempt_id
+    assert recovery_diagnostics.recovery_id == captured_recovery["recovery_id"]
+    assert recovery_diagnostics.checkpoint_id is not None
+    assert recovery_diagnostics.checkpoint_attempt_id == producer.attempt_id
+    assert recovery_diagnostics.effect_id is not None
+    assert recovery_diagnostics.effect_attempt_id == producer.attempt_id
+    assert recovery_diagnostics.outbox[-1].state.value == "pending"
     replay_owner = "exact-replay-recovery"
     replay_claim = restarted._durability_store.claim_durability_mutator(
         scope=task.scope,

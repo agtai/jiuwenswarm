@@ -61,6 +61,7 @@ from .critical_token_safety import (
 from .formal_task_models import (
     FormalTaskState,
     FormalTaskViolation,
+    OutboxKind,
     PersistentTaskEvent,
     PersistentTaskRecord,
     ResolvedTaskContext,
@@ -70,6 +71,7 @@ from .formal_task_models import (
     TerminalOutcome,
     utc_now,
 )
+from .task_store import TaskDurabilityDiagnosticSnapshot
 from .interaction_engine import InteractionEnginePort
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
@@ -1284,7 +1286,12 @@ class AgentServerProductCompositionRegistry:
         event_id: str | None = None,
         outbox_id: str | None = None,
         executor_id: str | None = None,
+        checkpoint_id: str | None = None,
+        effect_id: str | None = None,
         presentation_id: str | None = None,
+        event_name: str | None = None,
+        source_seq: int | None = None,
+        state: str | None = None,
         completed: bool = False,
         observed_at: str | None = None,
     ) -> bool:
@@ -1319,13 +1326,17 @@ class AgentServerProductCompositionRegistry:
                         "seam_name": seam_name,
                         "seam_id": seam_id,
                         "source_record_id": source_record_id,
+                        "event_name": event_name,
+                        "source_seq": source_seq,
+                        "state": state,
                     }
                 )
             ).hexdigest()
             payload: dict[str, object] = {
                 "schema_version": OBSERVABILITY_SCHEMA_VERSION,
                 "event_id": observation_id,
-                "event_name": "segment.completed" if completed else "route.selected",
+                "event_name": event_name
+                or ("segment.completed" if completed else "route.selected"),
                 "segment_name": segment_name,
                 "observed_at": observed_at or utc_now(),
                 "monotonic_ms": 0.0,
@@ -1335,6 +1346,10 @@ class AgentServerProductCompositionRegistry:
             }
             if source_record_id is not None:
                 payload["source_record_id"] = source_record_id
+            if source_seq is not None:
+                payload["source_seq"] = source_seq
+            if state is not None:
+                payload["state"] = state
             if completed:
                 payload.update(
                     {"state": "terminal", "outcome": "completed", "duration_ms": 0.0}
@@ -1351,6 +1366,8 @@ class AgentServerProductCompositionRegistry:
                     event_id=event_id,
                     outbox_id=outbox_id,
                     executor_id=executor_id,
+                    checkpoint_id=checkpoint_id,
+                    effect_id=effect_id,
                     presentation_id=presentation_id,
                 ),
             )
@@ -1372,6 +1389,7 @@ class AgentServerProductCompositionRegistry:
 
         if self._observability_runtime is None:
             return False
+
         try:
             from .product_observability_runtime import (
                 ProductDiagnosticIdentity,
@@ -1430,6 +1448,93 @@ class AgentServerProductCompositionRegistry:
                 "reason=FACT_REJECTED"
             )
             return False
+
+    def _emit_authoritative_status_diagnostics(
+        self,
+        *,
+        session_id: str,
+        correlation_id: str,
+        snapshot: TaskDurabilityDiagnosticSnapshot,
+        event_id: str,
+        observed_at: str,
+    ) -> None:
+        """Project verified current Store seams after an authorized status read."""
+
+        common = {
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "task_id": snapshot.task_id,
+            "attempt_id": snapshot.attempt_id,
+            "executor_id": snapshot.executor_id,
+            "observed_at": observed_at,
+        }
+        for item in snapshot.outbox:
+            event_name = {
+                OutboxKind.ATTEMPT_DISPATCH: "task.dispatch_outbox_observed",
+                OutboxKind.ATTEMPT_CANCEL: "task.cancel_outbox_observed",
+                OutboxKind.ATTEMPT_ADJUST: "task.adjust_outbox_observed",
+            }.get(item.kind)
+            self._emit_authoritative_route_diagnostic(
+                **common,
+                segment_name="task.queue",
+                seam_name="outbox",
+                seam_id=(
+                    f"{item.outbox_id}:{item.state.value}:{item.delivery_count}"
+                ),
+                source_record_id=item.outbox_id,
+                command_id=item.command_id,
+                outbox_id=item.outbox_id,
+                event_name=event_name,
+                source_seq=(item.delivery_count if event_name is not None else None),
+                state=(item.state.value if event_name is not None else None),
+            )
+        if snapshot.checkpoint_id is not None:
+            self._emit_authoritative_route_diagnostic(
+                **{
+                    **common,
+                    "attempt_id": snapshot.checkpoint_attempt_id,
+                },
+                segment_name="task.attempt",
+                seam_name="checkpoint",
+                seam_id=snapshot.checkpoint_id,
+                source_record_id=snapshot.checkpoint_id,
+                checkpoint_id=snapshot.checkpoint_id,
+            )
+        if snapshot.effect_id is not None:
+            self._emit_authoritative_route_diagnostic(
+                **{
+                    **common,
+                    "attempt_id": snapshot.effect_attempt_id,
+                },
+                segment_name="task.attempt",
+                seam_name="effect",
+                seam_id=snapshot.effect_id,
+                source_record_id=snapshot.effect_id,
+                effect_id=snapshot.effect_id,
+            )
+        if snapshot.recovery_id is not None:
+            self._emit_authoritative_route_diagnostic(
+                **common,
+                segment_name="task.attempt",
+                seam_name="recovery",
+                seam_id=snapshot.recovery_id,
+                source_record_id=snapshot.recovery_id,
+            )
+        if snapshot.reconciliation_state is not None:
+            reconcile_id = (
+                f"{snapshot.task_id}:{snapshot.attempt_id}:"
+                f"{snapshot.reconciliation_state.value}:{event_id}"
+            )
+            self._emit_authoritative_route_diagnostic(
+                **common,
+                segment_name="task.attempt",
+                seam_name="reconcile",
+                seam_id=reconcile_id,
+                source_record_id=reconcile_id,
+                event_name="task.reconciliation_observed",
+                source_seq=snapshot.event_head,
+                state=snapshot.reconciliation_state.value,
+            )
 
     def _emit_authoritative_progress_generation(
         self,
@@ -11716,6 +11821,26 @@ class AgentServerProductCompositionRegistry:
                         code=ErrorCode.PROTOCOL_VIOLATION,
                         manifest=activation.manifest,
                     )
+                durability_diagnostics: TaskDurabilityDiagnosticSnapshot | None = None
+                diagnostic_reader = (
+                    self._p3_composition.read_product_status_diagnostics
+                    if type(self._p3_composition) is P3AuthenticatedComposition
+                    else None
+                )
+                if callable(diagnostic_reader):
+                    try:
+                        candidate_diagnostics = await diagnostic_reader(
+                            bearer_token=params.get("auth_token"),
+                            session_id=routed_session,
+                            task_id=str(task_id or ""),
+                        )
+                        if type(candidate_diagnostics) is TaskDurabilityDiagnosticSnapshot:
+                            durability_diagnostics = candidate_diagnostics
+                    except Exception:  # noqa: BLE001 -- diagnostics are effect-free
+                        logger.warning(
+                            "[LiveVoiceProduct] Store diagnostics unavailable; "
+                            "reason=FACT_REJECTED"
+                        )
                 authorized_operations: set[str] = set()
                 if self._p3_control_ready():
                     if retry_admission.get("eligible") is True:
@@ -11805,6 +11930,23 @@ class AgentServerProductCompositionRegistry:
                             executor_id=str(executor_id),
                             observed_at=envelope.observed_at,
                         )
+                        if (
+                            durability_diagnostics is not None
+                            and durability_diagnostics.task_id == status_task_id
+                            and durability_diagnostics.attempt_id == status_attempt_id
+                            and durability_diagnostics.executor_id == executor_id
+                            and durability_diagnostics.event_head
+                            == authority_fact.event_head
+                            and durability_diagnostics.event_head_id
+                            == authority_fact.event_head_id
+                        ):
+                            self._emit_authoritative_status_diagnostics(
+                                session_id=routed_session,
+                                correlation_id=diagnostic_correlation,
+                                snapshot=durability_diagnostics,
+                                event_id=authority_fact.event_head_id,
+                                observed_at=envelope.observed_at,
+                            )
             elif operation == "task.events" and envelope.ok:
                 result_payload = payload.get("result")
                 raw_events = (

@@ -439,6 +439,7 @@ try {
         JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS                     = $ProjectId
         JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT                 = $expiry
         JIUWENSWARM_LIVE_VOICE_P3_DATABASE                        = $taskStore
+        JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE                = 'live-voice.direct-project-code.d2.v1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED        = '1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED                 = '1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED            = '1'

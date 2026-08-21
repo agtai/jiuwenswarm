@@ -138,6 +138,8 @@ class ProductDiagnosticSeam(StrEnum):
     EXECUTOR = "executor"
     CHECKPOINT = "checkpoint"
     EFFECT = "effect"
+    RECOVERY = "recovery"
+    RECONCILE = "reconcile"
     RESULT = "result"
     RESPONSE = "response"
     PRESENTATION = "presentation"

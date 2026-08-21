@@ -1411,6 +1411,9 @@ def _configure_product_environment(scenario: _RegisteredScenario) -> None:
     }
     values = {
         "JIUWENSWARM_LIVE_VOICE_P3_ENABLED": "1",
+        "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE": (
+            "live-voice.direct-project-code.d2.v1"
+        ),
         "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN": scenario.token,
         "JIUWENSWARM_LIVE_VOICE_P3_PRINCIPAL_ID": scenario.principal_id,
         "JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS": ",".join(sorted(project_ids)),

@@ -124,7 +124,7 @@ from .task_progress_return import (
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
 )
-from .task_store import SqliteTaskStore
+from .task_store import SqliteTaskStore, TaskDurabilityDiagnosticSnapshot
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,7 @@ _PROJECTS_ENV = "JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS"
 _EXPIRY_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT"
 _DATABASE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_DATABASE"
 _RECONCILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS"
+_EXECUTOR_PROFILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE"
 _PRODUCT_COMPOSITION_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 _PRODUCT_P2_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 _PRODUCT_DEMO_POLICY_BYPASS_ENV = (
@@ -201,6 +202,42 @@ _PRODUCT_ADMISSION_POLICY = AdmissionPolicy(
     max_backoff_seconds=60,
     max_attempts=120,
 )
+
+
+def _validated_executor_configuration(
+    profile: ExecutorCapabilityProfile,
+) -> ValidatedExecutorConfiguration:
+    """Bind one exact construction profile to the public configuration fact."""
+
+    if type(profile) is not ExecutorCapabilityProfile:
+        raise TypeError("profile must be an exact ExecutorCapabilityProfile")
+    durability = DurabilityLevel(profile.durability_level)
+    capabilities = {
+        DurabilityLevel.D0: (
+            ExecutorCapability.CANCEL,
+            ExecutorCapability.DISPATCH,
+            ExecutorCapability.STATUS,
+        ),
+        DurabilityLevel.D1: (
+            ExecutorCapability.CANCEL,
+            ExecutorCapability.CHECKPOINT,
+            ExecutorCapability.DISPATCH,
+            ExecutorCapability.RECOVERY,
+            ExecutorCapability.STATUS,
+        ),
+        DurabilityLevel.D2: tuple(
+            sorted(ExecutorCapability, key=lambda item: item.value)
+        ),
+    }[durability]
+    profile_digest = profile.digest_sha256()
+    return ValidatedExecutorConfiguration(
+        executor_id=profile.executor_id,
+        adapter_id=profile.adapter_id,
+        durability_level=durability,
+        capabilities=capabilities,
+        validation_receipt_id=f"executor-profile.v1.{profile_digest[:32]}",
+        configuration_digest=profile_digest,
+    )
 
 
 def _product_execution_requirements(
@@ -1130,6 +1167,7 @@ class P3AuthenticatedComposition:
         reconcile_interval: float = 30.0,
         clock: Callable[[], str] = utc_now,
         executor_profiles: tuple[ExecutorCapabilityProfile, ...] | None = None,
+        validated_executor_configuration: ValidatedExecutorConfiguration | None = None,
         execution_durability_level: str = "D0",
         admission_policy: AdmissionPolicy = _PRODUCT_ADMISSION_POLICY,
     ) -> None:
@@ -1149,6 +1187,24 @@ class P3AuthenticatedComposition:
             raise TypeError("admission_policy must be an AdmissionPolicy")
         if execution_durability_level not in {"D0", "D1", "D2"}:
             raise ValueError("execution_durability_level must be D0, D1, or D2")
+        if validated_executor_configuration is not None:
+            if type(validated_executor_configuration) is not ValidatedExecutorConfiguration:
+                raise TypeError(
+                    "validated_executor_configuration must use the exact contract"
+                )
+            if executor_profiles is None or len(executor_profiles) != 1:
+                raise ValueError(
+                    "validated Executor configuration requires one selected profile"
+                )
+            configured_profile = executor_profiles[0]
+            if (
+                validated_executor_configuration
+                != _validated_executor_configuration(configured_profile)
+                or execution_durability_level != configured_profile.durability_level
+            ):
+                raise ValueError(
+                    "validated Executor configuration does not match selected profile"
+                )
         self._authenticator = authenticator
         self._authority_resolver = authority_resolver
         self._core = core
@@ -1173,6 +1229,7 @@ class P3AuthenticatedComposition:
         self._reconcile_interval = reconcile_interval
         self._clock = clock
         self._executor_profiles = executor_profiles
+        self._validated_executor_configuration = validated_executor_configuration
         self._execution_durability_level = execution_durability_level
         self._admission_policy = admission_policy
         self._lifecycle_lock = asyncio.Lock()
@@ -1274,6 +1331,8 @@ class P3AuthenticatedComposition:
                 self._executor_profiles is None
                 or len(self._executor_profiles) != 1
                 or type(self._executor_profiles[0]) is not ExecutorCapabilityProfile
+                or type(self._validated_executor_configuration)
+                is not ValidatedExecutorConfiguration
             ):
                 raise FormalTaskViolation(
                     "P3_EXECUTOR_CONFIGURATION_UNAVAILABLE",
@@ -1308,32 +1367,14 @@ class P3AuthenticatedComposition:
                     ErrorCode.CONFLICT,
                 )
             durability = DurabilityLevel(profile.durability_level)
-            executor_capabilities = {
-                DurabilityLevel.D0: (
-                    ExecutorCapability.CANCEL,
-                    ExecutorCapability.DISPATCH,
-                    ExecutorCapability.STATUS,
-                ),
-                DurabilityLevel.D1: (
-                    ExecutorCapability.CANCEL,
-                    ExecutorCapability.CHECKPOINT,
-                    ExecutorCapability.DISPATCH,
-                    ExecutorCapability.RECOVERY,
-                    ExecutorCapability.STATUS,
-                ),
-                DurabilityLevel.D2: tuple(
-                    sorted(ExecutorCapability, key=lambda item: item.value)
-                ),
-            }[durability]
             executor_digest = profile.digest_sha256()
-            executor = ValidatedExecutorConfiguration(
-                executor_id=profile.executor_id,
-                adapter_id=profile.adapter_id,
-                durability_level=durability,
-                capabilities=executor_capabilities,
-                validation_receipt_id=f"executor-profile.v1.{executor_digest[:32]}",
-                configuration_digest=executor_digest,
-            )
+            executor = self._validated_executor_configuration
+            if executor != _validated_executor_configuration(profile):
+                raise FormalTaskViolation(
+                    "P3_EXECUTOR_CONFIGURATION_CONFLICT",
+                    "validated Executor configuration does not match its owner",
+                    ErrorCode.CONFLICT,
+                )
             capability_values.extend(
                 (
                     LiveVoiceCapability.TASK_MUTATION,
@@ -2401,6 +2442,54 @@ class P3AuthenticatedComposition:
                 session_id=session_id,
                 task_id=task_id,
                 now=now,
+            )
+        finally:
+            if entered:
+                await self._leave_operation()
+
+    async def read_product_status_diagnostics(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        task_id: str,
+    ) -> TaskDurabilityDiagnosticSnapshot:
+        """Return authenticated Store diagnostics without business content."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                bearer_token,
+                operation="task.status",
+                now=now,
+            )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=session_id,
+                now=now,
+                require_clean=False,
+            )
+            authority.context.require_usable(
+                scope=authority.scope,
+                required_permissions=frozenset(),
+                destructive=False,
+                now=now,
+            )
+            await self._run_blocking(
+                self._require_exact_task_context,
+                authority=authority,
+                operation="task.status",
+                task_id=task_id,
+                now=now,
+            )
+            return await self._run_blocking(
+                self._core.store.read_task_durability_diagnostics,
+                scope=authority.scope,
+                task_id=task_id,
             )
         finally:
             if entered:
@@ -4676,18 +4765,31 @@ def create_p3_composition_from_environment(
             "P3 reconciliation interval must be in (0, 3600] seconds",
             ErrorCode.INVALID_ARGUMENT,
         ) from exc
-    database = str(os.getenv(_DATABASE_ENV) or "").strip()
-    database_path = _resolve_database_path(database)
+    configured_profile_id = str(os.getenv(_EXECUTOR_PROFILE_ENV) or "").strip()
+    candidates = DirectProjectCodeExecutorAdapter.construction_capability_profiles(
+        store_backed=True
+    )
+    configured_profiles = tuple(
+        profile for profile in candidates if profile.profile_id == configured_profile_id
+    )
+    if len(configured_profiles) != 1:
+        raise FormalTaskViolation(
+            "INVALID_P3_EXECUTOR_CONFIGURATION",
+            "enabled P3 route requires one available exact Executor profile",
+            ErrorCode.CAPABILITY_UNAVAILABLE,
+        )
+    configured_profile = configured_profiles[0]
     direct_selection = select_executor(
-        DirectProjectCodeExecutorAdapter.construction_capability_profiles(
-            store_backed=True
-        ),
+        (configured_profile,),
         _product_execution_requirements(
             executor_id=FORMAL_PROJECT_EXECUTOR_ID,
             side_effect_class="project_mutation",
-            durability_level="D2",
+            durability_level=configured_profile.durability_level,
         ),
     )
+    validated_executor = _validated_executor_configuration(direct_selection.profile)
+    database = str(os.getenv(_DATABASE_ENV) or "").strip()
+    database_path = _resolve_database_path(database)
     principal = AuthenticatedPrincipal(
         principal_id=principal_id,
         allowed_project_ids=project_ids,
@@ -4753,7 +4855,8 @@ def create_p3_composition_from_environment(
             policy=FormalTaskPolicyAdapter(commit_ledger),
             reconcile_interval=interval,
             executor_profiles=(direct_selection.profile,),
-            execution_durability_level="D2",
+            validated_executor_configuration=validated_executor,
+            execution_durability_level=direct_selection.profile.durability_level,
             admission_policy=_PRODUCT_ADMISSION_POLICY,
         )
     except BaseException:  # noqa: BLE001 -- clean every owner, then re-raise exactly
