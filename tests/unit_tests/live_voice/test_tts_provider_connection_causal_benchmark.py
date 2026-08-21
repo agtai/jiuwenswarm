@@ -733,17 +733,31 @@ async def test_dirty_pair_cleanup_stops_before_next_paid_provider(
         providers.append(provider)
         return provider
 
-    with pytest.raises(
-        ValueError, match="TTS_CONNECTION_BENCHMARK_CLEANUP_INCOMPLETE"
-    ):
-        await runner.run_benchmark(
-            config,
-            provider_factory=provider_factory,
-            monotonic=clock.now,
-        )
+    report = await runner.run_benchmark(
+        config,
+        provider_factory=provider_factory,
+        monotonic=clock.now,
+    )
 
     assert len(providers) == 1
     assert providers[0].close_count == 1
+    assert report.decision == "INCONCLUSIVE"
+    assert len(report.attempts) == 6
+    assert [attempt.outcome for attempt in report.attempts] == [
+        runner.TtsAttemptOutcome.COMPLETED,
+        runner.TtsAttemptOutcome.COMPLETED,
+        runner.TtsAttemptOutcome.UNKNOWN,
+        runner.TtsAttemptOutcome.UNKNOWN,
+        runner.TtsAttemptOutcome.UNKNOWN,
+        runner.TtsAttemptOutcome.UNKNOWN,
+    ]
+    assert [attempt.reason for attempt in report.attempts[2:]] == [
+        "PAIR_ABORTED",
+        "PAIR_ABORTED",
+        "PAIR_ABORTED",
+        "PAIR_ABORTED",
+    ]
+    assert report.cleanup_counts == {"pairs": 3, "completed": 0, "incomplete": 3}
 
 
 def test_report_parser_rejects_a_decision_that_disagrees_with_attempt_truth(

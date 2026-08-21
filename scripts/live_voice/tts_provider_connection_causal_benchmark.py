@@ -73,6 +73,7 @@ FORBIDDEN_EFFECTS = {
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _WORKER_FLAG = "--benchmark-worker"
+_WORKER_TOKEN_ENV = "JIUWENSWARM_TTS_BENCHMARK_WORKER_TOKEN"
 _BoundedValue = TypeVar("_BoundedValue")
 _RETAINED_BOUNDED_TASKS: set[asyncio.Future[object]] = set()
 
@@ -1041,13 +1042,26 @@ async def run_benchmark(
         )
         attempts.extend(pair_attempts)
         cleanup_complete.append(pair_cleanup)
-        if not pair_cleanup:
-            raise ValueError("TTS_CONNECTION_BENCHMARK_CLEANUP_INCOMPLETE")
-        if any(
+        stop = not pair_cleanup or any(
             attempt.outcome is not TtsAttemptOutcome.COMPLETED
             for attempt in pair_attempts
-        ):
-            raise ValueError("TTS_CONNECTION_BENCHMARK_INFRASTRUCTURE_INVALID")
+        )
+        if stop:
+            for unrun_pair_index in range(pair_index + 1, config.pair_count):
+                attempts.extend(
+                    TtsConnectionAttempt.failed(
+                        pair_index=unrun_pair_index,
+                        position=position,
+                        outcome=TtsAttemptOutcome.UNKNOWN,
+                        reason="PAIR_ABORTED",
+                    )
+                    for position in (
+                        TtsAttemptPosition.COLD,
+                        TtsAttemptPosition.WARM,
+                    )
+                )
+                cleanup_complete.append(False)
+            break
     return build_report(
         config,
         provider_id="openai-streaming-speech",
@@ -1206,17 +1220,30 @@ def _validated_worker_stdout(value: str) -> str | None:
 def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == _WORKER_FLAG:
-        return _worker_main(arguments[1:])
+        expected_token = os.environ.pop(_WORKER_TOKEN_ENV, "")
+        supplied_token = arguments[1] if len(arguments) > 1 else ""
+        if (
+            not expected_token
+            or supplied_token != expected_token
+            or not re.fullmatch(r"[0-9a-f]{32}", supplied_token)
+        ):
+            print("TTS_CONNECTION_BENCHMARK_FAILED", file=sys.stderr)
+            return 1
+        return _worker_main(arguments[2:])
+    worker_token = uuid.uuid4().hex
+    worker_environ = dict(os.environ)
+    worker_environ[_WORKER_TOKEN_ENV] = worker_token
     command = (
         sys.executable,
         str(Path(__file__).resolve()),
         _WORKER_FLAG,
+        worker_token,
         *arguments,
     )
     try:
         result = _run_process_with_watchdog(
             command,
-            environ=os.environ,
+            environ=worker_environ,
             timeout_seconds=PROCESS_WATCHDOG_SECONDS,
         )
     except (KeyboardInterrupt, SystemExit):

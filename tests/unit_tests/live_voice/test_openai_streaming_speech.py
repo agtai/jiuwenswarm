@@ -2458,7 +2458,14 @@ def test_provider_rejects_cross_event_loop_sse_client_cleanup(
             "content-encoding": "identity",
         }
 
+        def __init__(self) -> None:
+            super().__init__(lines)
+            self.iteration_started = asyncio.Event()
+            self.release = asyncio.Event()
+
         async def aiter_lines(self):
+            self.iteration_started.set()
+            await self.release.wait()
             async for line in self:
                 yield line
 
@@ -2468,13 +2475,14 @@ def test_provider_rejects_cross_event_loop_sse_client_cleanup(
     class Client:
         def __init__(self) -> None:
             self.close_count = 0
+            self.response = Response()
 
         def build_request(self, *_args, **_kwargs) -> Request:
             return Request()
 
         async def send(self, _request: Request, *, stream: bool) -> Response:
             assert stream is True
-            return Response(lines)
+            return self.response
 
         async def aclose(self) -> None:
             self.close_count += 1
@@ -2487,10 +2495,26 @@ def test_provider_rejects_cross_event_loop_sse_client_cleanup(
     )
     provider = OpenAIStreamingSpeechProvider(config())
     request = synthesis_request()
+    foreign_response = ResponseRef("interaction-foreign", "response-foreign", 0)
+    foreign_request = replace(
+        synthesis_request(),
+        ref=SynthesisStreamRef(
+            "synthesis-foreign",
+            0,
+            foreign_response,
+            "unit-foreign",
+            0,
+        ),
+    )
 
-    async def synthesize() -> None:
+    async def start_synthesis() -> None:
         provider.conformance.activate_response(request.ref.response)
+        provider.conformance.activate_response(foreign_request.ref.response)
         await provider.open_synthesis(request)
+
+        await asyncio.wait_for(client.response.iteration_started.wait(), timeout=1)
+
+    async def drain_synthesis() -> None:
         while True:
             event = await provider.next_synthesis_event(
                 request.ref, timeout_seconds=1
@@ -2501,17 +2525,38 @@ def test_provider_rejects_cross_event_loop_sse_client_cleanup(
     owner_loop = asyncio.new_event_loop()
     foreign_loop = asyncio.new_event_loop()
     try:
-        owner_loop.run_until_complete(synthesize())
+        owner_loop.run_until_complete(start_synthesis())
+        assert provider._closed is False
+        assert client.response.closed is False
+        assert provider.conformance.snapshot().active_synthesis == 1
+
+        with pytest.raises(OpenAIStreamingSpeechError) as foreign_open:
+            foreign_loop.run_until_complete(provider.open_synthesis(foreign_request))
+        assert foreign_open.value.reason == "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH"
+        assert provider._closed is False
+        assert client.response.closed is False
+        assert provider.conformance.snapshot().active_synthesis == 1
 
         with pytest.raises(OpenAIStreamingSpeechError) as mismatch:
             foreign_loop.run_until_complete(provider.close())
         assert mismatch.value.reason == "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH"
+        assert provider._closed is False
+        assert client.response.closed is False
+        assert provider.conformance.snapshot().active_synthesis == 1
         assert client.close_count == 0
 
+        client.response.release.set()
+        owner_loop.run_until_complete(drain_synthesis())
         owner_loop.run_until_complete(provider.close())
         assert client.close_count == 1
         assert provider.cleanup_snapshot.clean is True
     finally:
+        if not provider._closed:
+            client.response.release.set()
+            try:
+                owner_loop.run_until_complete(provider.close())
+            except BaseException:
+                pass
         foreign_loop.close()
         owner_loop.close()
 

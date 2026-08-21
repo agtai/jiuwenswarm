@@ -1021,6 +1021,16 @@ class OpenAIStreamingSpeechProvider:
                 self._sse_client_close_requested = None
             return self._sse_client
 
+    def _require_sse_client_loop(self) -> None:
+        if (
+            self._sse_client is not None
+            and self._sse_client_loop is not asyncio.get_running_loop()
+        ):
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH",
+                "streaming Speech Provider transport belongs to another event loop",
+            )
+
     async def _close_sse_client(self) -> httpx.AsyncClient | None:
         async with self._sse_client_lock:
             client = self._sse_client
@@ -1341,6 +1351,8 @@ class OpenAIStreamingSpeechProvider:
         *,
         on_transport_open: Callable[[], None] | None = None,
     ) -> None:
+        if self._sse_factory is None:
+            self._require_sse_client_loop()
         session: _SynthesisSession | None = None
         failure: BaseException | None = None
         conformance_started = False
@@ -1417,10 +1429,12 @@ class OpenAIStreamingSpeechProvider:
         )
 
     async def close(self) -> None:
+        self._require_sse_client_loop()
         async with self._close_lock:
             await self._close_serialized()
 
     async def _close_serialized(self) -> None:
+        self._require_sse_client_loop()
         process_control: BaseException | None = None
         cleanup_failure: BaseException | None = None
         if not self._closed:
