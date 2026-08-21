@@ -110,7 +110,7 @@ Voice P1/P2 owners and latency contracts.
 - Produces `buildCheckpointReport(config, attempts): CheckpointReport` and
   `compareCheckpointReports(a1, b, a2): CheckpointComparison`.
 
-- [ ] **Step 1: Write the RED closed-model tests**
+- [x] **Step 1: Write the RED closed-model tests**
 
   Add literal tests for all five truth classes, three workloads, three
   populations, D0–D10 order, direct segment definitions and the fixed workload
@@ -131,7 +131,7 @@ Voice P1/P2 owners and latency contracts.
   The production mutation each test catches is accepting an unreviewed workload,
   changing one controlled delay or deriving total from summarized segments.
 
-- [ ] **Step 2: Run RED and verify the missing module failure**
+- [x] **Step 2: Run RED and verify the missing module failure**
 
   ```bash
   cd jiuwenswarm/channels/web/frontend
@@ -141,7 +141,7 @@ Voice P1/P2 owners and latency contracts.
   Expected: TypeScript/module resolution fails because the checkpoint module is
   absent.
 
-- [ ] **Step 3: Implement frozen closed types and validators**
+- [x] **Step 3: Implement frozen closed types and validators**
 
   Use literal closed records and defensive finite-number checks. Define the
   workload table exactly:
@@ -156,7 +156,7 @@ Voice P1/P2 owners and latency contracts.
 
   Define controlled targets `400/500/2000/1000/85` ms and B batch bound `16`.
 
-- [ ] **Step 4: Write RED timing/ordering tests with a manual clock**
+- [x] **Step 4: Write RED timing/ordering tests with a manual clock**
 
   Implement a test-only `ManualClock` whose `waitMs` advances exact logical
   time. Assert one literal W1 attempt produces the exact event order and direct
@@ -164,26 +164,26 @@ Voice P1/P2 owners and latency contracts.
   `invalid` with stable reasons `CONTROLLED_WAIT_EARLY` and
   `CONTROLLED_WAIT_LATE`.
 
-- [ ] **Step 5: Implement attempt recorder and direct segments**
+- [x] **Step 5: Implement attempt recorder and direct segments**
 
   Record every D-point once, reject duplicate/missing/rewound observations and
   compute each attempt's `round_total_ms = D10 - D0`. Store controlled targets
   separately from observations. Do not calculate total by adding stage values.
 
-- [ ] **Step 6: Write RED report/summary tests**
+- [x] **Step 6: Write RED report/summary tests**
 
   Build five literal attempts with hand-derived values and assert nearest-rank
   p50/p95. Missing/failed/unknown attempts remain denominators and have no
   numeric percentile credit. Assert serialized fields carry a `truth_class`.
 
-- [ ] **Step 7: Implement report builder and A1/B/A2 comparer**
+- [x] **Step 7: Implement report builder and A1/B/A2 comparer**
 
   The comparer requires exact runner/fixture/timing fingerprints, A1/A2 source
   equality and only the allowed optimization-mode differences. Emit absolute
   B−A1/B−A2 milliseconds before percentages and calculate baseline drift per
   workload/stage/total.
 
-- [ ] **Step 8: Run GREEN, TypeScript and formatting checks**
+- [x] **Step 8: Run GREEN, TypeScript and formatting checks**
 
   ```bash
   cd jiuwenswarm/channels/web/frontend
@@ -195,7 +195,7 @@ Voice P1/P2 owners and latency contracts.
   git diff --check
   ```
 
-- [ ] **Step 9: Commit the closed contract**
+- [x] **Step 9: Commit the closed contract**
 
   ```bash
   git add \
