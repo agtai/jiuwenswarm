@@ -1110,6 +1110,19 @@ class TaskProgressReturnBridge:
                     return
                 if not await self._consume(event):
                     return
+        except Exception:  # noqa: BLE001 - the worker contains its own failure
+            # The worker owns its own background failure: an escaping exception
+            # must settle truthfully instead of ending this task with an
+            # exception nobody retrieves. Caller cancellation is a BaseException
+            # and still propagates, and an earlier settled truth still wins.
+            if self._state not in {
+                TaskProgressReturnState.CLOSED,
+                TaskProgressReturnState.FAILED,
+            }:
+                self._settle(
+                    TaskProgressReturnState.FAILED,
+                    TaskProgressReturnReason.SOURCE_FAILED,
+                )
         finally:
             try:
                 await self._close_source(binding)

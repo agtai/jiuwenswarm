@@ -14,8 +14,10 @@ import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
+    MAX_SAFE_INTEGER,
     Assurance,
     CommandEnvelope,
+    ContractViolation,
     OriginRef,
     ProducerRef,
     ScopeRef,
@@ -2282,3 +2284,72 @@ async def test_expired_grant_drain_during_parked_read_joins_the_worker_on_close(
     assert harness.text_events == []
     assert harness.bridge.snapshot().voice_intents == 0
     assert harness.bridge.snapshot().voice_drains == 0
+
+
+@pytest.mark.asyncio
+async def test_unsafe_generation_evidence_failure_is_contained_by_the_worker() -> None:
+    subscription = _SubscriptionDouble()
+    prepared = _PreparedSourceDouble(subscription, [])
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    text_events: list[TaskProgressTextEvent] = []
+    binding = _binding(TaskProgressOriginKind.VOICE, generation=MAX_SAFE_INTEGER + 1)
+
+    async def voice_sink(intent: TaskProgressNotificationIntent) -> None:
+        voice_events.append(intent)
+
+    async def text_sink(event: TaskProgressTextEvent) -> None:
+        text_events.append(event)
+
+    bridge = TaskProgressReturnBridge(
+        enabled=True,
+        subscription=cast(TaskEventSubscription, subscription),
+        prepared_source=prepared,
+        authorization=_grant(),
+        binding=binding,
+        generation_is_current=lambda _binding: True,
+        arbiter=arbiter,
+        foreground=_foreground,
+        voice_sink=voice_sink,
+        text_sink=text_sink,
+        allow_package_contract_handoff=True,
+        clock=lambda: NOW,
+    )
+
+    # Unchanged fail-closed disposition: minting activation evidence for a
+    # generation outside the cross-language safe range still raises.
+    with pytest.raises(ContractViolation):
+        await bridge.activate()
+
+    worker = next(
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == f"live-voice-task-progress:{binding.task_id}"
+    )
+    prepared.publish(_lifecycle_events()[0])
+    await _wait_settled(bridge)
+
+    # Containment: the worker settles its own failure instead of ending as a
+    # task whose exception nobody ever retrieves.
+    assert worker.done() is True
+    assert worker.cancelled() is False
+    assert worker.exception() is None
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
+    assert prepared.close_calls == 1
+
+    # Contained, never silently successful, and with zero delivered effects.
+    assert voice_events == []
+    assert text_events == []
+    assert bridge.snapshot().projected_events == 0
+    assert bridge.snapshot().voice_intents == 0
+    assert bridge.snapshot().voice_drains == 0
+    assert bridge.snapshot().text_events == 0
+    assert arbiter.snapshot().accepted_events == 0
+    assert arbiter.snapshot().pending_notifications == 0
+
+    await bridge.close()
+
+    assert prepared.close_calls == 1
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
