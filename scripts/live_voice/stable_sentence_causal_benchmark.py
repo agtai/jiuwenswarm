@@ -11,12 +11,20 @@ import os
 import re
 import statistics
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ResponseRef,
+    ScopeRef,
+    TurnCommit,
+)
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.server.live_voice.latency_probe import (
     CONTEXT_SCHEMA_VERSION,
@@ -32,6 +40,18 @@ from jiuwenswarm.server.live_voice.latency_probe_report import (
     reduce_latency_run,
     write_latency_report,
 )
+from jiuwenswarm.server.live_voice.batch_speech import (
+    SPEECH_API_BASE_ENV,
+    SPEECH_API_KEY_ENV,
+    SPEECH_PROVIDER_ENV,
+    SPEECH_TTS_MODEL_ENV,
+    SPEECH_TTS_VOICE_ENV,
+)
+from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    OpenAIStreamingSpeechConfig,
+    OpenAIStreamingSpeechProvider,
+)
+from jiuwenswarm.server.live_voice.speech_ports import SynthesisEventKind
 from jiuwenswarm.server.live_voice.stable_sentence_policy import (
     FinalReconciliationDisposition,
     StableSentenceStreamState,
@@ -39,6 +59,15 @@ from jiuwenswarm.server.live_voice.stable_sentence_policy import (
     commit_candidate,
     observe_agent_event,
     reconcile_final,
+)
+from jiuwenswarm.server.live_voice.streaming_speech import (
+    SynthesisStreamRef,
+    SynthesisStreamRequest,
+    TextSpan,
+)
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FormalAgentExecution,
+    FormalContextSnapshot,
 )
 
 
@@ -74,6 +103,313 @@ class ControlledCase:
     expected_candidate: str | None = field(repr=False)
     final: str = field(repr=False)
     expected_disposition: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCase:
+    case_id: str
+    prompt: str = field(repr=False)
+    minimum_sentence_count: int
+    allow_tools: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TimedAgentEvent:
+    observed_ms: float
+    event: AgentEvent
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTtsTiming:
+    request_started_ms: float
+    transport_open_ms: float
+    first_provider_audio_ms: float
+    first_pcm_ms: float
+    completed_ms: float
+    cleanup_complete: bool
+
+    def __post_init__(self) -> None:
+        ordered = (
+            self.request_started_ms,
+            self.transport_open_ms,
+            self.first_provider_audio_ms,
+            self.first_pcm_ms,
+            self.completed_ms,
+        )
+        if (
+            any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in ordered
+            )
+            or list(ordered) != sorted(ordered)
+            or self.cleanup_complete is not True
+        ):
+            raise ValueError("STABLE_SENTENCE_TTS_TIMING_INVALID")
+
+
+class StreamingBenchmarkTtsClient:
+    def __init__(self, provider: object, *, monotonic=time.monotonic) -> None:
+        if (
+            provider is None
+            or not callable(getattr(provider, "open_synthesis", None))
+            or not callable(getattr(provider, "next_synthesis_event", None))
+            or not callable(getattr(provider, "close", None))
+            or not callable(monotonic)
+        ):
+            raise ValueError("STABLE_SENTENCE_TTS_CLIENT_INVALID")
+        self._provider = provider
+        self._monotonic = monotonic
+
+    async def measure_first_pcm(
+        self,
+        *,
+        response_ref: ResponseRef,
+        unit_id: str,
+        text_utf8: bytes,
+    ) -> BenchmarkTtsTiming:
+        if (
+            not isinstance(response_ref, ResponseRef)
+            or not isinstance(unit_id, str)
+            or not unit_id
+            or not isinstance(text_utf8, bytes)
+            or not text_utf8
+        ):
+            raise ValueError("STABLE_SENTENCE_TTS_INPUT_INVALID")
+        try:
+            text = text_utf8.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("STABLE_SENTENCE_TTS_INPUT_INVALID") from error
+        request = SynthesisStreamRequest(
+            ref=SynthesisStreamRef(
+                f"stable-screen-stream-{response_ref.response_generation}",
+                response_ref.response_generation,
+                response_ref,
+                unit_id,
+                0,
+            ),
+            display_text=text,
+            spoken_text=text,
+            display_span=TextSpan(0, len(text)),
+            sample_rate_hz=24_000,
+            event_timeout_seconds=20.0,
+        )
+        started_at = self._monotonic()
+        transport_open_at: float | None = None
+        first_audio_at: float | None = None
+        completed_at: float | None = None
+
+        def on_transport_open() -> None:
+            nonlocal transport_open_at
+            observed = self._monotonic()
+            if transport_open_at is not None or observed < started_at:
+                raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+            transport_open_at = observed
+
+        try:
+            conformance = getattr(self._provider, "conformance", None)
+            activate = getattr(conformance, "activate_response", None)
+            if not callable(activate):
+                raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+            activate(response_ref)
+            await asyncio.wait_for(
+                self._provider.open_synthesis(
+                    request, on_transport_open=on_transport_open
+                ),
+                timeout=30.0,
+            )
+            expected_seq = 0
+            started = False
+            while completed_at is None:
+                event = await asyncio.wait_for(
+                    self._provider.next_synthesis_event(
+                        request.ref, timeout_seconds=20.0
+                    ),
+                    timeout=30.0,
+                )
+                if event.ref != request.ref or event.seq != expected_seq:
+                    raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+                expected_seq += 1
+                if event.kind is SynthesisEventKind.STARTED:
+                    if started or first_audio_at is not None:
+                        raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+                    started = True
+                elif event.kind is SynthesisEventKind.CHUNK:
+                    if (
+                        not started
+                        or event.pcm_s16le is None
+                        or event.sample_count <= 0
+                    ):
+                        raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+                    if first_audio_at is None:
+                        first_audio_at = self._monotonic()
+                elif event.kind is SynthesisEventKind.COMPLETED:
+                    if not started or first_audio_at is None:
+                        raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+                    completed_at = self._monotonic()
+                else:
+                    raise ValueError("STABLE_SENTENCE_TTS_PROTOCOL_INVALID")
+        finally:
+            await asyncio.wait_for(self._provider.close(), timeout=5.0)
+        clean = bool(
+            getattr(getattr(self._provider, "cleanup_snapshot", None), "clean", False)
+        )
+        if (
+            transport_open_at is None
+            or first_audio_at is None
+            or completed_at is None
+            or not clean
+        ):
+            raise ValueError("STABLE_SENTENCE_TTS_CLEANUP_INVALID")
+
+        def offset(value: float) -> float:
+            return max(0.0, (value - started_at) * 1000.0)
+
+        return BenchmarkTtsTiming(
+            0.0,
+            offset(transport_open_at),
+            offset(first_audio_at),
+            offset(first_audio_at),
+            offset(completed_at),
+            True,
+        )
+
+
+class FormalAgentStreamClient:
+    def __init__(self, facade: object, *, monotonic=time.monotonic) -> None:
+        stream = getattr(facade, "process_formal_live_voice_stream", None)
+        if not callable(stream) or not callable(monotonic):
+            raise ValueError("STABLE_SENTENCE_AGENT_CLIENT_INVALID")
+        self._facade = facade
+        self._monotonic = monotonic
+
+    async def stream(self, case: ProviderCase) -> AsyncIterator[TimedAgentEvent]:
+        if not isinstance(case, ProviderCase) or case.allow_tools is not False:
+            raise ValueError("STABLE_SENTENCE_PROVIDER_CASE_INVALID")
+        scope = ScopeRef(
+            "stable-screen-subject",
+            "stable-screen-project",
+            "stable-screen-session",
+            Assurance.REQUEST_ASSERTED,
+        )
+        commit = TurnCommit.from_dict(
+            {
+                "contract_version": "live-voice.contract.v2",
+                "commit_id": f"stable-screen-commit-{case.case_id}",
+                "turn_id": f"stable-screen-turn-{case.case_id}",
+                "interaction_id": f"stable-screen-interaction-{case.case_id}",
+                "text": case.prompt,
+                "hypothesis_provenance": {"provider": "stable-screen-public"},
+                "scope": scope.to_dict(),
+                "context_refs": [],
+                "committed_at": "2026-08-21T00:00:00Z",
+            }
+        )
+        execution = FormalAgentExecution(
+            request_id="provider-request",
+            channel_id="live_voice_latency_screen",
+            internal_session_id=f"lv-stable-screen-{case.case_id}",
+            commit=commit,
+            context=FormalContextSnapshot(scope),
+            allow_tools=False,
+        )
+        started = self._monotonic()
+        expected_seq = 0
+        final_seen = False
+        stream = self._facade.process_formal_live_voice_stream(execution)
+        async for chunk in stream:
+            if (
+                not isinstance(chunk, AgentResponseChunk)
+                or chunk.request_id != execution.request_id
+                or chunk.channel_id != execution.channel_id
+                or not isinstance(chunk.payload, dict)
+            ):
+                raise ValueError("STABLE_SENTENCE_AGENT_EVENT_INVALID")
+            event_type = chunk.payload.get("event_type")
+            content = chunk.payload.get("content")
+            if event_type in {"chat.tool_call", "chat.tool_result"}:
+                raise ValueError("STABLE_SENTENCE_TOOL_EVENT_FORBIDDEN")
+            if event_type not in {"chat.delta", "chat.reasoning", "chat.final"}:
+                raise ValueError("STABLE_SENTENCE_AGENT_EVENT_INVALID")
+            if not isinstance(content, str) or not content:
+                raise ValueError("STABLE_SENTENCE_AGENT_EVENT_INVALID")
+            if final_seen:
+                raise ValueError("STABLE_SENTENCE_AGENT_EVENT_AFTER_FINAL")
+            if event_type == "chat.final":
+                final_seen = True
+            observed = self._monotonic()
+            if observed < started:
+                raise ValueError("STABLE_SENTENCE_AGENT_CLOCK_INVALID")
+            yield TimedAgentEvent(
+                (observed - started) * 1000.0,
+                AgentEvent(
+                    request_id=execution.request_id,
+                    interaction_id=commit.interaction_id,
+                    turn_id=commit.turn_id,
+                    commit_id=commit.commit_id,
+                    seq=expected_seq,
+                    event_type=event_type,
+                    source_provenance="stable-screen-real-agent",
+                    text=content,
+                    capability="agent.chat",
+                ),
+            )
+            expected_seq += 1
+        if not final_seen:
+            raise ValueError("STABLE_SENTENCE_AGENT_FINAL_MISSING")
+
+
+@asynccontextmanager
+async def managed_formal_agent_client(project_dir: Path, *, manager_factory=None):
+    if (
+        not isinstance(project_dir, Path)
+        or not project_dir.is_absolute()
+        or not project_dir.is_dir()
+    ):
+        raise ValueError("STABLE_SENTENCE_PROJECT_INVALID")
+    if manager_factory is None:
+        from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+        manager_factory = AgentManager
+    if not callable(manager_factory):
+        raise ValueError("STABLE_SENTENCE_AGENT_MANAGER_INVALID")
+    manager = manager_factory()
+    cleanup = getattr(manager, "cleanup", None)
+    if not callable(cleanup):
+        raise ValueError("STABLE_SENTENCE_AGENT_MANAGER_INVALID")
+    try:
+        facade = await manager.get_agent(
+            channel_id="live_voice_latency_screen",
+            mode="agent",
+            project_dir=str(project_dir),
+        )
+        yield FormalAgentStreamClient(facade)
+    finally:
+        await asyncio.wait_for(cleanup(), timeout=10.0)
+
+
+def create_real_tts_client(
+    environ: Mapping[str, str], *, monotonic=time.monotonic
+) -> StreamingBenchmarkTtsClient:
+    provider_name = str(environ.get(SPEECH_PROVIDER_ENV) or "").strip().lower()
+    api_base = str(environ.get(SPEECH_API_BASE_ENV) or "").strip()
+    api_key = str(environ.get(SPEECH_API_KEY_ENV) or "").strip()
+    model = str(environ.get(SPEECH_TTS_MODEL_ENV) or "").strip()
+    voice = str(environ.get(SPEECH_TTS_VOICE_ENV) or "").strip()
+    if provider_name != "openai" or not all((api_base, api_key, model, voice)):
+        raise ValueError("PROVIDER_UNAVAILABLE")
+    provider = OpenAIStreamingSpeechProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base=api_base,
+            api_key=api_key,
+            tts_model=model,
+            tts_voice=voice,
+        ),
+        monotonic=monotonic,
+    )
+    return StreamingBenchmarkTtsClient(provider, monotonic=monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +489,8 @@ class StableSentenceAttempt:
             or not _SAFE_ID.fullmatch(self.case_id)
             or not isinstance(self.attempt_index, int)
             or self.attempt_index < 0
-            or self.outcome not in {
+            or self.outcome
+            not in {
                 "completed",
                 "integrity_failure",
                 "failed",
@@ -337,7 +674,11 @@ def _require_exact_mapping(value: object, keys: frozenset[str]) -> Mapping[str, 
 
 
 def load_controlled_cases(path: Path) -> tuple[ControlledCase, ...]:
-    if not isinstance(path, Path) or not path.is_file() or path.stat().st_size > MAX_REPORT_BYTES:
+    if (
+        not isinstance(path, Path)
+        or not path.is_file()
+        or path.stat().st_size > MAX_REPORT_BYTES
+    ):
         raise ValueError("STABLE_SENTENCE_FIXTURE_INVALID")
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -373,7 +714,8 @@ def load_controlled_cases(path: Path) -> tuple[ControlledCase, ...]:
             or (candidate is not None and not isinstance(candidate, str))
             or not isinstance(final, str)
             or not final
-            or disposition not in {item.value for item in FinalReconciliationDisposition}
+            or disposition
+            not in {item.value for item in FinalReconciliationDisposition}
         ):
             raise ValueError("STABLE_SENTENCE_FIXTURE_INVALID")
         result.append(
@@ -388,6 +730,46 @@ def load_controlled_cases(path: Path) -> tuple[ControlledCase, ...]:
     if len({case.case_id for case in result}) != len(result):
         raise ValueError("STABLE_SENTENCE_FIXTURE_INVALID")
     return tuple(result)
+
+
+def load_provider_cases(path: Path) -> tuple[ProviderCase, ...]:
+    if (
+        not isinstance(path, Path)
+        or not path.is_file()
+        or path.stat().st_size > MAX_REPORT_BYTES
+    ):
+        raise ValueError("STABLE_SENTENCE_PROVIDER_CASE_INVALID")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("STABLE_SENTENCE_PROVIDER_CASE_INVALID") from error
+    if not isinstance(raw, list) or not 2 <= len(raw) <= 16:
+        raise ValueError("STABLE_SENTENCE_PROVIDER_CASE_INVALID")
+    cases: list[ProviderCase] = []
+    for item in raw:
+        record = _require_exact_mapping(
+            item,
+            frozenset({"case_id", "prompt", "minimum_sentence_count", "allow_tools"}),
+        )
+        case_id = record["case_id"]
+        prompt = record["prompt"]
+        minimum = record["minimum_sentence_count"]
+        if (
+            not isinstance(case_id, str)
+            or not _SAFE_ID.fullmatch(case_id)
+            or not isinstance(prompt, str)
+            or not prompt.strip()
+            or len(prompt.encode("utf-8")) > 1_024
+            or not isinstance(minimum, int)
+            or isinstance(minimum, bool)
+            or not 2 <= minimum <= 8
+            or record["allow_tools"] is not False
+        ):
+            raise ValueError("STABLE_SENTENCE_PROVIDER_CASE_INVALID")
+        cases.append(ProviderCase(case_id, prompt, minimum, False))
+    if len({case.case_id for case in cases}) != len(cases):
+        raise ValueError("STABLE_SENTENCE_PROVIDER_CASE_INVALID")
+    return tuple(cases)
 
 
 def _agent_event(seq: int, text: str) -> AgentEvent:
@@ -440,9 +822,7 @@ async def run_controlled_attempt(
         or not 0 <= attempt_index < config.run.intended_attempts
     ):
         raise ValueError("STABLE_SENTENCE_ATTEMPT_CONFIG_INVALID")
-    response = ResponseRef(
-        "stable-screen-interaction", "stable-screen-response", 0
-    )
+    response = ResponseRef("stable-screen-interaction", "stable-screen-response", 0)
     state = StableSentenceStreamState.create(response)
     first_delta_ms = CONTROLLED_FIRST_DELTA_MS
     candidate_detected_ms: float | None = None
@@ -454,8 +834,7 @@ async def run_controlled_attempt(
         discard_count += len(observation.discarded_candidate_ids)
         if observation.candidate is not None and candidate_detected_ms is None:
             candidate_detected_ms = (
-                CONTROLLED_FIRST_DELTA_MS
-                + seq * CONTROLLED_FRAGMENT_INTERVAL_MS
+                CONTROLLED_FIRST_DELTA_MS + seq * CONTROLLED_FRAGMENT_INTERVAL_MS
             )
             candidate_count = 1
             content = candidate_content(state, observation.candidate)
@@ -480,8 +859,7 @@ async def run_controlled_attempt(
     expected = case.expected_disposition
     integrity_ok = reconciled.disposition.value == expected
     prefix_mismatch_count = int(
-        reconciled.disposition
-        is FinalReconciliationDisposition.REWRITE_AFTER_COMMIT
+        reconciled.disposition is FinalReconciliationDisposition.REWRITE_AFTER_COMMIT
     )
     prefix_match_count = int(
         reconciled.disposition is FinalReconciliationDisposition.EXACT_PREFIX
@@ -569,6 +947,268 @@ async def run_controlled_attempt(
     return ControlledAttemptResult(attempt, batch)
 
 
+async def run_provider_attempt(
+    *,
+    population: str,
+    case: ProviderCase,
+    attempt_index: int,
+    agent: FormalAgentStreamClient,
+    tts: object,
+) -> StableSentenceAttempt:
+    if (
+        population not in {"SCREEN", "A1", "B", "A2"}
+        or not isinstance(case, ProviderCase)
+        or not isinstance(attempt_index, int)
+        or attempt_index < 0
+        or not isinstance(agent, FormalAgentStreamClient)
+        or not callable(getattr(tts, "measure_first_pcm", None))
+    ):
+        raise ValueError("STABLE_SENTENCE_PROVIDER_ATTEMPT_INVALID")
+    response = ResponseRef(
+        f"stable-screen-interaction-{case.case_id}",
+        f"stable-screen-response-{case.case_id}",
+        attempt_index,
+    )
+    state = StableSentenceStreamState.create(response)
+    first_delta_ms: float | None = None
+    candidate_detected_ms: float | None = None
+    final_ms: float | None = None
+    final_text: str | None = None
+    candidate_count = discard_count = 0
+    tts_task: asyncio.Task[BenchmarkTtsTiming] | None = None
+    try:
+        async for timed in agent.stream(case):
+            event = timed.event
+            if event.event_type == "chat.final":
+                final_ms = timed.observed_ms
+                final_text = event.text
+                continue
+            if event.event_type == "chat.delta" and first_delta_ms is None:
+                first_delta_ms = timed.observed_ms
+            observation = observe_agent_event(state, event)
+            state = observation.state
+            discard_count += len(observation.discarded_candidate_ids)
+            if observation.candidate is not None and tts_task is None:
+                candidate = observation.candidate
+                content = candidate_content(state, candidate)
+                candidate_detected_ms = timed.observed_ms
+                candidate_count = 1
+                state = commit_candidate(state, candidate.candidate_id).state
+                tts_task = asyncio.create_task(
+                    tts.measure_first_pcm(
+                        response_ref=response,
+                        unit_id=candidate.candidate_id,
+                        text_utf8=content,
+                    ),
+                    name=f"stable-sentence-screen-tts:{case.case_id}",
+                )
+        if final_ms is None or not isinstance(final_text, str):
+            raise ValueError("STABLE_SENTENCE_AGENT_FINAL_MISSING")
+        if first_delta_ms is None or candidate_detected_ms is None or tts_task is None:
+            if tts_task is not None:
+                await tts_task
+            return StableSentenceAttempt.noncompleted(
+                population=population,
+                case_id=case.case_id,
+                attempt_index=attempt_index,
+                outcome="integrity_failure",
+                reason="NO_STABLE_CANDIDATE",
+                first_delta_ms=first_delta_ms,
+                candidate_detected_ms=candidate_detected_ms,
+                final_ms=final_ms,
+                candidate_count=candidate_count,
+                discard_count=discard_count,
+                prefix_match_count=0,
+                prefix_mismatch_count=0,
+                correction_count=0,
+            )
+        timing = await tts_task
+        reconciled = reconcile_final(state, final_text)
+        mismatch = int(
+            reconciled.disposition
+            is FinalReconciliationDisposition.REWRITE_AFTER_COMMIT
+        )
+        if mismatch:
+            return StableSentenceAttempt.noncompleted(
+                population=population,
+                case_id=case.case_id,
+                attempt_index=attempt_index,
+                outcome="integrity_failure",
+                reason="PREFIX_MISMATCH",
+                first_delta_ms=first_delta_ms,
+                candidate_detected_ms=candidate_detected_ms,
+                final_ms=final_ms,
+                candidate_count=candidate_count,
+                discard_count=discard_count,
+                prefix_match_count=0,
+                prefix_mismatch_count=1,
+                correction_count=1,
+            )
+        if reconciled.disposition is not FinalReconciliationDisposition.EXACT_PREFIX:
+            return StableSentenceAttempt.noncompleted(
+                population=population,
+                case_id=case.case_id,
+                attempt_index=attempt_index,
+                outcome="integrity_failure",
+                reason="FINAL_RECONCILIATION_INVALID",
+                first_delta_ms=first_delta_ms,
+                candidate_detected_ms=candidate_detected_ms,
+                final_ms=final_ms,
+                candidate_count=candidate_count,
+                discard_count=discard_count,
+                prefix_match_count=0,
+                prefix_mismatch_count=0,
+                correction_count=0,
+            )
+        return StableSentenceAttempt.completed(
+            population=population,
+            case_id=case.case_id,
+            attempt_index=attempt_index,
+            first_delta_ms=first_delta_ms,
+            candidate_detected_ms=candidate_detected_ms,
+            final_ms=final_ms,
+            baseline_first_pcm_ms=final_ms + timing.first_pcm_ms,
+            candidate_first_pcm_ms=candidate_detected_ms + timing.first_pcm_ms,
+            candidate_count=candidate_count,
+            discard_count=discard_count,
+            prefix_match_count=1,
+            prefix_mismatch_count=0,
+            correction_count=0,
+        )
+    except BaseException:
+        if tts_task is not None and not tts_task.done():
+            tts_task.cancel()
+            await asyncio.gather(tts_task, return_exceptions=True)
+        raise
+
+
+def _provider_batch(
+    config: StableSentenceBenchmarkConfig,
+    attempt: StableSentenceAttempt,
+    *,
+    round_index: int,
+) -> LatencyBatch:
+    clock = _ManualClock()
+    context = LatencyProbeContext(
+        CONTEXT_SCHEMA_VERSION,
+        config.run.run_id,
+        "dialogue_no_tool",
+        config.run.input_case_for_profile("dialogue_no_tool") or "",
+        round_index,
+    )
+    recorder = LatencyProbeRecorder(
+        context=context,
+        component="agent_server",
+        phase="agent_foreground",
+        run_config=config.run,
+        source_instance_id_factory=lambda: "stable-provider-agent-source",
+        batch_id_factory=lambda: f"stable-provider-batch-{round_index}",
+        clock_domain_id="stable-provider-agent-clock",
+        monotonic_ms=clock.now,
+    )
+
+    def mark(point: str, timestamp: float) -> None:
+        clock.value = timestamp
+        accepted = recorder.mark(
+            point,
+            correlation_id="stable-provider-correlation",
+            interaction_id=f"stable-screen-interaction-{attempt.case_id}",
+            activation_id="stable-provider-activation",
+            activation_generation=1,
+            turn_id=f"stable-screen-turn-{attempt.case_id}",
+            response_id=f"stable-screen-response-{attempt.case_id}",
+            response_generation=round_index,
+        )
+        if not accepted:
+            raise ValueError("STABLE_SENTENCE_PROBE_MARK_REJECTED")
+
+    mark("agent.agent_started", 0.0)
+    if attempt.first_delta_ms is not None:
+        mark("agent.agent_first_delta", attempt.first_delta_ms)
+    if attempt.candidate_detected_ms is not None:
+        mark("agent.sentence_candidate_detected", attempt.candidate_detected_ms)
+    if attempt.final_ms is not None:
+        mark("agent.agent_final", attempt.final_ms)
+    batch = recorder.finish("completed" if attempt.outcome == "completed" else "failed")
+    if batch is None:
+        raise ValueError("STABLE_SENTENCE_PROBE_FINISH_FAILED")
+    return batch
+
+
+async def run_provider_corpus(
+    config: StableSentenceBenchmarkConfig,
+    cases_path: Path,
+    *,
+    agent: FormalAgentStreamClient,
+    tts_factory,
+) -> StableSentenceCausalResult:
+    if config.mode not in {"provider-pilot", "run"} or not callable(tts_factory):
+        raise ValueError("STABLE_SENTENCE_PROVIDER_CONFIG_INVALID")
+    cases = load_provider_cases(cases_path)
+    attempts_per_case = 1 if config.mode == "provider-pilot" else 5
+    expected_attempts = len(cases) * attempts_per_case
+    if config.run.intended_attempts != expected_attempts:
+        raise ValueError("STABLE_SENTENCE_ATTEMPT_POLICY_MISMATCH")
+    writer = LatencyProbeBatchWriter(
+        config.run_json.parent.parent, config.run, "agent_server"
+    )
+    attempts: list[StableSentenceAttempt] = []
+    batches: list[LatencyBatch] = []
+    round_index = 0
+    for case in cases:
+        for _case_attempt in range(attempts_per_case):
+            try:
+                tts = tts_factory()
+                attempt = await run_provider_attempt(
+                    population=config.population,
+                    case=case,
+                    attempt_index=round_index,
+                    agent=agent,
+                    tts=tts,
+                )
+            except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                attempt = StableSentenceAttempt.noncompleted(
+                    population=config.population,
+                    case_id=case.case_id,
+                    attempt_index=round_index,
+                    outcome="failed",
+                    reason="AGENT_OR_TTS_FAILED",
+                    first_delta_ms=None,
+                    candidate_detected_ms=None,
+                    final_ms=None,
+                    candidate_count=0,
+                    discard_count=0,
+                    prefix_match_count=0,
+                    prefix_mismatch_count=0,
+                    correction_count=0,
+                )
+            batch = _provider_batch(config, attempt, round_index=round_index)
+            receipt = writer.write(batch)
+            if receipt.status not in {"written", "replayed"}:
+                raise ValueError("STABLE_SENTENCE_BATCH_WRITE_FAILED")
+            attempts.append(attempt)
+            batches.append(batch)
+            round_index += 1
+    latency_report = reduce_latency_run(config.run, batches)
+    write_latency_report(latency_report, config.run_json.parent)
+    report = StableSentenceCausalResult(
+        REPORT_SCHEMA_VERSION,
+        config.run.run_id,
+        config.git_commit,
+        config.mode,
+        config.population,
+        tuple(attempts),
+        reduce_materiality_gate(attempts),
+        ZERO_FORBIDDEN_EFFECTS,
+    )
+    write_result(report, config.output_path)
+    return report
+
+
 def _p50(values: Sequence[float]) -> float | None:
     return None if not values else float(statistics.median(values))
 
@@ -626,9 +1266,9 @@ def reduce_materiality_gate(
 
 
 def _canonical_bytes(value: Mapping[str, object]) -> bytes:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    ) + b"\n"
+    encoded = (
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    )
     if len(encoded) > MAX_REPORT_BYTES:
         raise ValueError("STABLE_SENTENCE_REPORT_TOO_LARGE")
     return encoded
@@ -781,6 +1421,97 @@ def _prepare(output: Path, *, source_commit: str, source_clean: bool) -> None:
     _write_private_json(run.to_dict(), output)
 
 
+def prepare_provider_run(
+    output_path: Path,
+    cases_path: Path,
+    *,
+    mode: str,
+    population: str,
+    source_commit: str,
+    source_clean: bool,
+    environ: Mapping[str, str],
+) -> Path:
+    cases = load_provider_cases(cases_path)
+    provider = str(environ.get(SPEECH_PROVIDER_ENV) or "").strip().lower()
+    api_base = str(environ.get(SPEECH_API_BASE_ENV) or "").strip()
+    api_key = str(environ.get(SPEECH_API_KEY_ENV) or "").strip()
+    model = str(environ.get(SPEECH_TTS_MODEL_ENV) or "").strip()
+    voice = str(environ.get(SPEECH_TTS_VOICE_ENV) or "").strip()
+    if (
+        not isinstance(output_path, Path)
+        or not output_path.is_absolute()
+        or output_path.exists()
+        or mode not in {"provider-pilot", "run"}
+        or population not in {"SCREEN", "A1", "B", "A2"}
+        or (mode == "provider-pilot" and population != "SCREEN")
+        or not _GIT_SHA.fullmatch(source_commit)
+        or not source_clean
+        or provider != "openai"
+        or not all((api_base, api_key, model, voice))
+        or not all(
+            re.fullmatch(r"[A-Za-z0-9._-]{1,128}", item) for item in (model, voice)
+        )
+    ):
+        raise ValueError("STABLE_SENTENCE_PROVIDER_CONFIG_INVALID")
+    attempts_per_case = 1 if mode == "provider-pilot" else 5
+    intended_attempts = len(cases) * attempts_per_case
+    run_path = output_path.parent / "run.json"
+    payload = {
+        "schema_version": "live-voice.latency-run.v1",
+        "run_id": output_path.parent.name,
+        "git_commit": source_commit,
+        "source_state": "clean",
+        "environment_profile": "real-agent-real-tts-no-chrome",
+        "browser_family_and_version": "not-exercised",
+        "browser_os_class": "not-exercised",
+        "gateway_runtime_class": "direct-provider-client",
+        "agent_runtime_class": "formal-agent-no-tools",
+        "stt_provider_and_model": "not-exercised",
+        "tts_provider_and_model": f"openai-{model}-{voice}",
+        "audio_format": "pcm16-24000hz-mono",
+        "vad_configuration": "not-exercised",
+        "playout_configuration": "not-exercised",
+        "allowlisted_feature_flags": {
+            "latency_probe": True,
+            "stable_sentence_tts": population == "B",
+        },
+        "cold_or_warm": "warm",
+        "input_case_ids": ["stable-sentence-provider-v1"],
+        "profile_ids": ["dialogue_no_tool"],
+        "intended_attempts": intended_attempts,
+        "required_successes": len(cases),
+        "experiment": {
+            "experiment_id": "stable-sentence-screen",
+            "target_segment": "agent_to_final",
+            "target_statistic": "p50_ms",
+            "minimum_improvement_ms": 400.0,
+            "response_total_minimum_improvement_ms": 400.0,
+            "guardrails": [
+                {
+                    "metric": "failure_rate",
+                    "segment_id": None,
+                    "maximum_regression": 0.0,
+                }
+            ],
+            "declared_experiment_points": [
+                {
+                    "point": "agent.sentence_candidate_detected",
+                    "component": "agent_server",
+                    "paired_segment_id": "candidate_to_final",
+                    "start_point": "agent.sentence_candidate_detected",
+                    "end_point": "agent.agent_final",
+                }
+            ],
+        },
+        "optimization_track": "agent_tts_overlap",
+        "benchmark_lane": "no_browser_causal",
+        "fixture_profile_id": "stable-sentence-provider-v1",
+    }
+    run = _parse_latency_run_config(payload)
+    _write_private_json(run.to_dict(), run_path)
+    return run_path
+
+
 def _load_result(path: Path) -> StableSentenceCausalResult:
     if not path.is_file() or path.stat().st_size > MAX_REPORT_BYTES:
         raise ValueError("STABLE_SENTENCE_REPORT_INVALID")
@@ -820,10 +1551,86 @@ def _parser() -> argparse.ArgumentParser:
     controlled.add_argument("--run-json", type=Path, required=True)
     controlled.add_argument("--fixture", type=Path, required=True)
     controlled.add_argument("--output", type=Path, required=True)
+    provider = commands.add_parser("provider-run")
+    provider.add_argument("--mode", choices=("provider-pilot", "run"), required=True)
+    provider.add_argument(
+        "--population", choices=("SCREEN", "A1", "B", "A2"), required=True
+    )
+    provider.add_argument("--project-dir", type=Path, required=True)
+    provider.add_argument("--cases", type=Path, required=True)
+    provider.add_argument("--output", type=Path, required=True)
     compare = commands.add_parser("compare")
     compare.add_argument("--screen", type=Path, required=True)
     compare.add_argument("--output", type=Path, required=True)
     return parser
+
+
+def _require_disposable_project(path: Path) -> Path:
+    resolved = path.resolve()
+    if (
+        not path.is_absolute()
+        or not resolved.is_dir()
+        or resolved == REPOSITORY_ROOT
+        or REPOSITORY_ROOT in resolved.parents
+    ):
+        raise ValueError("STABLE_SENTENCE_PROJECT_INVALID")
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=resolved,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    remotes = subprocess.run(
+        ["git", "remote"],
+        cwd=resolved,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        inside.returncode != 0
+        or inside.stdout.strip() != "true"
+        or remotes.returncode != 0
+        or remotes.stdout.strip()
+    ):
+        raise ValueError("STABLE_SENTENCE_PROJECT_INVALID")
+    return resolved
+
+
+async def _run_real_provider_command(
+    args: argparse.Namespace,
+    *,
+    source_commit: str,
+    source_clean: bool,
+) -> None:
+    project = _require_disposable_project(args.project_dir)
+    output = args.output.resolve()
+    cases = args.cases.resolve()
+    run_path = prepare_provider_run(
+        output,
+        cases,
+        mode=args.mode,
+        population=args.population,
+        source_commit=source_commit,
+        source_clean=source_clean,
+        environ=os.environ,
+    )
+    config = StableSentenceBenchmarkConfig(
+        run_path,
+        output,
+        args.mode,
+        args.population,
+        source_commit,
+        source_clean,
+    )
+    async with managed_formal_agent_client(project) as agent:
+        await run_provider_corpus(
+            config,
+            cases,
+            agent=agent,
+            tts_factory=lambda: create_real_tts_client(os.environ),
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -831,7 +1638,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         source_commit, source_clean = _source_state()
         if args.command == "prepare":
-            _prepare(args.output, source_commit=source_commit, source_clean=source_clean)
+            _prepare(
+                args.output, source_commit=source_commit, source_clean=source_clean
+            )
             return 0
         if args.command == "controlled-run":
             config = StableSentenceBenchmarkConfig(
@@ -843,6 +1652,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_clean,
             )
             asyncio.run(run_controlled_corpus(config, args.fixture.resolve()))
+            return 0
+        if args.command == "provider-run":
+            asyncio.run(
+                _run_real_provider_command(
+                    args,
+                    source_commit=source_commit,
+                    source_clean=source_clean,
+                )
+            )
+            final_commit, final_clean = _source_state()
+            if final_commit != source_commit or final_clean is not True:
+                raise ValueError("STABLE_SENTENCE_SOURCE_CHANGED")
             return 0
         if args.command == "compare":
             report = _load_result(args.screen.resolve())

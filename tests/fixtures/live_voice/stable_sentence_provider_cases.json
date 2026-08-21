@@ -1,0 +1,20 @@
+[
+  {
+    "case_id": "two-sentence-explanation",
+    "prompt": "In two concise sentences, explain why streaming can reduce voice-agent latency.",
+    "minimum_sentence_count": 2,
+    "allow_tools": false
+  },
+  {
+    "case_id": "three-sentence-comparison",
+    "prompt": "In three short sentences, compare streaming and batch text-to-speech.",
+    "minimum_sentence_count": 3,
+    "allow_tools": false
+  },
+  {
+    "case_id": "short-technical-summary",
+    "prompt": "Summarize response-generation fencing in two short sentences without using tools.",
+    "minimum_sentence_count": 2,
+    "allow_tools": false
+  }
+]
