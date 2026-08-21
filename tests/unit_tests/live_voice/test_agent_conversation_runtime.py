@@ -6881,6 +6881,41 @@ class HostilePhaseName(str):
         return "private-hostile-phase-detail"
 
 
+class StrSubclassNameMeta(type):
+    @property
+    def __name__(cls) -> object:
+        return HostilePhaseName("RuntimeError")
+
+
+class StrSubclassNameTeardownError(Exception, metaclass=StrSubclassNameMeta):
+    """An owner failure whose class name is a ``str`` subclass lookalike.
+
+    The name compares equal to a registered exception type name, so every
+    equality test on it passes and the recorded failure reads as ordinary.  It
+    is not exactly a ``str`` though, so it is its own ``__format__`` -- not its
+    value -- that decides what a rendered public diagnostic says.
+    """
+
+
+class GuardEscapeProbe(BaseException):
+    """A teardown failure that is deliberately not an ``Exception``.
+
+    ``except Exception`` cannot contain this, so it separates the teardown
+    guards that really are ``except BaseException`` from the ones that merely
+    look wide enough while a hostile class raises past them.
+    """
+
+
+class BaseExceptionNameMeta(type):
+    @property
+    def __name__(cls) -> str:
+        raise GuardEscapeProbe("private-base-exception-class-name")
+
+
+class BaseExceptionNameTeardownError(Exception, metaclass=BaseExceptionNameMeta):
+    """An owner failure whose class name lookup raises a non-``Exception``."""
+
+
 @pytest.mark.asyncio
 async def test_clean_teardown_keeps_the_registered_owner_order_and_closed_truth() -> (
     None
@@ -7063,6 +7098,85 @@ async def test_hostile_owner_exception_class_cannot_escape_the_teardown_guard() 
 
 
 @pytest.mark.asyncio
+async def test_non_exception_owner_name_failure_cannot_escape_the_teardown_guard() -> (
+    None
+):
+    """Guard the ``except BaseException`` in ``_teardown_failure_name``.
+
+    Property: naming a failed owner is a read that can never itself become a
+    teardown failure.  ``_teardown_failure_name`` runs inside
+    ``_run_teardown_owner``'s own ``except`` handler, so anything raised there
+    is already past the only guard the teardown sequence has: it unwinds
+    ``_shutdown_coordinator``, which has no outer ``try``, and reaches the
+    ``close()`` caller as a raised exception instead of a result.
+
+    ``test_hostile_owner_exception_class_cannot_escape_the_teardown_guard``
+    states that promise but only exercises an ``Exception``-derived name
+    failure, and a hostile class is free to raise anything.  This parallel test
+    raises a ``BaseException`` that no ``except Exception`` can contain.
+    Narrow that guard and the Harness, the Conversation Runtime and
+    notification cleanup are every one of them skipped -- the A7 defect this
+    composition's phase isolation exists to prevent -- so the first assertion
+    below is that each later owner still ran, not merely that nothing escaped.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=BaseExceptionNameTeardownError("hostile"),
+        instance_id="base-exception-name-bridge",
+    )
+    harness = teardown_harness("base-exception-name")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="base-exception-name",
+        bridge=bridge,
+        harness=harness,
+    )
+    order: list[str] = []
+    harness.close_observer = lambda: order.append("harness")
+    conversation_closes = observe_conversation_close(
+        current, observer=lambda: order.append("conversation")
+    )
+    assert await current.start() is True
+    escaped: BaseException | None = None
+    failed = None
+
+    try:
+        failed = await current.close(timeout_seconds=1)
+    except BaseException as caught:  # noqa: BLE001 - the escape is the defect
+        # An escape is caught here rather than left to propagate: the reporter
+        # renders a failing test's frame arguments, which on this path include
+        # the hostile failure itself, so its class name is read a second time
+        # and an unguarded read takes the whole session down instead of this
+        # one test.  The assertions below still say what went wrong.
+        escaped = caught
+
+    assert order == ["harness", "conversation"]
+    assert escaped is None
+    assert failed is not None
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:unknown"
+    assert current._teardown_failures == (("bridge", "unknown"),)
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "unknown")
+    assert settled.teardown_owner_failures == 1
+    assert settled.harness.closed is True
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert "private-base-exception-class-name" not in repr(
+        (failed, settled.first_teardown_owner_failure)
+    )
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
 async def test_externally_cancelled_consumer_is_an_owner_failure_not_caller_truth() -> (
     None
 ):
@@ -7193,8 +7307,19 @@ async def test_notification_cleanup_closes_the_producer_even_when_discard_fails(
     assert history.users == []
 
 
+@pytest.mark.parametrize(
+    ("suffix", "snapshot_error_factory", "probe_error_name"),
+    (
+        ("unreadable-closed-truth", LookupError, "LookupError"),
+        ("unreadable-closed-truth-base", GuardEscapeProbe, "GuardEscapeProbe"),
+    ),
+)
 @pytest.mark.asyncio
-async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer() -> None:
+async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer(
+    suffix: str,
+    snapshot_error_factory: Callable[[str], BaseException],
+    probe_error_name: str,
+) -> None:
     """Guard the failed-probe fallback in ``_bridge_reports_closed``.
 
     Property: consulting the Agent Bridge's own closed truth is a read, never a
@@ -7209,6 +7334,10 @@ async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer() 
     already given up its Agent Bridge -- and the consumer phase is recorded as
     the probe's own ``LookupError`` instead of the authoritative
     ``CancelledError`` that settling the child actually produces.
+
+    The probe runs code the bridge owns, so it can fail with anything.
+    Narrowing the guard to ``except Exception`` leaks the same child for a
+    ``BaseException`` probe failure, so both shapes are exercised here.
     """
 
     lower = LowerFormalAdapter()
@@ -7216,13 +7345,14 @@ async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer() 
     probe_marker = "private-bridge-probe-detail"
     bridge = SnapshotHostileBridge(
         close_error=RuntimeError("private-bridge-close-detail"),
-        snapshot_error=LookupError(probe_marker),
+        snapshot_error=snapshot_error_factory(probe_marker),
+        instance_id=f"{suffix}-bridge",
     )
-    harness = teardown_harness("unreadable-closed-truth")
+    harness = teardown_harness(suffix)
     current = teardown_composition(
         lower,
         history,
-        suffix="unreadable-closed-truth",
+        suffix=suffix,
         bridge=bridge,
         harness=harness,
     )
@@ -7248,7 +7378,7 @@ async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer() 
     assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
     assert settled.teardown_owner_failures == 2
     rendered = repr((failed, current._teardown_failures))
-    assert "LookupError" not in rendered
+    assert probe_error_name not in rendered
     assert probe_marker not in rendered
     assert bridge.close_calls == 1
     assert harness.close_calls == 1
@@ -7264,8 +7394,21 @@ async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer() 
     await bridge.settle_real_close()
 
 
+@pytest.mark.parametrize(
+    ("suffix", "hostile_error_class", "hostile_marker"),
+    (
+        ("non-string-name", NonStrNameTeardownError, RenderProbeName.marker),
+        (
+            "str-subclass-name",
+            StrSubclassNameTeardownError,
+            "private-hostile-phase-detail",
+        ),
+    ),
+)
 @pytest.mark.asyncio
-async def test_non_string_owner_exception_name_never_reaches_a_public_detail() -> None:
+async def test_non_string_owner_exception_name_never_reaches_a_public_detail(
+    suffix: str, hostile_error_class: type[Exception], hostile_marker: str
+) -> None:
     """Guard the ``type(name) is str`` half of the owner-name guard.
 
     Property: ``_teardown_failure_name`` reads an owner failure's type name and
@@ -7278,6 +7421,11 @@ async def test_non_string_owner_exception_name_never_reaches_a_public_detail() -
     into ``f"teardown_failed:{first_failure[1]}"``: its ``__format__`` executes
     inside the composition and its private content becomes the composition's
     public FAILED detail.
+
+    Relax that same test to ``isinstance`` and the exact ``str`` case keeps
+    passing while a ``str`` subclass whose value equals a registered type name
+    survives every equality check and still renders its own content into the
+    public detail, so both hostile name shapes are exercised here.
     """
 
     probe = NonStrNameTeardownError.render_probe
@@ -7285,14 +7433,14 @@ async def test_non_string_owner_exception_name_never_reaches_a_public_detail() -
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     bridge = TeardownFailingBridge(
-        close_error=NonStrNameTeardownError("hostile"),
-        instance_id="non-string-name-bridge",
+        close_error=hostile_error_class("hostile"),
+        instance_id=f"{suffix}-bridge",
     )
-    harness = teardown_harness("non-string-name")
+    harness = teardown_harness(suffix)
     current = teardown_composition(
         lower,
         history,
-        suffix="non-string-name",
+        suffix=suffix,
         bridge=bridge,
         harness=harness,
     )
@@ -7304,7 +7452,9 @@ async def test_non_string_owner_exception_name_never_reaches_a_public_detail() -
     assert probe.renders == []
     assert failed.status is AgentConversationShutdownStatus.FAILED
     assert failed.detail == "teardown_failed:unknown"
+    assert hostile_marker not in failed.detail
     assert RenderProbeName.marker not in failed.detail
+    assert "private-hostile-phase-detail" not in failed.detail
     settled = current.snapshot()
     assert settled.first_teardown_owner_failure == ("bridge", "unknown")
     assert type(settled.first_teardown_owner_failure[1]) is str
