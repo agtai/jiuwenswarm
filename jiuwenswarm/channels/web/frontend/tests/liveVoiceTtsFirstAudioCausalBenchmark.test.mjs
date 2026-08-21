@@ -57,7 +57,7 @@ test('real P1 owner exposes successor ACK delay without forbidden business effec
     'source_clean',
     'summaries',
   ]);
-  assert.equal(report.candidate_mode, 'legacy_sequential');
+  assert.ok(['legacy_sequential', 'successor_ack_decoupled'].includes(report.candidate_mode));
   assert.deepEqual(report.forbidden_effects, {
     agent: 0,
     tool: 0,
@@ -68,9 +68,17 @@ test('real P1 owner exposes successor ACK delay without forbidden business effec
   assert.equal(report.populations[0].attempts[0].tts_request_started_ms, 0);
   assert.ok(report.populations[0].attempts[0].successor_first_ack_ms >= 0);
   assert.ok(report.populations[0].attempts[0].first_source_scheduled_ms >= report.populations[0].attempts[0].downlink_opened_ms);
-  assert.equal(report.populations[1].attempts[0].outcome, 'failed');
-  assert.equal(report.populations[1].attempts[0].reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
-  assert.equal(report.populations[1].attempts[0].downlink_opened_ms, null);
+  const timeout = report.populations[1].attempts[0];
+  if (report.candidate_mode === 'legacy_sequential') {
+    assert.equal(timeout.outcome, 'failed');
+    assert.equal(timeout.reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+    assert.equal(timeout.downlink_opened_ms, null);
+  } else {
+    assert.equal(timeout.outcome, 'degraded_interruption');
+    assert.equal(timeout.reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+    assert.equal(typeof timeout.downlink_opened_ms, 'number');
+    assert.equal(typeof timeout.first_source_scheduled_ms, 'number');
+  }
 });
 
 test('benchmark input is closed before allocating the real P1 owner', async () => {

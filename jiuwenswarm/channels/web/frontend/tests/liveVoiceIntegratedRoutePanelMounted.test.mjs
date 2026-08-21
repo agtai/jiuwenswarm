@@ -6390,7 +6390,9 @@ test('mounted TTS failure and ACK transport loss keep text visible, replay one A
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'initial TTS failure capture unavailable');
       await browser.emitSpeechEndOfTurn();
       await waitForMounted(
-        () => projectedMessages.some(event => event.message.role === 'assistant') && states.some(state => state.p1_status === 'playing'),
+        () =>
+          projectedMessages.some(event => event.message.role === 'assistant')
+          && calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
         'recovered notification did not reach held TTS',
       );
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
@@ -6655,16 +6657,6 @@ test('mounted terminal-response barge converges without voice failure and keeps 
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'initial capture did not start');
       await controlRef.current.stop();
       await waitForMounted(
-        () => states.at(-1)?.p1_status === 'playing',
-        `Agent answer did not start playout; states=${states
-          .slice(-12)
-          .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`)
-          .join(',')}; methods=${calls
-          .slice(-16)
-          .map(call => call.method)
-          .join(',')}`,
-      );
-      await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
         'Agent answer did not request authoritative synthesis',
       );
@@ -6687,6 +6679,7 @@ test('mounted terminal-response barge converges without voice failure and keeps 
         );
       }
       await waitForMounted(() => browser.counts.sourceStarts === 1, 'dedicated Agent audio did not begin browser rendering');
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'scheduled Agent audio did not publish playing');
       await browser.emitSpeechStartDuringPlayout();
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
@@ -6956,10 +6949,6 @@ test('mounted stale TTS settlement after Session switch cannot retain predecesso
       );
       await controlRef.current.stop();
       await waitForMounted(
-        () => states.at(-1)?.p1_status === 'playing',
-        'predecessor TTS did not start',
-      );
-      await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
         'predecessor TTS did not request authoritative synthesis',
       );
@@ -6982,6 +6971,7 @@ test('mounted stale TTS settlement after Session switch cannot retain predecesso
         );
       }
       await waitForMounted(() => browser.counts.sourceStarts === 1, 'predecessor TTS did not begin browser rendering');
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'predecessor scheduled audio did not publish playing');
     });
 
     await act(async () => {
