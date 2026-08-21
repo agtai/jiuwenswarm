@@ -95,6 +95,19 @@ import './LiveVoiceIntegratedRoutePanel.css';
 
 export { extractWebErrorReason, webReconnectDelayMs };
 
+type ProductP2ActivationOwnerInput = Omit<
+  ConstructorParameters<typeof ProductWebP2ActivationOwner>[0],
+  'notification_batch_size'
+> & { notification_batch_size?: 1 | 16 };
+
+export function createProductP2ActivationOwner(input: ProductP2ActivationOwnerInput): ProductWebP2ActivationOwner {
+  const { notification_batch_size = 16, ...ownerInput } = input;
+  return new ProductWebP2ActivationOwner({
+    ...ownerInput,
+    notification_batch_size,
+  });
+}
+
 export interface LiveVoiceIntegratedRoutePanelProps {
   activeSessionId: string | null;
   isConnected: boolean;
@@ -2877,7 +2890,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setP3MutationStatus('idle');
         },
         activate_exact: async binding => {
-          recovery.owner = new ProductWebP2ActivationOwner({
+          recovery.owner = createProductP2ActivationOwner({
             enabled: true,
             request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
           });
@@ -3012,7 +3025,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       activationGenerationRef.current = binding.activation_generation;
       let owner: ProductWebP2ActivationOwner | null = null;
-      owner = new ProductWebP2ActivationOwner({
+      owner = createProductP2ActivationOwner({
         enabled: true,
         request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
         durable_operation_journal: journal,
@@ -3357,7 +3370,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               const successorBinding = journal.prepareSuccessor(pageInstanceIdRef.current!);
               activationGenerationRef.current = successorBinding.activation_generation;
               let successor: ProductWebP2ActivationOwner | null = null;
-              successor = new ProductWebP2ActivationOwner({
+              successor = createProductP2ActivationOwner({
                 enabled: true,
                 request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
                 durable_operation_journal: journal,

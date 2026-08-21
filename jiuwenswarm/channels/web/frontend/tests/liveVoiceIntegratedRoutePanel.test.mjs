@@ -15,6 +15,7 @@ import {
   bindProductVoiceTaskOrigin,
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
+  createProductP2ActivationOwner,
   extractWebErrorReason,
   formalTaskIntentResultSummary,
   inspectProductP3RetryCandidate,
@@ -38,6 +39,49 @@ import {
   terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
+test('Panel P2 owner factory defaults production to sixteen and injects one for A/B baseline', async () => {
+  const binding = {
+    session_id: 'session-batch-panel',
+    correlation_id: 'correlation-batch-panel',
+    interaction_id: 'interaction-batch-panel',
+    activation_id: 'activation-batch-panel',
+    activation_generation: 1,
+  };
+  for (const notification_batch_size of [1, 16]) {
+    const notificationParams = [];
+    const owner = createProductP2ActivationOwner({
+      enabled: true,
+      notification_batch_size,
+      request: async (method, params) => {
+        if (method === 'live_voice.composition.p2.activate') {
+          return { ok: true, result: { status: 'active', ...binding } };
+        }
+        notificationParams.push(params);
+        throw new Error('stop after request observation');
+      },
+    });
+    await owner.start(binding);
+    await assert.rejects(owner.nextNotification(), /stop after request observation/);
+    assert.equal(notificationParams.length, 1);
+    assert.equal('max_notifications' in notificationParams[0], notification_batch_size === 16);
+    if (notification_batch_size === 16) assert.equal(notificationParams[0].max_notifications, 16);
+  }
+
+  const productionParams = [];
+  const productionOwner = createProductP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      if (method === 'live_voice.composition.p2.activate') return { ok: true, result: { status: 'active', ...binding } };
+      productionParams.push(params);
+      throw new Error('stop after production request observation');
+    },
+  });
+  await productionOwner.start(binding);
+  await assert.rejects(productionOwner.nextNotification(), /stop after production request observation/);
+  assert.equal(productionParams[0].max_notifications, 16);
+});
+
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,

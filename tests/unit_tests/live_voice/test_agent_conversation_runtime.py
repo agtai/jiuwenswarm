@@ -3032,6 +3032,47 @@ def test_invalid_composition_notification_bounds_fail_before_runtime_effects() -
     assert lower.calls == 0
 
 
+@pytest.mark.asyncio
+async def test_exact_notification_lease_drains_only_currently_queued_items_with_closed_bounds() -> (
+    None
+):
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    selected = await prepare(current)
+    lease = current.attach_notification_consumer(
+        consumer_id="bounded-pull-owner", connection_epoch=0
+    )
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(handle.completion, timeout=1)
+
+    async def wait_for_four() -> None:
+        while current.snapshot().queued_notifications < 4:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_four(), timeout=1)
+    before = current.snapshot()
+    for invalid in (False, 0, 17):
+        with pytest.raises(AgentConversationRuntimeViolation) as rejected:
+            await current.drain_notifications_for(lease, limit=invalid)
+        assert rejected.value.reason == "INVALID_NOTIFICATION_BATCH_LIMIT"
+        assert (
+            current.snapshot().delivered_notifications == before.delivered_notifications
+        )
+
+    drained = await current.drain_notifications_for(lease, limit=3)
+    assert [item.publish_seq for item in drained] == [0, 1, 2]
+    assert current.snapshot().queued_notifications == 1
+    last = await current.drain_notifications_for(lease, limit=16)
+    assert [item.publish_seq for item in last] == [3]
+    assert await current.drain_notifications_for(lease, limit=16) == ()
+
+    assert current.detach_notification_consumer(lease) is True
+    with pytest.raises(AgentConversationRuntimeViolation) as detached:
+        await current.drain_notifications_for(lease, limit=1)
+    assert detached.value.reason == "NOTIFICATION_CONSUMER_DETACHED"
+    assert current.snapshot().harness.cancel_effects == 0
+    await current.close(timeout_seconds=1)
+
+
 def test_duplicate_or_exhausted_critical_reserve_fails_closed_without_growth() -> None:
     current = runtime(LowerFormalAdapter(), RecordingHistoryWriter(), max_requests=1)
     notification = AgentConversationNotification(

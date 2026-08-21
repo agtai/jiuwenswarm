@@ -1032,3 +1032,15 @@
 - feature-off 与组合边界：ordinary production flag-off 保持零 formal Task transport/allocation 并保留旧 text path。P3-8B 只能以 content-free observation/diagnostic consumer 身份接入 Registry/AgentServer startup/shutdown/issuer、Runtime generation/response/PresentationAck 和上述 Task projection；不得改变它们的 authority、closed params/result、auth/durability/Store semantics 或 unsupported vocabulary。需要修改 A-owned file 时由 Main 重新签发 single-writer lease。
 - 证据：backend authenticated composition/AgentServer `184 passed`，formal owner `14/14`，mounted affected `10/10`，build profiles `2/2`，production build PASS；完整 Formal Web `439/440`，唯一失败是已在 clean A baseline 复现的 P1/TTS Exit/immediate-re-enable late presentation ACK。最终独立 review 为 `0 Critical / 0 Important / 0 Minor`。详见 [P3-7 review](../reviews/P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md) 与 [evidence](../evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md)。
 - 重新评估条件：实现要求新 common ReqMethod/schema/Task state、第二 Task/event/result/unread/confirmation authority、浏览器推断 principal capability/retry、跳过 fresh result 即恢复 formal route、Task event 直接触发 TTS、Stop/barge-in 扩为 Task cancel、改变 unsupported operation、P3-8B 需要修改 auth/Store/Core/durability semantics，或把 P3-7 自动化冒充物理/完整产品验收。
+
+## D-092 P2 有界通知拉取人工验收后默认开启并退役部署开关
+
+- 日期：2026-08-21
+- 状态：Accepted scoped default-and-compatibility decision（用户在 `4b405fca1` 上完成 feature-on 人工验收后，明确决定不长期保留仅用于 A/B、验证和快速回滚的两个 P2 notification batch 部署开关）。
+- 验收依据：三个问题的可见任务用时分别为 `10.65s`、`7.05s`、`2.78s / 3.14s / 3.14s`；语音均可播放，修复前连续出现的 `SPEECH_OPERATION_NOT_AUTHORIZED` 未复现。该结果只接受默认路径与修复效果，不是冻结语料 p50/p95，也不改变 controlled-candidate/feature-complete 状态。
+- 生产默认：Integrated Web 生产 owner 固定注入 `notification_batch_size: 16`。后端 `p2.notification.next` 始终接受显式 canonical `max_notifications=2..16`；未传该字段的旧客户端继续按单条 `notification` 拉取，不要求升级或伪造 batch response。
+- 配置退役：删除前端 `VITE_FEATURE_LIVE_VOICE_P2_NOTIFICATION_BATCH` 与后端 `JIUWENSWARM_LIVE_VOICE_P2_NOTIFICATION_BATCH_ENABLED`，不再由部署环境选择 P2 通知 transport mode。A/B 自动化通过依赖注入只选择 `1` 或 `16`，从而保留可重复基线而不恢复生产开关。
+- Authority 与非变化：每个 batch item 仍必须经过 Dedicated Media authorization observer 的完整校验/注册后才可进入 TTS；batch 上限保持 `16`，authoritative barrier、顺序、replay、zero-forbidden-effect 和 fail-closed 语义不变。Successor-ACK/TTS 原本没有此类开关且已默认启用，本决定不为它新增或清理开关。
+- 回滚：默认切换验收完成后，回滚窗口不再依赖长期部署开关；若当前实现发生已证实回归，使用有边界的代码回退/修复并保留旧客户端单条兼容。该决定不授权 remote ref update。
+- 证据：[P2 default-on evidence](../evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md)。
+- 重新评估条件：显式 `2..16` 无法保持严格绑定/顺序/authoritative barrier；旧客户端缺省单条路径失败；生产 `16` 在真实负载下产生有证据的 backpressure、丢序或错误授权；或固定语料证明另一有界值需要成为新产品默认。重新评估不自动恢复环境开关。

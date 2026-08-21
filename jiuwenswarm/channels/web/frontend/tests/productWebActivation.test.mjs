@@ -280,6 +280,39 @@ function presentationAckResponse(requestId, changes = {}) {
   });
 }
 
+function notificationItem(sequence, changes = {}) {
+  return {
+    status: 'notification',
+    kind: 'agent.output',
+    request_id: 'request-agent-1',
+    round_id: 'round-1',
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: 'response-1',
+      response_generation: 0,
+    },
+    agent_event: {
+      seq: sequence,
+      event_type: 'chat.delta',
+      source_provenance: 'formal',
+      text: `chunk-${sequence}`,
+      capability: 'agent.chat',
+      error_reason: null,
+    },
+    source_event: null,
+    progress_event: null,
+    presentation_unit: null,
+    error_reason: null,
+    publish_seq: sequence,
+    ...binding,
+    ...changes,
+  };
+}
+
+function notificationBatch(notifications, changes = {}) {
+  return response('notification_batch', { notifications, ...changes });
+}
+
 function webError(message, code, retriable = false) {
   return Object.assign(new Error(message), { code, retriable });
 }
@@ -569,7 +602,157 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
   );
   assert.equal(calls[1][1].text, '  preserve exact text  ');
   assert.equal(calls[2][1].notification_sequence, 1);
+  assert.equal('max_notifications' in calls[2][1], false);
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
+});
+
+test('bounded P2 notification owner delivers eighteen ordered items through two RPCs', async () => {
+  const calls = [];
+  let delivered = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_CLOSE_METHOD) return response('closed');
+      assert.equal(method, PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
+      calls.push([params, requestId]);
+      const count = Math.min(16, 18 - delivered);
+      const notifications = Array.from({ length: count }, () => notificationItem(delivered++));
+      if (delivered === 18) {
+        notifications[notifications.length - 1] = notificationItem(17, {
+          agent_event: {
+            ...notificationItem(17).agent_event,
+            event_type: 'chat.final',
+          },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'unit-final',
+            seq: 0,
+            source_start_utf8: 0,
+            source_end_utf8: 8,
+            content_ref: 'sha256:fixture',
+          },
+        });
+      }
+      return notificationBatch(notifications);
+    },
+  });
+  await owner.start(binding);
+
+  const observed = [];
+  for (let index = 0; index < 18; index += 1) {
+    observed.push(await owner.nextNotification());
+  }
+
+  assert.deepEqual(
+    observed.map(item => item.publish_seq),
+    Array.from({ length: 18 }, (_, index) => index),
+  );
+  assert.deepEqual(
+    calls.map(([params]) => params.notification_sequence),
+    [1, 2],
+  );
+  assert.deepEqual(
+    calls.map(([params]) => params.max_notifications),
+    [16, 16],
+  );
+  assert.equal(new Set(calls.map(([, requestId]) => requestId)).size, 2);
+  await owner.close();
+});
+
+test('bounded P2 notification owner rejects malformed or authority-crossing batches', async () => {
+  const cases = [
+    ['empty', []],
+    ['oversized', Array.from({ length: 17 }, (_, index) => notificationItem(index))],
+    ['open', [notificationItem(0, { unexpected: true })]],
+    ['foreign', [notificationItem(0, { activation_id: 'activation-foreign' })]],
+    ['duplicate', [notificationItem(0), notificationItem(0)]],
+    ['decreasing', [notificationItem(1), notificationItem(0)]],
+    ['barrier-before-tail', [notificationItem(0, { error_reason: 'FAILED' }), notificationItem(1)]],
+    [
+      'nested-agent-error-before-tail',
+      [
+        notificationItem(0, {
+          agent_event: { ...notificationItem(0).agent_event, error_reason: 'AGENT_STREAM_FAILED' },
+        }),
+        notificationItem(1),
+      ],
+    ],
+  ];
+
+  for (const [name, notifications] of cases) {
+    const owner = new ProductWebP2ActivationOwner({
+      enabled: true,
+      notification_batch_size: 16,
+      request: async method => (method === PRODUCT_P2_ACTIVATE_METHOD ? response('active') : notificationBatch(notifications)),
+    });
+    await owner.start(binding);
+    await assert.rejects(owner.nextNotification(), /notification batch/, name);
+  }
+});
+
+test('bounded P2 notification owner coalesces an in-flight first item and clears queued tail on close', async () => {
+  let release;
+  let notificationCalls = 0;
+  const pending = new Promise(resolve => {
+    release = resolve;
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_CLOSE_METHOD) return response('closed');
+      notificationCalls += 1;
+      return pending;
+    },
+  });
+  await owner.start(binding);
+  const first = owner.nextNotification();
+  const coalesced = owner.nextNotification();
+  release(notificationBatch([notificationItem(0), notificationItem(1)]));
+  assert.deepEqual(await first, await coalesced);
+  assert.equal(notificationCalls, 1);
+  await owner.close();
+  await assert.rejects(owner.nextNotification(), /not active/);
+  assert.equal(notificationCalls, 1);
+});
+
+test('bounded P2 notification owner rejects a replayed publish sequence across RPC batches', async () => {
+  let notificationCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      notificationCalls += 1;
+      return notificationBatch([notificationItem(7)]);
+    },
+  });
+  await owner.start(binding);
+
+  assert.equal((await owner.nextNotification()).publish_seq, 7);
+  await assert.rejects(owner.nextNotification(), /notification batch order/);
+  assert.equal(notificationCalls, 2);
+});
+
+test('P2 notification batch constructor rejects noncanonical bounds before transport', () => {
+  let calls = 0;
+  for (const notification_batch_size of [0, 17, false, 1.5]) {
+    assert.throws(
+      () =>
+        new ProductWebP2ActivationOwner({
+          enabled: true,
+          notification_batch_size,
+          request: async () => {
+            calls += 1;
+          },
+        }),
+      /batch size/,
+    );
+  }
+  assert.equal(calls, 0);
 });
 
 test('durable submit ACK and barge-in checkpoint before transport and settle only after exact validation', async () => {

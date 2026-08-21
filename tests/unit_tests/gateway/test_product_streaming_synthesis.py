@@ -325,6 +325,7 @@ def _authorized_registry(
     provider: _Provider,
     *,
     observability: LiveVoiceObservabilityCollector | None = None,
+    notification_batch: bool = False,
 ):
     registry = DedicatedMediaProductRegistry(enabled=True)
     registry.set_provider_available(True)
@@ -371,25 +372,37 @@ def _authorized_registry(
     parent.route_completed = True
     parent.accepted_frames = 1
     text = "authoritative agent text"
-    registry.observe_agent_response(
-        {
-            "ok": True,
-            "result": {
-                "status": "notification",
-                "kind": "agent.output",
-                "session_id": "session-1",
-                "correlation_id": "correlation-1",
-                "activation_id": "activation-1",
-                "activation_generation": 1,
-                "response": {
-                    "interaction_id": "interaction-1",
-                    "response_id": "response-1",
-                    "response_generation": 0,
-                },
-                "agent_event": {"event_type": "chat.final", "text": text},
-                "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
-            },
+    final_notification: dict[str, object] = {
+        "status": "notification",
+        "kind": "agent.output",
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-1",
+            "response_generation": 0,
         },
+        "agent_event": {"event_type": "chat.final", "text": text},
+        "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
+    }
+    result: dict[str, object]
+    if notification_batch:
+        result = {
+            "status": "notification_batch",
+            "notifications": [final_notification],
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        }
+    else:
+        result = final_notification
+    registry.observe_agent_response(
+        {"ok": True, "result": result},
         routed_session_id="session-1",
         user_id="user-1",
         connection_id="connection-1",
@@ -518,6 +531,30 @@ async def test_exact_agent_final_opens_real_streaming_product_downlink() -> None
         await source.__anext__()
     assert source.completed is True
     assert source.emitted_frames == 1
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_batched_agent_final_opens_real_streaming_product_downlink() -> None:
+    provider = _Provider()
+    registry, owner, context, params = _authorized_registry(
+        provider, notification_batch=True
+    )
+    batch = _Batch()
+
+    result = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        params,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+
+    assert result is not None and result["ok"] is True
+    assert len(provider.requests) == 1
+    assert provider.requests[0].ref.response.response_id == "response-1"
+    assert provider.requests[0].ref.unit_id == "unit-1"
+    assert batch.calls == 0
     await owner.close()
 
 

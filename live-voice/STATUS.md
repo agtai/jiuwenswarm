@@ -47,6 +47,16 @@
   [physical validation and latency finding](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
   This scoped result does not upgrade the failed controlled candidate or close
   feature-complete latency acceptance.
+- **Latest scoped P2 notification result:** **BOUNDED-PULL FUNCTIONAL PASS /
+  FIXED-CORPUS LATENCY STILL PARTIAL** on exact source `4b405fca1`. With the
+  bounded P2 pull enabled, the accepted manual run completed the three prompts
+  in `10.65s`, `7.05s`, and `2.78s / 3.14s / 3.14s`, with audible TTS and no
+  recurrence of `SPEECH_OPERATION_NOT_AUTHORIZED`. [D-092](decisions/DECISIONS.md)
+  therefore makes Web batch size `16` the production default and retires the
+  two validation-only deployment switches; clients that omit
+  `max_notifications` remain a single-notification compatibility path. This
+  small, non-frozen prompt run is acceptance evidence for the default change,
+  not p50/p95 or feature-complete latency proof.
 - **P3-G0 status:** **PASS — AUTHORITATIVE P3 FOUNDATION; CONTROLLED
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
@@ -57,8 +67,8 @@
   preparation, then executes B2 composition and replacement-gated retirement
   against the frozen D-091 interfaces. The P1/P2 closeout sequence remains:
   repair the one reproduced mounted Exit/immediate-re-enable regression;
-  integrate and verify
-  the assigned P2 notification batch/push/coalescing latency work when ready;
+  preserve the now-default bounded P2 notification pull and its legacy single-
+  pull compatibility;
   close generation-time interruption required by the formal feature-complete
   P1/P2 boundary; then run the complete fixed-corpus, automated, review and real-
   device Journey. P3-8B and P1/P2 may overlap only under disjoint ownership.
@@ -112,17 +122,17 @@ risks, dependencies, acceptance and integration order.
 | Audio Device & browser I/O | **PARTIAL.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist. `P1/P2-T1` repaired the failed rotation mechanism, and the later exact-source `e1df8b452` physical run passed repeated short/long audible playout, automatic post-playout listening, foreground Stop and playback-time barge-in without the prior visible recovery failure | Fixed-boundary/idle rotation attribution across broader devices; permission recovery; AEC/NS/AGC and double-talk; measured first-frame/loss/stop targets | P1/P2 completion before controlled-candidate/feature-complete acceptance; scoped physical evidence in the [2026-08-20 run](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) |
 | Speech Recognition | **PARTIAL.** Real microphone finals now sustain repeated automatic turns on `e1df8b452`. Ordinary and barge-in capture both retain the 1.2-second server-VAD silence contract; one EOT-to-submit interval was 0.669 seconds | Fixed-corpus ordinary/barge-in p50/p95 and pause/truncation evidence before VAD tuning; exact provider speech-start attribution, robust fallback/cancel, Provider-neutral configuration and broader device/network validation | Audio I/O, media route and benchmark owner; no claim that recognition finalization is barge-in-specific |
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist; repeated short/long TTS was physically audible on `e1df8b452` without the repaired ACK/receipt failures | Provider-neutral configuration, measured first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation; scoped physical PASS does not close feature-complete targets |
-| Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the scoped `e1df8b452` physical loop, including automatic post-playout listening and playout-time barge-in. The same run exposed variable P2 notification head-of-line delay | Remove the one-notification-per-RPC P2 bottleneck under a separately scoped Tier-3 boundary; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; cumulative real network/device verification |
-| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and button/automatic playout-time barge-in passed the scoped `e1df8b452` physical journey | **Hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; P2 notification delivery must avoid final head-of-line delay; complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
+| Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the scoped `e1df8b452` physical loop. The bounded P2 notification pull removes the observed one-notification-per-RPC tail from the production Web path: Web requests `16`, the server accepts explicit `2..16`, and omitted input remains a legacy single pull. The feature-on `4b405fca1` manual run passed without the repaired TTS authorization failure | Backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery; fixed-corpus p50/p95 proof | Audio I/O plus Conversation Runtime; [D-092](decisions/DECISIONS.md) and cumulative real network/device verification |
+| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and button/automatic playout-time barge-in passed the scoped `e1df8b452` physical journey. Bounded final notification delivery is now default-on after the scoped `4b405fca1` acceptance | **Hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; complete `ask_user` voice loop, mounted Exit/re-enable and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; P3-1, P3-2, P3-4, P3-5A, P3-5B and P3-6 scoped Gates PASS.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; unsupported controls remain truthful | Complete later P3 UI/product-model packages and cumulative one-product acceptance without adding a second Task, event, presentation or confirmation authority | Executor capability/admission/durability facts, Voice–Task Bridge and restart/concurrency matrix; exact Wave-3 facts in the [evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md) and [review](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md) |
 | Executor & Durability | **PARTIAL overall; P3-3 and P3-4 scoped Gates PASS.** Immutable Direct capability/profile selection, priority/FIFO admission, project-busy/capacity deferral, D0/D1/D2 truth, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect manual settlement are integrated. Real Agent/file-Tool production regression and Store/Direct/OS-lock product-path evidence are closed within their declared boundaries | Generalize the supported Executor/configuration matrix and carry D0-D2 truth through later product acceptance; no additional durability primitive is implied | Tier-3 Direct/Store/Core evidence plus exact Wave-2 and Wave-3 private boundaries; the private run is not a host-crash oracle |
 | Voice–Task Bridge | **PARTIAL overall; P3-6 scoped Gate PASS and P3-7 consumer integrated.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported; clarification, durable single-use confirmation, parity and zero-false-truth paths are closed. The formal Web owner now consumes these queries/mutations without adding another Bridge authority | Broader language/policy generalization; provide-input/pause/resume remain unsupported until real primitives exist; P3-8B may observe but not replace this authority | Exact Store Task/Attempt/event/result/capability truth, authenticated context/model reread, the 68-case/14-group corpus and frozen D-091 interface |
-| Integrated Web product experience | **PARTIAL overall; P3-5B and P3-7 scoped Gates PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed; the mounted Exit/immediate-re-enable automated seam remains deferred | Compose P3-8B diagnostics/configuration and replacement-gated retirement without changing the frozen P3-7 authority; close Agent-generation interruption, P2 presentation latency, mounted Exit/re-enable recovery, device/privacy/recovery UX and the cumulative human journey | [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [review](reviews/P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md), P3-8B/P3-9 plus remaining P1/P2 completion; P3-7 automation grants no physical audio credit |
-| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets and P3-8B B1 preparation PASS.** Trace foundations now include bounded SLI/privacy/OTel assets plus an immutable correlation/causation validator that separates high-cardinality trace identity from closed metric dimensions and requires an injected trusted receipt verifier before readiness. The `e1df8b452` physical diagnostic measured one 0.669-second EOT-to-submit interval and isolated the P2 notification tail; it is diagnostic evidence, not a fixed-corpus benchmark | B2 must compose the codec/exporter/backend lifecycle and content-free Task/Executor/presentation diagnostic chain; separately repair P2 delivery and execute the [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with frozen environment/corpus and p50/p95 proof | [P3-8B preparation](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md), [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md), fixed corpus/environment and frozen D-091 owners |
-| Automated verification and product acceptance | **PARTIAL overall; Wave-2, bounded Wave-3 and P3-7 scoped Gates PASS.** P3-7 completed backend `184/184`, owner `14/14`, mounted affected `10/10`, build profiles `2/2`, production build and independent `C0/I0/M0`; full Formal Web was `439/440` with only the disclosed baseline Exit/re-enable failure. Earlier exact-source automation/review/real-path credits remain unchanged. Exact source `e1df8b452` retains scoped physical functional PASS; latency remains PARTIAL, the combined P3 Task journey remains open, and the controlled candidate remains FAIL | Complete P3-8B, repair P2 notification delivery, close fixed-corpus latency and deferred Exit/re-enable, then run the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md), [P1/P2 physical evidence](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md) and exact clean sources |
-| Configuration, code and document cleanup | **PARTIAL overall; P3-8B B1 preparation PASS.** Three cleanup audits and document Batch A are complete; ordinary production remains flag-off and the explicit Live Voice profile flag-on. B1 adds a pure validated-configuration-to-capability declaration with no env/provider/worker/backend effects and a provenance-checked retirement manifest; no product composition or deletion is yet claimed | B2 must consume the declaration without auth/durability downgrade, migrate each replacement oracle, and retire only manifest rows whose preconditions/flag-on/flag-off/rollback review pass; local artifacts and generic non-Live-Voice consumers stay excluded | [P3-8B preparation/manifest](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md) plus the [code](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) retirement Gates |
+| Integrated Web product experience | **PARTIAL overall; P3-5B and P3-7 scoped Gates PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned. On exact source `e1df8b452`, foreground Agent/TTS and hands-free controls physically passed; after the `4b405fca1` batch authorization repair, three bounded-pull prompts also passed and the production owner now fixes notification batch size at `16`. The mounted Exit/immediate-re-enable automated seam remains deferred | Compose P3-8B diagnostics/configuration and replacement-gated retirement without changing the frozen P3-7 authority; close Agent-generation interruption, fixed-corpus presentation latency, mounted Exit/re-enable recovery, device/privacy/recovery UX and the cumulative human journey | [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), P3-8B/P3-9 plus remaining P1/P2 completion |
+| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets and P3-8B B1 preparation PASS.** Trace foundations now include bounded SLI/privacy/OTel assets plus an immutable correlation/causation validator. The `e1df8b452` diagnostic isolated the one-RPC-per-notification tail; the later feature-on manual samples were `10.65s`, `7.05s`, and `2.78s / 3.14s / 3.14s`. They support the default-on decision but are not a frozen-corpus benchmark | B2 must compose the codec/exporter/backend lifecycle and content-free Task/Executor/presentation diagnostic chain; execute the remaining [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with frozen environment/corpus and p50/p95 proof | [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), [P3-8B preparation](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md), and fixed corpus/environment |
+| Automated verification and product acceptance | **PARTIAL overall; Wave-2, bounded Wave-3 and P3-7 scoped Gates PASS.** The P2 default-on cleanup passes its focused backend compatibility checks, dependency-injected A/B test and production build. Full Formal Web is `445/446`; its only failure is the already-disclosed mounted Exit/re-enable case. Exact source `4b405fca1` has the scoped human bounded-pull/TTS PASS; latency remains PARTIAL, the combined P3 Task journey remains open, and the controlled candidate remains FAIL | Complete P3-8B, fixed-corpus latency and deferred Exit/re-enable, then run the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [Wave-3 evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md) and exact clean sources |
+| Configuration, code and document cleanup | **PARTIAL overall; P3-8B B1 preparation PASS.** Three cleanup audits and document Batch A are complete. D-092 retires only the two validation-only P2 notification deployment switches after scoped human acceptance: production Web is fixed at `16`, A/B uses dependency injection of `1` or `16`, and the server's omitted parameter remains legacy single-pull compatibility. Successor-ACK/TTS stays default-on and has no switch to retire. Other Live Voice product gates retain their existing semantics | B2 must consume its separate declaration without auth/durability downgrade, migrate each replacement oracle, and retire only manifest rows whose preconditions/flag-on/flag-off/rollback review pass; local artifacts and generic non-Live-Voice consumers stay excluded | [D-092](decisions/DECISIONS.md), [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), and the [P3-8B preparation/manifest](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md) |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
 ## P3-G0 scoped PASS and deferred gaps
@@ -394,14 +404,16 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   physical journey passed its scoped continuation criteria; broader device,
   quiet multi-boundary, Exit and cumulative acceptance remain open.
 
-### Batch member P1/P2-T2 — playout repair and latency diagnosis delivered
+### Batch member P1/P2-T2 — playout repair and bounded-notification latency repair delivered
 
 - **Packet result:** successor-capture ACK and post-playout receipt decoupling,
-  hands-free controls and one physical latency diagnosis are delivered and
-  integrated. The [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
-  remains open beyond that diagnosis.
-- **Constraint:** the next latency implementation must separately scope the P2
-  shared notification delivery owner. No Provider/model/billing change,
+  hands-free controls, bounded P2 notification pulls and their dedicated-media
+  authorization repair are delivered. Scoped human acceptance makes batch size
+  `16` the production Web default under D-092; the
+  [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
+  remains open for fixed-corpus and later-stage targets.
+- **Constraint:** later latency work must preserve the P2 notification protocol
+  and legacy omitted-parameter compatibility. No Provider/model/billing change,
   persistent speech cache, new retention policy or raw-audio storage; ideas
   rejected in the plan's §8 stay rejected.
 - **Risk:** per-batch tier under root `TESTING.md`; the pipeline and
@@ -409,11 +421,12 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 - **Acceptance:** per the plan's §§3–7 measured evidence relative to the
   fresh baseline; targets become release gates only after environment, corpus
   and sample size are frozen.
-- **Current latency priority:** the latest physical run first routes the P2
-  one-notification-per-RPC head-of-line delay to a separate Tier-3 scope/risk
-  checkpoint, then VAD finalization, then text-to-first-audio startup. The
-  detailed observation is in the
-  [2026-08-20 physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
+- **Current latency priority:** the dominant P2 one-notification-per-RPC tail is
+  repaired and default-on after the scoped D-092 acceptance. Next evaluate VAD
+  finalization and text-to-first-audio startup against a frozen corpus; do not
+  infer p50/p95 from the small manual sample. The diagnosis and successor result
+  are in the [2026-08-20 physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md)
+  and [default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md).
 
 #### T2-L2A — successor-capture ACK must not gate authoritative playout (SOURCE/AUTOMATED REPAIRED; SCOPED PHYSICAL PASS, 2026-08-20)
 
@@ -511,10 +524,25 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   A pre-control-exposure 8.59-second turn had the same mechanism, so the delay
   is not caused by automatic barge-in.
 - **Disposition:** functional scope PASS; latency and overall acceptance remain
-  PARTIAL. The next latency change must separately scope/re-tier the shared P2
-  delivery boundary before implementation; VAD and first-audio optimization
-  follow. Exact evidence and limitations are in the
+  PARTIAL. The bounded P2 delivery repair is now accepted under D-092; VAD,
+  first-audio and fixed-corpus p50/p95 optimization follow. Exact evidence and limitations are in the
   [physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
+
+#### T2-L2D — bounded P2 notification pull (SCOPED PHYSICAL PASS / DEFAULT-ON, 2026-08-21)
+
+- **Source and behaviour:** `4b405fca1` authorizes every validated item in a
+  bounded notification batch before TTS. The successor cleanup fixes production
+  Web at `16`, accepts explicit server bounds `2..16`, and retains omitted
+  `max_notifications` as the single-notification compatibility path.
+- **Human result:** the accepted feature-on run completed the three prompts in
+  `10.65s`, `7.05s`, and `2.78s / 3.14s / 3.14s`; TTS was audible and the prior
+  `SPEECH_OPERATION_NOT_AUTHORIZED` recovery failure did not recur.
+- **Configuration result:** both validation-only deployment switches are
+  retired. A/B continues through an injected owner batch size of `1` or `16`;
+  Successor-ACK/TTS remains unchanged and has no feature switch.
+- **Limits:** the retained prompts, sample count and environment were not a
+  frozen benchmark, so fixed-corpus p50/p95, Exit/re-enable, Agent-generation
+  interruption and feature-complete acceptance remain open.
 
 ## Dependency route to feature complete
 
@@ -548,8 +576,8 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
    duplicate consolidation and entrypoint/document retirement only after
    replacement without deleting live coverage. The P1/P2 post-TTS source
    repair and scoped physical continuation are integrated; remaining P1/P2
-   work is the separately scoped P2 notification latency repair, mounted
-   Exit/re-enable, generation-time interruption and fixed-corpus/generalization
+   work is mounted Exit/re-enable, generation-time interruption and fixed-
+   corpus/generalization
    evidence under the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
    The remaining P3 route is ~~P3-7 formal carrier~~ **DONE — SCOPED GATE
    PASS** → P3-8B composition/retirement → P3-9 cumulative complete-P3
@@ -621,10 +649,10 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 - **Latency:** the code-fact diagnosis and implementation approach are now
   defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
   The first physical diagnosis found the dominant P2 one-notification-per-RPC
-  tail; scope and repair that shared delivery owner first, then evaluate VAD
-  finalization, first-audio startup and formal sentence-level Agent→TTS overlap
-  against a frozen corpus with p50/p95. This remains queued P1/P2 quality work,
-  not completion credit.
+  tail; the bounded pull is now repaired, physically accepted in a small sample
+  and default-on under D-092. Next evaluate VAD finalization, first-audio startup
+  and formal sentence-level Agent→TTS overlap against a frozen corpus with
+  p50/p95. This remains queued P1/P2 quality work, not completion credit.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.

@@ -1363,6 +1363,69 @@ def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> No
     assert registry.authorize(wrong) is None
 
 
+def test_mismatched_notification_batch_has_zero_partial_speech_authority() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+    valid_final = {
+        "status": "notification",
+        "kind": "agent.output",
+        **binding,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-valid",
+            "response_generation": 0,
+        },
+        "agent_event": {"event_type": "chat.final", "text": "valid first item"},
+        "presentation_unit": {"surface": "text", "unit_id": "unit-valid"},
+    }
+    mismatched_final = {
+        **valid_final,
+        "activation_generation": 2,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-mismatched",
+            "response_generation": 1,
+        },
+        "agent_event": {
+            "event_type": "chat.final",
+            "text": "mismatched second item",
+        },
+        "presentation_unit": {
+            "surface": "text",
+            "unit_id": "unit-mismatched",
+        },
+    }
+
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification_batch",
+                "notifications": [valid_final, mismatched_final],
+                **binding,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    assert record.synthesis_content_sha256 == {}
+
+
 def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow() -> (
     None
 ):

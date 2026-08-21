@@ -145,6 +145,7 @@ _STREAMING_OBSERVABILITY_QUEUE_CAPACITY = 64
 _STREAMING_OBSERVABILITY_CLOSE_BUDGET_SECONDS = 0.05
 _LOCALES = frozenset({"en", "en-US", "zh", "zh-CN"})
 _PRODUCT_CONTRACT_VERSION = "live-voice.product-composition.gate0.v1"
+_P2_NOTIFICATION_BATCH_MAX = 16
 _STREAMING_DIAGNOSTIC_QUEUE_CAPACITY = 16
 _STREAMING_DIAGNOSTIC_CLOSE_BUDGET_SECONDS = 0.05
 _FORMAL_P2_EVIDENCE = frozenset(
@@ -2411,6 +2412,63 @@ class DedicatedMediaProductRegistry:
                 while len(self._product_activations) > self._capacity:
                     _key, evicted = self._product_activations.popitem(last=False)
                     self._revoke_media_for_product_activation(evicted)
+            return
+        if status == "notification_batch":
+            notifications = result.get("notifications")
+            if (
+                not isinstance(notifications, list)
+                or not 1 <= len(notifications) <= _P2_NOTIFICATION_BATCH_MAX
+            ):
+                return
+            try:
+                batch_binding = (
+                    _required_id(result.get("session_id"), "session_id"),
+                    _required_id(result.get("correlation_id"), "correlation_id"),
+                    _required_id(result.get("interaction_id"), "interaction_id"),
+                    _required_id(result.get("activation_id"), "activation_id"),
+                    _safe_uint(
+                        result.get("activation_generation"), "activation_generation"
+                    ),
+                )
+                validated: list[Mapping[str, object]] = []
+                for notification in notifications:
+                    if (
+                        not isinstance(notification, Mapping)
+                        or notification.get("status") != "notification"
+                    ):
+                        return
+                    notification_binding = (
+                        _required_id(notification.get("session_id"), "session_id"),
+                        _required_id(
+                            notification.get("correlation_id"), "correlation_id"
+                        ),
+                        _required_id(
+                            notification.get("interaction_id"), "interaction_id"
+                        ),
+                        _required_id(
+                            notification.get("activation_id"), "activation_id"
+                        ),
+                        _safe_uint(
+                            notification.get("activation_generation"),
+                            "activation_generation",
+                        ),
+                    )
+                    if notification_binding != batch_binding:
+                        return
+                    validated.append(notification)
+            except MediaTransportViolation:
+                return
+            # Validate the complete bounded batch before retaining any media
+            # authority. Reuse the exact legacy notification path so batching
+            # changes transport efficiency, never Speech authorization rules.
+            for notification in validated:
+                self.observe_agent_response(
+                    {"ok": True, "result": notification},
+                    routed_session_id=routed_session_id,
+                    user_id=user_id,
+                    connection_id=connection_id,
+                    request_method=request_method,
+                )
             return
         if status != "notification":
             return
