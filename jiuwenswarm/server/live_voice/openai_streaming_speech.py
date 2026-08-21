@@ -790,7 +790,8 @@ class _StreamingLinearResampler:
 
 
 class _HttpxSseStream:
-    def __init__(self, response: httpx.Response) -> None:
+    def __init__(self, client: httpx.AsyncClient, response: httpx.Response) -> None:
+        self._client = client
         self._response = response
 
     async def __aiter__(self) -> AsyncIterator[str]:
@@ -799,18 +800,7 @@ class _HttpxSseStream:
 
     async def aclose(self) -> None:
         await self._response.aclose()
-
-
-def _default_sse_client_factory() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        follow_redirects=False,
-        timeout=None,
-        limits=httpx.Limits(
-            max_connections=8,
-            max_keepalive_connections=8,
-            keepalive_expiry=30.0,
-        ),
-    )
+        await self._client.aclose()
 
 
 async def _default_socket_factory(
@@ -834,7 +824,6 @@ async def _default_socket_factory(
 
 
 async def _default_sse_factory(
-    client: httpx.AsyncClient,
     url: str,
     headers: Mapping[str, str],
     payload: Mapping[str, str],
@@ -842,7 +831,7 @@ async def _default_sse_factory(
     *,
     trace: Callable[[str, Mapping[str, object]], Awaitable[None]] | None = None,
 ) -> SpeechSseStream:
-    response: httpx.Response | None = None
+    client = httpx.AsyncClient(follow_redirects=False, timeout=None)
     try:
         request_kwargs: dict[str, object] = {
             "headers": headers,
@@ -871,10 +860,9 @@ async def _default_sse_factory(
                 "SPEECH_PROVIDER_INVALID_CONTENT_TYPE",
                 "speech Provider did not return an SSE stream",
             )
-        return _HttpxSseStream(response)
+        return _HttpxSseStream(client, response)
     except BaseException:
-        if response is not None:
-            await response.aclose()
+        await client.aclose()
         raise
 
 
@@ -905,11 +893,8 @@ class OpenAIStreamingSpeechProvider:
         self._event_queue_wait_seconds = event_queue_wait_seconds
         self._config = config
         self._socket_factory = socket_factory or _default_socket_factory
-        self._sse_factory = sse_factory
-        self._sse_client: httpx.AsyncClient | None = None
-        self._sse_client_loop: asyncio.AbstractEventLoop | None = None
-        self._sse_client_close_requested: httpx.AsyncClient | None = None
-        self._sse_client_lock = asyncio.Lock()
+        self._uses_default_sse_factory = sse_factory is None
+        self._sse_factory = sse_factory or _default_sse_factory
         self._degradation_sink = degradation_sink
         self._synthesis_transport_observer = synthesis_transport_observer
         if fallback_tier is not SpeechRouteTier.TEXT:
@@ -1005,70 +990,6 @@ class OpenAIStreamingSpeechProvider:
                     return
 
         return trace
-
-    async def _get_or_create_sse_client(self) -> httpx.AsyncClient:
-        async with self._sse_client_lock:
-            self._require_open()
-            loop = asyncio.get_running_loop()
-            if self._sse_client is not None and self._sse_client_loop is not loop:
-                raise OpenAIStreamingSpeechError(
-                    "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH",
-                    "streaming Speech Provider transport belongs to another event loop",
-                )
-            if self._sse_client is None:
-                self._sse_client = _default_sse_client_factory()
-                self._sse_client_loop = loop
-                self._sse_client_close_requested = None
-            return self._sse_client
-
-    def _require_sse_client_loop(self) -> None:
-        if (
-            self._sse_client is not None
-            and self._sse_client_loop is not asyncio.get_running_loop()
-        ):
-            raise OpenAIStreamingSpeechError(
-                "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH",
-                "streaming Speech Provider transport belongs to another event loop",
-            )
-
-    async def _close_sse_client(self) -> httpx.AsyncClient | None:
-        async with self._sse_client_lock:
-            client = self._sse_client
-            if client is None:
-                return None
-            if self._sse_client_loop is not asyncio.get_running_loop():
-                raise OpenAIStreamingSpeechError(
-                    "SPEECH_PROVIDER_EVENT_LOOP_MISMATCH",
-                    "streaming Speech Provider transport belongs to another event loop",
-                )
-            if (
-                self._sse_client_close_requested is client
-                and self._transport_cleanup_tasks.snapshot().clean
-            ):
-                self._sse_client = None
-                self._sse_client_loop = None
-                self._sse_client_close_requested = None
-                return client
-            self._sse_client_close_requested = client
-            complete = await self._transport_cleanup_tasks.attempt(
-                kind="sse-client", resource=client, cleanup=client.aclose
-            )
-            if complete and self._sse_client is client:
-                self._sse_client = None
-                self._sse_client_loop = None
-                self._sse_client_close_requested = None
-            return client
-
-    async def _release_cleaned_sse_client(
-        self, client: httpx.AsyncClient | None
-    ) -> None:
-        if client is None or not self._transport_cleanup_tasks.snapshot().clean:
-            return
-        async with self._sse_client_lock:
-            if self._sse_client is client:
-                self._sse_client = None
-                self._sse_client_loop = None
-                self._sse_client_close_requested = None
 
     async def open_recognition(
         self,
@@ -1351,8 +1272,6 @@ class OpenAIStreamingSpeechProvider:
         *,
         on_transport_open: Callable[[], None] | None = None,
     ) -> None:
-        if self._sse_factory is None:
-            self._require_sse_client_loop()
         session: _SynthesisSession | None = None
         failure: BaseException | None = None
         conformance_started = False
@@ -1429,12 +1348,10 @@ class OpenAIStreamingSpeechProvider:
         )
 
     async def close(self) -> None:
-        self._require_sse_client_loop()
         async with self._close_lock:
             await self._close_serialized()
 
     async def _close_serialized(self) -> None:
-        self._require_sse_client_loop()
         process_control: BaseException | None = None
         cleanup_failure: BaseException | None = None
         if not self._closed:
@@ -1522,11 +1439,8 @@ class OpenAIStreamingSpeechProvider:
         self._conformance.reap_terminal()
         self._recognition.clear()
         self._synthesis.clear()
-        sse_client: httpx.AsyncClient | None = None
         try:
-            sse_client = await self._close_sse_client()
             await self._finalize_cleanup_owners()
-            await self._release_cleaned_sse_client(sse_client)
         except BaseException as exc:
             failure = _safe_boundary_exception(exc)
             if _is_process_control(failure):
@@ -1539,7 +1453,6 @@ class OpenAIStreamingSpeechProvider:
         recognition = ()
         synthesis = ()
         tasks = ()
-        sse_client = None
         if process_control is not None:
             raise process_control from None
         if cleanup_failure is not None:
@@ -1900,10 +1813,8 @@ class OpenAIStreamingSpeechProvider:
             timeout_ms=max(0, int(self._config.connect_timeout_seconds * 1000)),
         )
         try:
-            if self._sse_factory is None:
-                client = await self._get_or_create_sse_client()
+            if self._uses_default_sse_factory:
                 stream = await _default_sse_factory(
-                    client,
                     endpoint,
                     headers,
                     payload,
