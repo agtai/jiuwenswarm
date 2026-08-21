@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -1170,6 +1172,330 @@ async def test_closed_lease_allows_only_a_newer_authorized_generation() -> None:
     assert next_generation.lease is not first.lease
     assert stale_after_replacement.status is P2ActivationStatus.DENIED
     assert len(runtimes) == 2
+
+
+class _LeaseLifetimeFixture:
+    """One adapter plus the exact allocation counters a lifetime test needs."""
+
+    def __init__(self) -> None:
+        self.resolver = RecordingResolver((candidate(),))
+        self.runtime_refs: list[weakref.ReferenceType[FakeRuntime]] = []
+        self.retained: list[FakeRuntime] = []
+        self.last_runtime: FakeRuntime | None = None
+        self.runtime_allocations = 0
+        self.engine_allocations = 0
+        self.adapter = adapter_for(
+            self.resolver,
+            self._make_runtime,
+            interaction_engine_factory=self._make_engine,
+        )
+
+    def _make_runtime(self, _context, _binding) -> FakeRuntime:
+        self.runtime_allocations += 1
+        created = FakeRuntime()
+        self.runtime_refs.append(weakref.ref(created))
+        self.last_runtime = created
+        return created
+
+    def _make_engine(self, context, binding) -> InteractionEnginePort:
+        self.engine_allocations += 1
+        return engine_factory(context, binding)
+
+    def retain_last_runtime(self) -> FakeRuntime:
+        """Keep the newest runtime alive on purpose, for live-lease checks."""
+
+        assert self.last_runtime is not None
+        self.retained.append(self.last_runtime)
+        return self.last_runtime
+
+    async def open_and_close(self, index: int) -> None:
+        """Run one complete distinct interaction to its terminal close."""
+
+        result = await self.adapter.activate(
+            request(
+                interaction_id=f"interaction-{index}",
+                activation_id=f"activation-{index}",
+            )
+        )
+        assert result.status is P2ActivationStatus.ACTIVE
+        assert result.lease is not None
+        closed = await result.lease.close(
+            result.lease.binding,
+            timeout_seconds=1.0,
+        )
+        assert closed.status is P2LeaseCloseStatus.CLOSED
+        # This helper never keeps a runtime alive; only `retain_last_runtime`
+        # does, so a reachability assertion measures the adapter alone.
+        self.last_runtime = None
+
+    def assert_zero_activation_effects(self, result: P2ActivationResult) -> None:
+        """Every refused activation allocates and tears down exactly nothing."""
+
+        assert result.lease is None
+        assert result.cleanup is None
+        assert result.replayed is False
+        assert self.adapter.retained_failed_cleanups() == ()
+
+    def retained_runtime_effects(self) -> tuple[int, int, int]:
+        return (
+            sum(runtime.start_calls for runtime in self.retained),
+            sum(len(runtime.open_calls) for runtime in self.retained),
+            sum(runtime.close_calls for runtime in self.retained),
+        )
+
+
+@pytest.mark.asyncio
+async def test_closed_interaction_leases_are_released_and_stale_replay_fenced() -> None:
+    """A15: a terminal close must release its heavyweight retained lease.
+
+    RED on the activation baseline: only a higher generation of the same key
+    ever removes a closed lease, so every distinct closed interaction keeps its
+    ``P2ActivationLease`` — and through it the runtime, Interaction Engine and
+    authenticated context — for the adapter's whole lifetime.
+    """
+
+    fixture = _LeaseLifetimeFixture()
+    closed_interactions = 512
+    for index in range(closed_interactions):
+        await fixture.open_and_close(index)
+
+    assert fixture.runtime_allocations == closed_interactions
+    assert fixture.engine_allocations == closed_interactions
+    # RED assertions: the baseline retains 512 closed leases and their runtimes.
+    assert len(fixture.adapter._leases) == 0
+    gc.collect()
+    assert [ref for ref in fixture.runtime_refs if ref() is not None] == []
+
+    # Preserved contract: the released identity keeps its exact existing
+    # refusal.  ``interaction-0`` is far past the exact tombstone capacity, so
+    # its refusal comes from the compact conservative-maximum sketch, while the
+    # newest interaction is still answered by the exact tombstone layer.
+    for fenced_index in (0, closed_interactions - 1):
+        stale = await fixture.adapter.activate(
+            request(
+                interaction_id=f"interaction-{fenced_index}",
+                activation_id=f"activation-{fenced_index}",
+            )
+        )
+        assert stale.status is P2ActivationStatus.DENIED
+        assert stale.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+        fixture.assert_zero_activation_effects(stale)
+    assert fixture.runtime_allocations == closed_interactions
+    assert fixture.engine_allocations == closed_interactions
+    assert len(fixture.adapter._leases) == 0
+    # The exact tombstone layer stays at its capacity, so the oldest released
+    # key above was answered by the conservative sketch alone.
+    assert len(fixture.adapter._closed_generations) == 256
+    assert ("session-1", "interaction-0") not in fixture.adapter._closed_generations
+    assert (
+        "session-1",
+        f"interaction-{closed_interactions - 1}",
+    ) in fixture.adapter._closed_generations
+
+    successor = await fixture.adapter.activate(
+        request(
+            interaction_id="interaction-0",
+            activation_id="activation-0-successor",
+            generation=2,
+        )
+    )
+    assert successor.status is P2ActivationStatus.ACTIVE
+    assert successor.reason is P2ActivationReason.ACTIVATION_LEASE_OPEN
+    assert successor.lease is not None
+    assert fixture.runtime_allocations == closed_interactions + 1
+    assert len(fixture.adapter._leases) == 1
+
+
+@pytest.mark.asyncio
+async def test_live_lease_survives_terminal_release_of_other_interactions() -> None:
+    """A15 boundary: reclaiming closed leases must never collect a live one."""
+
+    fixture = _LeaseLifetimeFixture()
+    live = await fixture.adapter.activate(
+        request(interaction_id="interaction-live", activation_id="activation-live")
+    )
+    assert live.status is P2ActivationStatus.ACTIVE
+    assert live.lease is not None
+    live_lease = live.lease
+    fixture.retain_last_runtime()
+    for index in range(300):
+        await fixture.open_and_close(index)
+
+    # RED on the baseline: 301 leases are retained instead of the single live
+    # one.  The live lease itself stays open, replayable and usable either way.
+    assert len(fixture.adapter._leases) == 1
+    assert live_lease.snapshot().state is P2LeaseState.OPEN
+    replay = await fixture.adapter.activate(
+        request(interaction_id="interaction-live", activation_id="activation-live")
+    )
+    assert replay.status is P2ActivationStatus.ACTIVE
+    assert replay.replayed is True
+    assert replay.lease is live_lease
+    intent = live_lease.propose_action(
+        live_lease.binding,
+        InteractionAction(
+            "action-live",
+            "interaction.respond",
+            "interaction-live",
+            SCOPE,
+        ),
+    )
+    assert intent.accepted is True
+    assert intent.effect_owner == "none_intent_only"
+    assert fixture.retained_runtime_effects() == (1, 1, 0)
+    assert fixture.runtime_allocations == 301
+
+
+@pytest.mark.asyncio
+async def test_superseded_lease_close_replay_never_collects_its_successor() -> None:
+    """Identity guard for the release path; not a baseline defect reproduction.
+
+    The baseline never releases on terminal close, so this passes there too.
+    It pins that a repeated terminal observation from a superseded lease can
+    only ever retire itself, never the successor that already owns the key.
+    """
+
+    fixture = _LeaseLifetimeFixture()
+    first = await fixture.adapter.activate(request())
+    assert first.lease is not None
+    first_runtime = fixture.retain_last_runtime()
+    assert (
+        await first.lease.close(first.lease.binding, timeout_seconds=1.0)
+    ).status is P2LeaseCloseStatus.CLOSED
+    successor = await fixture.adapter.activate(
+        request(activation_id="activation-2", generation=2)
+    )
+    assert successor.status is P2ActivationStatus.ACTIVE
+    assert successor.lease is not None
+    assert fixture.runtime_allocations == 2
+
+    replayed_close = await first.lease.close(
+        first.lease.binding,
+        timeout_seconds=1.0,
+    )
+
+    assert replayed_close.status is P2LeaseCloseStatus.CLOSED
+    assert first_runtime.close_calls == 1
+    assert len(fixture.adapter._leases) == 1
+    still_live = await fixture.adapter.activate(
+        request(activation_id="activation-2", generation=2)
+    )
+    assert still_live.replayed is True
+    assert still_live.lease is successor.lease
+    assert fixture.runtime_allocations == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_release_is_linearized_against_concurrent_activation() -> None:
+    """A15 concurrency: a lease is released only after its teardown settles."""
+
+    fixture = _LeaseLifetimeFixture()
+    opened = await fixture.adapter.activate(request())
+    assert opened.lease is not None
+    lease = opened.lease
+    runtime = fixture.retain_last_runtime()
+    close_gate = asyncio.Event()
+    runtime.close_gate = close_gate
+    closing = asyncio.create_task(lease.close(lease.binding, timeout_seconds=1.0))
+    for _ in range(100):
+        if runtime.close_calls == 1:
+            break
+        await asyncio.sleep(0)
+    assert runtime.close_calls == 1
+    assert lease.snapshot().state is P2LeaseState.CLOSING
+
+    during_teardown = await fixture.adapter.activate(
+        request(activation_id="activation-2", generation=2)
+    )
+
+    assert during_teardown.status is P2ActivationStatus.DENIED
+    assert during_teardown.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+    fixture.assert_zero_activation_effects(during_teardown)
+    assert fixture.runtime_allocations == 1
+    assert len(fixture.adapter._leases) == 1
+
+    close_gate.set()
+    assert (await closing).status is P2LeaseCloseStatus.CLOSED
+
+    # RED on the baseline: the settled lease is still retained afterwards.
+    assert len(fixture.adapter._leases) == 0
+    stale = await fixture.adapter.activate(request())
+    assert stale.status is P2ActivationStatus.DENIED
+    assert stale.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+    fixture.assert_zero_activation_effects(stale)
+    assert fixture.runtime_allocations == 1
+    after_teardown = await fixture.adapter.activate(
+        request(activation_id="activation-2", generation=2)
+    )
+    assert after_teardown.status is P2ActivationStatus.ACTIVE
+    assert fixture.runtime_allocations == 2
+    assert runtime.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_teardown_lease_is_retained_and_never_released() -> None:
+    """Failure/fallback: an unreclaimed runtime keeps refusing every successor.
+
+    Not a baseline defect reproduction.  It pins that releasing *closed* leases
+    never weakens the fail-closed disposition of a teardown that never
+    completed, whose heavyweight runtime genuinely was not reclaimed.
+    """
+
+    fixture = _LeaseLifetimeFixture()
+    opened = await fixture.adapter.activate(request())
+    assert opened.lease is not None
+    runtime = fixture.retain_last_runtime()
+    runtime.close_status = AgentConversationShutdownStatus.FAILED
+
+    failed = await opened.lease.close(opened.lease.binding, timeout_seconds=1.0)
+
+    assert failed.status is P2LeaseCloseStatus.FAILED
+    assert opened.lease.snapshot().state is P2LeaseState.FAILED
+    assert len(fixture.adapter._leases) == 1
+    for generation, activation_id in ((1, "activation-1"), (2, "activation-2")):
+        refused = await fixture.adapter.activate(
+            request(activation_id=activation_id, generation=generation)
+        )
+        assert refused.status is P2ActivationStatus.DENIED
+        assert refused.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+        fixture.assert_zero_activation_effects(refused)
+    assert fixture.runtime_allocations == 1
+    assert runtime.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_released_generation_fence_is_owner_lifetime_characterization() -> None:
+    """Restart/replay and owner isolation for the released generation fence.
+
+    Characterization, not a durability guarantee: this adapter holds no
+    persisted state, so a restarted owner starts with an empty fence.  Two
+    concurrent owners never inherit each other's released generations either.
+    """
+
+    retired = _LeaseLifetimeFixture()
+    await retired.open_and_close(0)
+    assert len(retired.adapter._leases) == 0
+    stale = await retired.adapter.activate(
+        request(interaction_id="interaction-0", activation_id="activation-0")
+    )
+    assert stale.status is P2ActivationStatus.DENIED
+    assert stale.reason is P2ActivationReason.ACTIVATION_BINDING_CONFLICT
+    retired.assert_zero_activation_effects(stale)
+
+    restarted = _LeaseLifetimeFixture()
+    readmitted = await restarted.adapter.activate(
+        request(interaction_id="interaction-0", activation_id="activation-0")
+    )
+
+    assert readmitted.status is P2ActivationStatus.ACTIVE
+    assert readmitted.replayed is False
+    assert restarted.runtime_allocations == 1
+    assert retired.runtime_allocations == 1
+    still_fenced = await retired.adapter.activate(
+        request(interaction_id="interaction-0", activation_id="activation-0")
+    )
+    assert still_fenced.status is P2ActivationStatus.DENIED
+    retired.assert_zero_activation_effects(still_fenced)
 
 
 @pytest.mark.asyncio
