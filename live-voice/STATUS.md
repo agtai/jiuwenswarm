@@ -30,7 +30,7 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects; **31/88 are closed** on this branch,
+  packet against 88 unique current defects; **32/88 are closed** on this branch,
   beginning with exact authority and privacy boundaries. Progress is counted
   only after reproduced defects,
   affected verification and independent module review close; the
@@ -144,7 +144,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — **31/88 closed**, 57 unique current
+- **Packet:** strict-review remediation — **32/88 closed**, 56 unique current
   defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
@@ -177,9 +177,10 @@ exact-source Alpha result.
   their exact positive, negative, boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
-- **Remaining accounting:** 57 unique defects remain: 8 A findings, 27 B
-  findings, 19 L findings and D1-D3. Three are the activated Wave 11 candidates
-  A15, A17 and B42; the other 54 remain unactivated in the owner-scoped queue.
+- **Remaining accounting:** 56 unique defects remain: 7 A findings, 27 B
+  findings, 19 L findings and D1-D3. Two are the still-open Wave 11 candidates
+  A15 and B42; the other 54 remain unactivated in the owner-scoped queue. A17
+  closed, so the product TTS ceiling A1 left behind is now lifted as well.
   A1 closed, but product TTS stays capped at 256 per channel owner until A17
   lands; see §5.10 of the execution contract.
   C3 continues to alias B42 and B17 continues to alias B13, so neither creates
