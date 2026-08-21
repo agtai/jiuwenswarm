@@ -165,7 +165,7 @@ entram nos percentis.
 ### Tempos agregados por configuração
 
 Os percentis abaixo agrupam somente tentativas completas da configuração. Por
-isso E1/E2 têm 14 amostras, enquanto A1/A2 têm 20.
+isso E1/E2 têm 15 amostras, enquanto A1/A2 têm 20.
 
 | Configuração | Sucesso | Fala final → EOT p50 / p95 | EOT → STT final p50 / p95 | Fala final → STT final p50 / p95 |
 |---|---:|---:|---:|---:|

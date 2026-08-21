@@ -193,7 +193,8 @@ converted into an attractive latency number.
 
 All durations use one process-local monotonic clock:
 
-- `session_open_ms`: open request to effective session ready;
+- Provider session open is bounded as preflight/attempt infrastructure, but
+  report v0 does not persist it as a comparison metric;
 - `final_voiced_frame_to_eot_ms`: scheduled send time of the final voiced frame
   to observed `SPEECH_STOPPED`;
 - `eot_to_final_ms`: observed `SPEECH_STOPPED` to transcription `FINAL`;
