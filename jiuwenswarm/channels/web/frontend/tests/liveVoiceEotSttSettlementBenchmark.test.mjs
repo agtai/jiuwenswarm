@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import {
 } from '../node_modules/.cache/live-voice-eot-stt-benchmark/eotSttSettlementBenchmark.js';
 import {
   assertEotSttCleanSource,
+  JsonLineRegistryFixture,
   parseEotSttSettlementBenchmarkArgs,
   validateEotSttPythonExecutable,
   writeEotSttSettlementBenchmarkReport,
@@ -119,6 +120,33 @@ test('attempt reduction rejects private fields, unknown fields, and non-monotoni
   }
 });
 
+test('completed attempts reject a zero EOT-to-final duration before derived statistics', async () => {
+  const zeroDuration = Object.freeze({
+    fixture_id: 'local-fast-provider-fast',
+    attempt_index: 0,
+    outcome: 'completed',
+    marks_ms: Object.freeze(Object.fromEntries([
+      'browser.eot_received',
+      'browser.uplink_closed',
+      'browser.streaming_result_request_started',
+      'browser.streaming_result_returned',
+      'browser.stt_final_received',
+    ].map(point => [point, 0]))),
+    rpc_count: 1,
+    exact_result: true,
+    cleanup_complete: true,
+  });
+  await assert.rejects(
+    runEotSttSettlementBenchmark({
+      fixtures: FIXTURES,
+      attempts: 1,
+      candidate: 'A1',
+      attempt_runner: async () => zeroDuration,
+    }),
+    /EOT_STT_BENCHMARK_ATTEMPT_INVALID/,
+  );
+});
+
 test('CLI requires the fixed A1 boundary, an absolute Python executable, and at least five attempts', () => {
   const parsed = parseEotSttSettlementBenchmarkArgs([
     '--output', '/tmp/eot-stt.json',
@@ -179,4 +207,82 @@ test('report creation is exclusive, mode 600, and leaves an existing report unto
   const first = await readFile(output, 'utf8');
   await assert.rejects(writeEotSttSettlementBenchmarkReport(output, { overwritten: true }), /EOT_STT_BENCHMARK_OUTPUT_EXISTS/);
   assert.equal(await readFile(output, 'utf8'), first);
+});
+
+test('report publication failure removes its private temporary and creates no final file', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'live-voice-eot-stt-atomic-'));
+  const output = path.join(directory, 'report.json');
+  const privateSentinel = ['PRIVATE', 'PUBLICATION', 'FAILURE'].join('_');
+  let failure = null;
+  try {
+    await writeEotSttSettlementBenchmarkReport(output, { safe: true }, {
+      before_publish: async () => { throw new Error(privateSentinel); },
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert.match(String(failure), /EOT_STT_BENCHMARK_REPORT_WRITE_FAILED/);
+  assert.equal(String(failure).includes(privateSentinel), false);
+  assert.deepEqual(await readdir(directory), []);
+});
+
+async function writeChildScript(source) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'live-voice-eot-stt-child-'));
+  const script = path.join(directory, 'child.mjs');
+  await writeFile(script, source, { encoding: 'utf8', mode: 0o600 });
+  return script;
+}
+
+test('fixture spawn failure is awaited, stable, and has no unreaped child', async () => {
+  const fixture = new JsonLineRegistryFixture(
+    path.join(os.tmpdir(), 'missing-eot-stt-python'),
+    50,
+    50,
+    { request_timeout_ms: 50, shutdown_timeout_ms: 50, kill_timeout_ms: 50 },
+  );
+  await assert.rejects(fixture.request('open'), /EOT_STT_BENCHMARK_FIXTURE_FAILED/);
+  assert.deepEqual(fixture.lifecycle(), {
+    reaped: true,
+    term_sent: false,
+    kill_sent: false,
+  });
+});
+
+test('nonresponsive fixture request times out and TERM reaps the child', async () => {
+  const script = await writeChildScript(`
+    process.stdin.resume();
+    setInterval(() => undefined, 1000);
+  `);
+  const fixture = new JsonLineRegistryFixture(process.execPath, 50, 50, {
+    fixture_script: script,
+    request_timeout_ms: 100,
+    shutdown_timeout_ms: 100,
+    kill_timeout_ms: 100,
+  });
+  await assert.rejects(fixture.request('open'), /EOT_STT_BENCHMARK_FIXTURE_FAILED/);
+  assert.deepEqual(fixture.lifecycle(), {
+    reaped: true,
+    term_sent: true,
+    kill_sent: false,
+  });
+});
+
+test('fixture cleanup escalates ignored TERM to KILL and awaits the reaped child', async () => {
+  const script = await writeChildScript(`
+    process.on('SIGTERM', () => undefined);
+    process.stdin.resume();
+    setInterval(() => undefined, 1000);
+  `);
+  const fixture = new JsonLineRegistryFixture(process.execPath, 50, 50, {
+    fixture_script: script,
+    request_timeout_ms: 150,
+    shutdown_timeout_ms: 50,
+    kill_timeout_ms: 250,
+  });
+  await assert.rejects(fixture.request('open'), /EOT_STT_BENCHMARK_FIXTURE_FAILED/);
+  assert.deepEqual(fixture.lifecycle(), {
+    reaped: true,
+    term_sent: true,
+    kill_sent: true,
+  });
 });

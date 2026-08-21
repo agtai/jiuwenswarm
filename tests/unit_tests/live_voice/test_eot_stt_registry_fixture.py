@@ -132,6 +132,92 @@ def test_json_line_process_keeps_identity_and_transcript_off_inherited_output() 
     assert "capture-" not in snapshot
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["abort", "owner", "diagnostics"])
+async def test_cleanup_failure_is_truthful_and_retries_only_unfinished_stage(
+    stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = EotSttRegistryFixture(local_settlement_ms=50, provider_final_ms=50)
+    calls = 0
+
+    if stage == "abort":
+        fixture._opened = True
+        fixture._record = object()
+
+        async def abort_once(_record: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("PRIVATE_ABORT_FAILURE")
+
+        monkeypatch.setattr(
+            fixture.registry,
+            "abort_streaming_recognition",
+            abort_once,
+        )
+    elif stage == "owner":
+
+        async def owner_once() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("PRIVATE_OWNER_FAILURE")
+
+        monkeypatch.setattr(fixture._owner, "close", owner_once)
+    else:
+
+        def diagnostics_once() -> bool:
+            nonlocal calls
+            calls += 1
+            return calls > 1
+
+        monkeypatch.setattr(
+            fixture.registry,
+            "close_streaming_diagnostics",
+            diagnostics_once,
+        )
+
+    first = await fixture._close()
+    assert first == {"status": "closed", "cleanup_complete": False}
+    second = await fixture._close()
+    assert second == {"status": "closed", "cleanup_complete": True}
+    assert calls == 2
+
+
+def test_oversized_json_line_drains_valid_operation_tail_without_execution() -> None:
+    script = Path("scripts/live_voice/eot_stt_registry_fixture.py").resolve()
+    oversized_with_open_tail = (
+        b"x" * 4097 + json.dumps({"operation": "open"}).encode("utf-8") + b"\n"
+    )
+    close = json.dumps({"operation": "close"}).encode("utf-8") + b"\n"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--local-settlement-ms",
+            "50",
+            "--provider-final-ms",
+            "50",
+        ],
+        input=oversized_with_open_tail + close,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=5,
+    )
+    assert completed.returncode == 0
+    assert completed.stderr == b""
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert responses == [
+        {
+            "status": "rejected",
+            "reason_id": "EOT_STT_FIXTURE_REQUEST_REJECTED",
+        },
+        {"status": "closed", "cleanup_complete": True},
+    ]
+
+
 @pytest.mark.parametrize("delay", [-1, 0, 49, 51, 499, 501, float("inf")])
 def test_fixture_delays_are_closed_to_the_exact_50_and_500_ms_values(
     delay: float,

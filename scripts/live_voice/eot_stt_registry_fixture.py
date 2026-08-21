@@ -237,7 +237,13 @@ class EotSttRegistryFixture:
         self._route_settled = False
         self._provider_final = False
         self._result_returned = False
+        self._close_requested = False
         self._closed = False
+        self._cleanup_abort_complete = False
+        self._cleanup_owner_complete = False
+        self._cleanup_observability_complete = False
+        self._cleanup_diagnostics_complete = False
+        self._cleanup_media_complete = False
 
     @property
     def exact_result_params(self) -> Mapping[str, object]:
@@ -251,7 +257,7 @@ class EotSttRegistryFixture:
         return _RECEIPT
 
     async def _open(self) -> dict[str, object]:
-        if self._opened or self._closed:
+        if self._opened or self._close_requested:
             raise RuntimeError("benchmark fixture state is invalid")
         os.environ["JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS"] = "voice.example.test"
         await self.registry.prepare_streaming_provider()
@@ -295,7 +301,7 @@ class EotSttRegistryFixture:
         if (
             not self._opened
             or self._route_settled
-            or self._closed
+            or self._close_requested
             or self._record is None
         ):
             raise RuntimeError("benchmark fixture state is invalid")
@@ -315,7 +321,7 @@ class EotSttRegistryFixture:
         return {"status": "route_settled", "elapsed_ms": self.local_settlement_ms}
 
     async def _release_provider_final(self) -> dict[str, object]:
-        if not self._opened or self._provider_final or self._closed:
+        if not self._opened or self._provider_final or self._close_requested:
             raise RuntimeError("benchmark fixture state is invalid")
         await asyncio.sleep(self.provider_final_ms / 1000)
         await self._provider.release_final()
@@ -356,7 +362,7 @@ class EotSttRegistryFixture:
             or not self._route_settled
             or not self._provider_final
             or self._result_returned
-            or self._closed
+            or self._close_requested
             or self._record is None
         ):
             raise RuntimeError("benchmark fixture state is invalid")
@@ -380,16 +386,58 @@ class EotSttRegistryFixture:
     async def _close(self) -> dict[str, object]:
         if self._closed:
             return {"status": "closed", "cleanup_complete": True}
-        self._closed = True
-        if self._record is not None and not self._result_returned:
-            await self.registry.abort_streaming_recognition(self._record)
-        await self._owner.close()
-        self.registry.close_streaming_observability()
-        diagnostics_closed = self.registry.close_streaming_diagnostics()
-        media_cleanup_closed = await self.registry.close_media_leaf_cleanup()
+        self._close_requested = True
+        if not self._cleanup_abort_complete:
+            if self._record is None or self._result_returned:
+                self._cleanup_abort_complete = True
+            else:
+                try:
+                    await self.registry.abort_streaming_recognition(self._record)
+                except (Exception, asyncio.CancelledError):
+                    pass
+                else:
+                    self._cleanup_abort_complete = True
+        if not self._cleanup_owner_complete:
+            try:
+                await self._owner.close()
+            except (Exception, asyncio.CancelledError):
+                pass
+            else:
+                self._cleanup_owner_complete = True
+        if not self._cleanup_observability_complete:
+            try:
+                self.registry.close_streaming_observability()
+            except Exception:
+                pass
+            else:
+                self._cleanup_observability_complete = True
+        if not self._cleanup_diagnostics_complete:
+            try:
+                self._cleanup_diagnostics_complete = (
+                    self.registry.close_streaming_diagnostics() is True
+                )
+            except Exception:
+                pass
+        if not self._cleanup_media_complete:
+            try:
+                self._cleanup_media_complete = (
+                    await self.registry.close_media_leaf_cleanup()
+                ) is True
+            except (Exception, asyncio.CancelledError):
+                pass
+        cleanup_complete = all(
+            (
+                self._cleanup_abort_complete,
+                self._cleanup_owner_complete,
+                self._cleanup_observability_complete,
+                self._cleanup_diagnostics_complete,
+                self._cleanup_media_complete,
+            )
+        )
+        self._closed = cleanup_complete
         return {
             "status": "closed",
-            "cleanup_complete": diagnostics_closed and media_cleanup_closed,
+            "cleanup_complete": cleanup_complete,
         }
 
     async def handle(self, request: object) -> dict[str, object]:
@@ -425,15 +473,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+async def _read_bounded_line() -> tuple[bytes, bool]:
+    line = await asyncio.to_thread(
+        sys.stdin.buffer.readline,
+        _MAX_LINE_BYTES + 1,
+    )
+    if line == b"":
+        return line, False
+    oversized = len(line) > _MAX_LINE_BYTES or not line.endswith(b"\n")
+    while line != b"" and not line.endswith(b"\n"):
+        line = await asyncio.to_thread(
+            sys.stdin.buffer.readline,
+            _MAX_LINE_BYTES + 1,
+        )
+    return (b"" if oversized else line), oversized
+
+
 async def _serve(fixture: EotSttRegistryFixture) -> int:
     try:
         while True:
-            line = await asyncio.to_thread(
-                sys.stdin.buffer.readline, _MAX_LINE_BYTES + 1
-            )
-            if line == b"":
+            line, oversized = await _read_bounded_line()
+            if line == b"" and not oversized:
                 break
-            if len(line) > _MAX_LINE_BYTES or not line.endswith(b"\n"):
+            if oversized:
                 response = dict(_REJECTED)
             else:
                 try:
@@ -443,10 +505,13 @@ async def _serve(fixture: EotSttRegistryFixture) -> int:
                 response = await fixture.handle(request)
             sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
             sys.stdout.flush()
-            if response.get("status") == "closed":
+            if (
+                response.get("status") == "closed"
+                and response.get("cleanup_complete") is True
+            ):
                 return 0
-        await fixture._close()
-        return 0
+        cleanup = await fixture._close()
+        return 0 if cleanup.get("cleanup_complete") is True else 1
     except BaseException:
         await fixture._close()
         return 1

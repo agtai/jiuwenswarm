@@ -226,11 +226,18 @@ function validateAttempt(
   ) {
     fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
   }
+  const marks = validateMarks(ownValue(value, 'marks_ms'));
+  if (
+    outcome === 'completed' &&
+    marks['browser.stt_final_received'] <= marks['browser.eot_received']
+  ) {
+    fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
+  }
   return Object.freeze({
     fixture_id: fixture.id,
     attempt_index: attemptIndex,
     outcome: outcome as EotSttAttempt['outcome'],
-    marks_ms: validateMarks(ownValue(value, 'marks_ms')),
+    marks_ms: marks,
     rpc_count: rpcCount as number,
     exact_result: ownValue(value, 'exact_result') as boolean,
     cleanup_complete: ownValue(value, 'cleanup_complete') as boolean,
@@ -243,6 +250,7 @@ function rounded(value: number): number {
 
 function nearestRank(values: readonly number[], percentile: 50 | 95): number | null {
   if (values.length === 0) return null;
+  if (values.some(value => !Number.isFinite(value))) fail('EOT_STT_BENCHMARK_ATTEMPT_INVALID');
   const sorted = [...values].sort((left, right) => left - right);
   return rounded(sorted[Math.ceil((percentile / 100) * sorted.length) - 1]);
 }

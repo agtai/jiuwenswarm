@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
@@ -30,6 +31,9 @@ const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const FIXTURE_SCRIPT = fileURLToPath(new URL('../../../../../scripts/live_voice/eot_stt_registry_fixture.py', import.meta.url));
 const PRODUCT_MODULE_URL = new URL('../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js', import.meta.url);
 const MEDIA_MODULE_URL = new URL('../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/adapters/browserDedicatedMediaRoute.js', import.meta.url);
+const FIXTURE_REQUEST_TIMEOUT_MS = 10_000;
+const FIXTURE_SHUTDOWN_TIMEOUT_MS = 2_000;
+const FIXTURE_KILL_TIMEOUT_MS = 2_000;
 
 function fail(code) {
   throw new Error(code);
@@ -103,85 +107,265 @@ export async function validateEotSttPythonExecutable(pythonExecutable) {
   }
 }
 
-export async function writeEotSttSettlementBenchmarkReport(output, report) {
+export async function writeEotSttSettlementBenchmarkReport(output, report, options = {}) {
   let handle = null;
-  let created = false;
+  let temporary = null;
   try {
-    handle = await fs.open(output, 'wx', 0o600);
-    created = true;
-    await handle.writeFile(`${JSON.stringify(report)}\n`, 'utf8');
+    if (
+      options === null ||
+      typeof options !== 'object' ||
+      Array.isArray(options) ||
+      Object.keys(options).some(key => key !== 'before_publish') ||
+      (options.before_publish !== undefined && typeof options.before_publish !== 'function')
+    ) {
+      fail('EOT_STT_BENCHMARK_REPORT_WRITE_FAILED');
+    }
+    const serialized = `${JSON.stringify(report)}\n`;
+    const directory = path.dirname(output);
+    temporary = path.join(directory, `.${path.basename(output)}.${randomUUID()}.tmp`);
+    handle = await fs.open(temporary, 'wx', 0o600);
+    await handle.writeFile(serialized, 'utf8');
+    await handle.chmod(0o600);
+    await handle.sync();
     await handle.close();
     handle = null;
-    await fs.chmod(output, 0o600);
+    await options.before_publish?.();
+    await fs.link(temporary, output);
   } catch (error) {
     if (handle !== null) await handle.close().catch(() => undefined);
-    if (created) await fs.unlink(output).catch(() => undefined);
+    if (temporary !== null) await fs.unlink(temporary).catch(() => undefined);
     if (error?.code === 'EEXIST') fail('EOT_STT_BENCHMARK_OUTPUT_EXISTS');
-    throw error;
+    fail('EOT_STT_BENCHMARK_REPORT_WRITE_FAILED');
+  }
+  try {
+    await fs.unlink(temporary);
+  } catch {
+    await fs.unlink(output).catch(() => undefined);
+    fail('EOT_STT_BENCHMARK_REPORT_WRITE_FAILED');
   }
 }
 
-class JsonLineRegistryFixture {
-  constructor(pythonExecutable, localSettlementMs, providerFinalMs) {
+export class JsonLineRegistryFixture {
+  constructor(pythonExecutable, localSettlementMs, providerFinalMs, options = {}) {
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+    }
+    const requestTimeoutMs = options.request_timeout_ms ?? FIXTURE_REQUEST_TIMEOUT_MS;
+    const shutdownTimeoutMs = options.shutdown_timeout_ms ?? FIXTURE_SHUTDOWN_TIMEOUT_MS;
+    const killTimeoutMs = options.kill_timeout_ms ?? FIXTURE_KILL_TIMEOUT_MS;
+    const fixtureScript = options.fixture_script ?? FIXTURE_SCRIPT;
+    if (
+      Object.keys(options).some(key => ![
+        'fixture_script',
+        'request_timeout_ms',
+        'shutdown_timeout_ms',
+        'kill_timeout_ms',
+      ].includes(key)) ||
+      typeof fixtureScript !== 'string' ||
+      !path.isAbsolute(fixtureScript) ||
+      ![requestTimeoutMs, shutdownTimeoutMs, killTimeoutMs].every(
+        value => Number.isSafeInteger(value) && value >= 10 && value <= 60_000,
+      )
+    ) {
+      fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+    }
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.shutdownTimeoutMs = shutdownTimeoutMs;
+    this.killTimeoutMs = killTimeoutMs;
     this.child = spawn(
       pythonExecutable,
-      [FIXTURE_SCRIPT, '--local-settlement-ms', String(localSettlementMs), '--provider-final-ms', String(providerFinalMs)],
+      [fixtureScript, '--local-settlement-ms', String(localSettlementMs), '--provider-final-ms', String(providerFinalMs)],
       { shell: false, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this.lines = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     this.iterator = this.lines[Symbol.asyncIterator]();
     this.stderrBytes = 0;
-    this.closed = false;
-    this.exited = new Promise(resolve => this.child.once('exit', (code, signal) => resolve({ code, signal })));
+    this.protocolClosed = false;
+    this.reaped = false;
+    this.termSent = false;
+    this.killSent = false;
+    this.exitFact = null;
+    this.spawnObserved = false;
+    this.terminationRequested = false;
+    this.closePromise = null;
+    this.terminationPromise = null;
+    let resolveSpawn;
+    let resolveExit;
+    this.spawned = new Promise(resolve => { resolveSpawn = resolve; });
+    this.exited = new Promise(resolve => { resolveExit = resolve; });
+    const settleExit = fact => {
+      if (this.reaped) return;
+      this.reaped = true;
+      this.exitFact = fact;
+      resolveExit(fact);
+    };
+    this.child.once('spawn', () => {
+      this.spawnObserved = true;
+      resolveSpawn(true);
+      if (this.terminationRequested && !this.reaped) {
+        this.termSent = this.child.kill('SIGTERM') || this.termSent;
+      }
+    });
+    this.child.on('error', () => {
+      if (!this.spawnObserved) {
+        resolveSpawn(false);
+        settleExit({ code: null, signal: null, spawn_error: true });
+      }
+    });
+    this.child.once('exit', (code, signal) => {
+      settleExit({ code, signal, spawn_error: false });
+    });
     this.child.stderr.on('data', chunk => {
       this.stderrBytes = Math.min(4097, this.stderrBytes + chunk.length);
     });
   }
 
-  async request(operation) {
-    if (this.closed || !['open', 'provider_final', 'route_settled', 'streaming_result', 'close'].includes(operation)) {
-      fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
-    }
-    const line = `${JSON.stringify({ operation })}\n`;
-    await new Promise((resolve, reject) => {
-      this.child.stdin.write(line, error => error ? reject(error) : resolve());
-    }).catch(() => fail('EOT_STT_BENCHMARK_FIXTURE_FAILED'));
-    const item = await this.iterator.next().catch(() => fail('EOT_STT_BENCHMARK_FIXTURE_FAILED'));
-    if (item.done || typeof item.value !== 'string' || Buffer.byteLength(item.value, 'utf8') > 64 * 1024) {
-      fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
-    }
-    let response = null;
+  async _bounded(promise, timeoutMs) {
+    let timer = null;
     try {
-      response = JSON.parse(item.value);
+      return await Promise.race([
+        promise.then(
+          value => ({ settled: true, value }),
+          () => ({ settled: false, timed_out: false }),
+        ),
+        new Promise(resolve => {
+          timer = setTimeout(
+            () => resolve({ settled: false, timed_out: true }),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  async _requireSpawned() {
+    const result = await this._bounded(this.spawned, this.requestTimeoutMs);
+    if (!result.settled || result.value !== true) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+  }
+
+  async request(operation) {
+    try {
+      if (this.protocolClosed || !['open', 'provider_final', 'route_settled', 'streaming_result', 'close'].includes(operation)) {
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      await this._requireSpawned();
+      if (this.reaped) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      const line = `${JSON.stringify({ operation })}\n`;
+      const write = await this._bounded(
+        new Promise((resolve, reject) => {
+          this.child.stdin.write(line, error => error ? reject(error) : resolve());
+        }),
+        this.requestTimeoutMs,
+      );
+      if (!write.settled) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      const itemResult = await this._bounded(this.iterator.next(), this.requestTimeoutMs);
+      if (!itemResult.settled) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      const item = itemResult.value;
+      if (item.done || typeof item.value !== 'string' || Buffer.byteLength(item.value, 'utf8') > 64 * 1024) {
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      let response = null;
+      try {
+        response = JSON.parse(item.value);
+      } catch {
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      if (response === null || typeof response !== 'object' || Array.isArray(response) || response.status === 'rejected') {
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      if (operation === 'close' && response.cleanup_complete === true) this.protocolClosed = true;
+      return response;
     } catch {
+      await this.terminate();
       fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
     }
-    if (response === null || typeof response !== 'object' || Array.isArray(response) || response.status === 'rejected') {
-      fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
-    }
-    if (operation === 'close') this.closed = true;
-    return response;
   }
 
   async close() {
-    let cleanupComplete = false;
-    if (!this.closed && this.child.exitCode === null) {
-      const response = await this.request('close');
-      cleanupComplete = response.status === 'closed' && response.cleanup_complete === true;
-    } else {
-      cleanupComplete = this.closed;
-    }
-    this.child.stdin.end();
-    const exited = await this.exited;
-    this.lines.close();
-    if (exited.code !== 0 || exited.signal !== null || this.stderrBytes !== 0) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
-    return cleanupComplete;
+    if (this.closePromise !== null) return this.closePromise;
+    this.closePromise = this._closeOnce();
+    return this.closePromise;
   }
 
-  terminate() {
+  async _closeOnce() {
+    try {
+      let cleanupComplete = this.protocolClosed;
+      for (let attempt = 0; !cleanupComplete && attempt < 2; attempt += 1) {
+        if (this.reaped) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+        const response = await this.request('close');
+        cleanupComplete = response.status === 'closed' && response.cleanup_complete === true;
+      }
+      if (!cleanupComplete) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      if (!this.child.stdin.destroyed) {
+        const ended = await this._bounded(
+          new Promise((resolve, reject) => this.child.stdin.end(error => error ? reject(error) : resolve())),
+          this.shutdownTimeoutMs,
+        );
+        if (!ended.settled) fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      const exited = await this._bounded(this.exited, this.shutdownTimeoutMs);
+      if (!exited.settled) {
+        await this.terminate();
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      this._closePipes();
+      if (
+        this.exitFact?.spawn_error === true ||
+        this.exitFact?.code !== 0 ||
+        this.exitFact?.signal !== null ||
+        this.stderrBytes !== 0
+      ) {
+        fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+      }
+      return true;
+    } catch {
+      await this.terminate();
+      fail('EOT_STT_BENCHMARK_FIXTURE_FAILED');
+    }
+  }
+
+  _closePipes() {
+    try { this.lines.close(); } catch {}
     this.child.stdin.destroy();
-    this.child.kill('SIGTERM');
-    this.lines.close();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
+  }
+
+  async terminate() {
+    if (this.terminationPromise !== null) return this.terminationPromise;
+    this.terminationPromise = this._terminateOnce();
+    return this.terminationPromise;
+  }
+
+  async _terminateOnce() {
+    this.terminationRequested = true;
+    this.child.stdin.destroy();
+    try { this.lines.close(); } catch {}
+    if (!this.reaped && !this.spawnObserved) {
+      await this._bounded(this.spawned, this.shutdownTimeoutMs);
+    }
+    if (!this.reaped && this.child.pid !== undefined) {
+      if (!this.termSent) this.termSent = this.child.kill('SIGTERM') || this.termSent;
+      const terminated = await this._bounded(this.exited, this.shutdownTimeoutMs);
+      if (!terminated.settled && !this.reaped) {
+        this.killSent = this.child.kill('SIGKILL') || this.killSent;
+        await this._bounded(this.exited, this.killTimeoutMs);
+      }
+    } else if (!this.reaped) {
+      await this._bounded(this.exited, this.shutdownTimeoutMs);
+    }
+    this._closePipes();
+    return this.lifecycle();
+  }
+
+  lifecycle() {
+    return Object.freeze({
+      reaped: this.reaped,
+      term_sent: this.termSent,
+      kill_sent: this.killSent,
+    });
   }
 }
 
@@ -551,7 +735,7 @@ async function runProductAttempt(pythonExecutable, fixture, attemptIndex) {
     });
   } catch {
     if (owner !== null) await owner.close().catch(() => undefined);
-    registryFixture.terminate();
+    await registryFixture.terminate().catch(() => undefined);
     fail('EOT_STT_BENCHMARK_ATTEMPT_FAILED');
   }
 }
