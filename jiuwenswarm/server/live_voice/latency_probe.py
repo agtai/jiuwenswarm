@@ -160,6 +160,15 @@ CORE_POINTS_BY_COMPONENT: Final[Mapping[str, tuple[str, ...]]] = {
         "agent.presentation_dispatched",
     ),
 }
+STABLE_SENTENCE_EXPERIMENT_POINTS: Final = frozenset(
+    {
+        "agent.sentence_candidate_detected",
+        "agent.sentence_presentation_committed",
+        "agent.sentence_candidate_discarded",
+        "agent.sentence_final_reconciled",
+        "agent.sentence_correction_started",
+    }
+)
 FIXED_SEGMENT_IDS: Final = frozenset(
     {
         "eot_to_stt_final", "stt_final_to_submit", "submit_to_presentation",
@@ -746,14 +755,22 @@ def _parse_experiment(value: object) -> LatencyExperiment | None:
             frozenset({"point", "component", "paired_segment_id", "start_point", "end_point"}),
         )
         name = _bounded_string(point["point"])
-        if not name.startswith(prefix) or point["component"] not in COMPONENTS:
+        component = point["component"]
+        closed_sentence_point = (
+            name in STABLE_SENTENCE_EXPERIMENT_POINTS
+            and component == "agent_server"
+        )
+        if (
+            (not name.startswith(prefix) and not closed_sentence_point)
+            or component not in COMPONENTS
+        ):
             raise LatencyProbeViolation("INVALID_EXPERIMENT_POINT")
         optional = []
         for key in ("paired_segment_id", "start_point", "end_point"):
             item_value = point[key]
             optional.append(None if item_value is None else _bounded_string(item_value))
         points.append(
-            LatencyExperimentPoint(name, point["component"], *optional)
+            LatencyExperimentPoint(name, component, *optional)
         )
     if len({point.point for point in points}) != len(points):
         raise LatencyProbeViolation("DUPLICATE_VALUE")

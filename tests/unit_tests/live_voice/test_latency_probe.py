@@ -135,6 +135,45 @@ def test_load_run_config_accepts_the_five_fixed_profiles_and_declared_points(run
     )
 
 
+def test_run_config_accepts_only_closed_stable_sentence_agent_points(
+    tmp_path,
+) -> None:
+    value = valid_run_json()
+    experiment = value["experiment"]
+    assert isinstance(experiment, dict)
+    experiment.update(
+        experiment_id="stable-sentence-screen",
+        target_segment="agent_to_final",
+        declared_experiment_points=[
+            {
+                "point": "agent.sentence_candidate_detected",
+                "component": "agent_server",
+                "paired_segment_id": "candidate_to_final",
+                "start_point": "agent.sentence_candidate_detected",
+                "end_point": "agent.agent_final",
+            },
+            {
+                "point": "agent.sentence_presentation_committed",
+                "component": "agent_server",
+                "paired_segment_id": "candidate_to_commit",
+                "start_point": "agent.sentence_candidate_detected",
+                "end_point": "agent.sentence_presentation_committed",
+            },
+        ],
+    )
+    path = tmp_path / "stable-sentence-run.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    run = load_latency_run_config(path)
+
+    assert run.allows_point(
+        "agent.sentence_candidate_detected", "agent_server"
+    )
+    assert run.allows_point(
+        "agent.sentence_presentation_committed", "agent_server"
+    )
+
+
 def test_v1_run_declares_post_capture_track_and_ordered_dialogue_subset(tmp_path) -> None:
     path = tmp_path / "run.json"
     path.write_text(json.dumps(valid_post_capture_run_json()), encoding="utf-8")

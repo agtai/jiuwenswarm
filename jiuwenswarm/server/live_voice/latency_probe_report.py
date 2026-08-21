@@ -286,7 +286,9 @@ def _same_identity(start: LatencyMark, end: LatencyMark) -> bool:
     )
 
 
-def _round_identity_compatible(batches: tuple[LatencyBatch, ...]) -> bool:
+def _round_identity_compatible(
+    batches: tuple[LatencyBatch, ...], run: LatencyRunConfig
+) -> bool:
     if not batches or len({batch.input_case_id for batch in batches}) != 1:
         return False
     marks = tuple(
@@ -361,6 +363,12 @@ def _round_identity_compatible(batches: tuple[LatencyBatch, ...]) -> bool:
         "agent.presentation_produced",
         "agent.presentation_dispatched",
     }
+    if run.experiment is not None:
+        response_required_points.update(
+            point.point
+            for point in run.experiment.declared_experiment_points
+            if point.component == "agent_server"
+        )
     task_required_points = browser_response_required_points | {
         "agent.task_command_accepted",
         "agent.presentation_produced",
@@ -554,7 +562,7 @@ def reduce_latency_run(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -
                 (
                     items,
                     tuple(mark for batch in items for mark in batch.marks),
-                    _round_identity_compatible(items),
+                    _round_identity_compatible(items, run),
                 )
             )
         summaries = tuple(

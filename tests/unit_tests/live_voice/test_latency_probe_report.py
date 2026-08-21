@@ -88,6 +88,144 @@ def test_reducer_accepts_the_post_capture_v1_manifest(tmp_path: Path) -> None:
     assert report.profile("dialogue_no_tool").segment("response_total").attempts == 1
 
 
+def stable_sentence_run_config(tmp_path: Path):
+    payload = run_payload()
+    payload["experiment"] = {
+        "experiment_id": "stable-sentence-screen",
+        "target_segment": "agent_to_final",
+        "target_statistic": "p50_ms",
+        "minimum_improvement_ms": 400.0,
+        "response_total_minimum_improvement_ms": 400.0,
+        "guardrails": [],
+        "declared_experiment_points": [
+            {
+                "point": "agent.sentence_candidate_detected",
+                "component": "agent_server",
+                "paired_segment_id": "candidate_to_final",
+                "start_point": "agent.sentence_candidate_detected",
+                "end_point": "agent.agent_final",
+            },
+            {
+                "point": "agent.sentence_presentation_committed",
+                "component": "agent_server",
+                "paired_segment_id": "candidate_to_commit",
+                "start_point": "agent.sentence_candidate_detected",
+                "end_point": "agent.sentence_presentation_committed",
+            },
+            *[
+                {
+                    "point": point,
+                    "component": "agent_server",
+                    "paired_segment_id": None,
+                    "start_point": None,
+                    "end_point": None,
+                }
+                for point in (
+                    "agent.sentence_candidate_discarded",
+                    "agent.sentence_final_reconciled",
+                    "agent.sentence_correction_started",
+                )
+            ],
+        ],
+    }
+    path = tmp_path / "stable-sentence-run.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return load_latency_run_config(path)
+
+
+def stable_sentence_batch(
+    run, *, response_bound: bool, include_agent_final: bool = True
+) -> LatencyBatch:
+    common = dict(
+        schema_version=MARK_SCHEMA_VERSION,
+        run_id=run.run_id,
+        profile_id="dialogue_no_tool",
+        input_case_id="short-greeting-v1",
+        round_index=0,
+        source_instance_id="agent-source-1",
+        component="agent_server",
+        clock_domain_id="agent-clock-1",
+        uncertainty_ms=None,
+        outcome="observed",
+        reason_code=None,
+        correlation_id="correlation-1",
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
+        turn_id="turn-1",
+        response_id="response-1" if response_bound else None,
+        response_generation=1 if response_bound else None,
+        task_id=None,
+    )
+    point_times = [
+        ("agent.sentence_candidate_detected", 100.0),
+        ("agent.sentence_presentation_committed", 125.0),
+    ]
+    if include_agent_final:
+        point_times.append(("agent.agent_final", 850.0))
+    marks = tuple(
+        LatencyMark(mark_index=index, point=point, monotonic_ms=timestamp, **common)
+        for index, (point, timestamp) in enumerate(point_times)
+    )
+    return LatencyBatch(
+        schema_version=BATCH_SCHEMA_VERSION,
+        batch_id="stable-sentence-batch",
+        run_id=run.run_id,
+        profile_id="dialogue_no_tool",
+        input_case_id="short-greeting-v1",
+        round_index=0,
+        source_instance_id="agent-source-1",
+        component="agent_server",
+        phase="agent_foreground",
+        terminal_outcome="completed",
+        marks=marks,
+    )
+
+
+def test_agent_experiment_points_require_exact_response_binding(tmp_path: Path) -> None:
+    run = stable_sentence_run_config(tmp_path)
+
+    report = reduce_latency_run(
+        run,
+        [
+            stable_sentence_batch(
+                run, response_bound=False, include_agent_final=False
+            )
+        ],
+    )
+
+    candidate_to_final = report.profile("dialogue_no_tool").segment(
+        "candidate_to_final"
+    )
+    candidate_to_commit = report.profile("dialogue_no_tool").segment(
+        "candidate_to_commit"
+    )
+    assert candidate_to_final.successful_samples == 0
+    assert candidate_to_final.unknown == 1
+    assert candidate_to_final.p50_ms is None
+    assert candidate_to_commit.successful_samples == 0
+    assert candidate_to_commit.unknown == 1
+
+
+def test_response_bound_sentence_segments_remain_same_clock_exact(tmp_path: Path) -> None:
+    run = stable_sentence_run_config(tmp_path)
+
+    report = reduce_latency_run(run, [stable_sentence_batch(run, response_bound=True)])
+
+    assert (
+        report.profile("dialogue_no_tool")
+        .segment("candidate_to_final")
+        .p50_ms
+        == 750.0
+    )
+    assert (
+        report.profile("dialogue_no_tool")
+        .segment("candidate_to_commit")
+        .p50_ms
+        == 25.0
+    )
+
+
 @pytest.fixture
 def run_config(tmp_path):
     path = tmp_path / "run.json"
