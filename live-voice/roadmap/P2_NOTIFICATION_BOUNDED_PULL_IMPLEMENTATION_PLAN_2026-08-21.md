@@ -204,8 +204,7 @@ runner exposed one candidate-neutral defect during the first B rerun: it tied
 instead of transport-RPC count. The correction leaves legacy A1 timings and
 effects unchanged, permits the contracted per-RPC sequence under batching, and
 derives expected serial wait from observed RPC count. It is part of the
-reviewed benchmark harness, not product optimization credit. The committed
-B/A2 measurements remain open.
+reviewed benchmark harness, not product optimization credit.
 
 The independent Tier-3 review then returned `READY` after one Important
 finding was reproduced and fixed in RED/GREEN: a nested
@@ -216,18 +215,40 @@ B and unchanged-source A2 below.
 
 ## Task 5: Candidate B and unchanged A2
 
-- [ ] Complete scoped self-review and one independent Tier-3 module-boundary
+- [x] Complete scoped self-review and one independent Tier-3 module-boundary
   review; remediate all Critical/Important findings.
-- [ ] Commit B in its separate worktree with one coherent message.
-- [ ] Run B using the frozen benchmark: five samples, 85 ms, batch size 16.
+- [x] Commit B in its separate worktree with one coherent message.
+- [x] Run B using the frozen benchmark: five samples, 85 ms, batch size 16.
   Expected notification RPC totals are 5, 20 and 35 for 10/50/100.
-- [ ] Rerun unchanged reference A2 at the exact replacement-A1 commit.
-- [ ] Compare B against both A1 and A2. Accept only if latency and RPC count
+- [x] Rerun unchanged reference A2 at the exact replacement-A1 commit.
+- [x] Compare B against both A1 and A2. Accept only if latency and RPC count
   improve against both while baselines remain stable and all forbidden effects
   remain zero.
-- [ ] Record sanitized A1/B/A2 results in this plan and STATUS. Keep raw JSON
+- [x] Record sanitized A1/B/A2 results in this plan and STATUS. Keep raw JSON
   outside Git.
-- [ ] Defer physical Browser confirmation until after the causal decision.
+- [x] Defer physical Browser confirmation until after the causal decision.
+
+**A1/B/A2 decision:** `ACCEPT — P2 CAUSAL COMPONENT EVIDENCE ONLY`
+
+- R/A1/A2 commit: `31f9209d66682d19745acd1d2c15a16b59fc75e2`
+- B commit: `c1b4a47f51b0b200b12e2e544617577d7f307c69`
+- A1 run: `p2-a1-r-batch16-20260821T001711Z-31f9209d6`
+- B run: `p2-b-batch16-20260821T002105Z-c1b4a47f5`
+- A2 run: `p2-a2-r-batch16-20260821T002121Z-31f9209d6`
+- Five attempts per population; 85 ms controlled RPC delay; batch input 16
+- All Agent, Tool, Task, history, audio and product mutation effects: zero
+
+| Notifications | A1 RPC / p50 / p95 | B RPC / p50 / p95 | A2 RPC / p50 / p95 | B p50 gain vs A1 / A2 |
+|---:|---:|---:|---:|---:|
+| 10 | 50 / 864.293 / 873.600 ms | 5 / 85.823 / 91.008 ms | 50 / 860.659 / 867.540 ms | 90.070% / 90.028% |
+| 50 | 250 / 4,348.227 / 4,351.440 ms | 20 / 343.704 / 349.175 ms | 250 / 4,305.376 / 4,343.331 ms | 92.096% / 92.017% |
+| 100 | 500 / 8,658.478 / 8,700.760 ms | 35 / 615.209 / 617.248 ms | 500 / 8,643.205 / 8,681.116 ms | 92.895% / 92.882% |
+
+A1 and A2 remained stable while B reached the exact expected 5/20/35 RPC
+totals. B therefore receives causal P2 component credit and is retained for a
+later physical Browser confirmation. These numbers do not measure capture,
+STT, Agent/model execution, TTS, WebAudio, first audible or complete Live Voice
+latency. Raw mode-600 JSON reports remain outside Git.
 
 ## Completion Gate
 
