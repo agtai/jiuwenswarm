@@ -310,7 +310,7 @@ class FormalAgentStreamClient:
         execution = FormalAgentExecution(
             request_id="provider-request",
             channel_id="live_voice_latency_screen",
-            internal_session_id=f"lv-stable-screen-{case.case_id}",
+            internal_session_id=f"lv-formal-stable-screen-{case.case_id}",
             commit=commit,
             context=FormalContextSnapshot(scope),
             allow_tools=False,

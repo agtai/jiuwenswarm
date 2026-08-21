@@ -402,6 +402,7 @@ async def test_formal_agent_stream_client_forces_no_tools_and_maps_exact_events(
     assert [item.observed_ms for item in events] == pytest.approx([100.0, 200.0, 900.0])
     assert facade.executions[0].allow_tools is False
     assert facade.executions[0].context.entries == ()
+    assert facade.executions[0].internal_session_id.startswith("lv-formal-")
     assert facade.executions[0].commit.text == (
         "In two concise sentences, explain why streaming can reduce voice-agent latency."
     )
