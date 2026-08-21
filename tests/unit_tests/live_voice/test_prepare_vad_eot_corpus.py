@@ -124,6 +124,38 @@ def test_builder_ignores_low_energy_phone_noise_after_last_voiced_frame(tmp_path
     }
 
 
+def test_builder_rederives_endpoint_after_nonquantum_boundary_removal(tmp_path: Path) -> None:
+    support = _load(SUPPORT_PATH, "vad_support_nonquantum_boundary")
+    source = tmp_path / "source-nonquantum.wav"
+    samples = (
+        (1200, -1200) * 1200
+        + (0,) * 1000
+        + (1800, -1800) * 1200
+        + (0,) * 96_000
+    )
+    with wave.open(str(source), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(48_000)
+        output.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    expectation = tmp_path / "expectation-nonquantum.json"
+    _expectation(expectation)
+    output_root = tmp_path / "derived-nonquantum"
+
+    manifest = support.prepare_vad_corpus(
+        support.PrepareVadCorpusRequest(
+            source,
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            output_root,
+            "vad-en-v1",
+            2_900,
+            expectation,
+        )
+    )
+
+    assert support.load_vad_corpus_manifest(output_root / "manifest.json") == manifest
+
+
 def test_manifest_is_closed_hash_bound_and_path_confined(tmp_path: Path) -> None:
     support = _load(SUPPORT_PATH, "vad_support_manifest")
     source = tmp_path / "source.wav"

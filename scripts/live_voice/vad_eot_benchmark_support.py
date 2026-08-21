@@ -292,7 +292,7 @@ def prepare_vad_corpus(request: PrepareVadCorpusRequest) -> VadCorpusManifest:
                     "pause_ms": pause_ms,
                     "wav_path": output_path.name,
                     "sha256": _sha256_file(output_path),
-                    "final_voiced_frame": final_voiced - (boundary_end - boundary_start) + pause_samples,
+                    "final_voiced_frame": _detect_final_voiced(samples),
                     "second_clause_first_frame": boundary_start + pause_samples,
                 }
             )
