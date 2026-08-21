@@ -178,7 +178,8 @@ exact-source Alpha result.
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
 - **Remaining accounting:** 57 unique defects remain: 8 A findings, 27 B
-  findings, 19 L findings and D1-D3, all unactivated in the owner-scoped queue.
+  findings, 19 L findings and D1-D3. Three are the activated Wave 11 candidates
+  A15, A17 and B42; the other 54 remain unactivated in the owner-scoped queue.
   A1 closed, but product TTS stays capped at 256 per channel owner until A17
   lands; see §5.10 of the execution contract.
   C3 continues to alias B42 and B17 continues to alias B13, so neither creates
@@ -188,12 +189,13 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** Wave 10 is frozen from `ab46ad3e4` with three disjoint packets
-  recorded in §5.10 of the repair execution contract, all from batch 2 of the
-  revalidation's priority ordering: SRR-22 owns A6+B4 in the conversation
-  runtime, SRR-23 owns A13 in the composition registry and SRR-24 owns A1 in
-  the conformance identity ledger. They share the accepted release-heavy-state
-  plus retain-compact-fence shape rather than an LRU. Each still requires
+- **Next action:** Wave 11 is frozen from `7109a274b` with three disjoint
+  packets in §5.11 of the repair execution contract: SRR-25 owns A17 in the
+  synthesis route, SRR-26 owns A15 in the P2 interaction adapter and SRR-27
+  owns B42 in the conversation loop. SRR-25 is what makes SRR-24's conformance
+  lift real end to end, because A17 is the second limit the review split from
+  A1. Wave 10 closed with SRR-22/A6+B4 at `935a4f74e`, SRR-23/A13 at
+  `1c860f980` and SRR-24/A1 at `05b59e317`. Each Wave 11 packet still requires
   deterministic RED reproduction, a minimum owner-scoped fix,
   negative/concurrency/restart evidence, independent review by someone who did
   not implement it, and Main-only integration with an affected rerun before the

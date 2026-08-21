@@ -864,10 +864,113 @@ routed after that branch merges. A5, A9, A15, A17 and B42 stay unactivated in §
   fences, its reap semantics and its exception priority must survive unchanged,
   and the packet must rerun that file's focused suite to prove it.
 
+## 5.11 Wave 11 ownership record — ACTIVE
+
+Wave 11 is frozen from integration baseline `7109a274b`, the Wave 10 closure record.
+Its three writer surfaces are disjoint. All three continue batch 2 of the
+revalidation's priority ordering and reuse the same accepted shape as Wave 10:
+release the heavy state a bound exists to reclaim, retain a separate compact
+fence, never a plain LRU. SRR-17, SRR-20, SRR-22 and SRR-24 have now each had
+that shape signed by an independent review, so a packet that departs from it
+must say why.
+
+A5 and A9 belong to the same batch and stay unactivated in §6 to keep this wave
+reviewable. B11 stays excluded while `project_code_executor.py` is modified in
+parallel on `agtai/hx/0812_live_voice_w3`.
+
+### SRR-25 — A17 streaming synthesis route binding lifetime
+
+- Capability/owner: `StreamingSynthesisRouteOwner` retained binding identity and
+  its capacity-exhaustion disposition.
+- Risk: Tier 3 authority and availability. This is the **second limit** the
+  strict review split from A1: SRR-24 lifted the conformance ceiling, and this
+  packet is what makes the product-side lift real end to end.
+- Worker-owned source/tests:
+  `jiuwenswarm/gateway/routing/streaming_synthesis_route.py` and
+  `tests/unit_tests/gateway/test_streaming_synthesis_route.py` only.
+- Intended behavior: A17 (`:510-560,716-763,1850-1867`) has **two independent
+  changes**. First, `_retained_bindings` — declared at `:558`, written at `:763`,
+  read at `:730` and `:1875`, and never deleted — gets bounded identity
+  retirement with a compact stale fence, so 256 binding tombstones no longer
+  live for the owner's whole lifetime. Second, capacity exhaustion stops raising
+  a raw failure that bypasses the normal batch-eligible fallback and becomes a
+  typed batch-eligible result instead.
+- Acceptance: reproduce both mechanisms RED first. Then beyond 256 streams the
+  product falls back without handler failure while stale bindings stay fenced;
+  the existing fallback contract and its exact reasons are preserved; every
+  refusal keeps zero forbidden effects. Concurrency with a deterministic
+  barrier, restart/replay and identity isolation across owners are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no conformance or Provider source change, no other module owner. The typed
+  result must reuse the **existing** batch-eligible fallback vocabulary; adding
+  a new reason code would be a protocol change and must stop for re-scoping.
+  This file carries one disclosed pre-existing failure at
+  `test_streaming_synthesis_route.py:1837`
+  (`test_cancel_api_caller_cancel_retries_cleanup_then_rethrows`) that four
+  independent reviews have confirmed on baseline; it must remain unchanged, and
+  the packet must not silently repair or hide it.
+
+### SRR-26 — A15 P2 interaction lease lifetime
+
+- Capability/owner: `ProductP2InteractionAdapter` retained activation leases and
+  their terminal release.
+- Risk: Tier 3 availability and identity.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/product_p2_interaction_adapter.py` and
+  `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` only.
+- Intended behavior: A15 (`:1154,1199-1203`) — `_leases` has no cap and no
+  terminal callback, so only a higher generation of the same key ever removes a
+  closed lease. A terminal notification now deletes the heavy closed lease and
+  keeps a separate bounded generation tombstone.
+- Also delivered in this packet, outside the audited 88 and credited only in
+  §6.1: the wall-clock flake in this same file's tests. `_settle_partial_failure`
+  (`:1554-1572`) rolls back with `cleanup_timeout_seconds`, defaulting to `0.1`
+  at `:1164`, and `cleanup` (`:449`) is `wait_for(shield(coordinator), timeout)`,
+  so any scheduling stall past 100 ms downgrades the intended `*_FAILED` reason
+  to `ROLLBACK_FAILED`. Two independent reviews reported different reproduction
+  rates — one saw 3/8 and 4/8, another 0/34 — which is itself evidence that the
+  test is timing-dependent rather than deterministic. Make the affected tests
+  deterministic without weakening what they assert. Keep it in a separate commit
+  so the numerator stays exact.
+- Acceptance: reproduce A15 RED first. Then many distinct closed interactions
+  stay bounded while stale generation replay is rejected with its exact existing
+  reason; a live lease is never collected; the flake tests become deterministic
+  and still fail for their original defect. Concurrency with a deterministic
+  barrier, restart/replay and zero forbidden effects are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no other module owner, no Gateway route change. Do not change
+  `cleanup_timeout_seconds`' production default as a way of fixing the flake;
+  that would be a capacity/timing policy change. Make the tests deterministic
+  instead.
+
+### SRR-27 — B42 conversation loop control ledger lifetime
+
+- Capability/owner: `conversation_runtime_loop` barge and cancel control
+  identity, and the durability of what it retains about failures.
+- Risk: Tier 3 availability and privacy. Retaining raw exception objects and
+  tracebacks is the same content-exposure family that SRR-02/A21 closed for the
+  Agent client, so the privacy half is not optional.
+- Worker-owned source/tests:
+  `jiuwenswarm/server/live_voice/conversation_runtime_loop.py` and
+  `tests/unit_tests/live_voice/test_conversation_runtime_loop.py` only.
+- Intended behavior: B42 (`:180-188,398-434,508-555,741-807`) — six barge and
+  cancel fingerprint, result and error maps have no lifetime capacity, and the
+  queue's `control_capacity` does not bound completed commands. They gain a
+  bounded fail-closed replay ledger, and only a stable error code, reason and
+  message are persisted instead of raw `Exception` objects and tracebacks.
+- Acceptance: reproduce RED first, for both halves. Then more than capacity
+  successful and failed ids keep memory bounded; an evicted old id cannot
+  execute again; no raw exception object, traceback, or private payload content
+  survives in any retained record or public diagnostic. Concurrency with a
+  deterministic barrier, restart/replay and zero forbidden effects are required.
+- Exclusions: no new product policy or classifier, no protocol/schema change,
+  no other module owner. C3 remains an audit-ID alias of B42 and adds no unique
+  defect, so closing B42 closes C3's surviving concern without a separate entry.
+
 ## 6. Queued repair programs
 
-The 57 remaining unique defects are the unactivated defects below; no
-candidate is in flight. These
+The 57 remaining unique defects consist of the three activated Wave 11
+candidates A15, A17 and B42 plus the 54 unactivated defects below. These
 groups are not worker write authority. Each activation removes its IDs from
 this queue and freezes smaller owner-specific packets before editing.
 
@@ -876,18 +979,20 @@ this queue and freezes smaller owner-specific packets before editing.
   B17 remains an inactive alias of B13 and is activated with it.
 - Cancellation/teardown/retained cleanup (**9**): A7, A19, A22, B21, B23,
   B24, D1, D3 and L7.
-- Capacity/lifetime/replay (**8**): A5, A9, A15, A17, B11, B42, L5 and L18.
-  A1, A6, A13 and B4 moved to the active Wave 10 packets. C3 remains an active
-  audit-ID alias of B42 and adds no unique defect.
+- Capacity/lifetime/replay (**5**): A5, A9, B11, L5 and L18. A1, A6, A13 and
+  B4 closed in Wave 10; A15, A17 and B42 moved to the active Wave 11 packets.
+  C3 remains an active audit-ID alias of B42 and adds no unique defect, so it
+  closes with B42.
 - Event-loop, lock and filesystem responsiveness (**4**): A14, B15, B25 and
   B27.
 - Protocol/state/compatibility (**29**): B1, B3, B5, B8, B19,
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 9 + 8 + 4 + 29 = 57`, the complete remainder now
-that Wave 10 closed. By historical family that remainder is 8 A, 27 B, 19 L and
-three D findings.
+The queue arithmetic is `7 + 9 + 5 + 4 + 29 = 54`; adding the three activated
+Wave 11 candidates gives the 57 unique remaining defects. By historical family
+that remainder is 8 A, 27 B, 19 L and three D findings, of which the
+unactivated 54 are 6 A, 26 B, 19 L and three D.
 
 ### 6.1 Findings routed out of Wave 9
 
