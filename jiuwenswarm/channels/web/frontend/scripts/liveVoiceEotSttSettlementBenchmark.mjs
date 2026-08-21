@@ -94,10 +94,10 @@ export async function validateEotSttPythonExecutable(pythonExecutable) {
     }
     const resolved = await fs.realpath(pythonExecutable);
     if (!path.isAbsolute(resolved)) fail('EOT_STT_BENCHMARK_PYTHON_INVALID');
-    await fs.access(resolved, fsConstants.X_OK);
-    const metadata = await fs.stat(resolved);
+    await fs.access(pythonExecutable, fsConstants.X_OK);
+    const metadata = await fs.stat(pythonExecutable);
     if (!metadata.isFile()) fail('EOT_STT_BENCHMARK_PYTHON_INVALID');
-    return resolved;
+    return pythonExecutable;
   } catch {
     fail('EOT_STT_BENCHMARK_PYTHON_INVALID');
   }

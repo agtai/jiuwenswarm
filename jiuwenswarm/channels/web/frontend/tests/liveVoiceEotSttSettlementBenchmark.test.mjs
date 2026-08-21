@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import {
 import {
   assertEotSttCleanSource,
   parseEotSttSettlementBenchmarkArgs,
+  validateEotSttPythonExecutable,
   writeEotSttSettlementBenchmarkReport,
 } from '../scripts/liveVoiceEotSttSettlementBenchmark.mjs';
 
@@ -160,6 +161,13 @@ test('source validation rejects a dirty or mismatched candidate without includin
     assert.match(String(failure), /EOT_STT_BENCHMARK_SOURCE_NOT_CLEAN/);
     assert.equal(String(failure).includes(privateStatus), false);
   }
+});
+
+test('Python executable validation preserves an absolute virtual-environment symlink', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'live-voice-eot-stt-python-'));
+  const executable = path.join(directory, 'python3');
+  await symlink(process.execPath, executable);
+  assert.equal(await validateEotSttPythonExecutable(executable), executable);
 });
 
 test('report creation is exclusive, mode 600, and leaves an existing report untouched', async () => {
