@@ -69,12 +69,18 @@
   rejection, timeout, route-not-found and refresh fault injection remain
   automation-owned. This scoped result grants no controlled-candidate or
   product-readiness PASS.
-- **Current same-tab Task re-entry repair:** **SOURCE/AUTOMATED PASS; CORRECTED
-  PHYSICAL RERUN AND INDEPENDENT TIER-3 REVIEW OPEN.** The user navigated one
+- **Current same-tab Task re-entry repair:** **SOURCE/AUTOMATED PASS;
+  PRE-REPAIR PHYSICAL FAIL OBSERVED; POST-REPAIR PHYSICAL RERUN AND INDEPENDENT
+  TIER-3 REVIEW OPEN.** The user navigated one
   browser tab from Task/Session A to B and later back to A. Recovery closed the
   retained A generation and activated its successor, but a lagging rendered P2
   status discarded the successor's only scheduled capture. Capture admission
-  now uses the exact authoritative owner snapshot. The earlier 15-minute
+  now uses the exact authoritative owner snapshot. The later browser-owner
+  integration exposed another race: a delayed parent Session cleanup read the
+  already-replaced surface control and completely closed the new Session. That
+  path now closes only the exact old-Session P1 owner and retains its identity
+  for retry, without closing or rotating the successor P2 activation. The
+  earlier 15-minute
   Dedicated Media expiry attribution is withdrawn: the cited line was a Web
   transport close during routing, and the log contains no matching authority
   rejection. Exact evidence and non-claims are in the
@@ -87,6 +93,19 @@
   fallback wait. It does not change timeout policy or solve cross-tab ownership.
   Exact evidence is in the
   [request-budget record](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md).
+- **Current browser-global capture-owner repair:** **SOURCE/AUTOMATED/SCOPED
+  TWO-TAB PHYSICAL PASS; CORRECTED SAME-TAB RERUN AND INDEPENDENT TIER-3 REVIEW
+  OPEN.** Two same-origin tabs could
+  previously enable Formal Live Voice independently and capture the same
+  physical microphone. The newest explicit enable now acquires one origin-wide
+  Web Lock, asks the prior owner to close through BroadcastChannel, and starts
+  only after exact local capture/media cleanup releases that lock. Cleanup
+  failure remains fail-closed; stale claims cannot evict a newer owner. After
+  the session-scoped cleanup correction, the user repeated forward and reverse
+  two-tab takeover on the current product code with only the newest tab
+  listening. Exact
+  evidence is in the
+  [browser capture-owner record](evidence/P1_BROWSER_CAPTURE_OWNERSHIP_EVIDENCE_20260822.md).
 - **P3-G0 status:** **PASS — AUTHORITATIVE P3 FOUNDATION; CONTROLLED
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
@@ -109,11 +128,15 @@
   also passed the scoped real browser/device journey. Independent Tier-3 review
   remains open before full packet acceptance. The follow-up same-tab Task
   re-entry repair admits the authoritative successor owner even while rendered
-  state lags; its corrected A -> B -> A physical rerun and independent review
+  state lags and now prevents late old-Session parent cleanup from closing the
+  successor; its post-repair A -> B -> A physical rerun and independent review
   remain open. The independent request-budget repair preserves the exact Speech
   timeout/abort options for initial and successor capture; its physical fallback
-  rerun and independent review remain open. Then integrate and verify the
-  assigned P2 notification batch/push/coalescing latency work when ready;
+  rerun and independent review remain open. The browser-global capture-owner
+  repair now serializes same-origin tabs and waits for exact loser cleanup; its
+  scoped forward/reverse two-tab physical exclusivity rerun passes, while
+  independent review remains open. Then integrate and
+  verify the assigned P2 notification batch/push/coalescing latency work when ready;
   close generation-time interruption required by the formal feature-complete
   P1/P2 boundary; then run the complete fixed-corpus, automated, review and real-
   device Journey. Any later observability completion and P1/P2 may overlap only
@@ -176,9 +199,9 @@ risks, dependencies, acceptance and integration order.
 | Task Control Core and Store | **PARTIAL overall; scheduled pre-P3-9 P3 code boundary closed.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; D-093 fixes absent primitives as stable zero-effect unsupported | Run the P3-9 cumulative one-product acceptance without adding a second Task, event, presentation or confirmation authority | Executor capability/admission/durability facts, Voice–Task Bridge and restart/concurrency matrix; D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) |
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | P3-9 cumulative acceptance; any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review and exact Wave-2/Wave-3 Direct/Store/Core evidence; no generic Executor or host-crash claim |
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is accepted for evaluation only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` are stable unsupported for nonterminal Tasks and conflict for terminal Tasks, with zero Task/Attempt/Event/outbox/Executor effect | Broader language/policy generalization and P3-9 cumulative acceptance; positive provide-input/pause/resume remain outside the current Direct profile unless a later real primitive is accepted | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus and D-093 zero-effect decision |
-| Integrated Web product experience | **PARTIAL overall; P3-5B, P3-7, the scoped P3-8B diagnostic consumer Gates and the Exit delayed-ACK source/automated/scoped physical repair PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned, while P3-8B observes only after authority succeeds. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed. The Exit/re-enable repair generation-fences unpresented old output and now lets generation 2 activate, capture, submit and present before a retained generation-1 ACK settles; late success/rejection/timeout/route-loss, refresh and Session isolation have automated coverage. Exact clean product source `8994489ba` also passed the scoped real text-tool, microphone/TTS, Exit/re-enable, Session-isolation and resource-re-establishment journey. The current source/automated repairs let a same-tab Task/Session successor start capture from exact owner truth and preserve initial/successor streaming-final request budgets. Corrected physical acceptance remains open | Independent Exit/Task-re-entry/request-budget Tier-3 review; corrected same-tab A -> B -> A and Provider fallback reruns; close cross-tab ownership, generation-time interruption, P2 presentation latency, device/privacy/recovery UX and the cumulative human journey | [Exit/re-enable evidence](evidence/P1_P2_EXIT_REENABLE_GENERATION_RETIREMENT_EVIDENCE_20260822.md), [same-tab Task re-entry evidence](evidence/P1_SAME_TAB_TASK_REENTRY_RECOVERY_EVIDENCE_20260822.md), [streaming-final request-budget evidence](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md), [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [P3-8B evidence](evidence/P3_8B_FORMAL_OBSERVABILITY_RETIREMENT_EVIDENCE_20260821.md) and remaining P1/P2/P3-9 completion; scoped packet evidence does not grant current-candidate credit |
+| Integrated Web product experience | **PARTIAL overall; P3-5B, P3-7, the scoped P3-8B diagnostic consumer Gates and the Exit delayed-ACK source/automated/scoped physical repair PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned, while P3-8B observes only after authority succeeds. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed. The Exit/re-enable repair generation-fences unpresented old output and now lets generation 2 activate, capture, submit and present before a retained generation-1 ACK settles; late success/rejection/timeout/route-loss, refresh and Session isolation have automated coverage. Exact clean product source `8994489ba` also passed the scoped real text-tool, microphone/TTS, Exit/re-enable, Session-isolation and resource-re-establishment journey. The current repairs let a same-tab Task/Session successor start capture from exact owner truth, preserve initial/successor streaming-final request budgets, enforce one same-origin browser capture owner with cleanup-before-takeover and prevent old-Session cleanup from closing a replacement activation. The scoped forward/reverse two-tab exclusivity run passes; post-repair same-tab and timeout physical acceptance remain open | Independent Exit/Task-re-entry/request-budget/browser-owner Tier-3 review; post-repair same-tab A -> B -> A and Provider fallback reruns; close generation-time interruption, P2 presentation latency, device/privacy/recovery UX and the cumulative human journey | [Exit/re-enable evidence](evidence/P1_P2_EXIT_REENABLE_GENERATION_RETIREMENT_EVIDENCE_20260822.md), [same-tab Task re-entry evidence](evidence/P1_SAME_TAB_TASK_REENTRY_RECOVERY_EVIDENCE_20260822.md), [streaming-final request-budget evidence](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md), [browser capture-owner evidence](evidence/P1_BROWSER_CAPTURE_OWNERSHIP_EVIDENCE_20260822.md), [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [P3-8B evidence](evidence/P3_8B_FORMAL_OBSERVABILITY_RETIREMENT_EVIDENCE_20260821.md) and remaining P1/P2/P3-9 completion; scoped packet evidence does not grant current-candidate credit |
 | Observability, benchmark and latency | **PARTIAL overall; scheduled P3 observability producer boundary closed.** Validated configuration, trusted HMAC public correlation, the single exporter FIFO, P3-8A codec and bounded in-process backend compose behind the formal Registry. Producers now cover Command, current outbox state, Executor, Store Event/failure, checkpoint, effect, recovery, explicit reconcile state, Result, Generation and ACK. Recovery checkpoint/effect facts retain their producer-Attempt binding; Task event-head mismatch drops diagnostics; no private content or high-card metric label is exported | A separately accepted external/persistent telemetry owner only if the deployment requires it; separately repair P2 delivery and execute the [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) | D-093 [review](reviews/P3_COMPLETE_CAPABILITY_BOUNDARY_IMPLEMENTATION_REVIEW_2026-08-22.md), [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) and D-092 external-telemetry nonclaims |
-| Automated verification and product acceptance | **PARTIAL overall; scheduled pre-P3-9 P3 code Gate and the Exit delayed-ACK source/automated/scoped physical repair PASS.** Exact source `b4e70efe` retains its backend/config/durability/observability/retirement evidence. The current Task-re-entry plus request-budget repairs pass Formal Web `453/453`; focused timeout forwarding is `4/4`. Exact clean product source `8994489ba` passes the scoped real browser/device journey. Remaining cumulative build/static automation, corrected physical acceptance, independent review, P3-9 and controlled-candidate acceptance remain open | Complete cumulative verification, independent review and corrected physical reruns; repair cross-tab and remaining P1/P2 boundaries, then run P3-9 clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md), [same-tab Task re-entry evidence](evidence/P1_SAME_TAB_TASK_REENTRY_RECOVERY_EVIDENCE_20260822.md), [request-budget evidence](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md) and the Exit/re-enable records; scoped packet evidence grants no current-candidate credit |
+| Automated verification and product acceptance | **PARTIAL overall; scheduled pre-P3-9 P3 code Gate and the Exit delayed-ACK source/automated/scoped physical repair PASS.** Exact source `b4e70efe` retains its backend/config/durability/observability/retirement evidence. The three current P1 repairs pass cumulative Formal Web `461/461`; focused browser-owner `6/6` and timeout forwarding `4/4` pass, together with the affected browser/media/build/static matrix. Exact clean product source `8994489ba` passes the earlier scoped real browser/device journey, and the current browser-owner source has scoped forward/reverse two-tab exclusivity physical PASS. Post-repair same-tab and timeout physical acceptance, independent review, P3-9 and controlled-candidate acceptance remain open | Independent review and post-repair same-tab/fallback physical reruns; close remaining P1/P2 boundaries, then run P3-9 clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md), [same-tab Task re-entry evidence](evidence/P1_SAME_TAB_TASK_REENTRY_RECOVERY_EVIDENCE_20260822.md), [request-budget evidence](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md), [browser capture-owner evidence](evidence/P1_BROWSER_CAPTURE_OWNERSHIP_EVIDENCE_20260822.md) and the Exit/re-enable records; scoped packet evidence grants no current-candidate credit |
 | Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off. Live Voice requires an explicit exact Direct D0/D2 profile; missing/D1/unknown configuration fails closed without auth or durability downgrade. Launch/evidence owners explicitly select D2. The controlled Formal Web launcher additionally owns the complete non-secret media/provider/origin/receipt contract and fails before launch when it is incomplete. D-092 retirement remains unchanged: three rows retired and 18 retained/inventory. The Exit delayed-ACK packet removes the unread `turn_id`, `commit_id`, `origin_voice_loop_generation` fence fields and unreachable crossing branch while retaining exact activation/response fencing, capture barriers, timers and cleanup | Each retained manifest row still requires its own replacement/oracle/flag-on/flag-off/rollback/review Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-093 evidence, [manifest](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md) and D-092 retained/retired boundary |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -229,8 +252,9 @@ exact-source Alpha result.
 
 ### P1 same-tab Task re-entry capture recovery
 
-- **Packet/status:** **SOURCE/AUTOMATED PASS; CORRECTED PHYSICAL RERUN AND INDEPENDENT
-  TIER-3 REVIEW OPEN.** The implementation is the commit containing this
+- **Packet/status:** **SOURCE/AUTOMATED PASS; PRE-REPAIR PHYSICAL FAIL OBSERVED;
+  POST-REPAIR PHYSICAL RERUN AND INDEPENDENT TIER-3 REVIEW OPEN.** The
+  implementation is the commit containing this
   STATUS, based on `b016c14c0168c38757d716bc437ffe874a3a3cdb`.
 - **Owner/risk:** Formal P1 capture admission after exact P2 recovery; Tier 3
   because a stale Session/generation can otherwise lose capture or misdirect a
@@ -239,16 +263,25 @@ exact-source Alpha result.
   2, then activated generation 3. The authoritative owner was active, but its
   only scheduled capture also depended on lagging rendered
   `p2Activation.status` and returned early. No generation-3 media start followed.
+  After browser-global ownership was integrated, the corrected physical run
+  exposed a second race: the parent Session effect read the mutable current
+  control after B rendered, so its delayed complete close could target B rather
+  than only settle A. Logs show successful replacement activation followed by
+  its close tens to hundreds of milliseconds later.
   The prior 15-minute Dedicated Media expiry attribution is withdrawn; the log
   contains no corresponding authority rejection.
 - **Implemented invariant:** recovery capture admission uses the exact active
   owner snapshot and exact Session/activation generation, without a redundant
-  rendered-state gate. Existing capture barriers and cleanup remain unchanged.
-- **Automated result:** Formal Web passes `451/451`, including the red-first
-  source oracle plus mounted same-tab retained cleanup and Session replacement.
+  rendered-state gate. Every P1 owner also retains its exact Session: same-tab
+  replacement closes/retries only the previous Session owner before releasing
+  browser ownership and never closes or rotates the successor P2 activation.
+- **Automated result:** Formal Web passes `461/461`, including the red-first
+  source oracle, mounted same-tab retained cleanup/Session replacement and a new
+  delayed-old-cleanup oracle proving zero successor P2 close/rotation plus one
+  successor microphone.
 - **Excluded/remaining:** no media TTL/rotation, Speech timeout, cross-tab
   ownership, Agent/Tool/Task, ACK, provider or launcher behavior changes. A
-  corrected one-tab A -> B -> A real microphone/speaker rerun and independent
+  post-repair one-tab A -> B -> A real microphone/speaker rerun and independent
   Tier-3 review remain required.
 - **Evidence:** [same-tab Task re-entry recovery](evidence/P1_SAME_TAB_TASK_REENTRY_RECOVERY_EVIDENCE_20260822.md).
 
@@ -272,6 +305,41 @@ exact-source Alpha result.
   same-tab recovery or cross-tab ownership behavior changes. A real Provider
   degradation/fallback rerun and independent Tier-3 review remain required.
 - **Evidence:** [streaming-final request-budget forwarding](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md).
+
+### P1 browser-global single capture owner
+
+- **Packet/status:** **SOURCE/AUTOMATED/SCOPED TWO-TAB PHYSICAL PASS; CORRECTED
+  SAME-TAB RERUN AND INDEPENDENT TIER-3 REVIEW OPEN.** The implementation is the
+  commit containing this
+  STATUS, based on the preceding request-budget repair.
+- **Owner/risk:** same-origin browser capture admission, losing-tab cleanup and
+  Formal Live Voice UI state; Tier 3 because overlapping owners can duplicate
+  microphone, Speech, Agent/audio and visible effects across Tasks.
+- **Root cause:** Formal Live Voice enable/retry directly marked each tab active
+  and started its local P1 control. There was no origin-wide ownership or
+  takeover contract, so two Tasks in two tabs could capture one microphone.
+- **Implemented invariant:** each explicit enable first queues one exclusive
+  origin-wide Web Lock. BroadcastChannel asks an older owner to generation-fence
+  and close its exact capture/media resources. The successor starts only after
+  that cleanup releases the lock. The newest claim wins; stale claims are
+  ignored; cleanup failure retains the old lock; missing Web Locks or
+  BroadcastChannel fails closed before capture. Exit/takeover use complete
+  close, while same-tab replacement uses the exact old-Session P1 close so it
+  cannot terminate a newly rendered Session's P2 owner.
+- **Automated result:** browser-owner lifecycle passes `6/6`; cumulative Formal
+  Web passes `461/461`. Browser audio `103/103`, Gateway Media `38/38`, browser
+  Dedicated Media `27/27`, backend Speech/Media `195/195`, build profiles `2/2`,
+  Live Voice build, Ruff and diff checks pass. The unchanged P2/Registry baseline
+  remains `214/220` with its six pre-existing P3 fixture/projection failures.
+- **Physical result:** after the session-scoped cleanup correction, the user
+  repeated forward and reverse same-origin two-tab takeover on the current
+  product code: enabling B first deactivated A and only B listened; re-enabling A
+  deactivated B and only A listened. This grants only scoped exclusivity credit.
+- **Excluded/remaining:** different browsers/devices/origins, a separate
+  post-run resource-zero measurement and server-wide multi-client arbitration
+  are excluded. The corrected one-tab rerun and independent Tier-3 review remain
+  required.
+- **Evidence:** [browser-global capture ownership](evidence/P1_BROWSER_CAPTURE_OWNERSHIP_EVIDENCE_20260822.md).
 
 ### P1/P2 mounted Exit/immediate-re-enable lifecycle
 
@@ -865,16 +933,28 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 
 ## Verification and runtime truth
 
-- The current same-tab Task re-entry repair passes Formal Web `451/451`,
-  including its source oracle and the existing mounted same-tab retained-cleanup/
-  Session-replacement cases. Remaining cumulative verification, corrected one-tab A -> B -> A
-  physical acceptance and independent Tier-3 review remain open. See the
+- The current same-tab Task re-entry repair passes cumulative Formal Web
+  `461/461`, including its source oracle, mounted same-tab retained-cleanup/
+  Session-replacement cases and the delayed old-Session cleanup oracle. The
+  pre-repair physical attempt exposed intermittent failure and ineffective
+  **Listen again**; a post-repair one-tab A -> B -> A physical acceptance and
+  independent Tier-3 review remain open. See the
   [current repair evidence](evidence/P1_SAME_TAB_TASK_REENTRY_RECOVERY_EVIDENCE_20260822.md).
 - The independent streaming-final request-budget repair passes its focused
   initial/successor/panel forwarding cases `4/4`; cumulative Formal Web is
   `453/453`. A real Provider degradation/fallback rerun and independent Tier-3
   review remain open. See the
   [request-budget evidence](evidence/P1_STREAMING_FINAL_TIMEOUT_BUDGET_EVIDENCE_20260822.md).
+- The browser-global capture-owner repair passes `6/6` focused ownership cases
+  and cumulative Formal Web `461/461`. The affected cumulative matrix also
+  passes browser audio `103/103`, Gateway Media `38/38`, browser Dedicated Media
+  `27/27`, backend Speech/Media `195/195`, build profiles `2/2`, the production
+  Live Voice build, Ruff and diff checks. P2/Registry remains the unchanged
+  `214/220` baseline with six disclosed P3 fixture/projection failures. The user
+  passed the scoped forward/reverse two-tab exclusivity run again after the
+  session-scoped correction. The corrected same-tab physical rerun and
+  independent Tier-3 review remain open;
+  see the [browser capture-owner evidence](evidence/P1_BROWSER_CAPTURE_OWNERSHIP_EVIDENCE_20260822.md).
 - The Exit/immediate-re-enable repair based on `2e01965ec` passes Formal Web
   `450/450`, browser audio `103/103`, Dedicated Media `27/27`, build profiles
   `2/2`, the unchanged launcher/probe baseline `3/3`, combined P2/Registry

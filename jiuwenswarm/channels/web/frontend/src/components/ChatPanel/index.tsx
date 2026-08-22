@@ -66,6 +66,10 @@ import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
+import {
+  createBrowserLiveVoiceOwnership,
+  type BrowserLiveVoiceOwnership,
+} from '../../features/live-voice/formal/browserLiveVoiceOwnership';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -1252,6 +1256,14 @@ export function ChatPanel({
   });
   const formalProductVoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_WEB && FEATURE_LIVE_VOICE_INTEGRATED_P1;
   const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
+  const browserLiveVoiceOwnershipRef = useRef<BrowserLiveVoiceOwnership | null>(null);
+  if (browserLiveVoiceOwnershipRef.current === null) {
+    browserLiveVoiceOwnershipRef.current = createBrowserLiveVoiceOwnership();
+  }
+  const productVoiceIntentRef = useRef(0);
+  const productVoiceCleanupRef = useRef<Promise<void>>(Promise.resolve());
+  const productVoiceCleanupSessionRef = useRef<string | null>(null);
+  const productVoiceSessionRef = useRef(activeSessionId);
   const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
   const addMessageIfAbsent = useChatStore((state) => state.addMessageIfAbsent);
   const [productVoiceActive, setProductVoiceActive] = useState(false);
@@ -1293,10 +1305,149 @@ export function ChatPanel({
       return next;
     });
   }, []);
+  const closeProductVoiceSessionForBrowserOwnership = useCallback(async (sessionId: string) => {
+    const cleanupSessionId = productVoiceCleanupSessionRef.current ?? sessionId;
+    productVoiceCleanupSessionRef.current = cleanupSessionId;
+    const priorCleanup = productVoiceCleanupRef.current;
+    const control = productVoiceControlRef.current;
+    const cleanup = (async () => {
+      try {
+        await priorCleanup;
+      } catch {
+        // A later explicit ownership operation retries the exact retained owner.
+      }
+      await control?.closeSession(cleanupSessionId);
+    })();
+    productVoiceCleanupRef.current = cleanup;
+    try {
+      await cleanup;
+      if (productVoiceCleanupSessionRef.current === cleanupSessionId) {
+        productVoiceCleanupSessionRef.current = null;
+      }
+    } catch {
+      throw new Error('FORMAL_P1_CLEANUP_PENDING');
+    }
+  }, []);
+
+  const closeProductVoiceForBrowserOwnership = useCallback(async () => {
+    const priorCleanup = productVoiceCleanupRef.current;
+    const control = productVoiceControlRef.current;
+    const cleanup = (async () => {
+      try {
+        await priorCleanup;
+      } catch {
+        // Full Exit/takeover still retries any retained old-Session capture
+        // before closing the current surface and releasing browser ownership.
+      }
+      const cleanupSessionId = productVoiceCleanupSessionRef.current;
+      if (cleanupSessionId !== null) {
+        await control?.closeSession(cleanupSessionId);
+        if (productVoiceCleanupSessionRef.current === cleanupSessionId) {
+          productVoiceCleanupSessionRef.current = null;
+        }
+      }
+      await control?.close();
+    })();
+    productVoiceCleanupRef.current = cleanup;
+    await cleanup;
+  }, []);
+
+  const startProductVoiceWithBrowserOwnership = useCallback(async () => {
+    const browserOwnership = browserLiveVoiceOwnershipRef.current;
+    if (browserOwnership === null) return;
+    const intent = productVoiceIntentRef.current + 1;
+    productVoiceIntentRef.current = intent;
+    const requestedSessionId = activeSessionId;
+    try {
+      await productVoiceCleanupRef.current;
+    } catch {
+      const cleanupSessionId = productVoiceCleanupSessionRef.current;
+      if (cleanupSessionId === null) return;
+      try {
+        await closeProductVoiceSessionForBrowserOwnership(cleanupSessionId);
+        await browserOwnership.release();
+      } catch {
+        return;
+      }
+    }
+    if (productVoiceIntentRef.current !== intent) return;
+    try {
+      await browserOwnership.acquire(async () => {
+        productVoiceIntentRef.current += 1;
+        setProductVoiceActive(false);
+        await closeProductVoiceForBrowserOwnership();
+      });
+    } catch {
+      if (productVoiceIntentRef.current === intent) setProductVoiceActive(false);
+      return;
+    }
+    if (
+      productVoiceIntentRef.current !== intent ||
+      useChatStore.getState().activeSessionId !== requestedSessionId
+    ) {
+      return;
+    }
+    const control = productVoiceControlRef.current;
+    if (control === null) {
+      setProductVoiceActive(false);
+      await browserOwnership.release();
+      return;
+    }
+    setProductVoiceActive(true);
+    try {
+      await control.start();
+    } catch {
+      // The formal route publishes the exact retryable/terminal failure state.
+      // Retain browser ownership until Exit or takeover so another tab cannot
+      // race a still-cleaning local capture.
+    }
+  }, [activeSessionId, closeProductVoiceSessionForBrowserOwnership]);
+
+  const stopProductVoiceAndReleaseBrowserOwnership = useCallback(async () => {
+    productVoiceIntentRef.current += 1;
+    setProductVoiceActive(false);
+    const browserOwnership = browserLiveVoiceOwnershipRef.current;
+    try {
+      await closeProductVoiceForBrowserOwnership();
+    } catch {
+      return;
+    }
+    await browserOwnership?.release();
+  }, [closeProductVoiceForBrowserOwnership]);
+
+  const stopProductVoiceSessionAndReleaseBrowserOwnership = useCallback(async (sessionId: string | null) => {
+    productVoiceIntentRef.current += 1;
+    setProductVoiceActive(false);
+    const browserOwnership = browserLiveVoiceOwnershipRef.current;
+    try {
+      if (sessionId !== null) await closeProductVoiceSessionForBrowserOwnership(sessionId);
+    } catch {
+      return;
+    }
+    await browserOwnership?.release();
+  }, [closeProductVoiceSessionForBrowserOwnership]);
+
   useEffect(() => {
     setProductVoiceActive(false);
     setProductVoiceState(null);
-  }, [activeSessionId]);
+    if (productVoiceSessionRef.current === activeSessionId) return;
+    const previousSessionId = productVoiceSessionRef.current;
+    productVoiceSessionRef.current = activeSessionId;
+    void stopProductVoiceSessionAndReleaseBrowserOwnership(previousSessionId);
+  }, [activeSessionId, stopProductVoiceSessionAndReleaseBrowserOwnership]);
+
+  useEffect(() => () => {
+    productVoiceIntentRef.current += 1;
+    const browserOwnership = browserLiveVoiceOwnershipRef.current;
+    void (async () => {
+      try {
+        await closeProductVoiceForBrowserOwnership();
+      } catch {
+        return;
+      }
+      await browserOwnership?.dispose();
+    })();
+  }, [closeProductVoiceForBrowserOwnership]);
 
   let formalVoiceVisualState: LiveVoiceVisualState = 'idle';
   if (productVoiceState?.recovery_diagnostic !== null && productVoiceState?.recovery_diagnostic !== undefined) {
@@ -1376,19 +1527,16 @@ export function ChatPanel({
     statusLabel: formalStatusLabel,
     handsFree: true,
     onEnable: () => {
-      setProductVoiceActive(true);
-      void productVoiceControlRef.current?.start();
+      void startProductVoiceWithBrowserOwnership();
     },
     onExit: () => {
-      setProductVoiceActive(false);
-      void productVoiceControlRef.current?.close();
+      void stopProductVoiceAndReleaseBrowserOwnership();
     },
     onPrimaryAction: () => {
       // Hands-free mode has no primary control after the first enable click.
     },
     onRetryListening: () => {
-      setProductVoiceActive(true);
-      void productVoiceControlRef.current?.start();
+      void startProductVoiceWithBrowserOwnership();
     },
     onInterruptAndSpeak: () => {
       // Formal playout already owns a concurrent successor capture. Stopping

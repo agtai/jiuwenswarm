@@ -1595,7 +1595,7 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /onTaskSelect=/);
   assert.match(source, /onTaskMutation=/);
   assert.match(source, /onTaskConfirm=/);
-  assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
+  assert.match(source, /startProductVoiceWithBrowserOwnership/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
   assert.match(source, /addMessageIfAbsent\(event\.session_id/);
   assert.match(source, /recoveryFailedWithReason/);
@@ -1669,6 +1669,49 @@ test('foreground presentation fence keeps exact activation and response identity
   assert.match(source, /voiceLoopCaptureTimerRef/);
   assert.match(source, /pendingForegroundPresentationRef\.current = null/);
   assert.match(source, /retirePendingPresentationAck/);
+});
+
+test('ChatPanel waits for browser-global Live Voice ownership and closes before releasing it', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
+  const panelSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const start = source.slice(
+    source.indexOf('const startProductVoiceWithBrowserOwnership'),
+    source.indexOf('const stopProductVoiceAndReleaseBrowserOwnership'),
+  );
+  const stop = source.slice(
+    source.indexOf('const stopProductVoiceAndReleaseBrowserOwnership'),
+    source.indexOf('let formalVoiceVisualState'),
+  );
+  const sessionCleanup = source.slice(
+    source.indexOf('const closeProductVoiceSessionForBrowserOwnership'),
+    source.indexOf('const closeProductVoiceForBrowserOwnership'),
+  );
+  const formalProps = source.slice(
+    source.indexOf('const formalLiveVoiceDemoProps'),
+    source.indexOf('const liveVoiceDemoBar'),
+  );
+  const sessionReplacement = source.match(
+    /useEffect\(\(\) => \{(?<body>[\s\S]*?productVoiceSessionRef\.current = activeSessionId;[\s\S]*?)\n  \}, \[activeSessionId,/,
+  )?.groups?.body;
+
+  assert.match(source, /createBrowserLiveVoiceOwnership/);
+  assert.match(panelSource, /closeSession\(sessionId: string\): Promise<void>/);
+  assert.match(start, /await browserOwnership\.acquire/);
+  assert.equal(start.indexOf('await browserOwnership.acquire') < start.indexOf('setProductVoiceActive(true)'), true);
+  assert.equal(start.indexOf('setProductVoiceActive(true)') < start.indexOf('await control.start()'), true);
+  assert.match(start, /setProductVoiceActive\(false\)[\s\S]*?await closeProductVoiceForBrowserOwnership\(\)/);
+  assert.match(start, /await closeProductVoiceSessionForBrowserOwnership\(cleanupSessionId\)[\s\S]*?await browserOwnership\.release\(\)/);
+  assert.match(sessionCleanup, /await control\?\.closeSession\(cleanupSessionId\)/);
+  assert.match(stop, /await closeProductVoiceForBrowserOwnership\(\)[\s\S]*?await browserOwnership\?\.release\(\)/);
+  assert.match(stop, /await closeProductVoiceSessionForBrowserOwnership\(sessionId\)[\s\S]*?await browserOwnership\?\.release\(\)/);
+  assert.match(formalProps, /onEnable:[\s\S]*?startProductVoiceWithBrowserOwnership/);
+  assert.match(formalProps, /onExit:[\s\S]*?stopProductVoiceAndReleaseBrowserOwnership/);
+  assert.match(formalProps, /onRetryListening:[\s\S]*?startProductVoiceWithBrowserOwnership/);
+  assert.doesNotMatch(formalProps, /setProductVoiceActive\(true\)[\s\S]*?productVoiceControlRef\.current\?\.start\(\)/);
+  assert.ok(sessionReplacement);
+  assert.match(sessionReplacement, /const previousSessionId = productVoiceSessionRef\.current/);
+  assert.match(sessionReplacement, /stopProductVoiceSessionAndReleaseBrowserOwnership\(previousSessionId\)/);
+  assert.doesNotMatch(sessionReplacement, /stopProductVoiceAndReleaseBrowserOwnership\(\)/);
 });
 
 test('successor capture admission uses the authoritative activation owner instead of lagging rendered state', async () => {

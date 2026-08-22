@@ -174,6 +174,7 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
 export interface ProductLiveVoiceSurfaceControl {
   start(): Promise<void>;
   stop(): Promise<void>;
+  closeSession(sessionId: string): Promise<void>;
   updateInput(value: string): void;
   submit(): void;
   submitCommand(): void;
@@ -1411,6 +1412,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const retiredPresentationAckInFlightRef = useRef(new Set<string>());
   const retiredPresentationAckOwnerRequestRef = useRef(new Map<ProductWebP2ActivationOwner, string>());
   const p1VoiceOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
+  const p1VoiceOwnerSessionRef = useRef<string | null>(null);
   const unifiedInputOwnerRef = useRef<ProductUnifiedCommittedInputOwner | null>(null);
   const deviceSelectionOwnerRef = useRef<BrowserAudioDeviceSelectionOwner | null>(null);
   const pendingP1VoiceStartRef = useRef<Readonly<{ generation: number; promise: Promise<void> }> | null>(null);
@@ -4288,9 +4290,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     )
       return;
     let owner = p1VoiceOwnerRef.current;
+    if (owner !== null && p1VoiceOwnerSessionRef.current !== binding.session_id) {
+      await owner.close();
+      if (p1VoiceOwnerRef.current === owner) {
+        p1VoiceOwnerRef.current = null;
+        p1VoiceOwnerSessionRef.current = null;
+      }
+      owner = null;
+    }
     if (owner && ['failed', 'cleanup_pending'].includes(owner.status().status)) {
       await owner.close();
-      if (p1VoiceOwnerRef.current === owner) p1VoiceOwnerRef.current = null;
+      if (p1VoiceOwnerRef.current === owner) {
+        p1VoiceOwnerRef.current = null;
+        p1VoiceOwnerSessionRef.current = null;
+      }
       owner = null;
     }
     if (!isCurrentBinding()) return;
@@ -4487,6 +4500,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       callbackOwner = nextOwner;
       owner = nextOwner;
       p1VoiceOwnerRef.current = nextOwner;
+      p1VoiceOwnerSessionRef.current = binding.session_id;
     }
     const startingOwner = owner;
     if (!isCurrentBinding() || hasCaptureAuthorityBarrier()) {
@@ -5871,9 +5885,28 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     } catch {
       // Retain the exact cleanup_pending owner. A later explicit start retries
       // cleanup before it can construct a successor route.
-      return;
+      throw new Error('FORMAL_P1_CLEANUP_PENDING');
     }
     requestVoiceLoopP2Refresh();
+  };
+
+  const closeProductVoiceSession = async (sessionId: string) => {
+    const owner = p1VoiceOwnerRef.current;
+    if (owner === null || p1VoiceOwnerSessionRef.current !== sessionId) return;
+    try {
+      await owner.close();
+    } catch {
+      // Keep the exact old-Session owner retained. Browser capture ownership
+      // cannot move until a later attempt settles this same cleanup.
+      throw new Error('FORMAL_P1_CLEANUP_PENDING');
+    }
+    if (p1VoiceOwnerRef.current === owner) {
+      p1VoiceOwnerRef.current = null;
+      p1VoiceOwnerSessionRef.current = null;
+      if (p1VoiceCaptureBindingRef.current?.session_id === sessionId) {
+        p1VoiceCaptureBindingRef.current = null;
+      }
+    }
   };
 
   const startProductVoiceLoop = async () => {
@@ -6009,6 +6042,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const control = Object.freeze<ProductLiveVoiceSurfaceControl>({
       start: startProductVoiceLoop,
       stop: () => (p1VoiceOwnerRef.current?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture()),
+      closeSession: closeProductVoiceSession,
       updateInput: handleProductCommandInput,
       submit: handleProductSubmit,
       submitCommand: () => void submitProductCommand(),

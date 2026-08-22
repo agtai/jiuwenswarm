@@ -5650,6 +5650,131 @@ test('mounted P1 retained Start cannot allocate an old-binding successor after S
   }
 });
 
+test('mounted late old-Session capture cleanup cannot close or rotate the replacement Session activation', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const controlRef = { current: null };
+  const p2Activations = [];
+  const p2Closes = [];
+  const mediaActivations = [];
+  const mediaCloses = [];
+  let resolveOldMediaClose = null;
+  let oldSessionCleanup = null;
+  let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
+  const request = async (method, params) => {
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Activations.push({ ...params });
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      p2Closes.push({ ...params });
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    if (method === 'live_voice.media.activate') {
+      mediaActivations.push({ ...params });
+      return {
+        status: 'active',
+        reason_id: null,
+        subject_id: `mounted-session-scoped-${params.session_id}`,
+        endpoint_path: '/api/v1/live_voice/media',
+        media_ticket: 'S'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        binding: {},
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: false },
+      };
+    }
+    if (method === 'live_voice.media.close') {
+      mediaCloses.push({ ...params });
+      if (params.session_id === 'mounted-session-scoped-old' && mediaCloses.filter(close => close.session_id === params.session_id).length === 1) {
+        return new Promise(resolve => {
+          resolveOldMediaClose = () => resolve({ status: 'closed', reason_id: null, ...params });
+        });
+      }
+      return { status: 'closed', reason_id: null, ...params };
+    }
+    throw new Error(`unexpected mounted session-scoped request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-session-scoped-old', request, {
+        productVoiceControlRef: controlRef,
+      }));
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'old Session did not expose formal P1 Start');
+      void controlRef.current.start();
+      await waitForMounted(
+        () => mediaActivations.some(activation => activation.session_id === 'mounted-session-scoped-old'),
+        'old Session did not start capture',
+      );
+    });
+
+    await act(async () => {
+      renderer.update(mountedP1Element(i18n, 'mounted-session-scoped-new', request, {
+        productVoiceControlRef: controlRef,
+      }));
+      await waitForMounted(
+        () =>
+          p2Activations.some(activation => activation.session_id === 'mounted-session-scoped-new') &&
+          mediaCloses.some(close => close.session_id === 'mounted-session-scoped-old'),
+        'replacement Session did not activate while exact old capture cleanup remained pending',
+      );
+      oldSessionCleanup = controlRef.current.closeSession('mounted-session-scoped-old');
+      await Promise.resolve();
+    });
+
+    assert.equal(typeof resolveOldMediaClose, 'function');
+    assert.equal(
+      p2Closes.some(close => close.session_id === 'mounted-session-scoped-new'),
+      false,
+      'a late parent cleanup for the old Session must not close the replacement P2 activation',
+    );
+
+    await act(async () => {
+      resolveOldMediaClose();
+      await oldSessionCleanup;
+      await Promise.resolve();
+    });
+    assert.equal(
+      p2Closes.some(close => close.session_id === 'mounted-session-scoped-new'),
+      false,
+      'settling exact old capture cleanup must not rotate the replacement P2 activation',
+    );
+
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(
+        () => mediaActivations.some(activation => activation.session_id === 'mounted-session-scoped-new'),
+        'replacement Session did not start capture after exact old cleanup settled',
+      );
+    });
+    assert.equal(browser.counts.getUserMedia, 2, 'replacement Session must allocate exactly one successor microphone');
+    assert.equal(
+      mediaActivations.filter(activation => activation.session_id === 'mounted-session-scoped-new').length,
+      1,
+    );
+    assert.equal(
+      p2Closes.some(close => close.session_id === 'mounted-session-scoped-new'),
+      false,
+    );
+  } finally {
+    if (resolveOldMediaClose !== null) resolveOldMediaClose();
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    browser.restore();
+  }
+});
+
 test('mounted P1 retained Start cannot allocate a successor after unmount wins during exact close', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();
