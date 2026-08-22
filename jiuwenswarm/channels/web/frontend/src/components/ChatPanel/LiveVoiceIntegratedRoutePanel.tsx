@@ -4282,7 +4282,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (
       !FEATURE_LIVE_VOICE_INTEGRATED_P1 ||
       !isCurrentBinding() ||
-      p2Activation.status !== 'active' ||
       binding === null ||
       typeof window === 'undefined' ||
       hasCaptureAuthorityBarrier()
