@@ -1,6 +1,7 @@
 # Live Voice latency optimization inventory
 
 > Date: 2026-08-21
+> Last synchronized: 2026-08-22
 >
 > This is a dated optimization/evidence snapshot, not the authority for current
 > project status or execution priority. `live-voice/STATUS.md` remains the
@@ -12,23 +13,27 @@
 
 The committed baseline inspected for `0812_live_voice_w3_renan` was
 `2c543aef`; unrelated uncommitted working-tree changes were excluded. That
-source predates the accepted optimization candidates. The accepted P2 and TTS
-changes live in separate latency branches and are composed in optimized
-checkpoint source `52f7bc54353fc2c212aab1246941674feb821a9e`. Its exact
+source predates the causally accepted optimization candidates. The P2 candidate
+and accepted TTS component change live in separate latency branches and are
+composed in optimized checkpoint source
+`52f7bc54353fc2c212aab1246941674feb821a9e`. Its exact
 sequential A reference is `1b0802cae9a6718c0d3326c1292f7475fdefe08c`. The
 checkpoint evidence documentation referenced here was recorded at
 `def1dc06bf93eaf9a35a2d6af0e8a7fcd9273c36`.
 
 The later EOT/STT materiality screen is bound separately to clean source
 `8e5dab8b8c6651b2be784cf103df9239a93814a0`; its reviewed documentation closure
-is `4222d522f92951bfbdf2c1a694c696cf782f51a0`. Its deterministic no-Chrome
-numbers must not be pooled with the real-Provider VAD/TTS experiments or the
-combined checkpoint.
+is `4222d522f92951bfbdf2c1a694c696cf782f51a0`, with raw-retention status later
+recorded at `4ddb8908ced58ea1448de60675f979ce21fdae8f`. Its deterministic
+no-Chrome numbers must not be pooled with the real-Provider VAD/TTS experiments
+or the combined checkpoint.
 
 The stable-sentence Agent-to-TTS screen is bound separately to tested
 JiuwenSwarm source `81903777f8dccb40ba2cb70fbe9b28d28d86c7f5` and Agent-Core
 `94e10cb6102c36fe78a64547957c0def97299273`. It did not modify Runtime, P2,
 Browser or the composed checkpoint and receives no product-behaviour credit.
+Its durable-artifact binding was recorded at
+`85fbcc516571350fc50974ef35bfb2f40e1c48c8`.
 
 Status terms used here:
 
@@ -44,19 +49,59 @@ Status terms used here:
 - **Estimated:** planning headroom inferred from current code facts or
   historical evidence, not a measured current-source improvement.
 
-## 2. Completed experiments
+## 2. Validation ladder and completion credit
+
+The agreed optimization loop is layered. A cheap screen may reject a weak
+hypothesis before product wiring, but a passing component experiment is only a
+candidate and cannot by itself close the optimization:
+
+| Gate | Required path | Credit granted |
+|---|---|---|
+| **A — deterministic causal** | Same source, controlled inputs, one changed variable, A/B/A where applicable, exact stage and forbidden-effect accounting | Component mechanism and causal headroom only |
+| **B — real Agent/Provider** | Current real Agent and/or Speech Provider for the boundary being changed, with exact model/config/source labels | Real dependency timing and semantic integrity for that component |
+| **C — deployed Live Voice A/B** | JiuwenSwarm deployed, Live Voice enabled, optimization off/on under the same environment/config/input; every workload completes and the affected output/TTS/Task truth succeeds | Product-path acceptance for the declared environment; physical first-audible/device credit only when Browser/audio is actually exercised |
+
+Gate C uses the same three workload classes agreed with Hongxing:
+
+| Workload | Prompt |
+|---|---|
+| Short | “What is the capital of France? Answer with the city name only.” |
+| Medium | “Explain the complete water cycle in nature in 5 points.” |
+| Long | “Please introduce Hangzhou in 8 detailed points, with at least two sentences for each point, then give a summary.” |
+
+For each prompt, record task/response success, TTS/playout success where
+applicable, stage-by-stage latency and total latency. A faster failed workflow
+is a regression, not an accepted optimization. Direct audio/prompt injection is
+valid for Gates A/B; it does not replace the deployed Live Voice Gate C.
+
+The bounded P2 pull currently demonstrates this distinction. Its repository
+A/B/A evidence passed Gate A, and Hongxing externally reported approximately
+46% faster response completion in a deployed validation. That same run failed
+TTS with `SPEECH_OPERATION_NOT_AUTHORIZED`; retry did not recover and the page
+required refresh. The external percentage has no source-bound artifact in this
+repository yet and is therefore **REPORTED**, not locally credited.
+
+The optimized checkpoint/EOT source supports the reported cause: the Web owner
+validates an entire `notification_batch` before queueing its items, but
+`DedicatedMediaProductRegistry.observe_agent_response()` observes only a
+top-level `notification` and ignores the final notification nested in the
+batch. The required repair must validate the complete batch before effects,
+then process every item in order so the final item can establish TTS authority;
+an invalid batch must grant zero partial authority.
+
+## 3. Completed experiments
 
 | Optimization | Status | Area / code ownership | Observed headroom or result | Current evidence | Comment |
 |---|---|---|---:|---|---|
-| P2 bounded notification pull, batch size 16 | **ACCEPTED — causal component scope** | P2; `productWebActivation.ts`, `LiveVoiceIntegratedRoutePanel.tsx`, `product_composition_registry.py`, `product_p2_interaction_adapter.py`, `agent_conversation_runtime.py` | p50 saved approximately **0.78 s / 4.00 s / 8.04 s** for 10/50/100 notifications | A1/B/A2: 864→86 ms, 4348→344 ms, 8658→615 ms; 15/15 successful in every population; zero forbidden effects | This removes the largest directly measured non-Agent bottleneck. Physical Browser/E2E credit remains open. |
+| P2 bounded notification pull, batch size 16 | **CAUSAL CANDIDATE ACCEPTED; DEPLOYED VALIDATION FAILED — FIX/RETEST REQUIRED** | P2; `productWebActivation.ts`, `LiveVoiceIntegratedRoutePanel.tsx`, `product_composition_registry.py`, `product_p2_interaction_adapter.py`, `agent_conversation_runtime.py`, media response observer | Repository p50 saved approximately **0.78 s / 4.00 s / 8.04 s** for 10/50/100 notifications; deployed improvement **~46% REPORTED** by Hongxing | A1/B/A2: 864→86 ms, 4348→344 ms, 8658→615 ms; 15/15 successful in every repository population; deployed response completed faster but TTS failed with `SPEECH_OPERATION_NOT_AUTHORIZED` | Component causality remains valid, but product acceptance is blocked until atomic batch observation is fixed and the short/medium/long deployed A/B passes without refresh or TTS failure. |
 | TTS downlink decoupled from successor-capture ACK | **ACCEPTED — first-audio causal component scope** | P1/P2 seam; `productP1VoiceRoute.ts`, `dedicated_media_registration.py` | First-source p50 saved **5.8 ms / 255.1 ms / 756.1 ms** under injected ACK delays of 0/250/750 ms | A1/B/A2 returned to the original timing; at 750 ms, first source changed from 756.5 to 0.48 ms | It improves first audio, but confirmed receipt remains ACK-delayed. Real E2E gain depends on the checkpoint and later physical validation. |
 | Fixed VAD reduction from 1200 to 900/800 ms | **REJECTED** | P1 input; `streaming_speech.py`, `openai_streaming_speech.py` | Successful turns exposed **285–412 ms** of potential endpointing headroom | Both candidates preserved only 15/20 turns; every 1000 ms natural-pause case failed 0/5 | The headroom is real, but a global fixed threshold cannot safely recover it. Keep 1200 ms. |
 | Application-level TTS HTTPX client reuse | **REJECTED AND REVERTED** | P1 TTS Provider; `openai_streaming_speech.py` | No gain; warm first-PCM regressed **57.8 ms / 7.0%** | B produced **0/3 warm TCP/TLS reuse**; 832.0→889.9 ms warm p50 | Do not reintroduce this implementation unchanged. |
-| Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP`** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Candidate→final/projected-gain p50 **177.2 ms**, p95 **425.3 ms**; relative p50 **7.43%** | 3/3 real pilot attempts completed, exact prefix 3/3, mismatch 0, zero forbidden effects | Failed the predeclared 500 ms headroom, 400 ms gain and 10% relative gates. Keep the screen assets; do not build the product candidate. |
-| Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves the composed controlled-owner gain. It remains non-physical: real Provider/network, Chrome/WebAudio, Agent/model execution and human-perceived first audio were out of scope. |
-| EOT/STT early result waiter | **REJECTED — NO MATERIAL SERIAL GAP** | P1/P2 Speech settlement; real `ProductP1VoiceRouteOwner` and registry result seam under deterministic dependencies | Largest removable-gap p50 **0.885 ms**; largest fraction p50 **0.015** | Complete A1 at `8e5dab8b8`: 20/20 exact, cleanup-complete attempts; ten marks/eight segments; zero forbidden effects | The 450.782 ms provider-slow diagnostic is legitimate remaining Provider wait. It cannot authorize an early-wait RPC, B or A2. |
+| Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP` FOR TESTED WORKLOADS** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Candidate→final/projected-gain p50 **177.2 ms**, p95 **425.3 ms**; relative p50 **7.43%** | 3/3 real pilot attempts completed, exact prefix 3/3, mismatch 0, zero forbidden effects; credited v2 artifacts survive in the durable latency-runs archive with matching hashes | Failed the predeclared 500 ms headroom, 400 ms gain and 10% relative gates. Reopen only with a reviewed new long-form workload/materiality hypothesis; do not generalize this STOP to every possible response length. |
+| Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves controlled owner-path gain only. It does not exercise the raw P2 response observer that caused the deployed TTS authorization failure, nor real Provider/network/Chrome/WebAudio/Agent/model timing. |
+| EOT/STT early result waiter | **REJECTED — NO MATERIAL SERIAL GAP** | P1/P2 Speech settlement; real `ProductP1VoiceRouteOwner` and registry result seam under deterministic dependencies | Largest removable-gap p50 **0.885 ms**; largest fraction p50 **0.015** | Complete A1 at `8e5dab8b8`: 20/20 exact, cleanup-complete attempts; ten marks/eight segments; zero forbidden effects | The 450.782 ms provider-slow diagnostic is legitimate remaining Provider wait. The credited final raw `/tmp` report no longer exists; reviewed sanitized tables remain authoritative, while an earlier diagnostic 20/20 raw report survives. Future credited runs must use the durable latency-runs root. |
 
-## 3. Combined checkpoint result
+## 4. Combined checkpoint result
 
 The deterministic checkpoint measures from `speech_end` to
 `confirmed_ack_and_next_turn_ready` on one injected monotonic scheduler. It
@@ -84,7 +129,7 @@ controlled Agent/model interval, not by the accepted P2/TTS waits. P2 final
 delivery is now 85/340/680 ms for W1/W2/W3, while the accepted TTS overlap
 reduces `tts_ready_to_downlink` from 250/750/750 ms to 0 ms in this scheduler.
 
-## 4. Stage-by-stage evidence for completed experiments
+## 5. Stage-by-stage evidence for completed experiments
 
 The tables below deliberately remain separate. The checkpoint and standalone
 P2/TTS owner experiments use deterministic monotonic schedulers, while the VAD
@@ -92,7 +137,7 @@ and connection experiments call the real Provider. A duration from one table
 must not be added to a duration from another as though they shared one physical
 clock or environment.
 
-### 4.1 Accepted combined checkpoint
+### 5.1 Accepted combined checkpoint
 
 These are deterministic p50 values. A1 and A2 are identical for every row, and
 p95 equals p50 because every fixture delay is controlled. `A` below therefore
@@ -116,7 +161,7 @@ reduction is explained by P2 final delivery plus TTS-ready-to-downlink overlap**
 STT, admission, Agent/model, TTS generation and controlled playout did not
 change.
 
-### 4.2 Accepted P2 bounded-pull experiment
+### 5.2 Causally accepted P2 bounded-pull experiment — deployed failure open
 
 This standalone causal experiment measures the real P2 owner from an available
 notification backlog to consumption of the authoritative final notification.
@@ -132,7 +177,16 @@ No Agent/model, STT, TTS, WebAudio or physical network stage was measured by
 this experiment. The gain comes specifically from reducing the number of
 serialized P2 request/response cycles while preserving ordered barriers.
 
-### 4.3 Accepted TTS successor-ACK decoupling experiment
+It did not cover the Gateway Media response observer. In the deployed run
+reported by Hongxing, faster completion was followed by
+`SPEECH_OPERATION_NOT_AUTHORIZED`, retry could not recover, and page refresh
+was required. Current code explains the gap: the frontend parser validates the
+whole batch and queues its tail, but the Gateway observer authorizes synthesis
+only from a top-level single `notification`. Until the observer validates a
+whole batch atomically and processes every valid item in order, the P2 change
+is a causal candidate with a failed product gate, not a complete optimization.
+
+### 5.3 Accepted TTS successor-ACK decoupling experiment
 
 These p50 values start at `TTS descriptor ready`. The candidate does not make
 successor capture ACK arrive earlier. It allows downlink and first-source work
@@ -166,7 +220,7 @@ At 1100 ms, A1/A2 failed before downlink, whereas B rendered once and then
 reported truthful degraded interruption. That is a reliability/ordering
 improvement, not a directly comparable successful-turn latency delta.
 
-### 4.4 Rejected fixed-threshold VAD experiment
+### 5.4 Rejected fixed-threshold VAD experiment
 
 This experiment uses the real OpenAI streaming recognition Provider. Values are
 aggregate successful-attempt p50; outcome integrity remains part of the result.
@@ -183,7 +237,7 @@ endpointing. The valid headroom is therefore the 285–412 ms endpointing region
 but it must be recovered through semantic/adaptive logic with a safe 1200 ms
 fallback rather than another global fixed threshold.
 
-### 4.5 Rejected TTS Provider connection-reuse experiment
+### 5.5 Rejected TTS Provider connection-reuse experiment
 
 This experiment calls the real `OpenAIStreamingSpeechProvider` directly. It
 contains no Gateway, Browser, WebAudio or playout receipt. Positive deltas are
@@ -206,7 +260,7 @@ connection-establishment stage and was reverted. A bounded post-`audio.done`
 EOF drain is only a separate hypothesis; it receives no headroom credit from
 this failed candidate.
 
-### 4.6 Rejected EOT/STT early-wait experiment
+### 5.6 Rejected EOT/STT early-wait experiment
 
 This deterministic no-Chrome A1 measures the real Product P1 owner and real
 registry result seam with controlled local-settlement and Provider-final
@@ -234,7 +288,14 @@ headroom: almost all 450.782 ms elapsed before Provider final readiness, leaving
 only 0.885 ms after both join inputs were ready. The closed decision is
 `NO_MATERIAL_SERIAL_GAP`; no product/wire change was implemented.
 
-### 4.7 Screened stable-sentence Agent→TTS overlap
+The credited final raw report was written under volatile `/tmp` and is no
+longer present. The reviewed sanitized tables remain the credited record. An
+earlier diagnostic A1 raw report survives under the durable
+`/home/renan/openJiuwen-ai/live-voice-latency-runs/` root but is not the final
+population. This weakens re-reduction availability, not the reviewed STOP
+decision; future credited runs must retain raw artifacts durably.
+
+### 5.7 Screened stable-sentence Agent→TTS overlap
 
 This no-Chrome screen asks whether an exact-prefix complete sentence appears
 early enough in the real formal Agent stream to justify benchmark-only TTS
@@ -270,8 +331,12 @@ stopped before authority, correction, cancellation, P2 and Browser work.
 Reopening requires a new representative workload/materiality hypothesis and
 the same exact-prefix gate. Complete evidence remains branch-bound at
 `latency/stable-sentence-agent-tts:live-voice/evidence/STABLE_SENTENCE_AGENT_TTS_CAUSAL_RESULT_2026-08-21.md`.
+The credited v2 raw artifacts survive at
+`/home/renan/openJiuwen-ai/live-voice-latency-runs/stable-sentence-screen-20260821/`;
+their recorded hashes were rechecked on 2026-08-22. Superseded unversioned
+pilot directories retain no credit.
 
-## 5. Recommended next optimization candidates
+## 6. Recommended next optimization candidates
 
 The reference numbers below are stable inventory labels, not execution
 priority. The execution order later in this document additionally accounts for
@@ -280,21 +345,22 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | Ref | Candidate | Status | Expected headroom | Area / likely code | Current evidence and rationale |
 |---:|---|---|---:|---|---|
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
-| 2 | Provider-native Semantic VAD with 1200 ms fallback | **SPECIFIED — NEXT LATENCY SCREEN** | **250–400 ms** | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms proved the latency opportunity but failed natural-pause integrity. The approved screen compares separate `auto` and `high` A/B/A blocks without adding another model RPC; product activation remains excluded. The spec remains branch-bound at `latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`. |
+| 2 | Provider-native Semantic VAD with 1200 ms fallback | **SPECIFIED — NEXT CAUSAL SCREEN** | **250–400 ms hypothesis**, not accepted gain | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms exposed 285–412 ms only on successful cases and failed natural-pause integrity. The approved Tier-3 screen compares separate `auto` and `high` A/B/A blocks without another RPC; product activation and Gate C remain excluded. The spec remains branch-bound at `latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`. |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
-| 4 | Adaptive WebAudio startup lead | **PROPOSED** | **700–840 ms estimated** | `browserAudioIOAdapter.ts`; current fixed `PLAYOUT_STARTUP_LEAD_SECONDS = 1.0` | Strong code-fact headroom. Start with roughly 160–300 ms contiguous decoded audio and a bounded reserve. Physical Chrome is ultimately required for underrun and first-audible acceptance. |
+| 4 | Adaptive WebAudio startup lead | **PROPOSED — PHYSICAL WATERFALL/SPEC FIRST** | **700–840 ms estimated** | `browserAudioIOAdapter.ts`; current fixed `PLAYOUT_STARTUP_LEAD_SECONDS = 1.0` | Strongest remaining code-fact estimate, not measured physical headroom. A bounded 160–300 ms decoded reserve can be screened cheaply, but Chrome/device evidence is required for underrun and first-audible acceptance. |
 | 5 | Separate receipt settlement from successor readiness | **OPEN AUTHORITY QUESTION** | Controlled wait exposed at approximately **254/754/1007 ms** for 250/750/1100 ms injected delays | `productP1VoiceRoute.ts`, P2 presentation ACK and next-turn ownership | First audio is already decoupled, but terminal receipt still follows successor readiness. Any optimization must retain truthful playout and interruption authority. |
-| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP`** | Real three-case pilot: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%** | Pure policy and no-Chrome runner only; no Runtime/P2/Browser product wiring | Three of three real formal-Agent/real-TTS attempts completed with exact prefixes and zero forbidden effects, but failed the 500 ms headroom, 400 ms gain and 10% gates. The earlier 1.5–2.5 s ordinary estimate is not credited. |
+| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP` FOR TESTED WORKLOADS** | Real three-case pilot: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%** | Pure policy and no-Chrome runner only; no Runtime/P2/Browser product wiring | Three of three real formal-Agent/real-TTS attempts completed with exact prefixes and zero forbidden effects, but failed the 500 ms headroom, 400 ms gain and 10% gates. The earlier 1.5–2.5 s ordinary estimate is not credited; any long-form retry requires a new reviewed hypothesis. |
 | 7 | Bounded next-sentence TTS prefetch | **PROPOSED** | **100–800 ms between sentences** | Conversation Runtime, streaming synthesis route, bounded semantic queue | Primarily improves continuity, not first-sentence latency. It must discard prefetched speech on replacement/barge-in. |
 | 8 | Fixed authoritative phrase cache | **PROPOSED** | **800–1400 ms per cache hit** | Conversation Runtime and TTS cache keyed by text hash, locale, model, voice and render version | Suitable only for stable non-private acknowledgements. It must not cache arbitrary Agent or user content. |
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
 
-## 6. Residual P2 candidates
+## 7. Residual P2 candidates
 
-These candidates are useful only if the combined checkpoint or later real
-workloads still show substantial P2 backlog.
+These candidates are frozen until the current batch-observer defect is fixed
+and Gate C shows substantial residual backlog. The deterministic checkpoint
+alone cannot justify more P2 transport work.
 
 | Candidate | Status | Expected headroom | Code area | Comment |
 |---|---|---:|---|---|
@@ -304,7 +370,7 @@ workloads still show substantial P2 backlog.
 | ACK/next-turn processing overlap | **LOWER PRIORITY** | **50–150 ms** | P1/P2 ACK and successor-capture lifecycle | Mostly improves next-turn readiness, not first audible response. |
 | PresentationUnit handoff tuning | **NOT A PRIMARY TARGET** | **<50 ms** | Conversation Runtime → presentation seam | Existing observations are roughly 16–68 ms. |
 
-## 7. Low-confidence or deferred ideas
+## 8. Low-confidence or deferred ideas
 
 | Candidate | Status | Headroom | Reason |
 |---|---|---:|---|
@@ -316,25 +382,34 @@ workloads still show substantial P2 backlog.
 | Direct Browser TTS from raw Agent deltas | **REJECTED DESIGN DIRECTION** | Potentially large but unsafe | Provisional or rewritten text cannot be retracted after it is spoken. Authority belongs in Conversation Runtime. |
 | Opus/codec replacement as the first lever | **DEFERRED** | Unproven | Existing 20 ms PCM framing is already appropriate for streaming; measured waits lie elsewhere. |
 
-## 8. Recommended execution order
+## 9. Recommended execution order
 
 This order applies only after the latency workstream is activated. It does not
 replace the current product-truth execution packet in `live-voice/STATUS.md`.
 
-1. EOT/STT A1 is closed as `NO_MATERIAL_SERIAL_GAP`; no early-wait product
-   candidate is permitted.
-2. Run the separately specified Provider-native Semantic VAD `auto` and `high`
-   screens with the 1200 ms configuration fallback.
-3. Do not implement the screened stable-sentence product candidate; reopen it
-   only for a new representative workload/materiality hypothesis.
-4. Keep bounded sentence prefetch independent and measure continuity headroom
-   before changing product behavior.
-5. Add truthful P3 acknowledgements and, separately, fixed-phrase caching.
-6. Revisit residual P2 push/coalescing only if real backlog remains material.
-7. Reopen Chrome only for physical WebAudio startup, underrun, first-audible
-   and full product-path confirmation.
+1. Repair the P2 Media observer: validate a complete `notification_batch`
+   before effects, process valid items in order, let the final item establish
+   TTS authority, and prove invalid batches grant zero partial authorization.
+2. Run deployed Live Voice A/B with the fixed short/medium/long prompts,
+   optimization off/on, identical environment/config, successful completion,
+   TTS/playout truth and a stage/total waterfall. This closes or rejects the
+   P2 product candidate; the externally reported 46% alone grants no credit.
+3. In parallel, run the separately specified Provider-native Semantic VAD
+   `auto` and `high` causal screens with the 1200 ms fallback. Treat this as
+   Tier-3 Provider/commit/fence work, not a low-risk constant change.
+4. Use the deployed waterfall to choose between an Adaptive WebAudio startup
+   spec (first-audible) and receipt-settlement authority design
+   (turn-completion/next-turn). Do not add their headroom estimates together.
+5. Keep stable-sentence stopped for the tested workloads. Reopen only after
+   Hongxing reviews a new long-form workload/materiality solution. Keep
+   sentence prefetch independent and measure continuity before product code.
+6. Consider authoritative P3 acknowledgements and fixed non-private phrase
+   caching only when perceived Task latency is a product priority; neither
+   shortens Task completion, and both retain Task/Presentation authority risk.
+7. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
+   demonstrates real P2 backlog.
 
-## 9. Documentation evidence
+## 10. Documentation evidence
 
 The following paths and refs were inspected for this inventory. Some evidence
 documents live only on their exact-source latency branches and therefore are
@@ -375,14 +450,24 @@ listed as branch-bound paths rather than current-tree links.
   `live-voice/evidence/LATENCY_ACCEPTED_OPTIMIZATIONS_CHECKPOINT_2026-08-21.md`
 - Hongxing source-bound physical findings:
   `WRAP_UP_HONGXING_LATENCY_FINDINGS_2026-08-21.md`
+- Hongxing deployed bounded-P2 validation report, 2026-08-21: approximately
+  46% faster response completion followed by
+  `SPEECH_OPERATION_NOT_AUTHORIZED`, unrecoverable retry and required refresh.
+  Branch, exact commit, reproduction logs and run artifacts remain pending, so
+  this is external reported evidence rather than source-bound measurement.
 
-## 10. Big-picture conclusion
+## 11. Big-picture conclusion
 
-The combined checkpoint now proves that the accepted P2 and TTS changes retain
+The combined checkpoint now proves that the composed P2 candidate and accepted
+TTS component change retain
 controlled full-round gains of 1.015–8.570 seconds across W1–W3, with longer
-notification-heavy workloads benefiting most. The EOT/STT screen found at most
-0.885 ms p50 removable tail and did not authorize an early-wait product change.
-The stable-sentence real pilot then measured only 177.2 ms p50 projected gain
-and stopped before product wiring. The next no-Chrome latency screen is
-Provider-native Semantic VAD; adaptive WebAudio startup remains a larger
-estimated opportunity but ultimately requires physical Browser validation.
+notification-heavy workloads benefiting most, but deployed P2 validation also
+found a TTS-authorization workflow defect; the P2 change remains a causal
+candidate until repair and Gate C rerun. EOT/STT found at most 0.885 ms p50
+removable tail and did not authorize a product change. Stable-sentence measured
+only 177.2 ms p50 projected gain for the tested workloads and stopped before
+product wiring. The next no-Chrome screen is Provider-native Semantic VAD,
+while P2 repair and the deployed physical waterfall proceed as the product
+validation lane. Adaptive WebAudio startup remains the largest code-fact
+estimate, but its actual priority depends on that waterfall and physical
+Browser evidence.
