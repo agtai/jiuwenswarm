@@ -5067,11 +5067,16 @@ class DirectProjectCodeExecutorAdapter:
                 if interruption is None:
                     interruption = ("cancelled", "TASK_CANCEL_ACKNOWLEDGED")
                 raw_status, error = interruption
+                user_cancel = error == "TASK_CANCEL_ACKNOWLEDGED"
                 await asyncio.to_thread(
                     self._journal.finish,
                     item.attempt_id,
                     owner_id=self._owner_id,
-                    outcome=TerminalOutcome.INTERRUPTED,
+                    outcome=(
+                        TerminalOutcome.CANCELLED
+                        if user_cancel
+                        else TerminalOutcome.INTERRUPTED
+                    ),
                     raw_status=raw_status,
                     summary=None,
                     error=error,

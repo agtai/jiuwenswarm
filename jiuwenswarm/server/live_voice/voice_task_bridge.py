@@ -1046,6 +1046,21 @@ class VoiceTaskBridge:
                 "task intent resolution changed its content-bound identity",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if result.confirmation_token is not None and any(
+            value is not None
+            for value in (
+                result.operation,
+                result.task_id,
+                result.name,
+                result.instruction,
+                result.target_span,
+            )
+        ):
+            raise VoiceTaskBridgeViolation(
+                "INVALID_TASK_CONFIRMATION_DECISION",
+                "a confirmation turn cannot carry Task intent authority",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
         source_value = result.instruction or result.confirmation_token or result.task_id
         self._verify_span(commit.text, result.source_span, source_value)
         self._verify_span(commit.text, result.target_span, result.task_id)
@@ -1075,12 +1090,6 @@ class VoiceTaskBridge:
             raise VoiceTaskBridgeViolation(
                 "INVALID_TASK_CONFIRMATION_DECISION",
                 "only resolved create/cancel intents require confirmation",
-                ErrorCode.PROTOCOL_VIOLATION,
-            )
-        if result.confirmation_token is not None and result.operation is not None:
-            raise VoiceTaskBridgeViolation(
-                "INVALID_TASK_CONFIRMATION_DECISION",
-                "a confirmation turn cannot introduce a second operation",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         return result

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -22,12 +22,15 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
     canonical_json_bytes,
 )
+from jiuwenswarm.server.live_voice import jiuwenswarm_round_harness as harness_module
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
     AgentConversationNotificationLease,
     AgentConversationRuntime,
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
+    _COMPOSITION_TEARDOWN_PHASES,
+    _teardown_phase_name,
 )
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentBridgeRuntime,
@@ -154,6 +157,205 @@ class LowerFormalAdapter:
         yield  # pragma: no cover
 
 
+class ControlledCloseStream:
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        channel_id: str,
+        final: str | None,
+        next_release: asyncio.Event | None,
+        close_release: asyncio.Event | None,
+        close_error: BaseException | None,
+        close_lookup_error: BaseException | None,
+        close_invocation_error: BaseException | None,
+    ) -> None:
+        self.request_id = request_id
+        self.channel_id = channel_id
+        self.final = final
+        self.next_release = next_release
+        self.close_release = close_release
+        self.close_error = close_error
+        self.close_lookup_error = close_lookup_error
+        self.close_invocation_error = close_invocation_error
+        self.next_started = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_finished = asyncio.Event()
+        self.close_lookups = 0
+        self.close_invocations = 0
+        self.close_calls = 0
+        self._final_examined = False
+
+    def __aiter__(self) -> ControlledCloseStream:
+        return self
+
+    async def __anext__(self) -> AgentResponseChunk:
+        if not self._final_examined:
+            self._final_examined = True
+            if self.final is not None:
+                return AgentResponseChunk(
+                    request_id=self.request_id,
+                    channel_id=self.channel_id,
+                    payload={"event_type": "chat.final", "content": self.final},
+                    is_complete=True,
+                )
+        if self.next_release is not None:
+            self.next_started.set()
+            await self.next_release.wait()
+        raise StopAsyncIteration
+
+    @property
+    def aclose(self) -> Callable[[], Awaitable[None]]:
+        self.close_lookups += 1
+        if self.close_lookup_error is not None:
+            raise self.close_lookup_error
+        return self._begin_close
+
+    def _begin_close(self) -> Awaitable[None]:
+        self.close_invocations += 1
+        if self.close_invocation_error is not None:
+            raise self.close_invocation_error
+        return self._close()
+
+    async def _close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        try:
+            if self.close_release is not None:
+                await self.close_release.wait()
+            if self.close_error is not None:
+                raise self.close_error
+        finally:
+            self.close_finished.set()
+
+
+class ControlledCloseFacade:
+    def __init__(
+        self,
+        *,
+        final: str | None,
+        next_release: asyncio.Event | None = None,
+        close_release: asyncio.Event | None = None,
+        close_error: BaseException | None = None,
+        close_lookup_error: BaseException | None = None,
+        close_invocation_error: BaseException | None = None,
+    ) -> None:
+        self.final = final
+        self.next_release = next_release
+        self.close_release = close_release
+        self.close_error = close_error
+        self.close_lookup_error = close_lookup_error
+        self.close_invocation_error = close_invocation_error
+        self.stream_created = asyncio.Event()
+        self.stream: ControlledCloseStream | None = None
+        self.calls = 0
+
+    def supports_formal_live_voice(self) -> bool:
+        return True
+
+    def process_formal_live_voice_stream(self, execution) -> ControlledCloseStream:
+        self.calls += 1
+        if self.stream is not None:
+            raise AssertionError("formal stream must be constructed exactly once")
+        self.stream = ControlledCloseStream(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            final=self.final,
+            next_release=self.next_release,
+            close_release=self.close_release,
+            close_error=self.close_error,
+            close_lookup_error=self.close_lookup_error,
+            close_invocation_error=self.close_invocation_error,
+        )
+        self.stream_created.set()
+        return self.stream
+
+
+class CustomCloseAwaitable:
+    def __init__(self, future: asyncio.Future[None]) -> None:
+        self.future = future
+
+    def __await__(self):
+        return self.future.__await__()
+
+
+class GeneralAwaitableCloseStream(ControlledCloseStream):
+    def __init__(self, *, awaitable_kind: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.awaitable_kind = awaitable_kind
+        self.returned_awaitable: object | None = None
+        self.manual_future: asyncio.Future[None] | None = None
+
+    def _begin_close(self) -> object:
+        self.close_invocations += 1
+        if self.close_invocation_error is not None:
+            raise self.close_invocation_error
+        if self.awaitable_kind == "task":
+            returned: object = asyncio.create_task(
+                self._close(), name="test-general-awaitable-stream-close"
+            )
+        elif self.awaitable_kind in {"future", "custom"}:
+            self.close_calls += 1
+            self.close_started.set()
+            future = asyncio.get_running_loop().create_future()
+            future.add_done_callback(lambda _completed: self.close_finished.set())
+            self.manual_future = future
+            if self.close_release is None:
+                if self.close_error is None:
+                    future.set_result(None)
+                else:
+                    future.set_exception(self.close_error)
+            returned = (
+                future
+                if self.awaitable_kind == "future"
+                else CustomCloseAwaitable(future)
+            )
+        elif self.awaitable_kind == "invalid":
+            returned = object()
+        else:  # pragma: no cover - test construction owns this vocabulary
+            raise AssertionError("unsupported test awaitable kind")
+        self.returned_awaitable = returned
+        return returned
+
+    def settle_manual_close(self) -> None:
+        future = self.manual_future
+        assert future is not None
+        if future.done():
+            return
+        assert self.close_release is None or self.close_release.is_set()
+        if self.close_error is None:
+            future.set_result(None)
+        else:
+            future.set_exception(self.close_error)
+
+
+class GeneralAwaitableCloseFacade(ControlledCloseFacade):
+    def __init__(self, *, awaitable_kind: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.awaitable_kind = awaitable_kind
+
+    def process_formal_live_voice_stream(
+        self, execution
+    ) -> GeneralAwaitableCloseStream:
+        self.calls += 1
+        if self.stream is not None:
+            raise AssertionError("formal stream must be constructed exactly once")
+        stream = GeneralAwaitableCloseStream(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            final=self.final,
+            next_release=self.next_release,
+            close_release=self.close_release,
+            close_error=self.close_error,
+            close_lookup_error=self.close_lookup_error,
+            close_invocation_error=self.close_invocation_error,
+            awaitable_kind=self.awaitable_kind,
+        )
+        self.stream = stream
+        self.stream_created.set()
+        return stream
+
+
 class RecordingHistoryWriter:
     def __init__(self, *, fail_assistant_once: bool = False) -> None:
         self.users = []
@@ -267,6 +469,42 @@ def id_factory():
     return allocate
 
 
+def controlled_harness_round(
+    current_facade: ControlledCloseFacade,
+    *,
+    suffix: str,
+):
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"controlled-close-harness-{suffix}",
+        id_factory=id_factory(),
+    )
+    selected = commit(
+        turn_id=f"turn-{suffix}",
+        commit_id=f"commit-{suffix}",
+        interaction_id=f"interaction-{suffix}",
+    )
+    binding = HarnessRoundBinding(
+        request_id=f"request-{suffix}",
+        response_id=f"response-{suffix}",
+        correlation_id=f"correlation-request-{suffix}",
+        commit=selected,
+    )
+    reservation = harness.reserve_round(binding, facade=current_facade)
+    assert harness.begin_round_commit(reservation) is True
+    handle = harness.commit_round(
+        reservation,
+        response_ref=ResponseRef(
+            interaction_id=selected.interaction_id,
+            response_id=binding.response_id,
+            response_generation=0,
+        ),
+        context=FormalContextSnapshot(selected.scope),
+        facade=current_facade,
+        allow_tools=False,
+    )
+    return harness, selected, binding, handle
+
+
 def runtime(
     lower: LowerFormalAdapter,
     history: RecordingHistoryWriter,
@@ -356,12 +594,19 @@ async def acknowledge_formal_round(
 
 
 def task_progress_intent(
-    *, origin_id: str = "interaction-1"
+    *,
+    origin_id: str = "interaction-1",
+    task_id: str = "task-progress-1",
+    event_id: str = "task-progress-source-0",
+    seq: int = 0,
+    event_type: str = "task.accepted",
+    state: str = "accepted",
+    outcome: str | None = None,
 ) -> TaskProgressNotificationIntent:
     current_scope = scope()
     binding = TaskProgressOriginBinding(
         scope=current_scope,
-        task_id="task-progress-1",
+        task_id=task_id,
         session_id=current_scope.session_id or "",
         project_id=current_scope.project_id or "",
         correlation_id="correlation-task-progress",
@@ -379,14 +624,14 @@ def task_progress_intent(
         progress_adapter="task_progress_return.v1",
     )
     task_event = PersistentTaskEvent(
-        event_id="task-progress-source-0",
+        event_id=event_id,
         task_id=binding.task_id,
         attempt_id="attempt-progress-1",
         scope=current_scope,
-        seq=0,
-        event_type="task.accepted",
-        state="accepted",
-        outcome=None,
+        seq=seq,
+        event_type=event_type,
+        state=state,
+        outcome=outcome,
         producer="task_core",
         source_event_id=None,
         causation_id="command-progress-1",
@@ -1027,6 +1272,314 @@ async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_tur
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+async def test_prestart_direct_cancel_keeps_terminal_owner_until_exact_cancel() -> None:
+    lower = LowerFormalAdapter(final=None, release=asyncio.Event())
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id="prestart-direct-cancel-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id="prestart-direct-cancel-composition",
+        facade=facade(lower),
+        history_writer=history,
+        harness=harness,
+    )
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    captured = SimpleNamespace(record=None, terminal_owner=None)
+
+    def cancel_before_first_task_turn(agent_handle) -> None:
+        round_record = harness._rounds[agent_handle.round_id]
+        assert round_record.started.is_set() is False
+        assert round_record.terminal_task is not None
+        captured.record = round_record
+        captured.terminal_owner = round_record.terminal_task
+        assert (
+            round_record.task.cancel("prestart direct process-control cancel") is True
+        )
+
+    try:
+        handle = await current.submit_committed_turn(
+            request_id="request-prestart-direct-cancel",
+            response_id="response-prestart-direct-cancel",
+            correlation_id="correlation-request-prestart-direct-cancel",
+            commit=selected,
+            context=FormalContextSnapshot(selected.scope),
+            after_dispatch=cancel_before_first_task_turn,
+        )
+        exact_command = cancel_command(
+            handle,
+            selected,
+            command_id="exact-cancel-after-prestart-direct-cancel",
+        )
+        accepted = await current.close_interaction(exact_command)
+        replay = await current.close_interaction(exact_command)
+        assert accepted.accepted is True
+        assert accepted.replayed is False
+        assert replay.accepted is True
+        assert replay.replayed is True
+
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.status.value == "terminal_observed"
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == "cancelled"
+        notifications = [
+            await asyncio.wait_for(current.next_notification(), timeout=1)
+            for _ in range(3)
+        ]
+        progress = [
+            WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            for notification in notifications
+            if notification.progress_event is not None
+        ]
+        assert [item.state.value for item in progress] == [
+            "accepted",
+            "running",
+            "terminal",
+        ]
+        assert progress[-1].outcome is not None
+        assert progress[-1].outcome.value == "cancelled"
+
+        round_record = captured.record
+        terminal_owner = captured.terminal_owner
+        assert round_record is harness._rounds[handle.round_id]
+        assert terminal_owner is not None
+        assert round_record.terminal_task is terminal_owner
+        assert terminal_owner.done()
+        assert round_record.task.cancelled()
+        assert round_record.cleanup_task is None
+        snapshot = current.snapshot()
+        assert snapshot.published_notifications == 3
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == ()
+        assert snapshot.harness.cancel_effects == 1
+        assert snapshot.bridge.active_requests == ()
+        assert lower.calls == 0
+        assert history.assistant_intents == []
+        assert not any(
+            record.effect.effect_type
+            in {
+                "agent.execute",
+                "tool.call",
+                "task.create",
+                "task.cancel",
+                "round.cancel",
+            }
+            for record in snapshot.conversation.effects
+        )
+
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert await current.close(timeout_seconds=1) == closed
+        assert history.users == [(selected, "web")]
+    finally:
+        await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_terminal_owner_cancel_is_not_swallowed_by_same_turn_business_finish() -> (
+    None
+):
+    business_release = asyncio.Event()
+    close_release = asyncio.Event()
+    close_error = RuntimeError("adopted cleanup failed after owner cancellation")
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        next_release=business_release,
+        close_release=close_release,
+        close_error=close_error,
+    )
+    harness, _selected, _binding, handle = controlled_harness_round(
+        current_facade,
+        suffix="terminal-owner-cancel-race",
+    )
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    stream = current_facade.stream
+    assert stream is not None
+    await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+
+    # A separately completed round proves that adopting the abandoned cleanup
+    # neither removes nor republishes another round's terminal authority.
+    other_facade = ControlledCloseFacade(final="other formal answer")
+    other_selected = commit(
+        turn_id="turn-terminal-owner-cancel-isolation",
+        commit_id="commit-terminal-owner-cancel-isolation",
+        interaction_id="interaction-terminal-owner-cancel-isolation",
+    )
+    other_binding = HarnessRoundBinding(
+        request_id="request-terminal-owner-cancel-isolation",
+        response_id="response-terminal-owner-cancel-isolation",
+        correlation_id="correlation-terminal-owner-cancel-isolation",
+        commit=other_selected,
+    )
+    other_reservation = harness.reserve_round(other_binding, facade=other_facade)
+    assert harness.begin_round_commit(other_reservation) is True
+    other_handle = harness.commit_round(
+        other_reservation,
+        response_ref=ResponseRef(
+            interaction_id=other_selected.interaction_id,
+            response_id=other_binding.response_id,
+            response_generation=0,
+        ),
+        context=FormalContextSnapshot(other_selected.scope),
+        facade=other_facade,
+        allow_tools=False,
+    )
+    other_events = await asyncio.wait_for(
+        _collect_harness_events(other_handle), timeout=1
+    )
+    other_terminals = [
+        item
+        for item in other_events
+        if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(other_terminals) == 1
+    assert other_terminals[0].payload == {
+        "state": "terminal",
+        "outcome": "completed",
+    }
+    other_record = harness._rounds[other_handle.round_id]
+    assert other_record.terminal_task is not None
+    assert other_record.terminal_task.done()
+
+    round_record = harness._rounds[handle.round_id]
+    terminal_owner = round_record.terminal_task
+    assert terminal_owner is not None
+    assert terminal_owner.done() is False
+    # Let the retained owner enter shield(record.task) before the business
+    # result is released.  The child done callback then places the real owner
+    # cancellation in the same scheduling window as shield completion.
+    await asyncio.sleep(0)
+    owner_cancel_requested = asyncio.Event()
+    cancel_results: list[bool] = []
+
+    def cancel_terminal_owner(_business_task: asyncio.Task[None]) -> None:
+        cancel_results.append(
+            terminal_owner.cancel("terminal owner cancelled after business result")
+        )
+        owner_cancel_requested.set()
+
+    round_record.task.add_done_callback(cancel_terminal_owner)
+    business_release.set()
+
+    first_close: asyncio.Task[None] | None = None
+    second_close: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(owner_cancel_requested.wait(), timeout=1)
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await terminal_owner
+        assert raised.value.args == ("terminal owner cancelled after business result",)
+        assert cancel_results == [True]
+        assert terminal_owner.cancelled()
+        assert round_record.task.done()
+        assert round_record.task.cancelled() is False
+        assert round_record.task.exception() is None
+        assert round_record.business_settled is True
+        assert round_record.terminal_outcome.value == "completed"
+
+        # Process-control cancellation cannot fabricate terminal authority or
+        # an end marker.  Only the legally emitted accepted/running/final data
+        # may remain queued for this abandoned subscription.
+        queued = tuple(handle._queue._queue)
+        progress = [
+            item.payload["state"]
+            for item in queued
+            if isinstance(item, harness_module.EventEnvelope)
+        ]
+        assert progress == ["accepted", "running"]
+        assert sum(isinstance(item, AgentResponseChunk) for item in queued) == 1
+        assert all(
+            isinstance(item, (AgentResponseChunk, harness_module.EventEnvelope))
+            for item in queued
+        )
+        assert handle.terminal_event is None
+        assert round_record.cleanup_task is None
+        assert stream.close_lookups == 0
+        assert stream.close_invocations == 0
+        assert stream.close_calls == 0
+
+        before_close = harness.snapshot()
+        assert before_close.closed is False
+        assert before_close.active_rounds == (handle.round_id,)
+        assert before_close.retained_rounds == 2
+        assert before_close.pending_cleanup_rounds == ()
+
+        first_close = asyncio.create_task(harness.close())
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+        retained_close_owner = harness._close_task
+        cleanup_owner = round_record.cleanup_task
+        assert retained_close_owner is not None
+        assert retained_close_owner.done() is False
+        assert cleanup_owner is not None
+        assert cleanup_owner.done() is False
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+
+        second_close = asyncio.create_task(harness.close())
+        await asyncio.sleep(0)
+        assert harness._close_task is retained_close_owner
+        assert first_close.done() is False
+        assert second_close.done() is False
+        pending = harness.snapshot()
+        assert pending.closed is False
+        assert pending.active_rounds == (handle.round_id,)
+        assert pending.retained_rounds == 2
+        assert pending.pending_cleanup_rounds == (handle.round_id,)
+
+        close_release.set()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        await asyncio.wait_for(asyncio.gather(first_close, second_close), timeout=1)
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+        closed = harness.snapshot()
+        assert closed.closed is True
+        assert closed.active_rounds == ()
+        assert closed.pending_cleanup_rounds == ()
+        assert closed.retained_rounds == 1
+        assert handle.round_id not in harness._rounds
+        assert harness._rounds[other_handle.round_id] is other_record
+        assert other_record.terminal_event is other_terminals[0]
+        assert round_record.cleanup_task is cleanup_owner
+        assert cleanup_owner.done()
+        assert round_record.cleanup_error is close_error
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert other_facade.stream is not None
+        assert other_facade.stream.close_lookups == 1
+        assert other_facade.stream.close_invocations == 1
+        assert other_facade.stream.close_calls == 1
+        assert (
+            sum(
+                getattr(item, "event_type", None) == "round.terminal"
+                for item in other_events
+            )
+            == 1
+        )
+    finally:
+        business_release.set()
+        close_release.set()
+        if first_close is not None or second_close is not None:
+            await asyncio.gather(
+                *(task for task in (first_close, second_close) if task is not None),
+                return_exceptions=True,
+            )
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+    assert harness.snapshot().closed is True
+    assert round_record.task.done()
+    assert terminal_owner.done()
+    assert round_record.cleanup_task is not None
+    assert round_record.cleanup_task.done()
 
 
 async def claim_and_ack_effects(
@@ -1965,6 +2518,1072 @@ async def test_capacity_one_unsubscribed_round_can_cancel_and_close() -> None:
     assert harness.snapshot().active_rounds == ()
     await asyncio.wait_for(harness.close(), timeout=1)
     assert harness.snapshot().closed is True
+
+
+@pytest.mark.parametrize(
+    ("final", "expected_outcome"),
+    (("formal answer", "completed"), (None, "failed")),
+)
+@pytest.mark.asyncio
+async def test_stream_close_error_preserves_known_round_outcome_and_fails_unknown(
+    final: str | None,
+    expected_outcome: str,
+) -> None:
+    current_facade = ControlledCloseFacade(
+        final=final,
+        close_error=RuntimeError("stream close failed"),
+    )
+    harness, _, _, handle = controlled_harness_round(
+        current_facade,
+        suffix=f"close-error-{expected_outcome}",
+    )
+
+    events = await asyncio.wait_for(
+        asyncio.create_task(_collect_harness_events(handle)),
+        timeout=1,
+    )
+
+    terminal_events = [
+        item for item in events if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].payload == {
+        "state": "terminal",
+        "outcome": expected_outcome,
+    }
+    assert current_facade.calls == 1
+    assert current_facade.stream is not None
+    assert current_facade.stream.close_calls == 1
+    assert current_facade.stream.close_finished.is_set()
+    assert harness.snapshot().active_rounds == ()
+    assert harness.snapshot().pending_cleanup_rounds == ()
+    await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_round_survives_stream_close_error() -> None:
+    next_release = asyncio.Event()
+    current_facade = ControlledCloseFacade(
+        final=None,
+        next_release=next_release,
+        close_error=RuntimeError("cancelled stream close failed"),
+    )
+    harness, selected, binding, handle = controlled_harness_round(
+        current_facade,
+        suffix="cancel-close-error",
+    )
+    events_task = asyncio.create_task(_collect_harness_events(handle))
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+    await asyncio.wait_for(current_facade.stream.next_started.wait(), timeout=1)
+
+    accepted = handle.cancel(
+        cancel_command(
+            SimpleNamespace(
+                request_id=binding.request_id,
+                round_id=handle.round_id,
+            ),
+            selected,
+            command_id="cancel-with-close-error",
+        )
+    )
+    assert accepted.accepted is True
+    events = await asyncio.wait_for(events_task, timeout=1)
+
+    terminal_events = [
+        item for item in events if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].payload == {
+        "state": "terminal",
+        "outcome": "cancelled",
+    }
+    assert current_facade.calls == 1
+    assert current_facade.stream.close_calls == 1
+    assert harness.snapshot().cancel_effects == 1
+    assert harness.snapshot().active_rounds == ()
+    assert harness.snapshot().pending_cleanup_rounds == ()
+    await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("business_case", "final", "expected_outcome"),
+    (
+        ("completed", "formal answer", "completed"),
+        ("cancelled", None, "cancelled"),
+        ("unknown", None, "failed"),
+    ),
+)
+@pytest.mark.parametrize("failure_boundary", ("lookup", "invocation"))
+@pytest.mark.asyncio
+async def test_stream_close_acquisition_failure_preserves_business_truth(
+    business_case: str,
+    final: str | None,
+    expected_outcome: str,
+    failure_boundary: str,
+) -> None:
+    next_release = asyncio.Event() if business_case == "cancelled" else None
+    close_error = RuntimeError(
+        f"hostile aclose {failure_boundary} failed after {business_case}"
+    )
+    current_facade = ControlledCloseFacade(
+        final=final,
+        next_release=next_release,
+        close_lookup_error=close_error if failure_boundary == "lookup" else None,
+        close_invocation_error=(
+            close_error if failure_boundary == "invocation" else None
+        ),
+    )
+    harness, selected, binding, handle = controlled_harness_round(
+        current_facade,
+        suffix=f"close-{failure_boundary}-{business_case}",
+    )
+    round_record = harness._rounds[handle.round_id]
+    events_task = asyncio.create_task(_collect_harness_events(handle))
+    cancel = cancel_command(
+        SimpleNamespace(
+            request_id=binding.request_id,
+            round_id=handle.round_id,
+        ),
+        selected,
+        command_id=f"cancel-close-{failure_boundary}-acquisition",
+    )
+
+    try:
+        await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+        assert current_facade.stream is not None
+        if business_case == "cancelled":
+            await asyncio.wait_for(current_facade.stream.next_started.wait(), timeout=1)
+            accepted = handle.cancel(cancel)
+            assert accepted.accepted is True
+
+        events = await asyncio.wait_for(events_task, timeout=1)
+        terminal_events = [
+            item
+            for item in events
+            if getattr(item, "event_type", None) == "round.terminal"
+        ]
+        assert len(terminal_events) == 1
+        assert terminal_events[0].payload == {
+            "state": "terminal",
+            "outcome": expected_outcome,
+        }
+        assert round_record.cleanup_error is close_error
+        assert round_record.cleanup_task is None
+        assert round_record.terminal_task is not None
+        assert round_record.terminal_task.done()
+        assert current_facade.calls == 1
+        assert current_facade.stream.close_lookups == 1
+        assert current_facade.stream.close_invocations == (
+            0 if failure_boundary == "lookup" else 1
+        )
+        assert current_facade.stream.close_calls == 0
+        assert current_facade.stream.close_started.is_set() is False
+        assert current_facade.stream.close_finished.is_set() is False
+        if business_case == "cancelled":
+            replay = handle.cancel(cancel)
+            assert replay.accepted is True
+            assert replay.replayed is True
+        else:
+            rejection = handle.cancel(cancel)
+            replay = handle.cancel(cancel)
+            assert rejection.accepted is False
+            assert rejection.replayed is False
+            assert rejection.reason == "ROUND_ALREADY_TERMINAL"
+            assert replay.accepted is False
+            assert replay.replayed is True
+        assert harness.snapshot().active_rounds == ()
+        assert harness.snapshot().pending_cleanup_rounds == ()
+        assert harness.snapshot().cancel_effects == (
+            1 if business_case == "cancelled" else 0
+        )
+        await asyncio.wait_for(harness.close(), timeout=1)
+        assert harness.snapshot().closed is True
+        await asyncio.wait_for(harness.close(), timeout=1)
+    finally:
+        if next_release is not None:
+            next_release.set()
+        if not events_task.done():
+            events_task.cancel()
+        await asyncio.gather(events_task, return_exceptions=True)
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.parametrize("awaitable_kind", ("future", "task", "custom"))
+@pytest.mark.parametrize(
+    ("business_case", "final", "expected_outcome", "cleanup_fails"),
+    (
+        ("completed", "formal answer", "completed", False),
+        ("cancelled", None, "cancelled", False),
+        ("unknown", None, "failed", True),
+    ),
+)
+@pytest.mark.asyncio
+async def test_stream_close_accepts_every_general_awaitable_shape(
+    awaitable_kind: str,
+    business_case: str,
+    final: str | None,
+    expected_outcome: str,
+    cleanup_fails: bool,
+) -> None:
+    next_release = asyncio.Event() if business_case == "cancelled" else None
+    close_error = (
+        RuntimeError(f"{awaitable_kind} close failed after unknown business")
+        if cleanup_fails
+        else None
+    )
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind=awaitable_kind,
+        final=final,
+        next_release=next_release,
+        close_error=close_error,
+    )
+    harness, selected, binding, handle = controlled_harness_round(
+        current_facade,
+        suffix=f"general-awaitable-{awaitable_kind}-{business_case}",
+    )
+    events_task = asyncio.create_task(_collect_harness_events(handle))
+    try:
+        await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+        stream = current_facade.stream
+        assert isinstance(stream, GeneralAwaitableCloseStream)
+        if business_case == "cancelled":
+            await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+            accepted = handle.cancel(
+                cancel_command(
+                    SimpleNamespace(
+                        request_id=binding.request_id,
+                        round_id=handle.round_id,
+                    ),
+                    selected,
+                    command_id=f"cancel-general-awaitable-{awaitable_kind}",
+                )
+            )
+            assert accepted.accepted is True
+
+        events = await asyncio.wait_for(events_task, timeout=1)
+        terminal_events = [
+            item
+            for item in events
+            if getattr(item, "event_type", None) == "round.terminal"
+        ]
+        assert len(terminal_events) == 1
+        assert terminal_events[0].payload == {
+            "state": "terminal",
+            "outcome": expected_outcome,
+        }
+        record = harness._rounds[handle.round_id]
+        cleanup_owner = record.cleanup_task
+        assert cleanup_owner is not None
+        assert cleanup_owner.done()
+        if awaitable_kind in {"future", "task"}:
+            assert cleanup_owner is stream.returned_awaitable
+        else:
+            assert isinstance(cleanup_owner, asyncio.Task)
+            assert cleanup_owner is not stream.returned_awaitable
+        if awaitable_kind == "task":
+            assert cleanup_owner.get_name() == "test-general-awaitable-stream-close"
+        elif awaitable_kind == "custom":
+            assert cleanup_owner.get_name().startswith(
+                "live-voice-harness-stream-close:"
+            )
+        assert record.cleanup_error is close_error
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert stream.close_started.is_set()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        assert harness.snapshot().active_rounds == ()
+        assert harness.snapshot().pending_cleanup_rounds == ()
+        assert harness.snapshot().cancel_effects == (
+            1 if business_case == "cancelled" else 0
+        )
+        await asyncio.wait_for(harness.close(), timeout=1)
+        await asyncio.wait_for(harness.close(), timeout=1)
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+    finally:
+        if next_release is not None:
+            next_release.set()
+        stream = current_facade.stream
+        if isinstance(stream, GeneralAwaitableCloseStream):
+            if stream.manual_future is not None and not stream.manual_future.done():
+                stream.settle_manual_close()
+            returned = stream.returned_awaitable
+            if isinstance(returned, asyncio.Future):
+                await asyncio.gather(returned, return_exceptions=True)
+            if stream.manual_future is not None and stream.manual_future.done():
+                stream.manual_future.exception()
+        if not events_task.done():
+            events_task.cancel()
+        await asyncio.gather(events_task, return_exceptions=True)
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("business_case", "final", "expected_outcome", "expected_notifications"),
+    (
+        ("completed", "formal answer", "completed", 4),
+        ("cancelled", None, "cancelled", 3),
+        ("unknown", None, "failed", 3),
+    ),
+)
+@pytest.mark.asyncio
+async def test_future_cleanup_cancelled_error_is_cleanup_failure_not_owner_cancel(
+    business_case: str,
+    final: str | None,
+    expected_outcome: str,
+    expected_notifications: int,
+) -> None:
+    next_release = asyncio.Event() if business_case == "cancelled" else None
+    close_error = asyncio.CancelledError(
+        f"future cleanup process-control failure after {business_case} business"
+    )
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind="future",
+        final=final,
+        next_release=next_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"future-cancelled-error-{business_case}-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"future-cancelled-error-{business_case}-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(
+        current,
+        selected,
+        request_id=f"request-future-cancelled-error-{business_case}",
+        response_id=f"response-future-cancelled-error-{business_case}",
+    )
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    stream = current_facade.stream
+    assert isinstance(stream, GeneralAwaitableCloseStream)
+
+    try:
+        if business_case == "cancelled":
+            await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+            accepted = await current.close_interaction(
+                cancel_command(
+                    handle,
+                    selected,
+                    command_id="cancel-future-cleanup-cancelled-error",
+                )
+            )
+            assert accepted.accepted is True
+            assert accepted.replayed is False
+
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == expected_outcome
+
+        notifications = []
+        terminal_progress = None
+        while terminal_progress is None:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                terminal_progress = progress
+        assert terminal_progress.outcome is not None
+        assert terminal_progress.outcome.value == expected_outcome
+        assert (
+            sum(
+                item.progress_event is not None
+                and WorkProgressEventV2.from_dict(
+                    item.progress_event.payload
+                ).state.value
+                == "terminal"
+                for item in notifications
+            )
+            == 1
+        )
+
+        round_record = harness._rounds[handle.round_id]
+        cleanup_owner = round_record.cleanup_task
+        terminal_owner = round_record.terminal_task
+        assert cleanup_owner is stream.manual_future
+        assert cleanup_owner is not None
+        assert cleanup_owner.done()
+        assert cleanup_owner.cancelled() is False
+        assert cleanup_owner.exception() is close_error
+        assert round_record.cleanup_error is close_error
+        assert terminal_owner is not None
+        assert terminal_owner.done()
+        assert terminal_owner.cancelled() is False
+        assert terminal_owner.exception() is None
+        assert round_record.task.done()
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert current_facade.calls == 1
+
+        snapshot = current.snapshot()
+        assert snapshot.published_notifications == expected_notifications
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == ()
+        assert snapshot.bridge.active_requests == ()
+        assert snapshot.bridge.pending_dispatches == 0
+        assert history.users == [(selected, "web")]
+        assert history.assistant_intents == []
+        assert not any(
+            record.effect.effect_type
+            in {
+                "tool.call",
+                "task.create",
+                "task.cancel",
+                "round.cancel",
+            }
+            for record in snapshot.conversation.effects
+        )
+
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert await current.close(timeout_seconds=1) == closed
+        assert current.snapshot().harness.active_rounds == ()
+        assert current.snapshot().bridge.active_requests == ()
+    finally:
+        if next_release is not None:
+            next_release.set()
+        if stream.manual_future is not None and not stream.manual_future.done():
+            stream.settle_manual_close()
+        if stream.manual_future is not None and stream.manual_future.done():
+            stream.manual_future.exception()
+        await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_non_awaitable_stream_close_result_is_acquisition_failure() -> None:
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind="invalid",
+        final="formal answer",
+    )
+    harness, _, _, handle = controlled_harness_round(
+        current_facade,
+        suffix="non-awaitable-close-result",
+    )
+
+    events = await asyncio.wait_for(
+        asyncio.create_task(_collect_harness_events(handle)), timeout=1
+    )
+
+    terminal_events = [
+        item for item in events if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].payload == {
+        "state": "terminal",
+        "outcome": "completed",
+    }
+    stream = current_facade.stream
+    assert isinstance(stream, GeneralAwaitableCloseStream)
+    record = harness._rounds[handle.round_id]
+    assert isinstance(record.cleanup_error, TypeError)
+    assert record.cleanup_task is None
+    assert stream.close_lookups == 1
+    assert stream.close_invocations == 1
+    assert stream.close_calls == 0
+    assert stream.close_started.is_set() is False
+    assert harness.snapshot().active_rounds == ()
+    assert harness.snapshot().pending_cleanup_rounds == ()
+    await asyncio.wait_for(harness.close(), timeout=1)
+    await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.parametrize("awaitable_kind", ("future", "task", "custom"))
+@pytest.mark.asyncio
+async def test_general_awaitable_cleanup_timeout_retains_exact_outer_close_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    awaitable_kind: str,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.01)
+    close_release = asyncio.Event()
+    close_error = RuntimeError(f"late {awaitable_kind} cleanup failed")
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind=awaitable_kind,
+        final="formal answer",
+        close_release=close_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"general-awaitable-{awaitable_kind}-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"general-awaitable-{awaitable_kind}-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    stream = current_facade.stream
+    assert isinstance(stream, GeneralAwaitableCloseStream)
+    await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+
+    try:
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == "completed"
+        notifications = []
+        terminal_progress = None
+        while terminal_progress is None:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                terminal_progress = progress
+        assert terminal_progress.outcome is not None
+        assert terminal_progress.outcome.value == "completed"
+        assert (
+            sum(
+                item.progress_event is not None
+                and WorkProgressEventV2.from_dict(
+                    item.progress_event.payload
+                ).state.value
+                == "terminal"
+                for item in notifications
+            )
+            == 1
+        )
+        round_record = harness._rounds[handle.round_id]
+        cleanup_owner = round_record.cleanup_task
+        assert cleanup_owner is not None
+        assert cleanup_owner.done() is False
+        if awaitable_kind in {"future", "task"}:
+            assert cleanup_owner is stream.returned_awaitable
+        else:
+            assert isinstance(cleanup_owner, asyncio.Task)
+            assert cleanup_owner is not stream.returned_awaitable
+        if awaitable_kind == "task":
+            assert cleanup_owner.get_name() == "test-general-awaitable-stream-close"
+        elif awaitable_kind == "custom":
+            assert cleanup_owner.get_name().startswith(
+                "live-voice-harness-stream-close:"
+            )
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+        published_notifications = snapshot.published_notifications
+
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert current.snapshot().closed is False
+        assert current.snapshot().harness.closed is False
+        assert round_record.cleanup_task is cleanup_owner
+
+        close_release.set()
+        if awaitable_kind in {"future", "custom"}:
+            stream.settle_manual_close()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        replayed_close = await current.close(timeout_seconds=1)
+        assert replayed_close.status is AgentConversationShutdownStatus.CLOSED
+        assert current.snapshot().harness.pending_cleanup_rounds == ()
+        assert current.snapshot().published_notifications == published_notifications
+        assert round_record.cleanup_task is cleanup_owner
+        assert cleanup_owner.done()
+        assert round_record.cleanup_error is close_error
+        assert (await handle.completion).terminal_outcome is not None
+        assert (await handle.completion).terminal_outcome.value == "completed"
+        assert current_facade.calls == 1
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert len(history.users) == 1
+        assert history.assistant_intents == []
+    finally:
+        close_release.set()
+        if stream.manual_future is not None and not stream.manual_future.done():
+            stream.settle_manual_close()
+        returned = stream.returned_awaitable
+        if isinstance(returned, asyncio.Future):
+            await asyncio.gather(returned, return_exceptions=True)
+        if stream.manual_future is not None and stream.manual_future.done():
+            stream.manual_future.exception()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deadline_publishes_terminal_and_retains_one_close_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.01)
+    close_release = asyncio.Event()
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        close_release=close_release,
+        close_error=RuntimeError("late stream close failed"),
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id="retained-cleanup-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id="retained-cleanup-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+    await asyncio.wait_for(current_facade.stream.close_started.wait(), timeout=1)
+
+    completion = await asyncio.wait_for(asyncio.shield(handle.completion), timeout=1)
+    assert completion.terminal_outcome.value == "completed"
+    notifications = [
+        await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
+    ]
+    terminal_notifications = [
+        item
+        for item in notifications
+        if item.progress_event is not None
+        and WorkProgressEventV2.from_dict(item.progress_event.payload).state.value
+        == "terminal"
+    ]
+    assert len(terminal_notifications) == 1
+    assert (
+        WorkProgressEventV2.from_dict(
+            terminal_notifications[0].progress_event.payload
+        ).outcome.value
+        == "completed"
+    )
+    snapshot = current.snapshot()
+    assert snapshot.harness.active_rounds == ()
+    assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+    published_notifications = snapshot.published_notifications
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert current.snapshot().closed is False
+    assert current.snapshot().harness.closed is False
+    assert current.snapshot().harness.pending_cleanup_rounds == (handle.round_id,)
+
+    close_release.set()
+    await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+    closed = await current.close(timeout_seconds=1)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert current.snapshot().closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().harness.pending_cleanup_rounds == ()
+    assert current.snapshot().published_notifications == published_notifications
+    assert (await handle.completion).terminal_outcome.value == "completed"
+    assert current_facade.calls == 1
+    assert current_facade.stream.close_calls == 1
+    assert history.assistant_intents == []
+
+
+@pytest.mark.parametrize(
+    ("settled_outcome", "cancel_before_cleanup"),
+    (("completed", False), ("cancelled", True)),
+)
+@pytest.mark.asyncio
+async def test_business_settled_round_fences_late_cancel_during_retained_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    settled_outcome: str,
+    cancel_before_cleanup: bool,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.05)
+    next_release = asyncio.Event() if cancel_before_cleanup else None
+    close_release = asyncio.Event()
+    close_error = RuntimeError(f"late {settled_outcome} stream close failed")
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        next_release=next_release,
+        close_release=close_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"settled-{settled_outcome}-cleanup-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"settled-{settled_outcome}-cleanup-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+
+    if cancel_before_cleanup:
+        await asyncio.wait_for(current_facade.stream.next_started.wait(), timeout=1)
+        initial_cancel = await current.close_interaction(
+            cancel_command(
+                handle,
+                selected,
+                command_id=f"cancel-{settled_outcome}-before-cleanup",
+            )
+        )
+        assert initial_cancel.accepted is True
+
+    await asyncio.wait_for(current_facade.stream.close_started.wait(), timeout=1)
+    round_record = harness._rounds[handle.round_id]
+    cleanup_owner = round_record.cleanup_task
+    assert cleanup_owner is not None
+    assert cleanup_owner.done() is False
+    cancel_effects_before_late_cancel = harness.snapshot().cancel_effects
+
+    late_cancel = await current.close_interaction(
+        cancel_command(
+            handle,
+            selected,
+            command_id=f"cancel-{settled_outcome}-after-business-settled",
+        )
+    )
+    try:
+        if late_cancel.accepted:
+            assert round_record.cancel_coordinator is not None
+            await asyncio.shield(round_record.cancel_coordinator)
+            await asyncio.sleep(0)
+        assert late_cancel.accepted is False
+        assert late_cancel.reason in {
+            "ROUND_ALREADY_TERMINAL",
+            "ROUND_CANCEL_ALREADY_REQUESTED",
+        }
+        assert late_cancel.terminal_observed is False
+        assert harness.snapshot().cancel_effects == cancel_effects_before_late_cancel
+
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.terminal_outcome.value == settled_outcome
+
+        notifications = []
+        while True:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                break
+        terminal_notifications = [
+            item
+            for item in notifications
+            if item.progress_event is not None
+            and WorkProgressEventV2.from_dict(item.progress_event.payload).state.value
+            == "terminal"
+        ]
+        assert len(terminal_notifications) == 1
+        assert (
+            WorkProgressEventV2.from_dict(
+                terminal_notifications[0].progress_event.payload
+            ).outcome.value
+            == settled_outcome
+        )
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+        assert harness._rounds[handle.round_id].cleanup_task is cleanup_owner
+        published_notifications = snapshot.published_notifications
+
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert current.snapshot().closed is False
+        assert current.snapshot().harness.closed is False
+        assert current.snapshot().harness.pending_cleanup_rounds == (handle.round_id,)
+        assert harness._rounds[handle.round_id].cleanup_task is cleanup_owner
+
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert current.snapshot().closed is True
+        assert current.snapshot().harness.closed is True
+        assert current.snapshot().harness.pending_cleanup_rounds == ()
+        assert harness._rounds[handle.round_id].cleanup_task is cleanup_owner
+        assert cleanup_owner.done()
+        assert round_record.cleanup_error is close_error
+        assert current.snapshot().published_notifications == published_notifications
+        assert (await handle.completion).terminal_outcome.value == settled_outcome
+        assert current_facade.calls == 1
+        assert current_facade.stream.close_calls == 1
+        assert len(history.users) == 1
+        assert history.assistant_intents == []
+    finally:
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        if not handle.completion.done():
+            harness._rounds[handle.round_id].handle.detach()
+        await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_completed_round_direct_cancel_transfers_terminal_to_retained_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.01)
+    close_release = asyncio.Event()
+    close_error = RuntimeError("late completed cleanup failed")
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        close_release=close_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id="completed-direct-cancel-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id="completed-direct-cancel-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+    await asyncio.wait_for(current_facade.stream.close_started.wait(), timeout=1)
+
+    round_record = harness._rounds[handle.round_id]
+    cleanup_owner = round_record.cleanup_task
+    terminal_owner = round_record.terminal_task
+    assert cleanup_owner is not None
+    assert cleanup_owner.done() is False
+    assert terminal_owner is not None
+    assert terminal_owner.done() is False
+    round_record.task.cancel("direct process-control cancel after completed result")
+
+    try:
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.status.value == "terminal_observed"
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == "completed"
+
+        notifications = []
+        terminal_progress = None
+        while terminal_progress is None:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                terminal_progress = progress
+        assert terminal_progress.outcome is not None
+        assert terminal_progress.outcome.value == "completed"
+        assert (
+            sum(
+                item.progress_event is not None
+                and WorkProgressEventV2.from_dict(
+                    item.progress_event.payload
+                ).state.value
+                == "terminal"
+                for item in notifications
+            )
+            == 1
+        )
+
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+        assert round_record.cleanup_task is cleanup_owner
+        assert round_record.terminal_task is terminal_owner
+        assert terminal_owner.done()
+        assert snapshot.harness.cancel_effects == 0
+        published_notifications = snapshot.published_notifications
+
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert current.snapshot().closed is False
+        assert round_record.cleanup_task is cleanup_owner
+
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert current.snapshot().harness.pending_cleanup_rounds == ()
+        assert current.snapshot().published_notifications == published_notifications
+        assert round_record.cleanup_error is close_error
+        assert round_record.terminal_task is terminal_owner
+        assert current_facade.calls == 1
+        assert current_facade.stream.close_calls == 1
+        assert len(history.users) == 1
+        assert history.assistant_intents == []
+    finally:
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_running_round_direct_cancel_waits_for_exact_cancel_terminal_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.01)
+    next_release = asyncio.Event()
+    close_release = asyncio.Event()
+    close_error = RuntimeError("late cancelled cleanup failed")
+    current_facade = ControlledCloseFacade(
+        final="formal answer",
+        next_release=next_release,
+        close_release=close_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id="running-direct-cancel-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id="running-direct-cancel-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    assert current_facade.stream is not None
+    await asyncio.wait_for(current_facade.stream.next_started.wait(), timeout=1)
+
+    round_record = harness._rounds[handle.round_id]
+    round_record.task.cancel("direct process-control cancel before business settled")
+    await asyncio.wait_for(current_facade.stream.close_started.wait(), timeout=1)
+    cleanup_owner = round_record.cleanup_task
+    terminal_owner = round_record.terminal_task
+    assert cleanup_owner is not None
+    assert cleanup_owner.done() is False
+    assert terminal_owner is not None
+    assert terminal_owner.done() is False
+    assert round_record.business_settled is False
+    assert handle.completion.done() is False
+    assert harness.snapshot().active_rounds == (handle.round_id,)
+    assert harness.snapshot().cancel_effects == 0
+
+    exact_cancel = await current.close_interaction(
+        cancel_command(
+            handle,
+            selected,
+            command_id="exact-cancel-after-direct-process-control",
+        )
+    )
+    assert exact_cancel.accepted is True
+    assert exact_cancel.terminal_observed is False
+
+    try:
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.status.value == "terminal_observed"
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == "cancelled"
+
+        notifications = []
+        terminal_progress = None
+        while terminal_progress is None:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                terminal_progress = progress
+        assert terminal_progress.outcome is not None
+        assert terminal_progress.outcome.value == "cancelled"
+        assert (
+            sum(
+                item.progress_event is not None
+                and WorkProgressEventV2.from_dict(
+                    item.progress_event.payload
+                ).state.value
+                == "terminal"
+                for item in notifications
+            )
+            == 1
+        )
+
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+        assert snapshot.harness.cancel_effects == 1
+        assert round_record.cleanup_task is cleanup_owner
+        assert round_record.terminal_task is terminal_owner
+        assert terminal_owner.done()
+        published_notifications = snapshot.published_notifications
+
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert current.snapshot().closed is False
+        assert round_record.cleanup_task is cleanup_owner
+
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert current.snapshot().harness.pending_cleanup_rounds == ()
+        assert current.snapshot().published_notifications == published_notifications
+        assert round_record.cleanup_error is close_error
+        assert round_record.terminal_task is terminal_owner
+        assert current_facade.calls == 1
+        assert current_facade.stream.close_calls == 1
+        assert len(history.users) == 1
+        assert history.assistant_intents == []
+    finally:
+        next_release.set()
+        close_release.set()
+        await asyncio.wait_for(current_facade.stream.close_finished.wait(), timeout=1)
+        await current.close(timeout_seconds=1)
+
+
+async def _collect_harness_events(handle):
+    return [item async for item in handle.events()]
 
 
 @pytest.mark.asyncio
@@ -3077,6 +4696,553 @@ def test_duplicate_or_exhausted_critical_reserve_fails_closed_without_growth() -
     assert snapshot.queued_critical_notifications == 2
     assert snapshot.published_notifications == 2
     assert snapshot.critical_notification_invariant_failures == 2
+
+
+def critical_notification(
+    request_id: str, *, kind: str = "work.progress"
+) -> AgentConversationNotification:
+    return AgentConversationNotification(
+        kind=kind,
+        request_id=request_id,
+        round_id=f"round-{request_id}",
+        response_ref=ResponseRef(
+            f"interaction-{request_id}", f"response-{request_id}", 0
+        ),
+    )
+
+
+def presentation_notification(request_id: str) -> AgentConversationNotification:
+    base = critical_notification(request_id, kind="agent.output")
+    return replace(
+        base,
+        presentation_unit=PresentationUnit(
+            ref=base.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=f"unit-{request_id}",
+            seq=0,
+            source_start_utf8=0,
+            source_end_utf8=1,
+            content_ref=f"sha256:{hashlib.sha256(request_id.encode()).hexdigest()}",
+        ),
+    )
+
+
+def assert_zero_business_effects(
+    current: AgentConversationRuntime,
+    lower: LowerFormalAdapter,
+    history: RecordingHistoryWriter,
+) -> None:
+    """A refused notification identity may not move any product authority."""
+
+    snapshot = current.snapshot()
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert lower.requests == []
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert snapshot.retained_admissions == 0
+    assert snapshot.active_requests == ()
+    assert snapshot.pending_history_intents == 0
+    assert snapshot.pending_conversation_effects == 0
+    assert snapshot.unacknowledged_effect_claims == 0
+    assert snapshot.conversation.conversation.turns == ()
+    assert snapshot.conversation.conversation.responses == ()
+    assert snapshot.conversation.presentation.records == ()
+    assert snapshot.harness.reservations == ()
+    assert snapshot.harness.active_rounds == ()
+    assert snapshot.harness.retained_rounds == 0
+    assert snapshot.harness.cancel_effects == 0
+    assert snapshot.bridge.pending_dispatches == 0
+    assert snapshot.bridge.active_requests == ()
+    assert snapshot.bridge.retained_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_drained_critical_reserve_returns_capacity_and_fences_replay() -> None:
+    """B4: queued items, not lifetime identities, own reserve capacity."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    for index in range(2):
+        current._publish(
+            critical_notification(f"request-drained-{index}"),
+            critical_key=("terminal", f"request-drained-{index}"),
+        )
+    assert current.snapshot().queued_critical_notifications == 2
+
+    drained = [await current.next_notification() for _ in range(2)]
+    assert [item.request_id for item in drained] == [
+        "request-drained-0",
+        "request-drained-1",
+    ]
+    assert current.snapshot().queued_critical_notifications == 0
+
+    # Delivering the retained notifications returns their reserve slots.
+    current._publish(
+        critical_notification("request-drained-2"),
+        critical_key=("terminal", "request-drained-2"),
+    )
+    assert current.snapshot().queued_critical_notifications == 1
+
+    # A delivered identity keeps its bounded tombstone and can never replay.
+    for index in range(2):
+        with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+            current._publish(
+                critical_notification(f"request-drained-{index}"),
+                critical_key=("terminal", f"request-drained-{index}"),
+            )
+        assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    # The same opaque id in the other retained lane is a distinct identity.
+    current._publish(
+        presentation_notification("request-drained-0"),
+        critical_key=("presentation", "request-drained-0"),
+    )
+
+    snapshot = current.snapshot()
+    assert snapshot.notification_critical_capacity == 2
+    assert snapshot.queued_critical_notifications == 2
+    assert snapshot.retired_critical_identities == 2
+    assert snapshot.fenced_critical_identities == 0
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert snapshot.bridge_publication_failures == 0
+    assert snapshot.last_bridge_publication_failure is None
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_discarded_presentation_reserve_returns_capacity_and_fences_replay() -> (
+    None
+):
+    """B4: retained-CR shutdown discard must release capacity, not identity."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    for index in range(2):
+        current._publish(
+            presentation_notification(f"request-discarded-{index}"),
+            critical_key=("presentation", f"request-discarded-{index}"),
+        )
+    assert current.snapshot().queued_critical_notifications == 2
+
+    assert current._notifications.discard_pending_presentations() == 2
+    assert current.snapshot().queued_critical_notifications == 0
+
+    current._publish(
+        presentation_notification("request-discarded-2"),
+        critical_key=("presentation", "request-discarded-2"),
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+        current._publish(
+            presentation_notification("request-discarded-0"),
+            critical_key=("presentation", "request-discarded-0"),
+        )
+    assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    snapshot = current.snapshot()
+    assert snapshot.queued_critical_notifications == 1
+    assert snapshot.retired_critical_identities == 2
+    assert snapshot.fenced_critical_identities == 0
+    assert snapshot.critical_notification_invariant_failures == 1
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_progress_terminal_reserve_cannot_starve_presentation_or_terminal() -> (
+    None
+):
+    """B4: Task progress terminals get their own quota, not the shared one."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=2)
+    for index in range(2):
+        current._publish(
+            critical_notification(
+                f"evidence-{index}", kind="task.progress.notification"
+            ),
+            critical_key=("task-progress-terminal", f"evidence-{index}"),
+        )
+    # The presentation/terminal reserve must be completely untouched.
+    for index in range(2):
+        current._publish(
+            presentation_notification(f"request-live-{index}"),
+            critical_key=("presentation", f"request-live-{index}"),
+        )
+        current._publish(
+            critical_notification(f"request-live-{index}"),
+            critical_key=("terminal", f"request-live-{index}"),
+        )
+    filled = current.snapshot()
+    assert filled.queued_progress_critical_notifications == 2
+    assert filled.notification_progress_critical_capacity == 2
+
+    with pytest.raises(AgentConversationRuntimeViolation) as progress_full:
+        current._publish(
+            critical_notification("evidence-2", kind="task.progress.notification"),
+            critical_key=("task-progress-terminal", "evidence-2"),
+        )
+    assert progress_full.value.reason == "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED"
+
+    with pytest.raises(AgentConversationRuntimeViolation) as request_full:
+        current._publish(
+            critical_notification("request-live-2"),
+            critical_key=("terminal", "request-live-2"),
+        )
+    assert request_full.value.reason == "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED"
+
+    snapshot = current.snapshot()
+    assert snapshot.notification_critical_capacity == 4
+    assert snapshot.queued_critical_notifications == 6
+    assert snapshot.queued_progress_critical_notifications == 2
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_evicted_replay_tombstone_still_refuses_released_identities() -> None:
+    """B4 boundary: eviction from the exact tombstone keeps the compact fence.
+
+    Restart is out of scope here: the composition cannot restart, so this
+    fence is a characterization of same-lifetime replay refusal, not a
+    durability guarantee across process restart.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    published = 64
+    for index in range(published):
+        current._publish(
+            critical_notification(f"request-cycled-{index}"),
+            critical_key=("terminal", f"request-cycled-{index}"),
+        )
+        delivered = await current.next_notification()
+        assert delivered.request_id == f"request-cycled-{index}"
+
+    snapshot = current.snapshot()
+    assert snapshot.queued_critical_notifications == 0
+    assert snapshot.retired_critical_identities == 2
+    assert snapshot.fenced_critical_identities == published - 2
+    assert snapshot.critical_notification_invariant_failures == 0
+
+    for index in range(published):
+        with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+            current._publish(
+                critical_notification(f"request-cycled-{index}"),
+                critical_key=("terminal", f"request-cycled-{index}"),
+            )
+        assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    # A never-published identity is still admitted: the fence refuses replays,
+    # not the live working set.
+    current._publish(
+        critical_notification("request-cycled-fresh"),
+        critical_key=("terminal", "request-cycled-fresh"),
+    )
+    assert current.snapshot().queued_critical_notifications == 1
+    assert current.snapshot().critical_notification_invariant_failures == published
+
+    # A second composition owns an independent fence for the same identities.
+    other = runtime(LowerFormalAdapter(), RecordingHistoryWriter(), max_requests=1)
+    other._publish(
+        critical_notification("request-cycled-0"),
+        critical_key=("terminal", "request-cycled-0"),
+    )
+    assert other.snapshot().queued_critical_notifications == 1
+
+    assert_zero_business_effects(current, lower, history)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+    assert (await other.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_injected_duplicate_publication_is_explicit_and_keeps_bridge_delivery() -> (
+    None
+):
+    """A6: one critical publish violation must not end every later delivery."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=4)
+    selected = await prepare(current)
+    # Injected violation: the retained presentation identity the sole bridge
+    # consumer is about to publish is already owned by the reserve.
+    current._publish(
+        critical_notification("request-1"),
+        critical_key=("presentation", "request-1"),
+    )
+    first = await dispatch(current, selected)
+    await asyncio.wait_for(first.completion, timeout=1)
+
+    second_commit = commit(
+        turn_id="turn-2",
+        commit_id="commit-2",
+        interaction_id="interaction-2",
+        text="second",
+    )
+    await current.open_interaction(second_commit.interaction_id)
+    await current.start_turn(second_commit.interaction_id, second_commit.turn_id)
+    await current.commit_turn(second_commit)
+    second = await dispatch(
+        current,
+        second_commit,
+        request_id="request-2",
+        response_id="response-2",
+    )
+    await asyncio.wait_for(second.completion, timeout=1)
+
+    delivered: dict[str, AgentConversationNotification] = {}
+    while len(delivered) < 2:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=2)
+        if notification.request_id != "request-2":
+            continue
+        if notification.presentation_unit is not None:
+            delivered["presentation"] = notification
+        elif notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                delivered["terminal"] = notification
+    assert delivered["presentation"].presentation_unit.ref == second.response_ref
+
+    snapshot = current.snapshot()
+    assert snapshot.bridge_publication_failures == 1
+    assert snapshot.last_bridge_publication_failure == (
+        "DUPLICATE_CRITICAL_NOTIFICATION",
+        "agent.output",
+        "request-1",
+    )
+    assert snapshot.critical_notification_invariant_failures == 1
+
+    # The dropped notification is confined to the notification lane: the CR
+    # response, its enqueued presentation and its terminal truth all survive.
+    responses = {
+        record.ref: record for record in snapshot.conversation.conversation.responses
+    }
+    assert responses[first.response_ref].state.value == "terminal"
+    assert responses[second.response_ref].state.value == "terminal"
+    assert any(
+        record.unit.ref == first.response_ref
+        for record in snapshot.conversation.presentation.records
+    )
+    assert lower.calls == 2
+    assert history.assistant_intents == []
+    assert snapshot.harness.cancel_effects == 0
+    assert snapshot.pending_history_intents == 0
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_injected_reserve_exhaustion_keeps_consumer_and_recovers_after_drain() -> (
+    None
+):
+    """A6+B4: an exhausted reserve is a reported failure, not a dead consumer."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=3)
+    selected = await prepare(current)
+    for index in range(6):
+        current._publish(
+            critical_notification(f"request-filler-{index}"),
+            critical_key=("terminal", f"request-filler-{index}"),
+        )
+    first = await dispatch(current, selected)
+    await asyncio.wait_for(first.completion, timeout=1)
+
+    async def wait_for_terminal_response(ref) -> None:
+        while not any(
+            record.ref == ref and record.state.value == "terminal"
+            for record in current.snapshot().conversation.conversation.responses
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_terminal_response(first.response_ref), timeout=2)
+
+    async def wait_for_publication_failures(expected: int) -> None:
+        while current.snapshot().bridge_publication_failures < expected:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_publication_failures(2), timeout=2)
+    exhausted = current.snapshot()
+    assert exhausted.last_bridge_publication_failure == (
+        "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED",
+        "work.progress",
+        "request-1",
+    )
+    assert exhausted.harness.cancel_effects == 0
+
+    while current.snapshot().queued_critical_notifications:
+        await asyncio.wait_for(current.next_notification(), timeout=1)
+
+    second_commit = commit(
+        turn_id="turn-2",
+        commit_id="commit-2",
+        interaction_id="interaction-2",
+        text="second",
+    )
+    await current.open_interaction(second_commit.interaction_id)
+    await current.start_turn(second_commit.interaction_id, second_commit.turn_id)
+    await current.commit_turn(second_commit)
+    second = await dispatch(
+        current,
+        second_commit,
+        request_id="request-2",
+        response_id="response-2",
+    )
+    await asyncio.wait_for(second.completion, timeout=1)
+
+    delivered: dict[str, AgentConversationNotification] = {}
+    while len(delivered) < 2:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=2)
+        if notification.request_id != "request-2":
+            continue
+        if notification.presentation_unit is not None:
+            delivered["presentation"] = notification
+        elif notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                delivered["terminal"] = notification
+    assert delivered["presentation"].presentation_unit.ref == second.response_ref
+
+    snapshot = current.snapshot()
+    assert snapshot.bridge_publication_failures == 2
+    assert snapshot.retired_critical_identities == 6
+    assert snapshot.fenced_critical_identities == 2
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert snapshot.harness.cancel_effects == 0
+    assert history.assistant_intents == []
+    assert lower.calls == 2
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_terminal_progress_admission_publishes_one_identity() -> None:
+    """B4 concurrency: one released barrier admits exactly one evidence id."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit(text="create task: inspect the repository")
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    response = await current.accept_task_origin(
+        request_id="task-origin-request-1",
+        response_id="task-origin-response-1",
+        correlation_id="task-origin-correlation-1",
+        commit=selected,
+    )
+    conversation_before = current.snapshot().conversation
+    intent = task_progress_intent(
+        event_id="task-progress-source-terminal",
+        seq=1,
+        event_type="task.terminal",
+        state="terminal",
+        outcome="completed",
+    )
+    released = asyncio.Event()
+
+    async def admit() -> bool:
+        await released.wait()
+        return await current.accept_task_progress_notification(
+            intent, response_ref=response
+        )
+
+    racers = [asyncio.create_task(admit()) for _ in range(2)]
+    await asyncio.sleep(0)
+    released.set()
+    outcomes = await asyncio.gather(*racers, return_exceptions=True)
+    accepted = [item for item in outcomes if item is True]
+    refused = [
+        item for item in outcomes if isinstance(item, AgentConversationRuntimeViolation)
+    ]
+    assert len(accepted) == 1
+    assert len(refused) == 1
+    assert refused[0].reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+    assert current.snapshot().queued_progress_critical_notifications == 1
+    assert current.snapshot().conversation == conversation_before
+
+    notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+    assert notification.kind == "task.progress.notification"
+    with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+        await current.accept_task_progress_notification(intent, response_ref=response)
+    assert replayed.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+
+    # Retry with a distinct Task evidence identity is still admitted.
+    assert (
+        await current.accept_task_progress_notification(
+            task_progress_intent(
+                task_id="task-progress-2",
+                event_id="task-progress-source-terminal-2",
+                seq=1,
+                event_type="task.terminal",
+                state="terminal",
+                outcome="completed",
+            ),
+            response_ref=response,
+        )
+        is True
+    )
+    snapshot = current.snapshot()
+    assert snapshot.queued_progress_critical_notifications == 1
+    assert snapshot.retired_critical_identities == 1
+    assert snapshot.critical_notification_invariant_failures == 2
+    assert snapshot.bridge_publication_failures == 0
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert snapshot.harness.cancel_effects == 0
+    assert snapshot.conversation.presentation.records == ()
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+def test_disabled_composition_reports_bounded_reserves_without_publication() -> None:
+    """A6/B4 feature-off: the disabled path keeps its old closed behaviour."""
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, enabled=False, max_requests=2)
+    snapshot = current.snapshot()
+    assert snapshot.notification_critical_capacity == 4
+    assert snapshot.notification_progress_critical_capacity == 2
+    assert snapshot.retired_critical_identities == 0
+    assert snapshot.fenced_critical_identities == 0
+    assert snapshot.bridge_publication_failures == 0
+    assert snapshot.last_bridge_publication_failure is None
+
+    with pytest.raises(AgentConversationRuntimeViolation) as closed:
+        current._publish(
+            critical_notification("request-disabled"),
+            critical_key=("terminal", "request-disabled"),
+        )
+    assert closed.value.reason == "NOTIFICATION_STREAM_CLOSED"
+    assert current.snapshot().critical_notification_invariant_failures == 0
+    assert_zero_business_effects(current, lower, history)
 
 
 @pytest.mark.asyncio
@@ -4703,3 +6869,1109 @@ async def test_harness_capacity_failure_precedes_cr_mutation_and_agent_effect() 
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+class CountingCloseBridge(AgentBridgeRuntime):
+    """Count Agent Bridge teardown owner calls without changing its behaviour."""
+
+    def __init__(self, *, instance_id: str = "counting-close-bridge") -> None:
+        super().__init__(instance_id=instance_id)
+        self.close_calls = 0
+        self.close_observer: Callable[[], None] | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_observer is not None:
+            self.close_observer()
+        await AgentBridgeRuntime.close(self)
+
+
+class TeardownFailingBridge(CountingCloseBridge):
+    """Fail the Agent Bridge teardown owner before or after its real close."""
+
+    def __init__(
+        self,
+        *,
+        close_error: BaseException,
+        close_first: bool = True,
+        instance_id: str = "teardown-failing-bridge",
+    ) -> None:
+        super().__init__(instance_id=instance_id)
+        self.close_error = close_error
+        self.close_first = close_first
+        self.close_entered = asyncio.Event()
+        self.close_gate: asyncio.Event | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_entered.set()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        if self.close_first:
+            await AgentBridgeRuntime.close(self)
+        raise self.close_error
+
+    async def settle_real_close(self) -> None:
+        await AgentBridgeRuntime.close(self)
+
+
+class SnapshotHostileBridge(TeardownFailingBridge):
+    """Fail the Agent Bridge closed-truth probe alongside its teardown owner.
+
+    The probe is only consulted while this bridge is being torn down, so the
+    hostile window opens when ``close()`` is entered.  A test reopens the real
+    snapshot afterwards to read the settled composition truth.
+    """
+
+    def __init__(
+        self,
+        *,
+        close_error: BaseException,
+        snapshot_error: BaseException,
+        instance_id: str = "snapshot-hostile-bridge",
+    ) -> None:
+        super().__init__(
+            close_error=close_error,
+            close_first=False,
+            instance_id=instance_id,
+        )
+        self.snapshot_error = snapshot_error
+        self.snapshot_probes = 0
+        self.hostile_snapshot = False
+
+    async def close(self) -> None:
+        self.hostile_snapshot = True
+        await super().close()
+
+    def snapshot(self):
+        if self.hostile_snapshot:
+            self.snapshot_probes += 1
+            raise self.snapshot_error
+        return TeardownFailingBridge.snapshot(self)
+
+
+class FaultyDeliveryBridge(CountingCloseBridge):
+    """Fail the sole bridge consumer without failing any teardown owner."""
+
+    def __init__(self) -> None:
+        super().__init__(instance_id="faulty-delivery-bridge")
+        self.delivery_calls = 0
+        self.delivery_error = RuntimeError("bridge delivery owner failed")
+
+    async def next_delivery(self):
+        self.delivery_calls += 1
+        raise self.delivery_error
+
+
+class CountingCloseHarness(JiuWenSwarmRoundHarness):
+    """Count Harness teardown owner calls without changing its behaviour."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.close_calls = 0
+        self.close_entered = asyncio.Event()
+        self.close_gate: asyncio.Event | None = None
+        self.close_observer: Callable[[], None] | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_entered.set()
+        if self.close_observer is not None:
+            self.close_observer()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        await JiuWenSwarmRoundHarness.close(self)
+
+
+class TeardownFailingHarness(CountingCloseHarness):
+    """Fail the Harness teardown owner after its real close finishes."""
+
+    def __init__(self, *, close_error: BaseException, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.close_error = close_error
+
+    async def close(self) -> None:
+        await super().close()
+        raise self.close_error
+
+
+def teardown_harness(suffix: str, *, close_error: BaseException | None = None):
+    kwargs = {
+        "instance_id": f"teardown-harness-{suffix}",
+        "max_active_rounds": 2,
+        "id_factory": id_factory(),
+    }
+    if close_error is None:
+        return CountingCloseHarness(**kwargs)
+    return TeardownFailingHarness(close_error=close_error, **kwargs)
+
+
+def teardown_composition(
+    lower: LowerFormalAdapter,
+    history: RecordingHistoryWriter,
+    *,
+    suffix: str,
+    bridge: AgentBridgeRuntime,
+    harness: JiuWenSwarmRoundHarness,
+) -> AgentConversationRuntime:
+    return AgentConversationRuntime(
+        scope(),
+        instance_id=f"teardown-composition-{suffix}",
+        facade=facade(lower),
+        max_requests=8,
+        notification_capacity=8,
+        history_writer=history,
+        harness=harness,
+        bridge=bridge,
+    )
+
+
+def observe_conversation_close(
+    current: AgentConversationRuntime,
+    *,
+    error: BaseException | None = None,
+    observer: Callable[[], None] | None = None,
+) -> list[str]:
+    """Observe, and optionally fail, the Conversation Runtime teardown owner."""
+
+    original = current._cr.close
+    calls: list[str] = []
+
+    async def observed_close():
+        calls.append("conversation")
+        if observer is not None:
+            observer()
+        effects = await original()
+        if error is not None:
+            raise error
+        return effects
+
+    current._cr.close = observed_close  # type: ignore[method-assign]
+    return calls
+
+
+_TEARDOWN_OWNER_PHASES = ("bridge", "consumer", "harness", "conversation")
+
+
+@pytest.mark.parametrize("failure_phase", _TEARDOWN_OWNER_PHASES)
+@pytest.mark.asyncio
+async def test_teardown_owner_failure_still_settles_every_later_owner_once(
+    failure_phase: str,
+) -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    error: BaseException = RuntimeError(f"{failure_phase} teardown owner failed")
+    if failure_phase == "bridge":
+        bridge: CountingCloseBridge = TeardownFailingBridge(close_error=error)
+    elif failure_phase == "consumer":
+        bridge = FaultyDeliveryBridge()
+        error = bridge.delivery_error
+    else:
+        bridge = CountingCloseBridge(instance_id=f"counting-bridge-{failure_phase}")
+    harness = teardown_harness(
+        failure_phase,
+        close_error=error if failure_phase == "harness" else None,
+    )
+    current = teardown_composition(
+        lower,
+        history,
+        suffix=failure_phase,
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(
+        current, error=error if failure_phase == "conversation" else None
+    )
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    lease = current.attach_notification_consumer(
+        consumer_id="teardown-consumer", connection_epoch=1
+    )
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert bridge.close_calls == 1
+    assert consumer.done() is True
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert current.snapshot().conversation.closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().bridge.closed is True
+    assert failed.final_drain_lease is not None
+    assert failed.final_drain_lease is not lease
+    assert failed.final_drain_lease.consumer_id == lease.consumer_id
+    assert current.snapshot().notification_stream_closed is True
+
+    settled = current.snapshot()
+    assert settled.closed is False
+    assert settled.closing is True
+    with pytest.raises(AgentConversationRuntimeViolation) as restart:
+        await current.start()
+    assert restart.value.reason == "COMPOSITION_CLOSING"
+
+    assert await current.close(timeout_seconds=1) == failed
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert settled.harness.cancel_effects == 0
+    assert settled.conversation.conversation.responses == ()
+
+
+@pytest.mark.asyncio
+async def test_failed_bridge_owner_settles_the_sole_consumer_instead_of_leaking_it() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    error = RuntimeError("bridge close failed before its closed terminal")
+    bridge = TeardownFailingBridge(close_error=error, close_first=False)
+    harness = teardown_harness("orphan-consumer")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="orphan-consumer",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    assert consumer.done() is False
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert current.snapshot().conversation.closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().notification_stream_closed is True
+    assert current.snapshot().closed is False
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await bridge.settle_real_close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_teardown_owner_settles_every_owner_and_stays_cancelled() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=RuntimeError("bridge close owner is gated, never reached"),
+        close_first=False,
+    )
+    bridge.close_gate = asyncio.Event()
+    harness = teardown_harness("cancelled-owner")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="cancelled-owner",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+
+    closing = asyncio.create_task(current.close(timeout_seconds=5))
+    await asyncio.wait_for(bridge.close_entered.wait(), timeout=1)
+    retained = current._shutdown
+    assert retained is not None
+    retained.cancel()
+    outcome = (await asyncio.gather(closing, return_exceptions=True))[0]
+
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert current.snapshot().conversation.closed is True
+    assert current.snapshot().harness.closed is True
+    assert current.snapshot().notification_stream_closed is True
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert retained.cancelled() is True
+    assert current.snapshot().closed is False
+    with pytest.raises(AgentConversationRuntimeViolation) as restart:
+        await current.start()
+    assert restart.value.reason == "COMPOSITION_CLOSING"
+    with pytest.raises(asyncio.CancelledError):
+        await current.close(timeout_seconds=1)
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    bridge.close_gate.set()
+    await bridge.settle_real_close()
+
+
+class HostileNameMeta(type):
+    @property
+    def __name__(cls) -> str:
+        raise RuntimeError("private-hostile-class-name")
+
+
+class HostileTeardownError(Exception, metaclass=HostileNameMeta):
+    """An owner failure whose class refuses to expose a usable type name."""
+
+
+class RenderProbeName:
+    """A non-string owner exception name that records every render attempt.
+
+    Reading this object is harmless; rendering it is the leak.  ``__format__``
+    and ``__str__`` are the two ways ``f"teardown_failed:{name}"`` can execute
+    hostile code, so both record the attempt and both return private content.
+    ``__repr__`` stays inert and content-free so that a failing assertion
+    cannot itself forge the evidence this probe exists to collect.
+    """
+
+    marker = "private-non-string-class-name"
+
+    def __init__(self) -> None:
+        self.renders: list[str] = []
+
+    def __format__(self, format_spec: str) -> str:
+        self.renders.append("format")
+        return self.marker
+
+    def __str__(self) -> str:
+        self.renders.append("str")
+        return self.marker
+
+    def __repr__(self) -> str:
+        return "<non-string owner exception name>"
+
+
+class NonStrNameMeta(type):
+    @property
+    def __name__(cls) -> object:
+        return cls.render_probe
+
+
+class NonStrNameTeardownError(Exception, metaclass=NonStrNameMeta):
+    """An owner failure whose class name is not a string at all."""
+
+    render_probe = RenderProbeName()
+
+
+class HostilePhaseName(str):
+    """A registered phase name lookalike that is not exactly a ``str``."""
+
+    def __format__(self, format_spec: str) -> str:
+        return "private-hostile-phase-detail"
+
+
+class StrSubclassNameMeta(type):
+    @property
+    def __name__(cls) -> object:
+        return HostilePhaseName("RuntimeError")
+
+
+class StrSubclassNameTeardownError(Exception, metaclass=StrSubclassNameMeta):
+    """An owner failure whose class name is a ``str`` subclass lookalike.
+
+    The name compares equal to a registered exception type name, so every
+    equality test on it passes and the recorded failure reads as ordinary.  It
+    is not exactly a ``str`` though, so it is its own ``__format__`` -- not its
+    value -- that decides what a rendered public diagnostic says.
+    """
+
+
+class GuardEscapeProbe(BaseException):
+    """A teardown failure that is deliberately not an ``Exception``.
+
+    ``except Exception`` cannot contain this, so it separates the teardown
+    guards that really are ``except BaseException`` from the ones that merely
+    look wide enough while a hostile class raises past them.
+    """
+
+
+class BaseExceptionNameMeta(type):
+    @property
+    def __name__(cls) -> str:
+        raise GuardEscapeProbe("private-base-exception-class-name")
+
+
+class BaseExceptionNameTeardownError(Exception, metaclass=BaseExceptionNameMeta):
+    """An owner failure whose class name lookup raises a non-``Exception``."""
+
+
+@pytest.mark.asyncio
+async def test_clean_teardown_keeps_the_registered_owner_order_and_closed_truth() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingCloseBridge(instance_id="counting-bridge-order")
+    harness = teardown_harness("order")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="order",
+        bridge=bridge,
+        harness=harness,
+    )
+    order: list[str] = []
+    observed: dict[str, object] = {}
+    bridge.close_observer = lambda: order.append("bridge")
+
+    def on_harness_close() -> None:
+        order.append("harness")
+        consumer = current._consumer
+        observed["consumer_settled_before_harness"] = (
+            consumer is not None and consumer.done()
+        )
+
+    def on_conversation_close() -> None:
+        order.append("conversation")
+        observed["notifications_open_at_conversation_close"] = (
+            current.snapshot().notification_stream_closed is False
+        )
+
+    harness.close_observer = on_harness_close
+    conversation_closes = observe_conversation_close(
+        current, observer=on_conversation_close
+    )
+    assert await current.start() is True
+    lease = current.attach_notification_consumer(
+        consumer_id="order-consumer", connection_epoch=1
+    )
+
+    closed = await current.close(timeout_seconds=1)
+
+    assert order == ["bridge", "harness", "conversation"]
+    assert observed["consumer_settled_before_harness"] is True
+    assert observed["notifications_open_at_conversation_close"] is True
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert closed.detail == "teardown_complete"
+    assert closed.final_drain_lease is not None
+    assert closed.final_drain_lease.consumer_id == lease.consumer_id
+    settled = current.snapshot()
+    assert settled.closed is True
+    assert settled.closing is False
+    assert settled.teardown_owner_failures == 0
+    assert settled.first_teardown_owner_failure is None
+    assert settled.notification_stream_closed is True
+    assert await current.close(timeout_seconds=1) == closed
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_first_teardown_failure_wins_and_later_failures_stay_diagnosable() -> (
+    None
+):
+    first_marker = "private-bridge-teardown-detail"
+    later_marker = "private-harness-teardown-detail"
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(close_error=RuntimeError(first_marker))
+    harness = teardown_harness("first-failure", close_error=OSError(later_marker))
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="first-failure",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.teardown_owner_failures == 2
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    rendered = repr(
+        (
+            failed,
+            settled.first_teardown_owner_failure,
+            settled.teardown_owner_failures,
+        )
+    )
+    assert first_marker not in rendered
+    assert later_marker not in rendered
+    assert "OSError" not in rendered
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_process_control_teardown_failure_keeps_its_identity_and_priority() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(close_error=KeyboardInterrupt())
+    harness = teardown_harness(
+        "process-control", close_error=RuntimeError("private-later-detail")
+    )
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="process-control",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:KeyboardInterrupt"
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "KeyboardInterrupt")
+    assert settled.teardown_owner_failures == 2
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_hostile_owner_exception_class_cannot_escape_the_teardown_guard() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(close_error=HostileTeardownError("hostile"))
+    harness = teardown_harness("hostile")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="hostile",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:unknown"
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "unknown")
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert "private-hostile-class-name" not in repr(
+        (failed, settled.first_teardown_owner_failure)
+    )
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_non_exception_owner_name_failure_cannot_escape_the_teardown_guard() -> (
+    None
+):
+    """Guard the ``except BaseException`` in ``_teardown_failure_name``.
+
+    Property: naming a failed owner is a read that can never itself become a
+    teardown failure.  ``_teardown_failure_name`` runs inside
+    ``_run_teardown_owner``'s own ``except`` handler, so anything raised there
+    is already past the only guard the teardown sequence has: it unwinds
+    ``_shutdown_coordinator``, which has no outer ``try``, and reaches the
+    ``close()`` caller as a raised exception instead of a result.
+
+    ``test_hostile_owner_exception_class_cannot_escape_the_teardown_guard``
+    states that promise but only exercises an ``Exception``-derived name
+    failure, and a hostile class is free to raise anything.  This parallel test
+    raises a ``BaseException`` that no ``except Exception`` can contain.
+    Narrow that guard and the Harness, the Conversation Runtime and
+    notification cleanup are every one of them skipped -- the A7 defect this
+    composition's phase isolation exists to prevent -- so the first assertion
+    below is that each later owner still ran, not merely that nothing escaped.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=BaseExceptionNameTeardownError("hostile"),
+        instance_id="base-exception-name-bridge",
+    )
+    harness = teardown_harness("base-exception-name")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="base-exception-name",
+        bridge=bridge,
+        harness=harness,
+    )
+    order: list[str] = []
+    harness.close_observer = lambda: order.append("harness")
+    conversation_closes = observe_conversation_close(
+        current, observer=lambda: order.append("conversation")
+    )
+    assert await current.start() is True
+    escaped: BaseException | None = None
+    failed = None
+
+    try:
+        failed = await current.close(timeout_seconds=1)
+    except BaseException as caught:  # noqa: BLE001 - the escape is the defect
+        # An escape is caught here rather than left to propagate: the reporter
+        # renders a failing test's frame arguments, which on this path include
+        # the hostile failure itself, so its class name is read a second time
+        # and an unguarded read takes the whole session down instead of this
+        # one test.  The assertions below still say what went wrong.
+        escaped = caught
+
+    assert order == ["harness", "conversation"]
+    assert escaped is None
+    assert failed is not None
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:unknown"
+    assert current._teardown_failures == (("bridge", "unknown"),)
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "unknown")
+    assert settled.teardown_owner_failures == 1
+    assert settled.harness.closed is True
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert "private-base-exception-class-name" not in repr(
+        (failed, settled.first_teardown_owner_failure)
+    )
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_externally_cancelled_consumer_is_an_owner_failure_not_caller_truth() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingCloseBridge(instance_id="counting-bridge-cancelled-consumer")
+    harness = teardown_harness("cancelled-consumer")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="cancelled-consumer",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    consumer.cancel()
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:CancelledError"
+    assert consumer.cancelled() is True
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    retained = current._shutdown
+    assert retained is not None
+    assert retained.cancelled() is False
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("consumer", "CancelledError")
+    assert settled.teardown_owner_failures == 1
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert await current.close(timeout_seconds=1) == failed
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_first_teardown_failure_wins_over_a_later_caller_cancellation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=RuntimeError("private-first-teardown-detail")
+    )
+    harness = teardown_harness("late-cancel")
+    harness.close_gate = asyncio.Event()
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="late-cancel",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    closing = asyncio.create_task(current.close(timeout_seconds=5))
+    await asyncio.wait_for(harness.close_entered.wait(), timeout=1)
+    retained = current._shutdown
+    assert retained is not None
+    retained.cancel()
+    failed = await closing
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert retained.cancelled() is False
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.teardown_owner_failures == 2
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+    harness.close_gate.set()
+
+
+@pytest.mark.asyncio
+async def test_notification_cleanup_closes_the_producer_even_when_discard_fails() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingCloseBridge(instance_id="counting-bridge-discard")
+    harness = teardown_harness("discard")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="discard",
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    lease = current.attach_notification_consumer(
+        consumer_id="discard-consumer", connection_epoch=1
+    )
+
+    def failing_discard() -> int:
+        raise RuntimeError("private-discard-detail")
+
+    current._notifications.discard_pending_presentations = failing_discard
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    assert failed.final_drain_lease is None
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    settled = current.snapshot()
+    assert settled.notification_stream_closed is True
+    assert settled.first_teardown_owner_failure == ("notifications", "RuntimeError")
+    assert settled.teardown_owner_failures == 1
+    assert settled.closed is False
+    with pytest.raises(AgentConversationRuntimeViolation) as detached:
+        await current.next_notification_for(lease)
+    assert detached.value.reason == "NOTIFICATION_CONSUMER_DETACHED"
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.parametrize(
+    ("suffix", "snapshot_error_factory", "probe_error_name"),
+    (
+        ("unreadable-closed-truth", LookupError, "LookupError"),
+        ("unreadable-closed-truth-base", GuardEscapeProbe, "GuardEscapeProbe"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_unreadable_bridge_closed_truth_still_settles_the_sole_consumer(
+    suffix: str,
+    snapshot_error_factory: Callable[[str], BaseException],
+    probe_error_name: str,
+) -> None:
+    """Guard the failed-probe fallback in ``_bridge_reports_closed``.
+
+    Property: consulting the Agent Bridge's own closed truth is a read, never a
+    terminal.  When a bridge fails both ``close()`` and ``snapshot()`` the probe
+    degrades to "not closed", so the sole ``_consume_bridge`` child is still
+    cancelled and settled, and the probe's own error never becomes the consumer
+    owner's recorded outcome.
+
+    Delete the ``except BaseException: return False`` guard and the probe's
+    error escapes ``_settle_bridge_consumer``: the consumer task is never
+    cancelled and never awaited -- a leaked child of a composition that has
+    already given up its Agent Bridge -- and the consumer phase is recorded as
+    the probe's own ``LookupError`` instead of the authoritative
+    ``CancelledError`` that settling the child actually produces.
+
+    The probe runs code the bridge owns, so it can fail with anything.
+    Narrowing the guard to ``except Exception`` leaks the same child for a
+    ``BaseException`` probe failure, so both shapes are exercised here.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    probe_marker = "private-bridge-probe-detail"
+    bridge = SnapshotHostileBridge(
+        close_error=RuntimeError("private-bridge-close-detail"),
+        snapshot_error=snapshot_error_factory(probe_marker),
+        instance_id=f"{suffix}-bridge",
+    )
+    harness = teardown_harness(suffix)
+    current = teardown_composition(
+        lower,
+        history,
+        suffix=suffix,
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    assert consumer.done() is False
+
+    failed = await current.close(timeout_seconds=1)
+    bridge.hostile_snapshot = False
+
+    assert bridge.snapshot_probes == 1
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert current._teardown_failures == (
+        ("bridge", "RuntimeError"),
+        ("consumer", "CancelledError"),
+    )
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.teardown_owner_failures == 2
+    rendered = repr((failed, current._teardown_failures))
+    assert probe_error_name not in rendered
+    assert probe_marker not in rendered
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert settled.conversation.closed is True
+    assert settled.harness.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await bridge.settle_real_close()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "hostile_error_class", "hostile_marker"),
+    (
+        ("non-string-name", NonStrNameTeardownError, RenderProbeName.marker),
+        (
+            "str-subclass-name",
+            StrSubclassNameTeardownError,
+            "private-hostile-phase-detail",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_non_string_owner_exception_name_never_reaches_a_public_detail(
+    suffix: str, hostile_error_class: type[Exception], hostile_marker: str
+) -> None:
+    """Guard the ``type(name) is str`` half of the owner-name guard.
+
+    Property: ``_teardown_failure_name`` reads an owner failure's type name and
+    keeps it only when that name is exactly a string.  A hostile class whose
+    ``__name__`` is some other object must never be rendered, so neither its
+    ``__format__`` nor its ``__str__`` may run, and none of its content may
+    reach the public shutdown detail or the teardown snapshot.
+
+    Delete the ``type(name) is str`` test and the hostile object flows straight
+    into ``f"teardown_failed:{first_failure[1]}"``: its ``__format__`` executes
+    inside the composition and its private content becomes the composition's
+    public FAILED detail.
+
+    Relax that same test to ``isinstance`` and the exact ``str`` case keeps
+    passing while a ``str`` subclass whose value equals a registered type name
+    survives every equality check and still renders its own content into the
+    public detail, so both hostile name shapes are exercised here.
+    """
+
+    probe = NonStrNameTeardownError.render_probe
+    probe.renders.clear()
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=hostile_error_class("hostile"),
+        instance_id=f"{suffix}-bridge",
+    )
+    harness = teardown_harness(suffix)
+    current = teardown_composition(
+        lower,
+        history,
+        suffix=suffix,
+        bridge=bridge,
+        harness=harness,
+    )
+    conversation_closes = observe_conversation_close(current)
+    assert await current.start() is True
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert probe.renders == []
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:unknown"
+    assert hostile_marker not in failed.detail
+    assert RenderProbeName.marker not in failed.detail
+    assert "private-hostile-phase-detail" not in failed.detail
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "unknown")
+    assert type(settled.first_teardown_owner_failure[1]) is str
+    assert current._teardown_failures == (("bridge", "unknown"),)
+    assert probe.renders == []
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_bridge_consumer_settles_before_the_next_owner_runs() -> None:
+    """Guard the ``await asyncio.shield(consumer)`` on the cancel path.
+
+    Property: a consumer whose terminal can never arrive is cancelled *and*
+    settled by its own teardown owner.  No later registered owner may start
+    while that owned child is still pending, and the child's cancellation is
+    recorded as the consumer phase's own outcome.
+
+    Delete the ``await`` after ``consumer.cancel()`` and the consumer owner
+    returns with the cancellation only requested: the Harness owner runs while
+    the child is still unsettled, and the consumer phase records no outcome at
+    all.  Settling then degrades to whatever the next owner happens to yield
+    for, which is a scheduling accident rather than an owner guarantee.
+    """
+
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = TeardownFailingBridge(
+        close_error=RuntimeError("private-bridge-close-detail"),
+        close_first=False,
+        instance_id="cancel-path-settle-bridge",
+    )
+    harness = teardown_harness("cancel-path-settle")
+    current = teardown_composition(
+        lower,
+        history,
+        suffix="cancel-path-settle",
+        bridge=bridge,
+        harness=harness,
+    )
+    order: list[str] = []
+    observed: dict[str, object] = {}
+
+    def observe_child(owner: str) -> None:
+        order.append(owner)
+        consumer = current._consumer
+        observed[f"settled_before_{owner}"] = consumer is not None and consumer.done()
+        observed[f"cancelled_before_{owner}"] = (
+            consumer is not None and consumer.cancelled()
+        )
+
+    harness.close_observer = lambda: observe_child("harness")
+    conversation_closes = observe_conversation_close(
+        current, observer=lambda: observe_child("conversation")
+    )
+    assert await current.start() is True
+    consumer = current._consumer
+    assert consumer is not None
+    assert consumer.done() is False
+
+    failed = await current.close(timeout_seconds=1)
+
+    assert order == ["harness", "conversation"]
+    assert observed["settled_before_harness"] is True
+    assert observed["cancelled_before_harness"] is True
+    assert observed["settled_before_conversation"] is True
+    assert observed["cancelled_before_conversation"] is True
+    assert current._teardown_failures == (
+        ("bridge", "RuntimeError"),
+        ("consumer", "CancelledError"),
+    )
+    assert failed.status is AgentConversationShutdownStatus.FAILED
+    assert failed.detail == "teardown_failed:RuntimeError"
+    settled = current.snapshot()
+    assert settled.first_teardown_owner_failure == ("bridge", "RuntimeError")
+    assert settled.teardown_owner_failures == 2
+    assert consumer.done() is True
+    assert consumer.cancelled() is True
+    assert bridge.close_calls == 1
+    assert harness.close_calls == 1
+    assert conversation_closes == ["conversation"]
+    assert settled.conversation.closed is True
+    assert settled.notification_stream_closed is True
+    assert settled.closed is False
+    assert lower.calls == 0
+    assert history.users == []
+    await bridge.settle_real_close()
+
+
+def test_teardown_phase_names_stay_inside_the_registered_vocabulary() -> None:
+    """Guard the registered-phase fallback in ``_teardown_phase_name``.
+
+    Property: a public teardown diagnostic only ever names one of the phases
+    this composition registered.  Every registered phase survives verbatim as
+    an exact ``str``; anything else -- an unregistered name, or a ``str``
+    subclass that merely compares equal to a registered one -- degrades to
+    ``"unknown"``.  Production only ever passes registered literals, so this
+    guard is unreachable through the public surface and is called directly.
+
+    Drop the ``"unknown"`` fallback and an unregistered phase name is echoed
+    back verbatim.  Drop the ``type(phase) is str`` test and a hostile ``str``
+    subclass passes the membership test and is returned as the phase name, so
+    its own ``__format__`` decides what a public teardown diagnostic says.
+    """
+
+    for phase in _COMPOSITION_TEARDOWN_PHASES:
+        named = _teardown_phase_name(phase)
+        assert named == phase
+        assert type(named) is str
+    assert _teardown_phase_name("private-unregistered-phase") == "unknown"
+    lookalike = HostilePhaseName("bridge")
+    assert lookalike == "bridge"
+    assert f"{lookalike}" == "private-hostile-phase-detail"
+    named = _teardown_phase_name(lookalike)
+    assert named == "unknown"
+    assert type(named) is str
+    assert f"{named}" == "unknown"

@@ -1294,3 +1294,344 @@ test('closed practical limits accept their boundary and reject overflow before s
   releasePending();
   await Promise.all(pending);
 });
+
+function observedSnapshot(overrides = {}) {
+  const observed = task(overrides);
+  return {
+    ok: true,
+    result: {
+      task: observed,
+      attempt: {
+        task_id: observed.task_id,
+        attempt_id: observed.attempt_id,
+        attempt_number: overrides.attempt_number ?? 1,
+      },
+    },
+  };
+}
+
+const retryHistory = [
+  event(0, { attempt_id: 'attempt-a' }),
+  event(1, { attempt_id: 'attempt-a', event_type: 'task.terminal', state: 'terminal', outcome: 'cancelled' }),
+  event(2, {
+    attempt_id: 'attempt-b',
+    event_type: 'task.retry_accepted',
+    state: 'accepted',
+    source_event_id: null,
+    causation_id: 'retry-b',
+    details: {
+      command_id: 'retry-b',
+      retry_of_attempt_id: 'attempt-a',
+      previous_outcome: 'cancelled',
+      attempt_number: 2,
+    },
+  }),
+];
+
+test('a stale task.get or task.status cannot roll back attempt, event head, terminal state or outcome', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt(
+    'task.events',
+    {
+      ok: true,
+      result: eventsResult(
+        [event(0), event(1), event(2, { event_type: 'task.terminal', state: 'terminal', outcome: 'completed' })],
+        2,
+        'task-1',
+        -1,
+      ),
+    },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const terminal = leaf.snapshot();
+  assert.equal(terminal.tasks[0].state, 'terminal');
+  assert.equal(terminal.tasks[0].outcome, 'completed');
+  assert.equal(terminal.tasks[0].last_event_seq, 2);
+
+  for (const [operation, response, expected] of [
+    ['task.get', observedSnapshot({ state: 'running', outcome: null, event_head: 2 }), /revive or regress its observed lifecycle/],
+    ['task.status', observedSnapshot({ state: 'terminal', outcome: 'cancelled', event_head: 2 }), /change its observed terminal outcome/],
+    ['task.get', observedSnapshot({ state: 'terminal', outcome: 'completed', event_head: 1 }), /roll back its authoritative event head/],
+    [
+      'task.status',
+      observedSnapshot({ attempt_id: 'attempt-forged', state: 'terminal', outcome: 'completed', event_head: 2 }),
+      /change or roll back its authoritative attempt/,
+    ],
+  ]) {
+    assert.throws(() => leaf.adopt(operation, response, adoption(leaf, { target_task_id: 'task-1' })), expected);
+    assert.deepEqual(leaf.snapshot(), terminal);
+  }
+
+  const retried = new FormalTaskControlLeaf({ enabled: true, binding });
+  retried.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(retryHistory, 2, 'task-1', -1) },
+    adoption(retried, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const successor = retried.snapshot();
+  assert.equal(successor.tasks[0].attempt_id, 'attempt-b');
+  assert.equal(successor.tasks[0].attempt_number, 2);
+  assert.throws(
+    () => retried.adopt(
+      'task.get',
+      observedSnapshot({ attempt_id: 'attempt-a', attempt_number: 1, state: 'terminal', outcome: 'cancelled', event_head: 1 }),
+      adoption(retried, { target_task_id: 'task-1' }),
+    ),
+    /change or roll back its authoritative attempt/,
+  );
+  assert.deepEqual(retried.snapshot(), successor);
+});
+
+test('a task.get refresh retains the consumed event cursor and its replay fence', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([event(0), event(1)], 1, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  leaf.adopt('task.get', observedSnapshot({ state: 'running', event_head: 1 }), adoption(leaf, { target_task_id: 'task-1' }));
+  const refreshed = leaf.snapshot().tasks[0];
+  assert.equal(refreshed.last_event_seq, 1, 'a snapshot refresh must not discard the consumed event cursor');
+  assert.equal(refreshed.last_event_id, 'task-1:event:1');
+  assert.equal(refreshed.event_head, 1);
+
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([], 1, 'task-1', 1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 1 } }),
+  );
+  const fenced = leaf.snapshot();
+  assert.deepEqual(fenced.tasks[0], refreshed);
+
+  assert.throws(
+    () => leaf.adopt(
+      'task.events',
+      {
+        ok: true,
+        result: eventsResult(
+          [event(0), event(1, { event_id: 'task-1:forged:1', source_event_id: 'forged-source-1', causation_id: 'forged-source-1' })],
+          1,
+          'task-1',
+          -1,
+        ),
+      },
+      adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+    ),
+    /replay conflicts with observed task truth/,
+  );
+  assert.deepEqual(leaf.snapshot(), fenced);
+
+  assert.throws(
+    () => leaf.adopt(
+      'task.status',
+      observedSnapshot({ state: 'terminal', outcome: 'completed', event_head: 1 }),
+      adoption(leaf, { target_task_id: 'task-1' }),
+    ),
+    /contradicts the observed event head truth/,
+  );
+  assert.deepEqual(leaf.snapshot(), fenced);
+
+  leaf.adopt(
+    'task.status',
+    observedSnapshot({ state: 'terminal', outcome: 'completed', event_head: 3 }),
+    adoption(leaf, { target_task_id: 'task-1' }),
+  );
+  const ahead = leaf.snapshot().tasks[0];
+  assert.equal(ahead.state, 'terminal');
+  assert.equal(ahead.outcome, 'completed');
+  assert.equal(ahead.event_head, 3);
+  assert.equal(ahead.last_event_seq, null, 'a snapshot ahead of the cursor requires a complete replay');
+  leaf.adopt(
+    'task.events',
+    {
+      ok: true,
+      result: eventsResult(
+        [event(0), event(1), event(2), event(3, { event_type: 'task.terminal', state: 'terminal', outcome: 'completed' })],
+        3,
+        'task-1',
+        -1,
+      ),
+    },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(leaf.snapshot().tasks[0].last_event_seq, 3);
+  assert.equal(leaf.snapshot().tasks[0].last_event_id, 'task-1:event:3');
+});
+
+test('a task.status attempt boundary requires an observed terminal predecessor', () => {
+  const advanced = new FormalTaskControlLeaf({ enabled: true, binding });
+  advanced.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(retryHistory.slice(0, 2), 1, 'task-1', -1) },
+    adoption(advanced, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  advanced.adopt(
+    'task.status',
+    observedSnapshot({ attempt_id: 'attempt-b', attempt_number: 2, state: 'accepted', outcome: null, event_head: 2 }),
+    adoption(advanced, { target_task_id: 'task-1' }),
+  );
+  const successor = advanced.snapshot().tasks[0];
+  assert.equal(successor.attempt_id, 'attempt-b');
+  assert.equal(successor.attempt_number, 2);
+  assert.equal(successor.state, 'accepted');
+  assert.equal(successor.event_head, 2);
+  assert.equal(successor.last_event_seq, null, 'a successor attempt carries no consumed cursor');
+
+  const skipped = new FormalTaskControlLeaf({ enabled: true, binding });
+  skipped.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([event(0, { attempt_id: 'attempt-a' })], 0, 'task-1', -1) },
+    adoption(skipped, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const accepted = skipped.snapshot();
+  assert.throws(
+    () => skipped.adopt(
+      'task.status',
+      observedSnapshot({ attempt_id: 'attempt-b', attempt_number: 2, state: 'accepted', outcome: null, event_head: 2 }),
+      adoption(skipped, { target_task_id: 'task-1' }),
+    ),
+    /revive or regress its observed lifecycle/,
+  );
+  assert.deepEqual(skipped.snapshot(), accepted);
+
+  skipped.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(retryHistory, 2, 'task-1', -1) },
+    adoption(skipped, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(skipped.snapshot().tasks[0].attempt_id, 'attempt-b');
+  assert.equal(skipped.snapshot().tasks[0].attempt_number, 2);
+});
+
+test('a snapshot refresh keeps the formal task capacity boundary exact', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const boundaryTasks = Array.from({ length: FORMAL_TASK_CONTROL_LIMITS.max_tasks }, (_, index) => task({
+    task_id: `task-${index}`,
+    attempt_id: `attempt-${index}`,
+  }));
+  leaf.adopt('task.list', { ok: true, result: { tasks: boundaryTasks } }, adoption(leaf));
+  const boundary = leaf.snapshot();
+  assert.equal(boundary.tasks.length, FORMAL_TASK_CONTROL_LIMITS.max_tasks);
+
+  assert.throws(
+    () => leaf.adopt(
+      'task.get',
+      observedSnapshot({ task_id: 'task-overflow', attempt_id: 'attempt-overflow' }),
+      adoption(leaf, { target_task_id: 'task-overflow' }),
+    ),
+    /formal task capacity is exhausted/,
+  );
+  assert.deepEqual(leaf.snapshot(), boundary);
+
+  leaf.adopt(
+    'task.status',
+    observedSnapshot({ task_id: 'task-0', attempt_id: 'attempt-0', state: 'terminal', outcome: 'completed', event_head: 2 }),
+    adoption(leaf, { target_task_id: 'task-0' }),
+  );
+  const refreshed = leaf.snapshot();
+  assert.equal(refreshed.tasks.length, FORMAL_TASK_CONTROL_LIMITS.max_tasks);
+  assert.equal(refreshed.tasks.find(entry => entry.task_id === 'task-0').outcome, 'completed');
+});
+
+test('formal mutations require the product mutation envelope while queries keep the legacy result form', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const createPrepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.create', command_id: 'command-1', task_id: null },
+    confirmation(),
+  );
+  await leaf.submitMutation(createPrepared, async () => ({ ok: true }));
+  const beforeCreate = leaf.snapshot();
+  assert.throws(
+    () => leaf.adopt(
+      'task.create',
+      { ok: true, result: { command_id: 'command-1', task_id: 'task-1', attempt_id: 'attempt-1', state: 'accepted', outbox_id: 'outbox-1' } },
+      adoption(leaf, { command_id: 'command-1' }),
+    ),
+    /task\.create requires an authoritative product mutation envelope/,
+  );
+  assert.deepEqual(leaf.snapshot(), beforeCreate);
+  assert.equal(leaf.snapshot().tasks.length, 0);
+
+  leaf.adopt(
+    'task.create',
+    {
+      status: 'mutation_processed',
+      operation: 'task.create',
+      command_id: 'command-1',
+      target_task_id: null,
+      formal_task_result: { task_id: 'task-1', attempt_id: 'attempt-1', state: 'accepted', outbox_id: 'outbox-1' },
+    },
+    adoption(leaf, { command_id: 'command-1' }),
+  );
+  assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
+
+  leaf.adopt(
+    'task.events',
+    {
+      ok: true,
+      result: eventsResult([event(0), event(1, { event_type: 'task.terminal', state: 'terminal', outcome: 'cancelled' })], 1, 'task-1', -1),
+    },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(leaf.snapshot().tasks[0].outcome, 'cancelled');
+
+  const retryPrepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.retry', command_id: 'retry-b', task_id: 'task-1' },
+    confirmation({ confirmation_id: 'confirmation-retry', operation: 'task.retry', command_id: 'retry-b', target_task_id: 'task-1' }),
+  );
+  await leaf.submitMutation(retryPrepared, async () => ({ ok: true }));
+  const beforeRetry = leaf.snapshot();
+  assert.throws(
+    () => leaf.adopt(
+      'task.retry',
+      {
+        ok: true,
+        result: {
+          command_id: 'retry-b',
+          task_id: 'task-1',
+          attempt_id: 'attempt-b',
+          attempt_number: 2,
+          previous_attempt_id: 'attempt-1',
+          applied: true,
+          state: 'accepted',
+        },
+      },
+      adoption(leaf, { command_id: 'retry-b' }),
+    ),
+    /task\.retry requires an authoritative product mutation envelope/,
+  );
+  assert.deepEqual(leaf.snapshot(), beforeRetry);
+  assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-1');
+  assert.equal(leaf.snapshot().tasks[0].state, 'terminal');
+
+  const cancelPrepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.cancel', command_id: 'command-cancel', task_id: 'task-1' },
+    confirmation({ confirmation_id: 'confirmation-cancel', operation: 'task.cancel', command_id: 'command-cancel', target_task_id: 'task-1' }),
+  );
+  await leaf.submitMutation(cancelPrepared, async () => ({ ok: true }));
+  const beforeCancel = leaf.snapshot();
+  assert.throws(
+    () => leaf.adopt(
+      'task.cancel',
+      {
+        ok: true,
+        result: { command_id: 'command-cancel', task_id: 'task-1', attempt_id: 'attempt-1', cancel_acknowledged: false, applied: true, state: 'terminal' },
+      },
+      adoption(leaf, { command_id: 'command-cancel' }),
+    ),
+    /task\.cancel requires an authoritative product mutation envelope/,
+  );
+  assert.deepEqual(leaf.snapshot(), beforeCancel);
+
+  leaf.adopt(
+    'task.get',
+    observedSnapshot({ state: 'terminal', outcome: 'cancelled', event_head: 1 }),
+    adoption(leaf, { target_task_id: 'task-1' }),
+  );
+  assert.equal(leaf.snapshot().tasks[0].last_event_seq, 1);
+  leaf.adopt('task.list', { ok: true, result: { tasks: [task({ state: 'terminal', outcome: 'cancelled' })] } }, adoption(leaf));
+  assert.equal(leaf.snapshot().tasks.length, 1);
+});

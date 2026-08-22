@@ -3311,7 +3311,7 @@ class AutoHarnessService:
         )
         if owner_scope_was_provided and normalized_owner_scope is None:
             return {
-                "error": "璋冨害浠诲姟缂哄皯鏈嶅姟绔墍鏈夎€呰寖鍥?",
+                "error": "调度任务缺少服务端所有者范围",
                 "code": "TASK_SCOPE_REQUIRED",
             }
         if isinstance(interval_hours, bool) or not isinstance(interval_hours, (int, float)):
@@ -3489,7 +3489,7 @@ class AutoHarnessService:
         )
         if owner_scope_was_provided and normalized_owner_scope is None:
             return {
-                "error": "璋冨害浠诲姟缂哄皯鏈嶅姟绔墍鏈夎€呰寖鍥?",
+                "error": "调度任务缺少服务端所有者范围",
                 "code": "TASK_SCOPE_REQUIRED",
             }
         normalized_origin_namespace: Optional[str] = None

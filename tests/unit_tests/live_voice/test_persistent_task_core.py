@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -8879,6 +8881,344 @@ def test_executor_duplicate_is_noop_and_conflicting_duplicate_is_rejected(
     assert store.counts() == before
 
 
+def test_outbox_completion_rejects_cross_bound_observation_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+
+    invocation_b = _create(tmp_path, identity_suffix="-b")
+    created_b = core.execute(
+        invocation_b.envelope,
+        invocation_b.authorization,
+        context=invocation_b.context,
+        now=NOW,
+    )
+    assert created_b.ok
+    item_b = store.claim_outbox("worker-b")
+    assert item_b is not None
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{item_b.attempt_id}",
+        observations=(_observations(item_b)[0],),
+    )
+
+    invocation_a = _create(tmp_path, identity_suffix="-a")
+    created_a = core.execute(
+        invocation_a.envelope,
+        invocation_a.authorization,
+        context=invocation_a.context,
+        now=NOW,
+    )
+    assert created_a.ok
+    item_a = store.claim_outbox("worker-a")
+    assert item_a is not None
+    observation_b = _observations(item_b)[1]
+    observation_a = replace(
+        _observations(item_a)[0],
+        executor_ref=observation_b.executor_ref,
+    )
+    cross_bound_delivery = ExecutorDeliveryResult(
+        observation_b.executor_ref,
+        (observation_a, observation_b),
+    )
+    before_dump = _database_dump(database)
+    before_task_a = store.get_task(item_a.task_id, _scope())
+    before_task_b = store.get_task(item_b.task_id, _scope())
+    before_attempt_a = store.get_attempt(item_a.attempt_id)
+    before_attempt_b = store.get_attempt(item_b.attempt_id)
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.complete_outbox(
+            item_a,
+            executor_ref=cross_bound_delivery.executor_ref,
+            observations=cross_bound_delivery.observations,
+        )
+
+    assert raised.value.reason == "EXECUTOR_OBSERVATION_BINDING_MISMATCH"
+    assert raised.value.code is ErrorCode.PROTOCOL_VIOLATION
+    assert _database_dump(database) == before_dump
+    reopened = SqliteTaskStore(database)
+    assert reopened.get_task(item_a.task_id, _scope()) == before_task_a
+    assert reopened.get_task(item_b.task_id, _scope()) == before_task_b
+    assert reopened.get_attempt(item_a.attempt_id) == before_attempt_a
+    assert reopened.get_attempt(item_b.attempt_id) == before_attempt_b
+
+    exact_observations = _observations(item_a)
+    reopened.complete_outbox(
+        item_a,
+        executor_ref=f"legacy:{item_a.attempt_id}",
+        observations=exact_observations,
+    )
+    assert reopened.get_task(item_a.task_id, _scope()).state is FormalTaskState.RUNNING
+    assert reopened.get_attempt(item_a.attempt_id).state is FormalAttemptState.RUNNING
+    assert reopened.get_task(item_b.task_id, _scope()) == before_task_b
+    assert reopened.get_attempt(item_b.attempt_id) == before_attempt_b
+
+    after_completion = _database_dump(database)
+    replay = SqliteTaskStore(database).apply_observations(exact_observations)
+    assert replay.disposition is TaskMutationDisposition.NOOP
+    assert replay.events == ()
+    assert _database_dump(database) == after_completion
+
+
+@pytest.mark.asyncio
+async def test_core_rejects_mixed_outbox_observations_and_retries_exact_delivery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    setup_core = PersistentTaskCore(store, _Executor())
+
+    invocation_b = _create(tmp_path, identity_suffix="-mixed-b")
+    created_b = setup_core.execute(
+        invocation_b.envelope,
+        invocation_b.authorization,
+        context=invocation_b.context,
+        now=NOW,
+    )
+    assert created_b.ok and created_b.result is not None
+    item_b = store.claim_outbox("setup-b")
+    assert item_b is not None
+    observations_b = _observations(item_b)
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{item_b.attempt_id}",
+        observations=(observations_b[0],),
+    )
+
+    invocation_a = _create(tmp_path, identity_suffix="-mixed-a")
+    created_a = setup_core.execute(
+        invocation_a.envelope,
+        invocation_a.authorization,
+        context=invocation_a.context,
+        now=NOW,
+    )
+    assert created_a.ok and created_a.result is not None
+    task_a = str(created_a.result["task_id"])
+    attempt_a = str(created_a.result["attempt_id"])
+    command_a = invocation_a.envelope.command_id
+    task_b = str(created_b.result["task_id"])
+    attempt_b = str(created_b.result["attempt_id"])
+    command_b = invocation_b.envelope.command_id
+
+    class _MixedObservationExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivery: ExecutorDeliveryResult | None = None
+
+        async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
+            assert item.task_id == task_a
+            assert item.attempt_id == attempt_a
+            self.dispatches.append(item.attempt_id)
+            executor_ref = f"legacy:{attempt_b}"
+            observation_a = replace(_observations(item)[0], executor_ref=executor_ref)
+            observation_b = observations_b[1]
+            self.delivery = ExecutorDeliveryResult(
+                executor_ref,
+                (observation_a, observation_b),
+            )
+            return self.delivery
+
+    class _RecordingExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivery: ExecutorDeliveryResult | None = None
+
+        async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
+            self.delivery = await super().dispatch(item)
+            return self.delivery
+
+    def authority_snapshot(
+        task_ids: tuple[str, ...],
+        attempt_ids: tuple[str, ...],
+        command_ids: tuple[str, ...],
+    ) -> dict[str, tuple[tuple[object, ...], ...]]:
+        task_placeholders = ",".join("?" for _ in task_ids)
+        attempt_placeholders = ",".join("?" for _ in attempt_ids)
+        command_placeholders = ",".join("?" for _ in command_ids)
+        with sqlite3.connect(database) as connection:
+            return {
+                "tasks": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM tasks WHERE task_id IN ({task_placeholders}) "
+                        "ORDER BY task_id",
+                        task_ids,
+                    )
+                ),
+                "attempts": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM attempts "
+                        f"WHERE attempt_id IN ({attempt_placeholders}) "
+                        "ORDER BY attempt_id",
+                        attempt_ids,
+                    )
+                ),
+                "commands": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM commands "
+                        f"WHERE command_id IN ({command_placeholders}) "
+                        "ORDER BY scope_key, command_id",
+                        command_ids,
+                    )
+                ),
+                "task_events": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM task_events "
+                        f"WHERE task_id IN ({task_placeholders}) "
+                        "ORDER BY task_id, seq",
+                        task_ids,
+                    )
+                ),
+                "executor_events": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM executor_events "
+                        f"WHERE attempt_id IN ({attempt_placeholders}) "
+                        "ORDER BY attempt_id, source_seq",
+                        attempt_ids,
+                    )
+                ),
+            }
+
+    def outbox_snapshot(outbox_id: str) -> dict[str, object]:
+        with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM outbox WHERE outbox_id=?", (outbox_id,)
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    outbox_a = str(created_a.result["outbox_id"])
+    before_outbox_a = outbox_snapshot(outbox_a)
+    before_outbox_b = outbox_snapshot(item_b.outbox_id)
+    authority_ids = ((task_a, task_b), (attempt_a, attempt_b), (command_a, command_b))
+    before_authority = authority_snapshot(*authority_ids)
+    before_b_authority = authority_snapshot((task_b,), (attempt_b,), (command_b,))
+    executor = _MixedObservationExecutor()
+    core = PersistentTaskCore(store, executor)
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="mixed-observation-worker")
+
+    assert raised.value.reason == "EXECUTOR_OBSERVATION_BINDING_MISMATCH"
+    assert raised.value.code is ErrorCode.RESULT_UNKNOWN
+    assert executor.delivery is not None
+    assert executor.dispatches == [attempt_a]
+    assert attempt_b not in executor.dispatches
+    assert executor.cancels == []
+    assert executor.adjustments == []
+    assert executor.adjustment_settlements == []
+    assert executor.retry_readiness_calls == []
+
+    after_authority = authority_snapshot(*authority_ids)
+    assert after_authority["tasks"] == before_authority["tasks"]
+    assert after_authority["attempts"] == before_authority["attempts"]
+    assert after_authority["commands"] == before_authority["commands"]
+    assert after_authority["task_events"] == before_authority["task_events"]
+    assert after_authority["executor_events"] == before_authority["executor_events"]
+    after_outbox_b = outbox_snapshot(item_b.outbox_id)
+    assert after_outbox_b == before_outbox_b
+
+    after_outbox_a = outbox_snapshot(outbox_a)
+    expected_outbox_a = dict(before_outbox_a)
+    expected_outbox_a.update(
+        {
+            "delivery_count": before_outbox_a["delivery_count"] + 1,
+            "last_error": "outbox completion observations must bind its exact delivery",
+            "updated_at": after_outbox_a["updated_at"],
+        }
+    )
+    assert before_outbox_a["state"] == OutboxState.PENDING.value
+    assert before_outbox_a["claimed_by"] is None
+    assert before_outbox_a["claimed_at"] is None
+    assert before_outbox_a["claim_token"] is None
+    assert before_outbox_a["last_error"] is None
+    assert after_outbox_a == expected_outbox_a
+    assert after_outbox_a["state"] == OutboxState.PENDING.value
+    assert after_outbox_a["claimed_by"] is None
+    assert after_outbox_a["claimed_at"] is None
+    assert after_outbox_a["claim_token"] is None
+    assert after_outbox_a["updated_at"] >= before_outbox_a["updated_at"]
+
+    reopened = SqliteTaskStore(database)
+    retry_executor = _RecordingExecutor()
+    retry_core = PersistentTaskCore(reopened, retry_executor)
+    assert await retry_core.drain_outbox_once(worker_id="exact-a-retry") is True
+    assert retry_executor.delivery is not None
+    assert retry_executor.dispatches == [attempt_a]
+    assert attempt_b not in retry_executor.dispatches
+    assert retry_executor.cancels == []
+    assert retry_executor.adjustments == []
+    assert retry_executor.adjustment_settlements == []
+    assert reopened.get_task(task_a, _scope()).state is FormalTaskState.RUNNING
+    assert reopened.get_attempt(attempt_a).state is FormalAttemptState.RUNNING
+    assert outbox_snapshot(item_b.outbox_id) == before_outbox_b
+    assert authority_snapshot((task_b,), (attempt_b,), (command_b,)) == (
+        before_b_authority
+    )
+
+    delivered_outbox_a = outbox_snapshot(outbox_a)
+    assert delivered_outbox_a["state"] == OutboxState.DELIVERED.value
+    assert delivered_outbox_a["delivery_count"] == 2
+    after_exact_delivery = _database_dump(database)
+    replay = reopened.apply_observations(retry_executor.delivery.observations)
+    assert replay.disposition is TaskMutationDisposition.NOOP
+    assert replay.events == ()
+    assert _database_dump(database) == after_exact_delivery
+
+
+@pytest.mark.parametrize(
+    "binding_field",
+    ("task_id", "attempt_id", "executor_id", "executor_ref"),
+)
+def test_outbox_completion_prevalidates_each_observation_binding(
+    tmp_path: Path,
+    binding_field: str,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    item = store.claim_outbox("worker")
+    assert item is not None
+    valid = _observations(item)[0]
+    mismatched = replace(
+        valid,
+        **{binding_field: f"{getattr(valid, binding_field)}-other"},
+    )
+    before_dump = _database_dump(database)
+    before_task = store.get_task(item.task_id, _scope())
+    before_attempt = store.get_attempt(item.attempt_id)
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.complete_outbox(
+            item,
+            executor_ref=f"legacy:{item.attempt_id}",
+            observations=(mismatched,),
+        )
+
+    assert raised.value.reason == "EXECUTOR_OBSERVATION_BINDING_MISMATCH"
+    assert raised.value.code is ErrorCode.PROTOCOL_VIOLATION
+    assert _database_dump(database) == before_dump
+    reopened = SqliteTaskStore(database)
+    assert reopened.get_task(item.task_id, _scope()) == before_task
+    assert reopened.get_attempt(item.attempt_id) == before_attempt
+
+
 def test_wrong_executor_binding_and_sequence_gap_leave_state_unchanged(
     tmp_path: Path,
 ) -> None:
@@ -10374,3 +10714,493 @@ async def test_reconciliation_sink_failure_cannot_change_durable_task_truth(
     assert summary["lost"] == 1
     assert task.state is FormalTaskState.TERMINAL
     assert task.outcome is TerminalOutcome.INTERRUPTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["claim_outbox", "reset_expired_outbox_claims"])
+async def test_blocking_store_stall_never_delays_event_loop_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store = SqliteTaskStore(tmp_path / f"blocking-{operation}.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    if operation == "claim_outbox":
+        invocation = _create(tmp_path)
+        created = core.execute(
+            invocation.envelope,
+            invocation.authorization,
+            context=invocation.context,
+            now=NOW,
+        )
+        assert created.ok
+
+    original = getattr(store, operation)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_store_call(*args, **kwargs):  # type: ignore[no-untyped-def]
+        entered.set()
+        assert release.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, operation, blocking_store_call)
+    fallback_released = threading.Event()
+
+    def release_fallback() -> None:
+        fallback_released.set()
+        release.set()
+
+    timer = threading.Timer(0.2, release_fallback)
+    timer.start()
+    control_ran_before_fallback: list[bool] = []
+
+    async def observe_control() -> None:
+        await asyncio.sleep(0)
+        control_ran_before_fallback.append(not fallback_released.is_set())
+        release.set()
+
+    control = asyncio.create_task(observe_control())
+    try:
+        if operation == "claim_outbox":
+            assert await core.drain_outbox_once(worker_id="blocking-worker") is True
+        else:
+            await core.reconcile()
+        await control
+    finally:
+        release.set()
+        timer.join(timeout=2)
+
+    assert entered.is_set()
+    assert control_ran_before_fallback == [True]
+
+
+@pytest.mark.asyncio
+async def test_async_store_orchestration_never_runs_sqlite_on_owner_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "store-thread-isolation.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    loop_thread = threading.get_ident()
+    calls: dict[str, list[int]] = {}
+    operations = (
+        "claim_outbox",
+        "complete_outbox",
+        "reset_expired_outbox_claims",
+        "nonterminal_attempts",
+        "mark_reconciliation_pending",
+        "resolve_lost_attempt",
+    )
+    for operation in operations:
+        original = getattr(store, operation)
+        calls[operation] = []
+
+        def record_thread(*args, _operation=operation, _original=original, **kwargs):  # type: ignore[no-untyped-def]
+            calls[_operation].append(threading.get_ident())
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, operation, record_thread)
+
+    await core.drain_outbox_once(worker_id="thread-isolation")
+    executor.status_resolution = ExecutorResolution.LOST
+    summary = await core.reconcile()
+
+    assert summary["lost"] == 1
+    assert all(calls[operation] for operation in operations)
+    assert all(
+        thread_id != loop_thread
+        for operation in operations
+        for thread_id in calls[operation]
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_blocking_claim_settles_and_releases_exact_outbox_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "cancelled-blocking-claim.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    original_claim = store.claim_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_claim(worker_id: str, *, observed_at: str | None = None):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_claim(worker_id)
+
+    monkeypatch.setattr(store, "claim_outbox", blocked_claim)
+    timer = threading.Timer(0.2, release.set)
+    timer.start()
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="cancelled-owner"))
+    try:
+        await asyncio.sleep(0.03)
+        assert entered.is_set()
+        draining.cancel("caller stopped waiting")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        draining.cancel("duplicate caller cancellation")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        with pytest.raises(
+            asyncio.CancelledError, match="caller stopped waiting"
+        ) as raised:
+            await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    finally:
+        release.set()
+        timer.join(timeout=2)
+
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, claimed_by, claimed_at, claim_token FROM outbox"
+        ).fetchone()
+    assert outbox == ("pending", None, None, None)
+    assert executor.dispatches == []
+
+    monkeypatch.setattr(store, "claim_outbox", original_claim)
+    assert await core.drain_outbox_once(worker_id="successor-owner") is True
+    assert len(executor.dispatches) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_adjustment_store_wait_retains_exact_settlement_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "cancelled-adjustment-store.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(worker_id="dispatch-owner") is True
+    task_id = str(created.result["task_id"])
+    command, grant = _adjust(task_id, "Move the museum visit to 09:30.")
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok
+    original_complete = store.complete_adjustment_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_complete(*args, **kwargs):  # type: ignore[no-untyped-def]
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(store, "complete_adjustment_outbox", blocked_complete)
+    timer = threading.Timer(0.2, release.set)
+    timer.start()
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="adjustment-owner"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        draining.cancel("caller stopped adjustment wait")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        draining.cancel("duplicate adjustment cancellation")
+        await asyncio.sleep(0)
+        assert not draining.done()
+        release.set()
+        with pytest.raises(
+            asyncio.CancelledError, match="caller stopped adjustment wait"
+        ) as raised:
+            await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    finally:
+        release.set()
+        timer.join(timeout=2)
+
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, claimed_by, claimed_at, claim_token "
+            "FROM outbox WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+    assert outbox == ("delivered", None, None, None)
+    assert executor.adjustments == [command.command_id]
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False)
+    ]
+    replay = core.execute(
+        replace(command, request_id="request-adjust-after-cancelled-wait"),
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert replay.ok and replay.result is not None
+    assert replay.result["adjustment_state"] == "applied"
+    assert await core.drain_outbox_once(worker_id="later-owner") is False
+    assert executor.adjustments == [command.command_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_failure_kind", ["ordinary", "process_control"])
+async def test_cancelled_claim_release_failure_has_explicit_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_failure_kind: str,
+) -> None:
+    database = tmp_path / "cancelled-claim-release-failure.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    original_claim = store.claim_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_claim(worker_id: str, *, observed_at: str | None = None):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_claim(worker_id)
+
+    release_failure: BaseException
+    if release_failure_kind == "ordinary":
+        release_failure = RuntimeError("ordinary exact release failure")
+    else:
+        release_failure = GeneratorExit("process-control exact release failure")
+
+    def failing_release(*_args, **_kwargs) -> None:
+        raise release_failure
+
+    monkeypatch.setattr(store, "claim_outbox", blocked_claim)
+    monkeypatch.setattr(store, "release_outbox", failing_release)
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="failed-release"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        draining.cancel("caller cancellation remains authoritative")
+        release.set()
+        if release_failure_kind == "ordinary":
+            with pytest.raises(
+                asyncio.CancelledError,
+                match="caller cancellation remains authoritative",
+            ) as raised:
+                await draining
+            assert raised.value.__cause__ is None
+            assert raised.value.__context__ is None
+        else:
+            with pytest.raises(GeneratorExit) as raised:
+                await draining
+            assert raised.value is release_failure
+    finally:
+        release.set()
+
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, claimed_by, delivery_count FROM outbox"
+        ).fetchone()
+    assert outbox == ("claimed", "failed-release", 1)
+    assert executor.dispatches == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["ordinary", "process_control"])
+async def test_repeated_cancelled_claim_preserves_explicit_worker_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    database = tmp_path / f"claim-worker-{failure_kind}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok
+    original_claim = store.claim_outbox
+    entered = threading.Event()
+    release = threading.Event()
+    failure: BaseException
+    if failure_kind == "ordinary":
+        failure = RuntimeError("claim worker ordinary failure")
+    else:
+        failure = GeneratorExit("claim worker process-control failure")
+
+    def failing_claim(_worker_id: str, *, observed_at: str | None = None) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise failure
+
+    monkeypatch.setattr(store, "claim_outbox", failing_claim)
+    draining = asyncio.create_task(core.drain_outbox_once(worker_id="claim-owner"))
+    assert await asyncio.to_thread(entered.wait, 2)
+    draining.cancel("first claim caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("second claim caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("third claim caller cancellation")
+    await asyncio.sleep(0)
+    assert not draining.done()
+    release.set()
+
+    if failure_kind == "ordinary":
+        with pytest.raises(
+            asyncio.CancelledError,
+            match="first claim caller cancellation",
+        ) as raised:
+            await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    else:
+        with pytest.raises(GeneratorExit) as raised:
+            await draining
+        assert raised.value is failure
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    assert executor.dispatches == []
+    monkeypatch.setattr(store, "claim_outbox", original_claim)
+    reopened_executor = _Executor()
+    reopened = PersistentTaskCore(SqliteTaskStore(database), reopened_executor)
+    assert await reopened.drain_outbox_once(worker_id="claim-successor") is True
+    assert len(reopened_executor.dispatches) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["ordinary", "process_control"])
+async def test_repeated_cancelled_adjustment_preserves_worker_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    database = tmp_path / f"adjustment-worker-{failure_kind}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(worker_id="dispatch-owner") is True
+    command, grant = _adjust(
+        str(created.result["task_id"]),
+        "Move the museum visit to 10:00.",
+    )
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok
+    original_complete = store.complete_adjustment_outbox
+    entered = threading.Event()
+    release = threading.Event()
+    failure: BaseException
+    if failure_kind == "ordinary":
+        failure = RuntimeError("adjustment worker ordinary failure")
+    else:
+        failure = GeneratorExit("adjustment worker process-control failure")
+
+    def failing_complete(*_args, **_kwargs) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise failure
+
+    monkeypatch.setattr(store, "complete_adjustment_outbox", failing_complete)
+    draining = asyncio.create_task(
+        core.drain_outbox_once(worker_id="adjustment-failure-owner")
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+    draining.cancel("first adjustment caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("second adjustment caller cancellation")
+    await asyncio.sleep(0)
+    draining.cancel("third adjustment caller cancellation")
+    await asyncio.sleep(0)
+    assert not draining.done()
+    release.set()
+
+    if failure_kind == "ordinary":
+        with pytest.raises(
+            asyncio.CancelledError,
+            match="first adjustment caller cancellation",
+        ) as raised:
+            await draining
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    else:
+        with pytest.raises(GeneratorExit) as raised:
+            await draining
+        assert raised.value is failure
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    assert executor.adjustments == [command.command_id]
+    assert executor.adjustment_settlements == []
+    monkeypatch.setattr(store, "complete_adjustment_outbox", original_complete)
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT state, claimed_by FROM outbox WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+    assert row == ("claimed", "adjustment-failure-owner")
+
+
+@pytest.mark.asyncio
+async def test_retained_owner_preserves_its_own_exact_cancellation() -> None:
+    inner_cancellation = asyncio.CancelledError("retained owner cancelled itself")
+
+    async def cancel_self() -> None:
+        raise inner_cancellation
+
+    owner = asyncio.create_task(cancel_self())
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await PersistentTaskCore._await_retained(owner)
+
+    assert raised.value is inner_cancellation
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None

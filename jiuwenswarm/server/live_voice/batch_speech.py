@@ -749,13 +749,20 @@ class OpenAICompatibleBatchSpeechProvider:
                 "speech Provider returned an invalid recognition result",
             )
         text = payload.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
             raise _fail(
                 ErrorCode.PROTOCOL_VIOLATION,
                 "SPEECH_PROVIDER_EMPTY_TRANSCRIPT",
                 "speech Provider returned an empty recognition result",
             )
-        if len(text) > MAX_RECOGNITION_TEXT_CHARS:
+        canonical_text = text.strip()
+        if not canonical_text:
+            raise _fail(
+                ErrorCode.PROTOCOL_VIOLATION,
+                "SPEECH_PROVIDER_EMPTY_TRANSCRIPT",
+                "speech Provider returned an empty recognition result",
+            )
+        if len(canonical_text) > MAX_RECOGNITION_TEXT_CHARS:
             raise _fail(
                 ErrorCode.PROTOCOL_VIOLATION,
                 "SPEECH_PROVIDER_TRANSCRIPT_LIMIT",
@@ -764,7 +771,7 @@ class OpenAICompatibleBatchSpeechProvider:
         observed_locale = payload.get("language")
         if not isinstance(observed_locale, str) or not observed_locale.strip():
             observed_locale = None
-        return ProviderRecognitionResult(text, observed_locale, model)
+        return ProviderRecognitionResult(canonical_text, observed_locale, model)
 
     async def synthesize(
         self, request: ProviderSynthesisRequest
@@ -791,7 +798,8 @@ class OpenAICompatibleBatchSpeechProvider:
             bytes(response.content),
             sample_rate_hz=_OPENAI_PCM_SAMPLE_RATE_HZ,
         )
-        audio = _resample_pcm16_mono_wav(
+        audio = await asyncio.to_thread(
+            _resample_pcm16_mono_wav,
             audio,
             target_sample_rate_hz=request.required_sample_rate_hz,
         )

@@ -425,11 +425,18 @@ async def test_new_task_fails_closed_for_explicit_invalid_owner_scope(
             owner_scope=invalid_owner_scope,
         )
 
-    assert result["code"] == "TASK_SCOPE_REQUIRED"
-    assert "task_id" not in result
+    assert result == {
+        "error": "调度任务缺少服务端所有者范围",
+        "code": "TASK_SCOPE_REQUIRED",
+    }
     assert task_store.tasks == {}
     assert task_store.added == []
+    assert task_store.updates == []
+    assert task_store.deleted == []
+    assert task_store.log_reads == []
     assert scheduler.triggered == []
+    assert scheduler.cancelled == []
+    assert service._scheduled_task_execution_contexts == {}
 
 
 @pytest.mark.asyncio

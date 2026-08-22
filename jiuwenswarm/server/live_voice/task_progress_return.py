@@ -1180,6 +1180,7 @@ class TaskProgressReturnBridge:
         self._delivery_lock = asyncio.Lock()
         self._source_close_lock = asyncio.Lock()
         self._source_closed = False
+        self._source_started = False
         self._state = TaskProgressReturnState.NEW
         self._reason: TaskProgressReturnReason | None = None
         self._owner_loop: asyncio.AbstractEventLoop | None = None
@@ -1269,6 +1270,7 @@ class TaskProgressReturnBridge:
                 return self._inactive_activation()
 
             self._owner_loop = asyncio.get_running_loop()
+            self._source_started = True
             try:
                 started = await self._start_source(binding)
             except asyncio.CancelledError:
@@ -1383,22 +1385,30 @@ class TaskProgressReturnBridge:
         # while the retained cleanup task concurrently reaches source.close().
         self._close_requested = True
         self._deferred_voice_settled.set()
-        if self._state in {
+        settled_reason = self._state in {
             TaskProgressReturnState.DISABLED,
             TaskProgressReturnState.UNAVAILABLE,
             TaskProgressReturnState.CLOSED,
             TaskProgressReturnState.FAILED,
-        }:
+        }
+        # A settled reason alone does not prove the owned children stopped. An
+        # externally induced failure - a failed drain, or a terminal delivery
+        # whose own source close failed - settles the reason while the worker is
+        # still parked inside source.next_event(). Return early only when the
+        # source and the worker are both settled; otherwise run the idempotent
+        # cleanup so the source detaches and the poll terminates.
+        if settled_reason and self._cleanup_settled():
             return
         if self._state is TaskProgressReturnState.NEW and self._owner_loop is None:
             self._state = TaskProgressReturnState.CLOSED
             self._reason = TaskProgressReturnReason.CLOSED_BEFORE_ACTIVATION
             return
-        self._state = TaskProgressReturnState.DETACHING
-        self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
+        if not settled_reason:
+            self._state = TaskProgressReturnState.DETACHING
+            self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
         if self._close_task is None:
             self._close_task = current_loop.create_task(
-                self._close_impl(),
+                self._close_impl(preserve_settled_reason=settled_reason),
                 name=f"live-voice-task-progress-close:{self._binding.task_id}",
             )
         close_task = self._close_task
@@ -1580,6 +1590,19 @@ class TaskProgressReturnBridge:
                     return
                 if not await self._consume(event):
                     return
+        except Exception:  # noqa: BLE001 - the worker contains its own failure
+            # The worker owns its own background failure: an escaping exception
+            # must settle truthfully instead of ending this task with an
+            # exception nobody retrieves. Caller cancellation is a BaseException
+            # and still propagates, and an earlier settled truth still wins.
+            if self._state not in {
+                TaskProgressReturnState.CLOSED,
+                TaskProgressReturnState.FAILED,
+            }:
+                self._settle(
+                    TaskProgressReturnState.FAILED,
+                    TaskProgressReturnReason.SOURCE_FAILED,
+                )
         finally:
             try:
                 await self._close_source(binding)
@@ -2004,17 +2027,29 @@ class TaskProgressReturnBridge:
             self._text_events += 1
             return True
 
-    async def _close_impl(self) -> None:
+    async def _close_impl(self, *, preserve_settled_reason: bool = False) -> None:
         async with self._delivery_lock:
             pass
         await self._close_source(self._binding)
         worker = self._worker
         if worker is not None and worker is not asyncio.current_task():
             await asyncio.shield(worker)
+        if preserve_settled_reason:
+            # Cleanup is secondary: a state and reason that were already settled
+            # before this detach keep their exact business truth.
+            return
         self._settle(
             TaskProgressReturnState.CLOSED,
             TaskProgressReturnReason.CONSUMER_DETACHED,
         )
+
+    def _cleanup_settled(self) -> bool:
+        """True when neither the source nor the worker can still be running."""
+
+        worker = self._worker
+        if worker is not None and not worker.done():
+            return False
+        return self._source_closed or not self._source_started
 
     async def _start_source(self, binding: TaskProgressOriginBinding) -> bool:
         prepared = self._prepared_source

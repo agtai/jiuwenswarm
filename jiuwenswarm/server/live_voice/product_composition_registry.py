@@ -842,6 +842,11 @@ class AgentServerProductCompositionRegistry:
     _PRODUCT_OPERATION_CAPACITY = 128
     _TURN_COMMIT_CAPACITY = 128
     _TURN_COMMIT_CAPACITY_PER_ROUTE = 32
+    # An accepted task origin outlives its P2 route on purpose so a late
+    # P3 create can still consume it. That grace is bounded: eight abandoned
+    # origins keep 120 of the 128 shared committed-turn slots available for
+    # live routes, and an aged-out origin keeps only its retirement fence.
+    _ABANDONED_VOICE_ORIGIN_GRACE = 8
 
     def __init__(
         self,
@@ -919,6 +924,14 @@ class AgentServerProductCompositionRegistry:
             tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
         self._progress_generations: dict[tuple[str, str, str, str], int] = {}
+        # Exact high-water values cover the active working set. Evicting the
+        # whole entry at capacity would erase the generation high-water mark and
+        # let a superseded generation activate again, so the conservative max
+        # sketch retains it for this registry lifetime without unbounded RAM.
+        # Collisions can only fail closed.
+        self._progress_generation_fence = tuple(
+            array("Q", [0]) * (1 << 15) for _ in range(4)
+        )
         self._progress_targets: dict[tuple[str, str, str, str], _ProgressTarget] = {}
         self._progress_deliveries: dict[
             tuple[str, str, str, str], dict[str, _ProgressDelivery]
@@ -2013,9 +2026,65 @@ class AgentServerProductCompositionRegistry:
                 continue
             for closed_key in closed_keys:
                 self._closed_progress_routes.pop(closed_key, None)
-            self._progress_generations.pop(retained_key, None)
+            retired = self._progress_generations.pop(retained_key, None)
+            if retired is not None:
+                self._record_progress_generation(retained_key, retired)
             return True
         return False
+
+    def _progress_generation_indices(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> tuple[int, int, int, int]:
+        digest = hashlib.sha256("\0".join(key).encode("utf-8")).digest()
+        capacity = len(self._progress_generation_fence[0])
+        return (
+            int.from_bytes(digest[0:4], "big") % capacity,
+            int.from_bytes(digest[4:8], "big") % capacity,
+            int.from_bytes(digest[8:12], "big") % capacity,
+            int.from_bytes(digest[12:16], "big") % capacity,
+        )
+
+    def _record_progress_generation(
+        self,
+        key: tuple[str, str, str, str],
+        generation: int,
+    ) -> None:
+        # No uint64 clamp: the only source is a generation already retained in
+        # `_progress_generations`, and activation fails closed above the
+        # contract's MAX_SAFE_INTEGER and rolls that transient entry back under
+        # the same lock, so `generation + 1` can never overflow a cell.
+        encoded = generation + 1
+        for row, index in zip(
+            self._progress_generation_fence,
+            self._progress_generation_indices(key),
+            strict=True,
+        ):
+            row[index] = max(row[index], encoded)
+
+    def _progress_generation_high_water(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> int:
+        encoded = min(
+            row[index]
+            for row, index in zip(
+                self._progress_generation_fence,
+                self._progress_generation_indices(key),
+                strict=True,
+            )
+        )
+        return int(encoded) - 1
+
+    def _fenced_progress_generation(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> int | None:
+        current = self._progress_generations.get(key)
+        if current is not None:
+            return current
+        fenced = self._progress_generation_high_water(key)
+        return fenced if fenced >= 0 else None
 
     @classmethod
     def _reserve_progress_delivery(
@@ -4073,7 +4142,13 @@ class AgentServerProductCompositionRegistry:
                         manifest=existing.manifest,
                     )
                 self._p2_routes.pop(key, None)
+                # Run the same exact cleanup normal close runs, by exact commit
+                # id. Normal close may additionally retire the whole interaction
+                # because it never republishes the key; a replacement must not,
+                # because the successor immediately reuses that interaction and
+                # its monotonic input-generation fence.
                 self._drop_voice_task_origins_for_route_locked(key)
+                self._retire_accepted_voice_commits_for_route_locked(key)
                 self._retain_closed_p2_route(
                     key,
                     _ClosedP2Route(
@@ -4331,6 +4406,14 @@ class AgentServerProductCompositionRegistry:
                     else None
                 ),
             )
+            # Republishing this key makes every accepted commit still bound
+            # to it reachable through the successor with its critical-token
+            # identity intact, because `_accepted_voice_commit_routes` carries
+            # no activation id or generation. The replacement branch already
+            # retires a live predecessor; a closed predecessor reaches
+            # publication directly, and its bounded late-create grace must end
+            # exactly here rather than at close, which never republishes.
+            self._retire_accepted_voice_commits_for_route_locked(key)
             self._p2_routes[key] = retained_route
             self._observe_p2_activation(retained_route)
             self._closed_p2_routes.pop(key, None)
@@ -4613,6 +4696,23 @@ class AgentServerProductCompositionRegistry:
                     self._unknown_turn_commits_by_commit[commit.commit_id] = commit
                     self._unknown_turn_commits_by_turn[commit.turn_id] = commit
                     self._unknown_voice_commit_routes[commit.commit_id] = route_key
+                elif (
+                    dispatch_target == "task"
+                    and not result_unknown
+                    and commit.commit_id not in self._accepted_turn_commits_by_commit
+                    and commit.commit_id not in self._consumed_turn_commits_by_commit
+                ):
+                    # A definite failure keeps no critical-input identity and no
+                    # token-gate hold. Releasing by exact commit id leaves a
+                    # successor commit on the same interaction untouched.
+                    #
+                    # Only the task branch records an accepted commit and only it
+                    # sets result_unknown, so without the dispatch-target guard a
+                    # successful Agent submit would look exactly like a definite
+                    # failure and lose its gate evidence one turn early.
+                    self._critical_input_commit_generations.pop(commit.commit_id, None)
+                    self._critical_input_guarded_commits.discard(commit.commit_id)
+                    self._critical_token_gate.release_commit(commit.commit_id)
                 if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
                     self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
                 if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
@@ -4623,6 +4723,11 @@ class AgentServerProductCompositionRegistry:
         self, commit: TurnCommit, route_key: tuple[str, str]
     ) -> None:
         self._preflight_turn_commit_identity_locked(commit)
+        # Runs after the identity preflight so this exact commit can never be
+        # retired and re-admitted, and before the capacity refusal so an
+        # acceptance that linearized after its own route closed is still
+        # reached even though no further close runs for that route.
+        self._enforce_abandoned_voice_origin_grace_locked()
         retained_count = (
             len(self._pending_turn_commits_by_commit)
             + len(self._accepted_turn_commits_by_commit)
@@ -4742,6 +4847,36 @@ class AgentServerProductCompositionRegistry:
         self._mark_evicted_product_request("voice.commit", commit.commit_id)
         self._mark_evicted_product_request("voice.turn", commit.turn_id)
         self._release_voice_origin_locked(commit)
+
+    def _enforce_abandoned_voice_origin_grace_locked(self) -> None:
+        """Bound how long an abandoned route's accepted origins stay retained.
+
+        An accepted origin survives its route close so a late P3 create can
+        still consume it, but a route abandoned without one released nothing:
+        repeating submit-then-close filled ``_TURN_COMMIT_CAPACITY`` with
+        origins no request could ever reach and refused every later submit
+        until ``stop``. Retirement past the grace releases the heavy commit
+        state and keeps only the compact ``_evicted_operation_replay_fence``
+        membership, so the released identity stays refusable without being
+        retained. Insertion order is acceptance order, so the oldest
+        abandoned origins are released first and a live route's own origins
+        are never candidates.
+        """
+
+        abandoned = [
+            commit_id
+            for commit_id, route_key in self._accepted_voice_commit_routes.items()
+            if route_key not in self._p2_routes
+        ]
+        excess = len(abandoned) - self._ABANDONED_VOICE_ORIGIN_GRACE
+        if excess <= 0:
+            return
+        for commit_id in abandoned[:excess]:
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is None:
+                self._accepted_voice_commit_routes.pop(commit_id, None)
+                continue
+            self._retire_voice_origin_locked(commit)
 
     def _consume_voice_origin_locked(self, commit: TurnCommit) -> None:
         self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
@@ -8322,6 +8457,7 @@ class AgentServerProductCompositionRegistry:
             key = (routed_session, interaction_id)
             self._p2_routes.pop(key, None)
             self._drop_voice_task_origins_for_route_locked(key)
+            self._enforce_abandoned_voice_origin_grace_locked()
             self._retain_closed_p2_route(
                 key,
                 _ClosedP2Route(
@@ -8360,6 +8496,22 @@ class AgentServerProductCompositionRegistry:
             route_facts=(
                 _formal_fact(ProductSegment.AUTHORITY),
                 _formal_fact(ProductSegment.P3_CONTROL),
+            ),
+        )
+
+    @staticmethod
+    def _p3_control_unavailable_manifest() -> ProductCompositionManifest:
+        return create_product_composition_manifest(
+            enabled=True,
+            route_facts=(
+                _unavailable_fact(
+                    ProductSegment.AUTHORITY,
+                    ProductRouteReason.TRUSTED_AUTHORITY_UNAVAILABLE,
+                ),
+                _unavailable_fact(
+                    ProductSegment.P3_CONTROL,
+                    ProductRouteReason.FORMAL_ACTIVATION_EVIDENCE_MISSING,
+                ),
             ),
         )
 
@@ -9112,7 +9264,9 @@ class AgentServerProductCompositionRegistry:
                     "reason": reason,
                     "message": message,
                 },
-                "product_composition": _serialize_manifest(self._p3_control_manifest()),
+                "product_composition": _serialize_manifest(
+                    self._p3_control_unavailable_manifest()
+                ),
             },
         )
 
@@ -9905,6 +10059,31 @@ class AgentServerProductCompositionRegistry:
             and not any(key[1] == commit.interaction_id for key in self._p2_routes)
         ):
             self._critical_token_gate.release_interaction(commit.interaction_id)
+
+    def _retire_accepted_voice_commits_for_route_locked(
+        self, route_key: tuple[str, str]
+    ) -> None:
+        """Retire every accepted voice commit bound to a superseded route.
+
+        ``_accepted_voice_commit_routes`` is keyed by session and interaction
+        only, with no activation id or generation, so republishing the key for a
+        successor would otherwise leave a superseded generation's committed
+        speech fully actionable through the successor's route with its
+        critical-token identity intact. Exact-commit retirement releases the
+        commit-level gate evidence and leaves the interaction's monotonic
+        input-generation fence for the successor.
+        """
+
+        for commit_id, retained_route in tuple(
+            self._accepted_voice_commit_routes.items()
+        ):
+            if retained_route != route_key:
+                continue
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is None:
+                self._accepted_voice_commit_routes.pop(commit_id, None)
+                continue
+            self._retire_voice_origin_locked(commit)
 
     def _drop_voice_task_origins_for_route_locked(
         self, route_key: tuple[str, str]
@@ -12273,7 +12452,7 @@ class AgentServerProductCompositionRegistry:
 
             key = (routed_session, task_id, origin_id, generation_id)
             existing = self._progress_routes.get(key)
-            previous_generation = self._progress_generations.get(key)
+            previous_generation = self._fenced_progress_generation(key)
             state = _AuthorityState()
             preauthorized_authority: ProductSegmentActivation | None = None
             if (
@@ -13491,6 +13670,7 @@ class AgentServerProductCompositionRegistry:
                     ),
                 )
                 self._critical_token_gate.release_interaction(p2_key[1])
+            self._enforce_abandoned_voice_origin_grace_locked()
             remaining_orphans: list[_P2FailedCleanupLease] = []
             for cleanup in self._p2_orphan_cleanups:
                 try:

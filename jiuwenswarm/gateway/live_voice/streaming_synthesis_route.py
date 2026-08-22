@@ -16,6 +16,8 @@ import inspect
 import logging
 import math
 import struct
+from array import array
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -63,6 +65,18 @@ _PROVIDER_CLEANUP_TIMEOUT_SECONDS = 5.0
 _MAX_ROUTE_IDENTITIES = 256
 _DEFAULT_MAX_RETAINED_TASKS = 32
 _CLEANUP_TASK_RESERVE = 4
+# A retired identity surrenders its exact ledger entry and its retained handle,
+# and keeps a compact tombstone instead.  Both fences only ever rise, so a
+# digest collision can refuse a stream that could have run but can never admit
+# a retired binding or a stale response that must stay refused.  The bound
+# therefore limits the exact working set, not the number of streams one owner
+# may serve.
+_IDENTITY_ADMISSION_FENCE_BYTES = 1 << 20
+_GENERATION_FENCE_ROWS = 4
+_GENERATION_FENCE_CELLS = 1 << 13
+_BINDING_IDENTITY_SCOPE = "synthesis.binding"
+_RESPONSE_INTERACTION_SCOPE = "synthesis.response.interaction"
+_RESPONSE_ID_SCOPE = "synthesis.response.id"
 _PROCESS_CONTROL = (KeyboardInterrupt, SystemExit, GeneratorExit)
 
 _T = TypeVar("_T")
@@ -99,6 +113,56 @@ def _discard_awaitable(awaitable: Awaitable[object]) -> None:
         awaitable.close()
     elif isinstance(awaitable, asyncio.Future):
         awaitable.cancel()
+
+
+class _OwnedWorkSuperseded(Exception):
+    """One task this owner created was cancelled by this owner, not its caller.
+
+    It never leaves this module: `_select` and `_begin_prepared` translate it
+    into their existing selection and outcome vocabulary, so no new reason code
+    or fallback action reaches any caller.
+    """
+
+
+@dataclass(slots=True)
+class _SupersedableWork:
+    """Owner-created work plus the caller-observable supersession signal.
+
+    A caller's own WebSocket/RPC task is never stored here.  Close and
+    successor supersession can therefore reach only the task this owner
+    created, and the caller learns that it was superseded by observing
+    `superseded` instead of losing its whole connection to a cancellation.
+    """
+
+    superseded: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    reason: StreamingSynthesisReason | None = field(default=None, repr=False)
+    task: asyncio.Task[object] | None = field(default=None, repr=False)
+
+    def adopt(self, task: asyncio.Task[object]) -> None:
+        """Own one task this route created, never a caller's own task."""
+
+        self.task = task
+        if self.superseded.is_set():
+            task.cancel()
+
+    def withdraw(self) -> None:
+        """Stop offering work that already left this owner's control."""
+
+        self.task = None
+
+    def supersede(
+        self, reason: StreamingSynthesisReason
+    ) -> asyncio.Task[object] | None:
+        """Publish the first supersession truth, then offer owner-created work.
+
+        The first reason wins, so a close following a successor cannot rewrite
+        what the caller is told, and repeated supersession stays a no-op.
+        """
+
+        if not self.superseded.is_set():
+            self.reason = reason
+            self.superseded.set()
+        return self.task
 
 
 class _BoundedHardDeadlineOwner:
@@ -142,6 +206,7 @@ class _BoundedHardDeadlineOwner:
         operation: str,
         cleanup: bool = False,
         reservation: _TaskReservation | None = None,
+        work: _SupersedableWork | None = None,
     ) -> _T:
         if reservation is not None:
             if cleanup or not reservation._consume(self):
@@ -171,16 +236,26 @@ class _BoundedHardDeadlineOwner:
         self._tasks.add(owned)
         self._idle.clear()
         owned.add_done_callback(self._consume_done)
+        if work is not None:
+            work.adopt(cast(asyncio.Task[object], owned))
         try:
             done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
         except asyncio.CancelledError:
             task.cancel()
             raise
+        finally:
+            if work is not None:
+                work.withdraw()
         if not done:
             task.cancel()
             raise TimeoutError(f"hard deadline expired for {operation}")
         self._tasks.discard(owned)
         self._set_idle_if_empty()
+        if work is not None and task.cancelled():
+            # Only this owner ever cancels a task it created, and only after
+            # publishing supersession.  The caller's own task was untouched, so
+            # this must never surface to it as its own cancellation.
+            raise _OwnedWorkSuperseded(operation)
         result = task.result()
         if result.process_control is not None:
             raise result.process_control
@@ -549,14 +624,27 @@ class StreamingSynthesisRouteOwner:
         self._lifecycle_lock = asyncio.Lock()
         self._close_start_lock = asyncio.Lock()
         self._selection: StreamingSpeechSelection | None = None
-        self._selection_waiter: asyncio.Task[object] | None = None
+        # Selection and opening work are owner-created tasks, never the
+        # caller's WebSocket/RPC task.  Close and successor supersession may
+        # cancel only what is reachable through these records.
+        self._selection_work: _SupersedableWork | None = None
         self._selection_attempt: object | None = None
         self._active: dict[_ScopedStreamKey, StreamingSynthesisHandle] = {}
-        self._opening: dict[_ScopedStreamKey, asyncio.Task[object]] = {}
+        self._opening: dict[_ScopedStreamKey, _SupersedableWork] = {}
         self._opening_responses: dict[_ScopedStreamKey, ResponseRef] = {}
-        self._current_responses: dict[_ScopedResponseKey, ResponseRef] = {}
-        self._retained_bindings: dict[_ScopedStreamKey, str] = {}
+        self._current_responses: OrderedDict[_ScopedResponseKey, ResponseRef] = (
+            OrderedDict()
+        )
+        self._retained_bindings: OrderedDict[_ScopedStreamKey, str] = OrderedDict()
         self._known_handles: dict[_ScopedStreamKey, StreamingSynthesisHandle] = {}
+        # Fail-closed retirement tombstones.  A retired binding stays refusable
+        # as a reuse, and a retired interaction keeps a conservative maximum
+        # response generation, without holding their exact entries.
+        self._identity_admission_fence = bytearray(_IDENTITY_ADMISSION_FENCE_BYTES)
+        self._generation_fence = tuple(
+            array("Q", [0]) * _GENERATION_FENCE_CELLS
+            for _ in range(_GENERATION_FENCE_ROWS)
+        )
         self._provider_close_completed: set[int] = set()
         self._close_task: asyncio.Task[_CloseResult] | None = None
         self._close_cleanup_complete = False
@@ -709,10 +797,13 @@ class StreamingSynthesisRouteOwner:
             )
 
         key = _scoped_stream_key(scope_identity, ref)
-        current_task = asyncio.current_task()
-        if current_task is None:
+        if asyncio.current_task() is None:
             raise RuntimeError("streaming synthesis begin requires an asyncio task")
 
+        # The caller's own task never becomes route state.  Only the opening
+        # task created below is supersedable, so close or a successor can never
+        # cancel the connection request task this call arrived on.
+        work = _SupersedableWork()
         opening_registered = False
         open_reservation: _TaskReservation | None = None
         try:
@@ -727,16 +818,28 @@ class StreamingSynthesisRouteOwner:
                         allow_fallback=False,
                         capability=capability,
                     )
-                if self._retained_bindings.get(key) is not None or key in self._opening:
+                if (
+                    self._retained_bindings.get(key) is not None
+                    or self._retired_binding(key)
+                    or key in self._opening
+                ):
                     raise StreamingSynthesisRouteViolation(
                         "SYNTHESIS_STREAM_REUSED",
                         "a synthesis stream generation cannot be reused",
                     )
                 self._preflight_response(ref.response, scope_identity)
-                if len(self._retained_bindings) >= _MAX_ROUTE_IDENTITIES:
-                    raise StreamingSynthesisRouteViolation(
-                        "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
-                        "synthesis route identity ledger is exhausted",
+                if not self._binding_capacity_available(key):
+                    # Every retained identity still owns a live stream.  That is
+                    # the same bounded-capacity refusal as the active-stream and
+                    # task-slot walls below, so it reuses their existing typed
+                    # fallback instead of failing the caller's handler.
+                    return None, self._failure_outcome(
+                        binding_ref,
+                        StreamingSynthesisReason.CAPACITY_EXHAUSTED,
+                        ref=ref,
+                        first_audio_emitted=False,
+                        allow_batch=True,
+                        capability=capability,
                     )
                 if len(self._active) + len(self._opening) >= self._max_active_streams:
                     return None, self._failure_outcome(
@@ -760,11 +863,14 @@ class StreamingSynthesisRouteOwner:
                 # A hard task slot precedes identity, response, Provider-open,
                 # and cleanup effects.  Once response activation may mutate,
                 # retain the binding as an anti-replay tombstone.
+                self._make_binding_capacity(key)
                 self._retained_bindings[key] = binding_ref
-                self._opening[key] = current_task
+                self._opening[key] = work
                 self._opening_responses[key] = ref.response
                 opening_registered = True
-                await self._activate_response(provider, ref.response, scope_identity)
+                await self._activate_response(
+                    provider, ref.response, scope_identity, own_work=work
+                )
                 if self._closed:
                     return None, self._failure_outcome(
                         binding_ref,
@@ -778,12 +884,25 @@ class StreamingSynthesisRouteOwner:
 
             try:
                 await self._task_owner.run(
-                    self._open_provider_guarded(
-                        provider, prepared, key=key, owner_task=current_task
-                    ),
+                    self._open_provider_guarded(provider, prepared, key=key, work=work),
                     timeout_seconds=self._open_timeout_seconds,
                     operation="provider-open",
                     reservation=open_reservation,
+                    work=work,
+                )
+            except _OwnedWorkSuperseded:
+                # Close or a successor superseded this owner-created open.  The
+                # caller keeps its own task and stays usable for later RPCs, and
+                # the Provider effect was already settled inside the task that
+                # was cancelled, so nothing is left for this frame to clean up.
+                return None, self._failure_outcome(
+                    binding_ref,
+                    self._supersession_reason(work),
+                    ref=ref,
+                    first_audio_emitted=False,
+                    allow_batch=False,
+                    allow_fallback=False,
+                    capability=capability,
                 )
             except asyncio.CancelledError as caller_cancel:
                 if prepared.open_attempted:
@@ -829,7 +948,7 @@ class StreamingSynthesisRouteOwner:
         finally:
             if open_reservation is not None:
                 open_reservation.release()
-            if opening_registered and self._opening.get(key) is current_task:
+            if opening_registered and self._opening.get(key) is work:
                 del self._opening[key]
                 self._opening_responses.pop(key, None)
 
@@ -1128,9 +1247,20 @@ class StreamingSynthesisRouteOwner:
                 opening = tuple(self._opening.values())
                 handles = tuple(self._active.values())
                 selection = self._selection
-                selection_waiter = self._selection_waiter
-        waiters = opening + (
-            (selection_waiter,) if selection_waiter is not None else ()
+                selection_work = self._selection_work
+        supersedable = opening + (
+            (selection_work,) if selection_work is not None else ()
+        )
+        # Publish supersession first, then cancel only the tasks this owner
+        # created.  A caller's WebSocket/RPC task must survive its route being
+        # closed and stay usable for the rest of that connection.
+        waiters = tuple(
+            task
+            for task in (
+                work.supersede(StreamingSynthesisReason.OWNER_CLOSED)
+                for work in supersedable
+            )
+            if task is not None
         )
         interruption: BaseException | None = None
         cleanup_complete = True
@@ -1244,17 +1374,21 @@ class StreamingSynthesisRouteOwner:
                 return self._selection
             if self._closed:
                 return StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None)
-            current = asyncio.current_task()
-            if current is None:
+            if asyncio.current_task() is None:
                 raise RuntimeError("streaming Speech selection requires a task")
             attempt = object()
-            self._selection_waiter = cast(asyncio.Task[object], current)
+            # Close supersedes this owner-created selector task, never the
+            # caller's task, so a slow selector racing close leaves the caller
+            # with a truthful unavailable selection instead of a dead task.
+            work = _SupersedableWork()
+            self._selection_work = work
             self._selection_attempt = attempt
             try:
                 selection = await self._task_owner.run(
                     self._invoke_selector(attempt),
                     timeout_seconds=self._open_timeout_seconds,
                     operation="provider-selector",
+                    work=work,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1263,8 +1397,8 @@ class StreamingSynthesisRouteOwner:
             except BaseException:
                 selection = StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None)
             finally:
-                if self._selection_waiter is current:
-                    self._selection_waiter = None
+                if self._selection_work is work:
+                    self._selection_work = None
                 if self._selection_attempt is attempt:
                     self._selection_attempt = None
             if not isinstance(selection, StreamingSpeechSelection):
@@ -1314,15 +1448,20 @@ class StreamingSynthesisRouteOwner:
         provider: NativeStreamingSpeechProvider,
         response: ResponseRef,
         scope_identity: StreamingSynthesisScopeIdentity = _LEGACY_SYNTHESIS_SCOPE,
+        *,
+        own_work: _SupersedableWork | None = None,
     ) -> None:
         response_key = (scope_identity, response.interaction_id)
         current = self._current_responses.get(response_key)
         if current == response:
             return
-        if current is not None and (
-            response.response_generation <= current.response_generation
-            or response.response_id == current.response_id
-        ):
+        if (
+            current is not None
+            and (
+                response.response_generation <= current.response_generation
+                or response.response_id == current.response_id
+            )
+        ) or (current is None and self._retired_stale_response(response_key, response)):
             raise StreamingSynthesisRouteViolation(
                 "STALE_SYNTHESIS_RESPONSE",
                 "synthesis requires a strictly newer exact response generation",
@@ -1334,18 +1473,29 @@ class StreamingSynthesisRouteOwner:
             and handle.ref.response.interaction_id == response.interaction_id
         )
         opening_predecessors = tuple(
-            task
-            for key, task in self._opening.items()
+            work
+            for key, work in self._opening.items()
             if self._opening_responses.get(key) is not None
             and key[0] == scope_identity
             and self._opening_responses[key].interaction_id == response.interaction_id
             and self._opening_responses[key] != response
-            and task is not asyncio.current_task()
+            and work is not own_work
         )
         if opening_predecessors:
+            # Publish supersession first, then cancel only owner-created work.
+            # A predecessor caller keeps its own task and observes the exact
+            # superseded control outcome instead of losing its connection.
+            predecessor_tasks = tuple(
+                task
+                for task in (
+                    work.supersede(StreamingSynthesisReason.RESPONSE_SUPERSEDED)
+                    for work in opening_predecessors
+                )
+                if task is not None
+            )
             try:
                 await self._task_owner.cancel_and_wait(
-                    opening_predecessors,
+                    predecessor_tasks,
                     timeout_seconds=_PROVIDER_CLEANUP_TIMEOUT_SECONDS,
                     operation="predecessor-open",
                 )
@@ -1371,6 +1521,7 @@ class StreamingSynthesisRouteOwner:
         if process_control is not None:
             raise process_control
         provider.conformance.activate_response(response)
+        self._make_response_capacity(response_key)
         self._current_responses[response_key] = response
 
     def _preflight_response(
@@ -1380,7 +1531,8 @@ class StreamingSynthesisRouteOwner:
     ) -> None:
         """Reject stale response identity before any retained route effect."""
 
-        current = self._current_responses.get((scope_identity, response.interaction_id))
+        response_key = (scope_identity, response.interaction_id)
+        current = self._current_responses.get(response_key)
         if (
             current is not None
             and current != response
@@ -1388,7 +1540,7 @@ class StreamingSynthesisRouteOwner:
                 response.response_generation <= current.response_generation
                 or response.response_id == current.response_id
             )
-        ):
+        ) or (current is None and self._retired_stale_response(response_key, response)):
             raise StreamingSynthesisRouteViolation(
                 "STALE_SYNTHESIS_RESPONSE",
                 "synthesis requires a strictly newer exact response generation",
@@ -1824,15 +1976,35 @@ class StreamingSynthesisRouteOwner:
         prepared: _PreparedSynthesisRequest,
         *,
         key: _ScopedStreamKey,
-        owner_task: asyncio.Task[object],
+        work: _SupersedableWork,
     ) -> None:
-        async with self._provider_open_lock:
-            prepared.open_attempted = True
-            await provider.open_synthesis(prepared._payload)
-        if self._closed or self._opening.get(key) is not owner_task:
+        try:
+            async with self._provider_open_lock:
+                prepared.open_attempted = True
+                await provider.open_synthesis(prepared._payload)
+        except asyncio.CancelledError:
+            # This task is owner-created, so its cancellation is this owner's
+            # own supersession.  Settling the Provider here keeps the effect
+            # inside the task the canceller joins, instead of leaving it to the
+            # caller's connection task and racing the close drain.
+            if prepared.open_attempted and work.superseded.is_set():
+                try:
+                    await self._cancel_provider(
+                        provider, prepared.ref, reason="open_superseded"
+                    )
+                except (asyncio.CancelledError, *_PROCESS_CONTROL):
+                    pass
+            raise
+        if (
+            self._closed
+            or work.superseded.is_set()
+            or self._opening.get(key) is not work
+        ):
             await self._cancel_provider(
                 provider, prepared.ref, reason="late_open_fenced"
             )
+            if work.superseded.is_set():
+                raise _OwnedWorkSuperseded("provider-open")
             raise StreamingSynthesisRouteViolation(
                 "SYNTHESIS_LATE_OPEN_FENCED",
                 "a synthesis open completed after its route was fenced",
@@ -1866,6 +2038,201 @@ class StreamingSynthesisRouteOwner:
             if self._known_handles.get(key) is handle:
                 del self._known_handles[key]
 
+    # Bounded identity retirement.  Every helper below is synchronous, so one
+    # retirement pass cannot interleave with `_active`/`_opening` mutations.
+
+    @staticmethod
+    def _fence_identity(parts: tuple[str, ...]) -> str:
+        """Encode one identity injectively, whatever its parts contain."""
+
+        return "\0".join(f"{len(part)}:{part}" for part in parts)
+
+    @staticmethod
+    def _fence_digest(scope: str, identity: str) -> bytes:
+        return hashlib.sha256(
+            f"{scope}\0{identity}".encode("utf-8", "surrogatepass")
+        ).digest()
+
+    def _admission_fence_indices(self, scope: str, identity: str) -> tuple[int, ...]:
+        digest = self._fence_digest(scope, identity)
+        bit_capacity = len(self._identity_admission_fence) * 8
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % bit_capacity
+            for offset in (0, 4, 8, 12)
+        )
+
+    def _generation_fence_indices(self, scope: str, identity: str) -> tuple[int, ...]:
+        # Disjoint digest bytes keep the two fences independent, so an
+        # admission collision cannot drag a generation cell with it.
+        digest = self._fence_digest(scope, identity)
+        capacity = len(self._generation_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % capacity
+            for offset in (16, 20, 24, 28)
+        )
+
+    def _mark_retired(self, scope: str, identity: str) -> None:
+        for index in self._admission_fence_indices(scope, identity):
+            self._identity_admission_fence[index >> 3] |= 1 << (index & 7)
+
+    def _fenced_identity(self, scope: str, identity: str) -> bool:
+        return all(
+            self._identity_admission_fence[index >> 3] & (1 << (index & 7))
+            for index in self._admission_fence_indices(scope, identity)
+        )
+
+    @classmethod
+    def _binding_identity(cls, key: _ScopedStreamKey) -> str:
+        scope_identity, stream_id, stream_generation = key
+        return cls._fence_identity((*scope_identity, stream_id, str(stream_generation)))
+
+    @classmethod
+    def _interaction_identity(cls, key: _ScopedResponseKey) -> str:
+        scope_identity, interaction_id = key
+        return cls._fence_identity((*scope_identity, interaction_id))
+
+    @classmethod
+    def _response_id_identity(cls, key: _ScopedResponseKey, response_id: str) -> str:
+        # Scoped by interaction, exactly like the exact
+        # `response_id == current.response_id` refusal it stands in for.
+        scope_identity, interaction_id = key
+        return cls._fence_identity((*scope_identity, interaction_id, response_id))
+
+    def _release_binding(self, key: _ScopedStreamKey) -> None:
+        """Drop one exact binding and its handle, keep the refusal tombstone."""
+
+        self._mark_retired(_BINDING_IDENTITY_SCOPE, self._binding_identity(key))
+        self._retained_bindings.pop(key, None)
+        self._known_handles.pop(key, None)
+
+    def _retired_binding(self, key: _ScopedStreamKey) -> bool:
+        return self._fenced_identity(
+            _BINDING_IDENTITY_SCOPE, self._binding_identity(key)
+        )
+
+    def _releasable_binding(self) -> _ScopedStreamKey | None:
+        """Pick the least recently retained binding that owns no live stream."""
+
+        return next(
+            (
+                retained
+                for retained in self._retained_bindings
+                if retained not in self._active and retained not in self._opening
+            ),
+            None,
+        )
+
+    def _binding_capacity_available(self, key: _ScopedStreamKey) -> bool:
+        """Report identity capacity without mutating any retained state.
+
+        A rejected admission therefore leaves the ledgers, the fences and every
+        other retained structure exactly as they were.
+        """
+
+        if key in self._retained_bindings:
+            return True
+        if len(self._retained_bindings) < _MAX_ROUTE_IDENTITIES:
+            return True
+        return self._releasable_binding() is not None
+
+    def _make_binding_capacity(self, key: _ScopedStreamKey) -> None:
+        """Retire retained bindings that own no live stream, never a live one."""
+
+        if key in self._retained_bindings:
+            return
+        while len(self._retained_bindings) >= _MAX_ROUTE_IDENTITIES:
+            retired = self._releasable_binding()
+            if retired is None:
+                return
+            self._release_binding(retired)
+
+    def _release_response(self, key: _ScopedResponseKey) -> None:
+        """Drop one exact response entry, keep its conservative high water."""
+
+        response = self._current_responses.pop(key, None)
+        interaction_identity = self._interaction_identity(key)
+        self._mark_retired(_RESPONSE_INTERACTION_SCOPE, interaction_identity)
+        if response is None:
+            return
+        self._mark_retired(
+            _RESPONSE_ID_SCOPE, self._response_id_identity(key, response.response_id)
+        )
+        if response.response_generation <= 0:
+            # The admission fence alone already refuses generation zero, so an
+            # unreused interaction never needs a generation cell.
+            return
+        # No clamp is needed: `_request_binding_ref_inner` fails closed above
+        # MAX_SAFE_INTEGER, so `generation + 1` can never overflow a cell.
+        encoded = response.response_generation + 1
+        for row, index in zip(
+            self._generation_fence,
+            self._generation_fence_indices(
+                _RESPONSE_INTERACTION_SCOPE, interaction_identity
+            ),
+            strict=True,
+        ):
+            row[index] = max(row[index], encoded)
+
+    def _retired_response_generation(self, key: _ScopedResponseKey) -> int | None:
+        """Report a retired interaction's highest admitted response generation."""
+
+        interaction_identity = self._interaction_identity(key)
+        if not self._fenced_identity(_RESPONSE_INTERACTION_SCOPE, interaction_identity):
+            return None
+        fenced = min(
+            row[index]
+            for row, index in zip(
+                self._generation_fence,
+                self._generation_fence_indices(
+                    _RESPONSE_INTERACTION_SCOPE, interaction_identity
+                ),
+                strict=True,
+            )
+        )
+        return int(fenced) - 1 if fenced >= 1 else 0
+
+    def _retired_stale_response(
+        self, key: _ScopedResponseKey, response: ResponseRef
+    ) -> bool:
+        """Refuse a response whose exact interaction entry was already retired."""
+
+        high_water = self._retired_response_generation(key)
+        if high_water is not None and response.response_generation <= high_water:
+            return True
+        return self._fenced_identity(
+            _RESPONSE_ID_SCOPE, self._response_id_identity(key, response.response_id)
+        )
+
+    def _live_interactions(self) -> set[_ScopedResponseKey]:
+        live = {
+            (handle.scope_identity, handle.ref.response.interaction_id)
+            for handle in self._active.values()
+        }
+        live.update(
+            (key[0], response.interaction_id)
+            for key, response in self._opening_responses.items()
+        )
+        return live
+
+    def _make_response_capacity(self, key: _ScopedResponseKey) -> None:
+        """Retire interactions that own no live stream, never the caller's own."""
+
+        if key in self._current_responses:
+            return
+        live = self._live_interactions()
+        while len(self._current_responses) >= _MAX_ROUTE_IDENTITIES:
+            retired = next(
+                (
+                    retained
+                    for retained in self._current_responses
+                    if retained != key and retained not in live
+                ),
+                None,
+            )
+            if retired is None:
+                return
+            self._release_response(retired)
+
     def _require_handle(self, handle: StreamingSynthesisHandle) -> None:
         if not isinstance(handle, StreamingSynthesisHandle):
             raise StreamingSynthesisRouteViolation(
@@ -1879,6 +2246,17 @@ class StreamingSynthesisRouteOwner:
                 "SYNTHESIS_HANDLE_NOT_OWNED",
                 "synthesis handle is absent, stale, or belongs to another owner",
             )
+
+    def _supersession_reason(self, work: _SupersedableWork) -> StreamingSynthesisReason:
+        """Report supersession with the route's existing control vocabulary."""
+
+        if work.reason is not None:
+            return work.reason
+        return (
+            StreamingSynthesisReason.OWNER_CLOSED
+            if self._closed
+            else StreamingSynthesisReason.ROUTE_ABORTED
+        )
 
     @staticmethod
     def _selection_reason(
