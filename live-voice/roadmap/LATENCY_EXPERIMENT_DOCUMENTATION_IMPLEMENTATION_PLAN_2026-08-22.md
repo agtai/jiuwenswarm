@@ -59,7 +59,7 @@ validation, existing JiuwenSwarm latency JSON/JSONL reports.
 - Produces: a verified in-memory worksheet used by Tasks 2 and 4; no new
   authority file.
 
-- [ ] **Step 1: Confirm all writable branch heads and dirty state**
+- [x] **Step 1: Confirm all writable branch heads and dirty state**
 
 Run `git status --short --branch` and `git rev-parse HEAD` in:
 
@@ -76,7 +76,7 @@ Run `git status --short --branch` and `git rev-parse HEAD` in:
 Expected: only the main worktree has the already-recorded unrelated dirty
 files; all experiment-owner worktrees are clean.
 
-- [ ] **Step 2: Reconcile the exact experiment source records**
+- [x] **Step 2: Reconcile the exact experiment source records**
 
 Read these complete owner records:
 
@@ -94,7 +94,7 @@ latency/stable-sentence-agent-tts:live-voice/evidence/STABLE_SENTENCE_AGENT_TTS_
 Expected: exact branches, commits, run IDs, attempt counts, result tables,
 boundaries, limitations and decisions are extracted without pooling clocks.
 
-- [ ] **Step 3: Inventory every private run artifact**
+- [x] **Step 3: Inventory every private run artifact**
 
 Run:
 
@@ -106,7 +106,7 @@ find /home/renan/openJiuwen-ai/live-voice-latency-runs \
 Then compute SHA-256 for every credited report and every artifact already bound
 by an owner result. Never read or hash-print `current.env`.
 
-- [ ] **Step 4: Record discrepancies before writing**
+- [x] **Step 4: Record discrepancies before writing**
 
 The worksheet must explicitly retain:
 
@@ -135,20 +135,20 @@ Expected: no missing fact is silently converted into an estimate.
 - Produces: the canonical `LVL-00` through `LVL-08` cross-experiment reading
   route used by STATUS, REFERENCE_INDEX, the inventory and future reviewers.
 
-- [ ] **Step 1: Write the global catalog header and comparison rules**
+- [x] **Step 1: Write the global catalog header and comparison rules**
 
 Include purpose, non-authority boundary, evidence hierarchy, truth-label table,
 total-latency table and the Gate A/B/C completion ladder. State that failed
 workflow latency receives no optimization credit.
 
-- [ ] **Step 2: Add the branch and experiment indexes**
+- [x] **Step 2: Add the branch and experiment indexes**
 
 The branch table must distinguish writable documentation branches from
 immutable reference/detached worktrees. The experiment table must include
 `LVL-00` through `LVL-08`, status, owner, lane, source, start/end boundary,
 headline latency, total class, artifact state and next gate.
 
-- [ ] **Step 3: Add LVL-00 physical diagnostic details**
+- [x] **Step 3: Add LVL-00 physical diagnostic details**
 
 Preserve all A–G Browser-clock rows from
 `LATENCY_EXPERIMENTS_2026-08-20.md`, including:
@@ -162,7 +162,7 @@ Preserve all A–G Browser-clock rows from
 Label these values `MEASURED` on one Browser clock and
 `PRELIMINARY_DIAGNOSTIC`, not an accepted baseline.
 
-- [ ] **Step 4: Add LVL-01/LVL-01C P2 details**
+- [x] **Step 4: Add LVL-01/LVL-01C P2 details**
 
 Include the 10/50/100 A1/B/A2 RPC and p50/p95 tables, exact sources and run
 IDs, 15/15 outcomes, zero forbidden effects and component-only boundary.
@@ -172,7 +172,7 @@ Separate the causal candidate result from Hongxing's product episode:
 unobserved final item inside `notification_batch` and the atomic ordered repair
 gate.
 
-- [ ] **Step 5: Add LVL-02 through LVL-04 component experiments**
+- [x] **Step 5: Add LVL-02 through LVL-04 component experiments**
 
 For fixed VAD, include 20/20 controls, 15/20 candidates, 285–412 ms successful
 case headroom and all 1000 ms pause failures. For TTS ACK decoupling, include
@@ -180,7 +180,7 @@ case headroom and all 1000 ms pause failures. For TTS ACK decoupling, include
 limitation. For connection reuse, include cold/warm first-PCM and completion,
 0/3 warm reuse and the +57.8 ms warm first-PCM regression.
 
-- [ ] **Step 6: Add LVL-05 through LVL-08**
+- [x] **Step 6: Add LVL-05 through LVL-08**
 
 Include:
 
@@ -194,13 +194,13 @@ Include:
 The checkpoint totals must be labeled `CONTROLLED_ROUND_TOTAL`, never physical
 E2E.
 
-- [ ] **Step 7: Add the artifact and next-decision routes**
+- [x] **Step 7: Add the artifact and next-decision routes**
 
 For every experiment, name the exact owner evidence and private artifact state.
 End with the current order: P2 observer repair and deployed Gate C alongside
 the no-Chrome Semantic VAD screen, followed by a physical waterfall decision.
 
-- [ ] **Step 8: Verify the new catalog**
+- [x] **Step 8: Verify the new catalog**
 
 Run:
 
@@ -225,26 +225,26 @@ Expected: all IDs and truth classes are present and `git diff --check` exits 0.
 - Consumes: catalog taxonomy and repository evidence rules.
 - Produces: one copyable contract for every future latency experiment.
 
-- [ ] **Step 1: Write required metadata and credit fields**
+- [x] **Step 1: Write required metadata and credit fields**
 
 Require experiment ID, date, status, optimization flag, branch, exact source,
 Agent-Core source, dirty state, environment, Provider/model, run IDs, corpus,
 input path, sample count, warm/cold policy, start/end boundary, truth label,
 total class and artifact state.
 
-- [ ] **Step 2: Write method, results and integrity sections**
+- [x] **Step 2: Write method, results and integrity sections**
 
 Require hypothesis, mechanism, one changed variable, lane, A1/B/A2 role,
 stage-by-stage p50/p95, total table, success/failure denominator, semantic
 integrity, forbidden effects, regressions and downstream wait displacement.
 
-- [ ] **Step 3: Write artifact, decision and reproduction sections**
+- [x] **Step 3: Write artifact, decision and reproduction sections**
 
 Require private artifact path, SHA-256, retention state, exact command,
 decision rationale, limitations, next gate and reviewer evidence. Include
 explicit `NOT APPLICABLE`, `UNKNOWN` and `NOT RETAINED` rules.
 
-- [ ] **Step 4: Check the template for placeholders masquerading as facts**
+- [x] **Step 4: Check the template for placeholders masquerading as facts**
 
 The template may use bracketed instructional fields, but it must not contain
 unqualified claims, default acceptance or implied physical E2E credit.
@@ -261,12 +261,12 @@ unqualified claims, default acceptance or implied physical E2E credit.
 - Produces: private artifact-to-experiment binding used for re-reduction and
   forensic review.
 
-- [ ] **Step 1: Preserve archive privacy and retention rules**
+- [x] **Step 1: Preserve archive privacy and retention rules**
 
 Keep the prohibition on `/tmp`, Git inclusion and `current.env` disclosure.
 Define every artifact state from the design.
 
-- [ ] **Step 2: Add one ledger section per experiment**
+- [x] **Step 2: Add one ledger section per experiment**
 
 Map all existing groups:
 
@@ -287,13 +287,13 @@ stable-sentence-screen-20260821/
 Every group gets experiment ID, source/run IDs, credited/superseded role,
 artifact completeness and owning evidence.
 
-- [ ] **Step 3: Add fresh hashes for credited surviving artifacts**
+- [x] **Step 3: Add fresh hashes for credited surviving artifacts**
 
 Use `sha256sum` on the exact paths and copy only digest, relative private path
 and size. Mark the credited EOT final report `LOST`; do not substitute its
 earlier diagnostic raw file.
 
-- [ ] **Step 4: Cross-check archive coverage**
+- [x] **Step 4: Cross-check archive coverage**
 
 Run a sorted `find` excluding `current.env` and compare every top-level group
 against a README heading or table row. Expected: no artifact group is silently
@@ -314,7 +314,7 @@ uncataloged.
 - Consumes: canonical catalog and current documentation authority map.
 - Produces: one stable reading route without duplicating mutable current state.
 
-- [ ] **Step 1: Update STATUS latency facts without changing product priority**
+- [x] **Step 1: Update STATUS latency facts without changing product priority**
 
 In the Observability/latency capability row and tracked-latency paragraph,
 record:
@@ -328,24 +328,24 @@ record:
 
 Keep the product-truth repair packet as the current highest product priority.
 
-- [ ] **Step 2: Add the conditional reference route**
+- [x] **Step 2: Add the conditional reference route**
 
 Add one `REFERENCE_INDEX.md` row directing latency history, reproduction and
 forensics to the catalog first, then only the implicated branch-bound evidence
 and runbook section.
 
-- [ ] **Step 3: Link the runbook recording contract**
+- [x] **Step 3: Link the runbook recording contract**
 
 In sections 7.6 and 7.7, link to the catalog/template for evidence recording.
 Do not move commands or duplicate result tables into the runbook.
 
-- [ ] **Step 4: Narrow the optimization inventory to its owning role**
+- [x] **Step 4: Narrow the optimization inventory to its owning role**
 
 Add the catalog as the complete experiment-history source. Retain decision,
 headroom and execution tables; remove only duplicated prose that would create
 two competing run ledgers.
 
-- [ ] **Step 5: Validate documentation structure and links**
+- [x] **Step 5: Validate documentation structure and links**
 
 Run `git diff --check`, verify every changed local Markdown link resolves and
 confirm `git ls-files docs/zh/live-voice` is empty.
@@ -364,7 +364,7 @@ confirm `git ls-files docs/zh/live-voice` is empty.
 - Produces: one reviewable local documentation commit on
   `0812_live_voice_w3_renan`.
 
-- [ ] **Step 1: Inspect the exact scoped diff**
+- [x] **Step 1: Inspect the exact scoped diff**
 
 Run `git status --short`, `git diff --check`, `git diff --stat` and:
 
@@ -381,13 +381,13 @@ git diff -- \
 Confirm no product source, lockfile or pre-existing untracked document is
 staged.
 
-- [ ] **Step 2: Run an evidence consistency review**
+- [x] **Step 2: Run an evidence consistency review**
 
 Check every catalog headline number against its owner document and every
 branch/source/run ID against Git or the retained report. Any mismatch is fixed
 before commit.
 
-- [ ] **Step 3: Commit only the canonical documentation**
+- [x] **Step 3: Commit only the canonical documentation**
 
 ```bash
 git add -- \
@@ -419,22 +419,22 @@ Expected: one documentation-only commit; unrelated dirty files remain unstaged.
 - Consumes: exact canonical file bytes committed in Task 6.
 - Produces: identical handoff route on all seven writable branches.
 
-- [ ] **Step 1: Recheck every target worktree before writing**
+- [x] **Step 1: Recheck every target worktree before writing**
 
 Run `git status --short --branch` and stop on an unexpected writer/change.
 
-- [ ] **Step 2: Apply the exact canonical content**
+- [x] **Step 2: Apply the exact canonical content**
 
 Use `apply_patch` for each target worktree. Do not cherry-pick because the main
 commit also updates mutable authorities that must not overwrite branch-specific
 STATUS state.
 
-- [ ] **Step 3: Verify each branch diff**
+- [x] **Step 3: Verify each branch diff**
 
 For every branch, require `git diff --check` and confirm the diff contains only
 the catalog, template and inventory.
 
-- [ ] **Step 4: Commit each owner branch separately**
+- [x] **Step 4: Commit each owner branch separately**
 
 Use the same message:
 
@@ -455,22 +455,22 @@ No push is authorized.
 - Consumes: Tasks 4, 6 and 7 outputs.
 - Produces: final exact hashes, commit map, status map and documented exclusions.
 
-- [ ] **Step 1: Compare canonical hashes**
+- [x] **Step 1: Compare canonical hashes**
 
 Run `sha256sum` for the catalog, template and inventory in all seven writable
 worktrees. Expected: one digest per filename across every branch.
 
-- [ ] **Step 2: Verify commits and changed files**
+- [x] **Step 2: Verify commits and changed files**
 
 Run `git show --check --stat` and `git diff-tree --name-only` for every new
 commit. Expected: documentation-only scope.
 
-- [ ] **Step 3: Verify final worktree states**
+- [x] **Step 3: Verify final worktree states**
 
 Expected: six experiment-owner branches clean; the main branch retains only the
 same unrelated dirty/untracked files present before this plan.
 
-- [ ] **Step 4: Report the handoff**
+- [x] **Step 4: Report the handoff**
 
 Report:
 
