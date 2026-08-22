@@ -51,6 +51,10 @@ authority for mutable project priority and the numerator; this execution record
 owns exact packet scope, evidence and candidate history. Do not create another
 parallel handoff or remaining-work summary.
 
+Before reviewing or integrating anything, read §2.2 — it bounds what a review
+may block on and caps a packet at two rounds. Before activating a new wave, read
+§2.3.
+
 At the start of every new Session:
 
 1. Open `D:\XGG AI\openjiuwen\jiuwenswarm-review-20260819` and run
@@ -98,6 +102,79 @@ The last integrated defect-closure record before this documentation sync is
 `b5e6dd6e7` (`fix(live-voice): settle terminal retirement failures`). A later
 documentation-only HEAD is expected after this synchronization and does not
 change implementation credit.
+
+## 2.2 Review verdict boundary
+
+Waves 11 and 12 cost roughly four times what the earlier waves did for the same
+calendar time: 31 findings closed in the first 24 hours, 6 in the next 23. The
+measured cause is not difficulty. SRR-30 changed 41 source lines and took five
+hours; SRR-02 changed 1351 and took twenty minutes. The cause is review rounds.
+The first twenty packets each passed in one round. Six of the last ten took two
+or three — and across those rejections, six independent reviews found **no
+defect in any source they rejected**. Every one was an evidence gap.
+
+Evidence gaps are worth finding. Two of them were one edit away from reviving a
+defect that had already been fixed, and Ruff actively prompts for one of those
+edits. But the standing evidence rule as written has no stopping condition: each
+new reviewer designs new mutants, and a large module always has one more
+comment-stated property without a killing test. The boundary below is what makes
+the rule terminate.
+
+**Blocking.** A review may reject only for one of these:
+
+- a defect in the source under repair;
+- a mutant that revives the finding this packet closed;
+- a claimed safety property whose failure is reachable from shipped inputs;
+- a new test that is a false gate — vacuous, tautological, passing unchanged on
+  the unrepaired baseline, or asserting only through a substituted seam.
+
+**Routed, not blocking.** Everything else goes to §6.1 and does not hold the
+packet: properties reachable only through hostile injection or a substituted
+collaborator; gaps in code the packet did not touch; surviving mutants that are
+equivalent or unreachable; naming, wording and precision defects in a report.
+
+**Round limit.** A packet gets at most two review rounds. On reaching a third,
+the Integration Owner rules on the open findings directly against this boundary
+and closes the packet — blocking items are repaired, everything else is routed.
+A third round must not be spent re-deriving what the first two established.
+
+**The Integration Owner is bound by this boundary too.** During wave 12 it was
+stated and then set aside on its first application, which cost two rounds the
+rule would have routed. A boundary that lives only in the operator's judgement
+fails the same way this packet documents about comments: it does not survive the
+next person — including the next instance of the same operator.
+
+## 2.3 Continuing beyond wave 12
+
+51 findings remain, all unactivated: 5 A, 25 B, 18 L and D1-D3. They are grouped
+in §6 by owner surface, not by severity, because disjoint writer surfaces are
+what make a wave parallelisable.
+
+**Wave composition.** Freeze three packets per wave from the latest integration
+branch, with disjoint owned files. Two constraints carry forward: exclude any
+file being modified in parallel on another feature branch, and rest a module for
+one wave after two packets have changed it — `product_composition_registry.py`
+was rested after SRR-20 and SRR-23 for exactly this reason.
+
+**Expected pace.** With §2.2 in force, a three-packet wave should close in one
+working day. If a wave runs past two days, the boundary is being applied too
+loosely; check the rejections against §2.2 before adding another round.
+
+**Retrofit obligation.** The first twenty packets closed in one review round
+each, before the standing evidence rule existed. They were held to a lower
+evidence bar, not a higher quality one. This is measured, not assumed: during
+the w3 merge verification, the mutant `A13-replacement-skips-retire` — deleting
+the accepted-commit retirement that SRR-23 introduced — survived the full focused
+suite on the repair branch itself. That repair has no killing test.
+
+Retrofitting evidence for those twenty packets is its own work item. It must not
+be folded into a new wave, because mixing retrofit with new closures makes the
+numerator ambiguous: a retrofit adds no unique defect and must not advance it.
+Run it as a separate pass, one module at a time, seeding for each closed finding
+the mutant that would revive it and recording which survive.
+
+**Stopping.** Wave 12 closed at 37/88 by user instruction. Any further wave needs
+its own instruction; the queue in §6 is not standing authority to continue.
 
 ## 3. Wave 1 ownership record — CLOSED
 

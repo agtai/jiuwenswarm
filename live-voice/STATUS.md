@@ -199,8 +199,16 @@ exact-source Alpha result.
   every packet to at least one extra round, and in each case the source was
   already correct and only the evidence was missing. Three separate cases in
   this wave were found to promise in their names a guard their bodies never
-  bought. Any next wave should activate disjoint packets from §6 and freeze
-  each from the latest integration branch before editing.
+  bought. That wave also cost four times what the earlier ones did for the same
+  calendar time, and the measured cause was review rounds rather than
+  difficulty, so §2.2 of the contract now bounds what a review may block on and
+  caps a packet at two rounds; §2.3 sets out how a next wave is composed and
+  paced. Read both before activating anything. One obligation is already
+  recorded there: the first twenty packets closed under a lower evidence bar,
+  and one of their repairs is measured to have no killing test, so retrofitting
+  their evidence is its own work item and must not advance the numerator.
+  Wave 12 closed at 37/88 by instruction — the queue in §6 is not standing
+  authority to continue.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original
