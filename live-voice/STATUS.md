@@ -60,13 +60,15 @@
   [physical validation and latency finding](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md).
   This scoped result does not upgrade the failed controlled candidate or close
   feature-complete latency acceptance.
-- **Latest scoped Exit/re-enable physical observation:** **ORDINARY SCENARIOS
-  PASS / DELAYED-ACK ACCEPTANCE OPEN** on local pre-rebaseline source
-  `698c6c375bf3d36563b4f035b573000de136a3e9`. Baseline dialogue, Exit while the
-  Agent was working followed by immediate re-enable, Exit during playout, and
-  Session isolation all passed without duplicate visible/audio/business effects.
-  The run did not delay the presentation-ACK transport and was performed before
-  rebasing onto D-093, so it is supporting evidence only.
+- **Latest scoped Exit/re-enable physical result:** **PASS** on exact clean
+  product source `8994489ba79db18ccdde16593dd44d61450697af`. In two local Formal
+  Web Sessions, the user passed the real text-tool path, ordinary microphone/TTS
+  loop, Exit with immediate re-enable, Session isolation, and resource
+  zero/re-establishment without duplicate visible/audio/business effects. The
+  physical run validates the real browser/device seam; delayed ACK success,
+  rejection, timeout, route-not-found and refresh fault injection remain
+  automation-owned. This scoped result grants no controlled-candidate or
+  product-readiness PASS.
 - **P3-G0 status:** **PASS — AUTHORITATIVE P3 FOUNDATION; CONTROLLED
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
@@ -80,14 +82,15 @@
   private content. The bounded backend remains in-process and makes no external
   OTLP/SLO/retention claim; that is an operations nonclaim, not an unfinished
   scheduled P3 primitive. The mounted Exit/immediate-re-enable repair closes the
-  reproduced Agent-generation, stale output/TTS and resource-cleanup paths, and
-  its four ordinary real-device scenarios passed on the pre-rebaseline tree.
-  The complete defect package remains **PARTIAL**: the current retained
-  presentation-ACK oracle still waits for the predecessor ACK before closing P2
-  and activating the successor. That delayed-ACK dependency must be removed and
-  the superseded presentation-fence residue reviewed before this packet can be
-  called source/automated complete. Then integrate and verify the assigned P2
-  notification batch/push/coalescing latency work when ready;
+  reproduced Agent-generation, stale output/TTS and resource-cleanup paths. The
+  Exit/immediate-re-enable packet is now **SOURCE/AUTOMATED/SCOPED PHYSICAL
+  PASS**:
+  a retired predecessor presentation ACK remains exact/durable in the
+  background but no longer gates or mutates successor activation/capture, and
+  the superseded presentation-fence residue is removed. The exact product source
+  also passed the scoped real browser/device journey. Independent Tier-3 review
+  remains open before full packet acceptance. Then integrate and verify the
+  assigned P2 notification batch/push/coalescing latency work when ready;
   close generation-time interruption required by the formal feature-complete
   P1/P2 boundary; then run the complete fixed-corpus, automated, review and real-
   device Journey. Any later observability completion and P1/P2 may overlap only
@@ -144,16 +147,16 @@ risks, dependencies, acceptance and integration order.
 | Speech Recognition | **PARTIAL.** Real microphone finals now sustain repeated automatic turns on `e1df8b452`. Ordinary and barge-in capture both retain the 1.2-second server-VAD silence contract; one EOT-to-submit interval was 0.669 seconds | Fixed-corpus ordinary/barge-in p50/p95 and pause/truncation evidence before VAD tuning; exact provider speech-start attribution, robust fallback/cancel, Provider-neutral configuration and broader device/network validation | Audio I/O, media route and benchmark owner; no claim that recognition finalization is barge-in-specific |
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist; repeated short/long TTS was physically audible on `e1df8b452` without the repaired ACK/receipt failures | Provider-neutral configuration, measured first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation; scoped physical PASS does not close feature-complete targets |
 | Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the scoped `e1df8b452` physical loop, including automatic post-playout listening and playout-time barge-in. The same run exposed variable P2 notification head-of-line delay | Remove the one-notification-per-RPC P2 bottleneck under a separately scoped Tier-3 boundary; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; cumulative real network/device verification |
-| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and button/automatic playout-time barge-in passed the scoped `e1df8b452` physical journey. The newer Exit repair also fences an unresolved Agent generation from a successor, but its old presentation ACK still serializes successor activation | Decouple late predecessor ACK settlement from the new generation; **hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; P2 notification delivery must avoid final head-of-line delay; complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
+| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and button/automatic playout-time barge-in passed the scoped `e1df8b452` physical journey. The newer Exit repair also fences an unresolved Agent generation, retires a late predecessor presentation ACK without blocking or mutating its successor, and passes its scoped real browser/device journey on `8994489ba` | **Hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; P2 notification delivery must avoid final head-of-line delay; complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; scheduled pre-P3-9 P3 code boundary closed.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; D-093 fixes absent primitives as stable zero-effect unsupported | Run the P3-9 cumulative one-product acceptance without adding a second Task, event, presentation or confirmation authority | Executor capability/admission/durability facts, Voice–Task Bridge and restart/concurrency matrix; D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) |
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | P3-9 cumulative acceptance; any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review and exact Wave-2/Wave-3 Direct/Store/Core evidence; no generic Executor or host-crash claim |
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is accepted for evaluation only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` are stable unsupported for nonterminal Tasks and conflict for terminal Tasks, with zero Task/Attempt/Event/outbox/Executor effect | Broader language/policy generalization and P3-9 cumulative acceptance; positive provide-input/pause/resume remain outside the current Direct profile unless a later real primitive is accepted | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus and D-093 zero-effect decision |
-| Integrated Web product experience | **PARTIAL overall; P3-5B, P3-7 and the scoped P3-8B diagnostic consumer Gates PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned, while P3-8B observes only after authority succeeds. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed. The rebased Exit/re-enable repair generation-fences unpresented old output and passed the ordinary Agent-working, playout and Session-isolation scenarios before rebaseline, but the deterministic delayed presentation-ACK path still blocks successor activation | Decouple predecessor ACK settlement from successor activation; remove superseded presentation-fence residue after its zero-use proof; close generation-time interruption, P2 presentation latency, device/privacy/recovery UX and the cumulative human journey | [Exit/re-enable evidence](evidence/P1_P2_EXIT_REENABLE_GENERATION_RETIREMENT_EVIDENCE_20260822.md), [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [P3-8B evidence](evidence/P3_8B_FORMAL_OBSERVABILITY_RETIREMENT_EVIDENCE_20260821.md) and remaining P1/P2/P3-9 completion; scoped automation and pre-rebaseline physical evidence do not grant current-candidate credit |
+| Integrated Web product experience | **PARTIAL overall; P3-5B, P3-7, the scoped P3-8B diagnostic consumer Gates and the Exit delayed-ACK source/automated/scoped physical repair PASS.** The visible formal carrier now lists/selects multiple authenticated Tasks and projects exact state/outcome/admission/current-Attempt progress/history/result/lineage plus only current-principal-supported controls. Initial load, select, refresh and reconnect revalidate list/status/events/result; failed revalidation retains zero formal activation/ACK. Durable text/voice consumption remains P3-5B-owned, while P3-8B observes only after authority succeeds. On exact source `e1df8b452`, real foreground Agent text/TTS, repeated automatic listening, foreground Stop and button/automatic playout-time barge-in physically passed. The Exit/re-enable repair generation-fences unpresented old output and now lets generation 2 activate, capture, submit and present before a retained generation-1 ACK settles; late success/rejection/timeout/route-loss, refresh and Session isolation have automated coverage. Exact clean product source `8994489ba` also passed the scoped real text-tool, microphone/TTS, Exit/re-enable, Session-isolation and resource-re-establishment journey | Independent Exit Tier-3 review; close generation-time interruption, P2 presentation latency, device/privacy/recovery UX and the cumulative human journey | [Exit/re-enable evidence](evidence/P1_P2_EXIT_REENABLE_GENERATION_RETIREMENT_EVIDENCE_20260822.md), [P3-7 evidence](evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md), [P3-8B evidence](evidence/P3_8B_FORMAL_OBSERVABILITY_RETIREMENT_EVIDENCE_20260821.md) and remaining P1/P2/P3-9 completion; scoped packet evidence does not grant current-candidate credit |
 | Observability, benchmark and latency | **PARTIAL overall; scheduled P3 observability producer boundary closed.** Validated configuration, trusted HMAC public correlation, the single exporter FIFO, P3-8A codec and bounded in-process backend compose behind the formal Registry. Producers now cover Command, current outbox state, Executor, Store Event/failure, checkpoint, effect, recovery, explicit reconcile state, Result, Generation and ACK. Recovery checkpoint/effect facts retain their producer-Attempt binding; Task event-head mismatch drops diagnostics; no private content or high-card metric label is exported | A separately accepted external/persistent telemetry owner only if the deployment requires it; separately repair P2 delivery and execute the [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) | D-093 [review](reviews/P3_COMPLETE_CAPABILITY_BOUNDARY_IMPLEMENTATION_REVIEW_2026-08-22.md), [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) and D-092 external-telemetry nonclaims |
-| Automated verification and product acceptance | **PARTIAL overall; scheduled pre-P3-9 P3 code Gate PASS.** Exact source `b4e70efe` retains its backend/config/durability/observability/retirement evidence. On the rebased repair tree, Formal Web is `443/443`, browser audio `103/103`, Dedicated Media `27/27`, launcher/probe `3/3`, P2/Registry `214/220`, production build, Ruff and diff checks PASS. The six Python failures are unchanged P3 fixture/projection cases. The green delayed-ACK Web test currently proves a blocking dependency rather than the required decoupling, so the complete Exit packet is not automated PASS. Earlier exact-source physical credits remain unchanged; P3-9 is open and the controlled candidate remains FAIL | Repair delayed-ACK successor activation and remaining P1/P2 boundaries, then run P3-9 clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) plus the Exit/re-enable records; automation grants no current-candidate or product-readiness credit |
-| Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off. Live Voice requires an explicit exact Direct D0/D2 profile; missing/D1/unknown configuration fails closed without auth or durability downgrade. Launch/evidence owners explicitly select D2. The controlled Formal Web launcher additionally owns the complete non-secret media/provider/origin/receipt contract and fails before launch when it is incomplete. D-092 retirement remains unchanged: three rows retired and 18 retained/inventory. The pre-rebaseline Exit repair also leaves two unread presentation-fence identity fields and one generation-crossing branch whose reachability proof is obsolete | Remove that residue only in the delayed-ACK packet after focused static/resource oracles prove zero semantic loss. Each retained manifest row still requires its own replacement/oracle/flag-on/flag-off/rollback/review Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-093 evidence, [manifest](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md) and D-092 retained/retired boundary |
+| Automated verification and product acceptance | **PARTIAL overall; scheduled pre-P3-9 P3 code Gate and the Exit delayed-ACK source/automated/scoped physical repair PASS.** Exact source `b4e70efe` retains its backend/config/durability/observability/retirement evidence. On the current repair tree, Formal Web is `450/450`, browser audio `103/103`, Dedicated Media `27/27`, build profiles `2/2`, P2/Registry `214/220`, production build, Ruff and diff checks PASS. The six Python failures are unchanged P3 fixture/projection cases and are not counted as PASS. Exact clean product source `8994489ba` passes the scoped real browser/device journey; independent Exit review, P3-9 and controlled-candidate acceptance remain open | Complete independent Exit review, repair remaining P1/P2 boundaries, then run P3-9 clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) plus the Exit/re-enable records; scoped packet evidence grants no current-candidate or product-readiness credit |
+| Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off. Live Voice requires an explicit exact Direct D0/D2 profile; missing/D1/unknown configuration fails closed without auth or durability downgrade. Launch/evidence owners explicitly select D2. The controlled Formal Web launcher additionally owns the complete non-secret media/provider/origin/receipt contract and fails before launch when it is incomplete. D-092 retirement remains unchanged: three rows retired and 18 retained/inventory. The Exit delayed-ACK packet removes the unread `turn_id`, `commit_id`, `origin_voice_loop_generation` fence fields and unreachable crossing branch while retaining exact activation/response fencing, capture barriers, timers and cleanup | Each retained manifest row still requires its own replacement/oracle/flag-on/flag-off/rollback/review Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-093 evidence, [manifest](reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md) and D-092 retained/retired boundary |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
 ## P3-G0 scoped PASS and deferred gaps
@@ -188,9 +191,8 @@ deferred from the P3-1 sequencing Gate:
    repair is integrated on W3 with affected automation/build evidence, and exact
    source `e1df8b452` passed repeated audible turns, automatic post-playout
    listening, foreground Stop and playout-time barge-in. Quiet multi-boundary
-   and broader device/network generalization, current-source physical
-   Exit/re-enable validation, generation-time interruption, fixed-corpus
-   latency and the combined P3 Task journey remain open. See the
+   and broader device/network generalization, generation-time interruption,
+   fixed-corpus latency and the combined P3 Task journey remain open. See the
    [dated disposition](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md),
    [physical result](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md)
    and [W3 integration evidence](evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md).
@@ -204,10 +206,10 @@ exact-source Alpha result.
 
 ### P1/P2 mounted Exit/immediate-re-enable lifecycle
 
-- **Packet/status:** **PARTIAL — ORDINARY EXIT PATHS REPAIRED; DELAYED
-  PRESENTATION ACK STILL BLOCKS THE SUCCESSOR.** The seven pre-rebaseline local
-  implementation/evidence commits are consolidated in the commit containing
-  this STATUS, based on `451599b4319c8b4a29054d75d8e2c8b051edae37`.
+- **Packet/status:** **SOURCE/AUTOMATED/SCOPED PHYSICAL PASS; PACKET ACCEPTANCE
+  PARTIAL — INDEPENDENT TIER-3 REVIEW OPEN.** The
+  delayed-ACK implementation is the commit containing this STATUS, based on
+  `2e01965ecd89a33ca5917cdad1c1080018bb8b1b`.
   The earlier cross-generation presentation-transfer model is superseded. The
   same-tab retained-P2 explicit-retry fallback remains necessary for refresh
   recovery but is not the Exit-race repair.
@@ -232,21 +234,19 @@ exact-source Alpha result.
   the predecessor before allocating its successor; an uncertain close retains
   the barrier. The successor then resumes one capture without replaying submit,
   presentation ACK, TTS, Agent, Tool, Task or history effects.
-- **Open delayed-ACK defect:** if the predecessor has already played and its
-  presentation ACK request is retained in transport, the activation journal
-  replays and settles that durable operation before closing the old P2 route.
-  The mounted test explicitly asserts zero predecessor close after Exit/start,
-  then releases the ACK and only afterward expects close, generation-2
-  activation and capture. This violates the required invariant that a late old
-  ACK must not delay or influence the successor.
-- **Removable residue:** the superseded intermediate presentation fence left
-  unread `turn_id` and `commit_id` fields plus an
-  `origin_voice_loop_generation` crossing branch. The fence is installed only
-  for the current loop, while every generation-changing owner clears it, so the
-  crossing branch is unreachable under the corrected invariant. Remove these
-  only together with the delayed-ACK change and its focused static/resource
-  oracles; do not remove the exact activation/response fence itself.
-- **Automated result:** Formal Web `443/443` passes. The mounted blocked-Agent
+- **Delayed-ACK result:** an in-flight presentation ACK is atomically retired
+  from the current operation slot into a bounded v3 journal ledger before the
+  predecessor closes. It keeps the exact request id/params and settles in a
+  separate background lock. Success, `accepted: false`, route-not-found and
+  definitive rejection remove only the old record; timeout retains it for exact
+  replay. A late old result cannot alter the active binding, phase or a
+  successor ACK. Refresh and same-tab Session isolation are covered.
+- **Removed residue:** `PendingForegroundPresentationFence` no longer stores
+  unread `turn_id`, `commit_id` or `origin_voice_loop_generation`, and the
+  unreachable `crossesExitedVoiceLoopGeneration` branch is gone. Exact
+  Session/correlation/interaction/activation/response fences, capture barriers,
+  timers and cleanup remain under static and mounted oracles.
+- **Automated result:** Formal Web `450/450` passes. The mounted blocked-Agent
   oracle proves successor capture before predecessor settlement, zero old
   ACK/TTS/audio/assistant history and one exact successor submit/playout/ACK,
   with balanced microphone, AudioContext, AudioWorklet and socket resources.
@@ -254,19 +254,24 @@ exact-source Alpha result.
   Agent execution exactly once, generation-2 activation before old release,
   zero old notification/history, one successor presentation ACK and balanced
   Agent pins. Browser audio is `103/103`, Dedicated Media `27/27`, launcher/probe
-  `3/3`, and combined P2/Registry is `214/220`; the six failures remain unrelated
-  P3 fixture/projection cases. Production build, Ruff and diff checks pass. The
-  delayed-ACK test is green only because its current oracle encodes the wrong
-  serialization, so these counts do not close the packet.
-- **Physical observation:** on pre-rebaseline source `698c6c375`, the four
-  ordinary baseline, Agent-working Exit/re-enable, playout Exit/re-enable and
-  Session-isolation scenarios passed. There was no artificial ACK delay and no
-  post-D-093 physical rerun, so delayed-ACK and current-candidate credit remain
-  open.
+  baseline remains `3/3`, and combined P2/Registry is `214/220`; the six failures
+  remain unrelated P3 fixture/projection cases. Production build, Ruff and diff
+  checks pass. The mounted retained-ACK oracle was changed first and failed on
+  blocked generation-2 activation; it now proves generation 2 capture and own
+  response playout before `releaseAck()`, old settlement isolation and balanced
+  browser/media plus durable-ledger resources.
+- **Physical result:** on exact clean product source `8994489ba`, the user
+  completed the five scoped Formal Web checks across two local Sessions: real
+  text-tool submission, ordinary microphone/TTS, Exit with immediate re-enable,
+  Session isolation, and resource zero/re-establishment. All passed without a
+  duplicate response, stale audio/history, cross-Session effect or failed
+  successor capture. The browser journey did not inject transport faults;
+  delayed ACK success/rejection/timeout/route-not-found and refresh remain
+  automation-owned.
 - **Excluded/remaining:** no shared schema, Gateway/Provider, Agent/Tool/Task
-  policy, P2 latency or generation-time interruption changed. The delayed-ACK
-  repair, independent Tier-3 review and a current-source real Chrome journey
-  remain required before full packet, candidate or product-readiness credit.
+  policy, P2 latency or generation-time interruption changed. Independent
+  Tier-3 review remains required before full packet credit. This scoped result
+  grants no candidate or product-readiness credit.
 - **Evidence:** [corrected generation-retirement record](evidence/P1_P2_EXIT_REENABLE_GENERATION_RETIREMENT_EVIDENCE_20260822.md),
   [superseded earlier source record](evidence/P1_P2_EXIT_REENABLE_PRESENTATION_FENCE_EVIDENCE_20260821.md)
   and [retained-P2 explicit-retry repair](evidence/P2_RETAINED_GENERATION_EXPLICIT_RETRY_EVIDENCE_20260822.md).
@@ -791,14 +796,16 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 
 ## Verification and runtime truth
 
-- The consolidated Exit/immediate-re-enable repair based on `451599b43` passes
-  Formal Web `443/443`, browser audio `103/103`, Dedicated Media `27/27`, build
-  profiles `2/2`, launcher/probe `3/3`, combined P2/Registry `214/220`, the focused real
-  Registry-to-Runtime blocked-Agent race, Ruff/diff checks and the production
-  Live Voice build. All six Python failures are unchanged P3 fixture/projection
-  cases outside this patch. The retained-presentation-ACK test is also green but
-  currently encodes predecessor settlement before successor activation, so the
-  complete Exit package remains PARTIAL. Exact commands, physical scenario
+- The Exit/immediate-re-enable repair based on `2e01965ec` passes Formal Web
+  `450/450`, browser audio `103/103`, Dedicated Media `27/27`, build profiles
+  `2/2`, the unchanged launcher/probe baseline `3/3`, combined P2/Registry
+  `214/220`, the unchanged focused real Registry-to-Runtime blocked-Agent race,
+  Ruff/diff checks and the production Live Voice build. All six Python failures
+  are unchanged P3 fixture/projection
+  cases outside this patch. The retained-presentation-ACK oracle now proves
+  successor activation/capture/own response before old settlement. Exact clean
+  product source `8994489ba` also passes the scoped real browser/device journey;
+  independent Tier-3 review remains open. Exact commands, physical scenario
   scope, the superseded assumption and non-claims are in the
   [current evidence](evidence/P1_P2_EXIT_REENABLE_GENERATION_RETIREMENT_EVIDENCE_20260822.md).
 - Integrated P1/P2 source `8846862f009d332761763f887c38ce6486f3ee90`

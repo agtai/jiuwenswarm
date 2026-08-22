@@ -1646,6 +1646,31 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   );
 });
 
+test('foreground presentation fence keeps exact activation and response identity without superseded generation residue', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const fence = source.match(
+    /type PendingForegroundPresentationFence = Readonly<\{(?<fields>[\s\S]*?)\}>;/,
+  )?.groups?.fields;
+
+  assert.ok(fence);
+  for (const field of [
+    'session_id',
+    'correlation_id',
+    'interaction_id',
+    'activation_id',
+    'activation_generation',
+    'response_id',
+    'response_generation',
+  ]) {
+    assert.match(fence, new RegExp(`\\b${field}:`));
+  }
+  assert.doesNotMatch(fence, /\bturn_id:|\bcommit_id:|\borigin_voice_loop_generation:/);
+  assert.doesNotMatch(source, /\bcrossesExitedVoiceLoopGeneration\b/);
+  assert.match(source, /voiceLoopCaptureTimerRef/);
+  assert.match(source, /pendingForegroundPresentationRef\.current = null/);
+  assert.match(source, /retirePendingPresentationAck/);
+});
+
 test('voice Task origin is exact-session and exact-committed-text only', () => {
   const origin = Object.freeze({
     session_id: 'session-voice',
