@@ -1247,6 +1247,51 @@ async def test_closed_lease_allows_only_a_newer_authorized_generation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_closing_lease_fences_old_effects_without_blocking_newer_generation() -> (
+    None
+):
+    resolver = RecordingResolver((candidate(),))
+    predecessor_close = asyncio.Event()
+    runtimes: list[FakeRuntime] = []
+
+    def make_runtime(_context, _binding):
+        runtime = FakeRuntime(
+            close_gate=predecessor_close if not runtimes else None,
+        )
+        runtimes.append(runtime)
+        return runtime
+
+    adapter = adapter_for(resolver, make_runtime)
+    first = await adapter.activate(request())
+    assert first.lease is not None
+    pending = await first.lease.close(
+        first.lease.binding,
+        timeout_seconds=0.001,
+    )
+    assert pending.status is P2LeaseCloseStatus.PENDING
+    assert first.lease.snapshot().state is P2LeaseState.CLOSING
+
+    successor = await adapter.activate(
+        request(activation_id="activation-2", generation=2)
+    )
+
+    assert successor.status is P2ActivationStatus.ACTIVE
+    assert successor.lease is not None
+    assert successor.lease is not first.lease
+    assert len(runtimes) == 2
+    assert first.lease.snapshot().state is P2LeaseState.CLOSING
+
+    predecessor_close.set()
+    closed = await first.lease.close(first.lease.binding, timeout_seconds=1.0)
+    assert closed.status is P2LeaseCloseStatus.CLOSED
+    successor_closed = await successor.lease.close(
+        successor.lease.binding,
+        timeout_seconds=1.0,
+    )
+    assert successor_closed.status is P2LeaseCloseStatus.CLOSED
+
+
+@pytest.mark.asyncio
 async def test_wrong_or_stale_lease_binding_has_zero_engine_and_close_effect() -> None:
     resolver = RecordingResolver((candidate(),))
     runtime = FakeRuntime()

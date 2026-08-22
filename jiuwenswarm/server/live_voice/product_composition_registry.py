@@ -926,6 +926,9 @@ class AgentServerProductCompositionRegistry:
         self._pending_p2_agents: dict[tuple[str, str, str, int], Any] = {}
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
+        self._root_cleanup_tasks: dict[
+            ProductCompositionLease, asyncio.Task[None]
+        ] = {}
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_settlement_tasks: set[asyncio.Task[None]] = set()
@@ -1822,10 +1825,57 @@ class AgentServerProductCompositionRegistry:
             adoption.set()
 
     def _retain_root_cleanup(self, cleanup: ProductCompositionLease | None) -> None:
-        if cleanup is not None and all(
-            retained is not cleanup for retained in self._root_orphan_cleanups
-        ):
+        if cleanup is None:
+            return
+        if all(retained is not cleanup for retained in self._root_orphan_cleanups):
             self._root_orphan_cleanups.append(cleanup)
+
+    def _retire_p2_root_cleanup(self, cleanup: ProductCompositionLease) -> None:
+        """Retain and autonomously finish one logically fenced P2 root."""
+
+        self._retain_root_cleanup(cleanup)
+        if cleanup in self._root_cleanup_tasks:
+            return
+        task = asyncio.create_task(
+            self._drain_root_cleanup(cleanup),
+            name="live-voice-product-p2-retained-cleanup",
+        )
+        self._root_cleanup_tasks[cleanup] = task
+
+    async def _drain_root_cleanup(self, cleanup: ProductCompositionLease) -> None:
+        """Finish a logically retired route without blocking its successor."""
+
+        try:
+            while not cleanup.closed:
+                try:
+                    await cleanup.close()
+                except ProductCompositionLeaseCloseError:
+                    # The P2 segment uses a bounded observation wait while its
+                    # shielded Runtime coordinator completes the accepted turn.
+                    # Once P2 is gone, any remaining owner needs the registry's
+                    # normal explicit cleanup path instead of an endless P2
+                    # retry loop.
+                    if "agent_server.product_p2.v1" not in cleanup.pending_adapter_ids:
+                        logger.error(
+                            "[LiveVoiceProduct] retained non-P2 composition cleanup "
+                            "still pending: adapters=%s",
+                            cleanup.pending_adapter_ids,
+                        )
+                        return
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    logger.exception(
+                        "[LiveVoiceProduct] retained composition cleanup failed"
+                    )
+                    return
+        finally:
+            self._root_cleanup_tasks.pop(cleanup, None)
+            if cleanup.closed:
+                self._root_orphan_cleanups = [
+                    retained
+                    for retained in self._root_orphan_cleanups
+                    if retained is not cleanup
+                ]
 
     def _retain_closed_p2_route(
         self,
@@ -3995,10 +4045,27 @@ class AgentServerProductCompositionRegistry:
                     )
                 if replay_authority.lease is not None:
                     await replay_authority.lease.close()
+                cleanup_pending = False
                 try:
+                    self._close_task_presentations_for_p2_route(
+                        existing,
+                        reason="p2_route_superseded",
+                    )
                     await existing.lease.close()
                 except ProductCompositionLeaseCloseError as exc:
-                    self._retain_root_cleanup(exc.lease)
+                    if existing.activation_lease.snapshot().state not in {
+                        P2LeaseState.CLOSING,
+                        P2LeaseState.CLOSED,
+                    }:
+                        return _error_result(
+                            request_id,
+                            reason="PRODUCT_P2_CLEANUP_PENDING",
+                            code=ErrorCode.UNAVAILABLE,
+                            manifest=existing.manifest,
+                        )
+                    self._retire_p2_root_cleanup(exc.lease)
+                    cleanup_pending = True
+                except TaskPresentationViolation:
                     return _error_result(
                         request_id,
                         reason="PRODUCT_P2_CLEANUP_PENDING",
@@ -4006,6 +4073,7 @@ class AgentServerProductCompositionRegistry:
                         manifest=existing.manifest,
                     )
                 self._p2_routes.pop(key, None)
+                self._drop_voice_task_origins_for_route_locked(key)
                 self._retain_closed_p2_route(
                     key,
                     _ClosedP2Route(
@@ -4014,6 +4082,11 @@ class AgentServerProductCompositionRegistry:
                         existing.notification_replay_floor,
                     ),
                 )
+                self._critical_token_gate.release_interaction(interaction_id)
+                if cleanup_pending:
+                    logger.info(
+                        "[LiveVoiceProduct] predecessor P2 route retired while cleanup completes"
+                    )
 
             closed = self._closed_p2_routes.get(key)
             if generation <= self._closed_p2_generation_high_water(key):
@@ -8225,7 +8298,20 @@ class AgentServerProductCompositionRegistry:
                     reason="p2_route_closed",
                 )
                 await retained.lease.close()
-            except (ProductCompositionLeaseCloseError, TaskPresentationViolation):
+            except ProductCompositionLeaseCloseError as exc:
+                if retained.activation_lease.snapshot().state not in {
+                    P2LeaseState.CLOSING,
+                    P2LeaseState.CLOSED,
+                }:
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P2_CLEANUP_PENDING",
+                    )
+                self._retire_p2_root_cleanup(exc.lease)
+                logger.info(
+                    "[LiveVoiceProduct] closed P2 route retired while cleanup completes"
+                )
+            except TaskPresentationViolation:
                 return _error_result(
                     request_id,
                     reason="PRODUCT_P2_CLEANUP_PENDING",

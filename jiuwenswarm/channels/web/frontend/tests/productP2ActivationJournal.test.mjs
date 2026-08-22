@@ -228,6 +228,65 @@ test('legacy result-unknown remains a zero-effect recovery barrier', async () =>
   assert.throws(() => refreshedPage.prepareSuccessor('page-b'), new RegExp(PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED));
 });
 
+test('explicit retry promotes a generic unknown only into exact predecessor cleanup', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage);
+  const predecessor = firstPage.prepareSuccessor('page-a');
+  firstPage.markResultUnknown(predecessor);
+  const refreshedPage = openJournal(storage, 'client-b');
+  const effects = [];
+
+  refreshedPage.requestResultUnknownRecovery(predecessor);
+  assert.equal(refreshedPage.snapshot().phase, 'activation_result_unknown');
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    activate_exact: async binding => {
+      effects.push(['activate', binding]);
+      return { replayed: true };
+    },
+    close_exact: async binding => {
+      effects.push(['close', binding]);
+    },
+    error_reason: () => undefined,
+    activation_retryable: () => false,
+  });
+
+  assert.deepEqual(recovered, { kind: 'ready' });
+  assert.deepEqual(effects, [
+    ['activate', predecessor],
+    ['close', predecessor],
+  ]);
+  const successor = refreshedPage.prepareSuccessor('page-b');
+  assert.equal(successor.activation_generation, predecessor.activation_generation + 1);
+  assert.notEqual(successor.activation_id, predecessor.activation_id);
+});
+
+test('explicit generic-unknown retry retains the exact barrier when cleanup is uncertain', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage);
+  const predecessor = firstPage.prepareSuccessor('page-a');
+  firstPage.markResultUnknown(predecessor);
+  const refreshedPage = openJournal(storage, 'client-b');
+  refreshedPage.requestResultUnknownRecovery(predecessor);
+
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    activate_exact: async () => ({ replayed: true }),
+    close_exact: async () => {
+      throw new Error('transport result unknown');
+    },
+    error_reason: () => undefined,
+    activation_retryable: () => false,
+  });
+
+  assert.deepEqual(recovered, {
+    kind: 'retry',
+    reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
+  });
+  assert.equal(refreshedPage.snapshot().phase, 'closing_unconfirmed');
+  assert.throws(() => refreshedPage.prepareSuccessor('page-b'), new RegExp(PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED));
+});
+
 test('v1 generic result-unknown upgrades in place and retains its zero-effect barrier', async () => {
   const storage = memoryStorage();
   const created = openJournal(storage);

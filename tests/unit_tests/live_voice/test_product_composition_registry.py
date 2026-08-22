@@ -1870,6 +1870,144 @@ async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_ident
 
 
 @pytest.mark.asyncio
+async def test_exit_during_agent_generation_retires_predecessor_and_opens_successor(
+    tmp_path: Path,
+) -> None:
+    """The real Registry/Runtime seam must not require a synthetic handoff.
+
+    Exit fences the predecessor presentation while its already accepted Agent
+    execution is still completing.  A newer activation may capture and submit
+    independently; the predecessor final has zero notification/history effect.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    predecessor = _p2_params()
+    activated = await registry.handle_p2_activate(
+        params=predecessor,
+        request_id="request-exit-generation-activate-1",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert activated.ok
+    predecessor_history = _install_unified_history_writer(registry)
+
+    submitted = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="exit-generation-predecessor",
+            text="finish exactly once after Exit",
+        ),
+        request_id="request-exit-generation-submit-1",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert submitted.ok
+    predecessor_response = cast(dict[str, object], submitted.payload["result"])[
+        "response"
+    ]
+    assert isinstance(predecessor_response, dict)
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+
+    closed = await registry.handle_p2_close(
+        params=predecessor,
+        request_id="request-exit-generation-close-1",
+        session_id=SCOPE.session_id,
+    )
+    if not closed.ok:
+        # Keep the pre-fix red oracle bounded: the retained Agent execution is
+        # released only to let pytest tear down after recording the bad close.
+        blocking.release.set()
+    assert closed.ok
+    closed_result = cast(dict[str, object], closed.payload["result"])
+    assert closed_result["status"] == "closed"
+
+    successor = _p2_params(
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    reopened = await registry.handle_p2_activate(
+        params=successor,
+        request_id="request-exit-generation-activate-2",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert reopened.ok
+    active = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert active.binding.activation_generation == 2
+    assert manager.pins == 2
+    successor_history = _HistoryWriter()
+    active.activation_lease._runtime._history_writer = successor_history
+
+    blocking.release.set()
+    for _ in range(100):
+        if manager.unpins >= 1:
+            break
+        await asyncio.sleep(0.01)
+    assert manager.unpins >= 1
+    assert blocking.calls == 1
+    assert predecessor_history.assistants == []
+
+    next_params = _unified_final_params(
+        stem="exit-generation-successor",
+        text="successor records normally",
+    )
+    next_params.update(
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    next_turn = await registry.handle_unified_submit(
+        params=next_params,
+        request_id="request-exit-generation-submit-2",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert next_turn.ok
+    assert blocking.calls == 2
+
+    delivered: dict[str, object] | None = None
+    for sequence in range(1, 5):
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params={**successor, "notification_sequence": sequence},
+                request_id=f"request-exit-generation-notification-{sequence}",
+                session_id=SCOPE.session_id,
+            ),
+            timeout=1,
+        )
+        assert polled.ok
+        candidate = cast(dict[str, object], polled.payload["result"])
+        unit = candidate.get("presentation_unit")
+        response = candidate.get("response")
+        if isinstance(unit, dict) and isinstance(response, dict):
+            assert response["response_id"] != predecessor_response["response_id"]
+            delivered = candidate
+            break
+    assert delivered is not None
+    response = cast(dict[str, object], delivered["response"])
+    unit = cast(dict[str, object], delivered["presentation_unit"])
+    acknowledged = await registry.handle_p2_presentation_ack(
+        params={
+            **successor,
+            "response_id": response["response_id"],
+            "response_generation": response["response_generation"],
+            "surface": unit["surface"],
+            "unit_id": unit["unit_id"],
+            "contiguous_cursor": unit["seq"],
+            "presented_at": NOW,
+        },
+        request_id="request-exit-generation-ack-2",
+        session_id=SCOPE.session_id,
+    )
+    assert acknowledged.ok
+    assert len(successor_history.assistants) == 1
+    assert predecessor_history.assistants == []
+    assert blocking.calls == 2
+    await registry.stop()
+    assert manager.unpins == 2
+
+
+@pytest.mark.asyncio
 async def test_unified_task_ack_never_contaminates_next_dialogue_context(
     tmp_path: Path,
 ) -> None:

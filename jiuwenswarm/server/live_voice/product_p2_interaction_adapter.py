@@ -1448,10 +1448,15 @@ class ProductP2InteractionAdapter:
                     replayed=True,
                 )
             if (
-                existing_state is P2LeaseState.CLOSED
+                existing_state in {P2LeaseState.CLOSING, P2LeaseState.CLOSED}
                 and binding.activation_generation
                 > existing.binding.activation_generation
             ):
+                # Close publishes its lifecycle fence synchronously before the
+                # retained Runtime waits for an already accepted Agent turn.
+                # A newer transport generation may therefore allocate without
+                # reviving or polling the predecessor.  Its shielded close
+                # coordinator remains the sole owner of predecessor teardown.
                 self._leases.pop(lease_key)
                 return await self._allocate(context, binding, lease_key)
             return P2ActivationResult(

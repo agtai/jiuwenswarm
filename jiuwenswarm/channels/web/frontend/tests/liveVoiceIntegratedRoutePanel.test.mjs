@@ -1642,7 +1642,7 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   assert.match(source, /isStaleProductResponseError\(error\)/);
   assert.match(
     source,
-    /setProductTextReason\(null\)[\s\S]{0,120}setProductTextStatus\(foregroundPresentationPendingRef\.current \? 'waiting' : 'acknowledged'\)/,
+    /setProductTextReason\(null\)[\s\S]{0,160}setProductTextStatus\(pendingForegroundPresentationRef\.current !== null \? 'waiting' : 'acknowledged'\)/,
   );
 });
 

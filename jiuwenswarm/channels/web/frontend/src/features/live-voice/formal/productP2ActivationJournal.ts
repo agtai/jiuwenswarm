@@ -641,6 +641,21 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
     this.#replace(binding, 'result_unknown');
   }
 
+  /**
+   * An explicit user retry may abandon an unclassified legacy outcome only by
+   * promoting it to exact activation reconciliation.  The recovery owner must
+   * still replay/close this same binding before a successor can be allocated;
+   * this transition never declares a submit, ACK, barge-in or activation
+   * successful and never clears a durable pending operation.
+   */
+  requestResultUnknownRecovery(binding: Readonly<ProductWebP2ActivationBinding>): void {
+    this.#requireNoRecoveryOwner();
+    if (this.#record.phase !== 'result_unknown' || this.#record.pending_operation !== null) {
+      throw new Error('product P2 result-unknown recovery is unavailable');
+    }
+    this.#replace(binding, 'activation_result_unknown');
+  }
+
   checkpointOperation(operation: Readonly<ProductP2DurableOperation>): void {
     this.#requireNoRecoveryOwner();
     const parsed = parseOperation(operation, this.#record.binding);

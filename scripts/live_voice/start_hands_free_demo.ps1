@@ -1,5 +1,7 @@
 ﻿[CmdletBinding()]
 param(
+    [ValidateSet('hands-free-demo', 'formal-web-validation')]
+    [string]$RuntimeProfile = 'hands-free-demo',
     [string]$ProjectPath,
     [string]$ProjectId,
     [string]$DataDir,
@@ -22,9 +24,17 @@ $StopCommand = Join-Path $RepoRoot '.venv\Scripts\jiuwenswarm-stop.exe'
 $FrontendRoot = Join-Path $RepoRoot 'jiuwenswarm\channels\web\frontend'
 $ProductionFrontendEnv = Join-Path $FrontendRoot '.env.production'
 $LiveVoiceFrontendEnv = Join-Path $FrontendRoot '.env.live-voice'
+$FormalWebRuntimeProbe = Join-Path $PSScriptRoot 'formal_web_runtime_probe.py'
 $ExpectedBranch = 'hx/0812_live_voice_w3'
+$FrontendPort = if ($RuntimeProfile -eq 'formal-web-validation') { 5173 } else { 6173 }
+$RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {
+    'Formal Web validation'
+} else {
+    'hands-free orders Demo'
+}
+$ExecutorProfile = 'live-voice.direct-project-code.d2.v1'
 $ExpectedPorts = [ordered]@{
-    FRONTEND_PORT     = 6173
+    FRONTEND_PORT     = $FrontendPort
     AGENT_SERVER_PORT = 18092
     WEB_PORT          = 19000
     GATEWAY_PORT      = 19001
@@ -257,6 +267,23 @@ function Wait-TcpPort([int]$Port, [DateTime]$Deadline) {
     return $false
 }
 
+function Wait-HttpResponse([string]$Uri, [DateTime]$Deadline) {
+    do {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Headers @{ 'Cache-Control' = 'no-cache' } -TimeoutSec 5
+            if ($response.StatusCode -eq 200) {
+                return $response
+            }
+        } catch {
+            # A listening socket can precede HTTP readiness by a few seconds.
+            # Keep the same bounded launch deadline and never turn a transient
+            # connection refusal into a false deployment failure.
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    return $null
+}
+
 try {
     Write-Step '检查源码与依赖'
     Set-Location -LiteralPath $RepoRoot
@@ -290,12 +317,20 @@ try {
     Write-Pass "源码分支 $branch，HEAD $head"
     $sourceDirty = @(& git status --short)
     if ($sourceDirty.Count -gt 0) {
+        if ($RuntimeProfile -eq 'formal-web-validation') {
+            Fail "Formal Web 验证要求干净源码；当前有 $($sourceDirty.Count) 项未提交修改。请先完成审查、测试和提交。"
+        }
         Write-Warn "源码工作区存在 $($sourceDirty.Count) 项未提交修改；脚本会按当前源码构建，不会提交或覆盖它们。"
     }
 
     # Keep the machine selection at one stable path so a non-default data
     # directory can still be discovered by the next no-argument launch.
-    $DemoConfigPath = Join-Path $env:USERPROFILE '.jiuwenswarm\config\live-voice-demo.json'
+    $demoConfigName = if ($RuntimeProfile -eq 'formal-web-validation') {
+        'live-voice-formal-web-validation.json'
+    } else {
+        'live-voice-demo.json'
+    }
+    $DemoConfigPath = Join-Path $env:USERPROFILE ".jiuwenswarm\config\$demoConfigName"
     $savedConfig = $null
     if (Test-Path -LiteralPath $DemoConfigPath -PathType Leaf) {
         $savedConfig = Get-Content -Raw -LiteralPath $DemoConfigPath -Encoding UTF8 | ConvertFrom-Json
@@ -352,25 +387,31 @@ try {
     if ($remotes.Count -gt 0) {
         Fail "Demo 项目存在 Git remote（$($remotes -join ', ')）；为避免误改远端项目，脚本拒绝启动。"
     }
-    foreach ($fileName in $ExpectedOrderInputs) {
-        if (-not (Test-Path -LiteralPath (Join-Path $ProjectPath $fileName) -PathType Leaf)) {
-            Fail "Demo 订单输入不完整，缺少：$fileName"
+    if ($RuntimeProfile -eq 'hands-free-demo') {
+        foreach ($fileName in $ExpectedOrderInputs) {
+            if (-not (Test-Path -LiteralPath (Join-Path $ProjectPath $fileName) -PathType Leaf)) {
+                Fail "Demo 订单输入不完整，缺少：$fileName"
+            }
         }
     }
     $projectStatus = @(@(Invoke-Git -Arguments @('-C', $ProjectPath, '-c', 'core.quotepath=false', 'status', '--porcelain')) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($projectStatus.Count -gt 0 -and -not $AllowDirtyProject) {
-        $unexpected = @($projectStatus | Where-Object {
-            if ($_ -notmatch '^\?\?\s+(.+)$') { return $true }
-            return $ExpectedOrderInputs -notcontains $Matches[1]
-        })
-        if ($unexpected.Count -gt 0) {
-            Fail "Demo 项目含有订单输入以外的修改。请先清理，或在明确接受基线时传入 -AllowDirtyProject。"
+        if ($RuntimeProfile -eq 'formal-web-validation') {
+            Fail "Formal Web 验证项目必须干净。请先清理，或在明确接受基线时传入 -AllowDirtyProject。"
+        } else {
+            $unexpected = @($projectStatus | Where-Object {
+                if ($_ -notmatch '^\?\?\s+(.+)$') { return $true }
+                return $ExpectedOrderInputs -notcontains $Matches[1]
+            })
+            if ($unexpected.Count -gt 0) {
+                Fail "Demo 项目含有订单输入以外的修改。请先清理，或在明确接受基线时传入 -AllowDirtyProject。"
+            }
+            Write-Warn 'Demo 项目仅有 7 份预期的未跟踪订单输入；它们将作为本次只读输入基线。'
         }
-        Write-Warn 'Demo 项目仅有 7 份预期的未跟踪订单输入；它们将作为本次只读输入基线。'
     } elseif ($projectStatus.Count -gt 0) {
         Write-Warn "已按 -AllowDirtyProject 接受 $($projectStatus.Count) 项现有项目变化。"
     } else {
-        Write-Pass 'Demo Git 项目干净且无 remote'
+        Write-Pass "$RuntimeProfileLabel Git 项目干净且无 remote"
     }
     Write-Pass "项目注册与 P3 绑定一致（$ProjectId）"
 
@@ -387,11 +428,15 @@ try {
     }
 
     Write-Step '检查 Agent、语言与私有 Speech 配置'
-    $configProbe = & $Python -c "import json,yaml,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=yaml.safe_load(p.read_text(encoding='utf-8')) or {}; print(json.dumps({'language':d.get('preferred_language'),'models':bool((d.get('models') or {}).get('defaults')),'leader':bool((d.get('agents') or {}).get('agent_leader'))}))" $ConfigYamlPath
+    $configProbe = & $Python -c "import json,yaml,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=yaml.safe_load(p.read_text(encoding='utf-8')) or {}; c=d.get('channels') or {}; x=sorted(k for k,v in c.items() if k not in {'web','tui'} and isinstance(v,dict) and v.get('enabled') is True); print(json.dumps({'language':d.get('preferred_language'),'models':bool((d.get('models') or {}).get('defaults')),'leader':bool((d.get('agents') or {}).get('agent_leader')),'external_channels':x}))" $ConfigYamlPath
     if ($LASTEXITCODE -ne 0) { Fail '无法解析 JiuwenSwarm config.yaml。' }
     $configFacts = $configProbe | ConvertFrom-Json
     if ($configFacts.language -ne 'zh') { Fail "preferred_language 必须为 zh，当前为 '$($configFacts.language)'。" }
     if (-not $configFacts.models -or -not $configFacts.leader) { Fail 'Agent 默认模型或 agent_leader 配置缺失。' }
+    $enabledExternalChannels = @($configFacts.external_channels)
+    if ($enabledExternalChannels.Count -gt 0) {
+        Fail "受控 Live Voice 验证禁止启用无关外部 channel：$($enabledExternalChannels -join ', ')。请先在隔离数据配置中关闭。"
+    }
     # This launcher is intentionally pinned to the official OpenAI Speech
     # origin below. The runtime requires an explicit provider label as well;
     # without it both Streaming and Batch fail closed as unavailable even when
@@ -415,7 +460,7 @@ try {
     if ($speechProbe.batch -ne $true -or $speechProbe.streaming -ne $true) {
         Fail '正式 Streaming/Batch Speech Provider 未就绪。'
     }
-    Write-Pass '中文 Agent、OpenAI Speech、STT/TTS 模型和 TTS voice 已就绪（私密值未输出）'
+    Write-Pass '中文 Agent、OpenAI Speech、STT/TTS 模型和 TTS voice 已就绪；无关外部 channel 已关闭（私密值未输出）'
 
     Write-Step '设置完整免手 Demo 能力与安全边界'
     $taskStore = Join-Path $DataDir 'live_voice\p3alpha\formal_tasks.sqlite3'
@@ -430,6 +475,7 @@ try {
     $authToken = [Convert]::ToBase64String($tokenBytes)
     $expiry = [DateTimeOffset]::UtcNow.AddHours(12).ToString('o')
     $featureEnvironment = [ordered]@{
+        JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE                    = $RuntimeProfile
         JIUWENSWARM_DATA_DIR                                      = $DataDir
         JIUWENSWARM_ENABLE_ORIGIN_CHECK                           = '1'
         JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS                       = 'localhost,127.0.0.1'
@@ -439,7 +485,7 @@ try {
         JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS                     = $ProjectId
         JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT                 = $expiry
         JIUWENSWARM_LIVE_VOICE_P3_DATABASE                        = $taskStore
-        JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE                = 'live-voice.direct-project-code.d2.v1'
+        JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE                = $ExecutorProfile
         JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED        = '1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED                 = '1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED            = '1'
@@ -466,8 +512,9 @@ try {
     }
     # InstanceManager resolves its default port group from the JIUWENSWARM_*
     # names before it writes the child-process FRONTEND/WEB/GATEWAY variables.
-    # Set both layers so the launcher cannot silently fall back to Vite's 5173.
-    [Environment]::SetEnvironmentVariable('JIUWENSWARM_FRONTEND_PORT', '6173', 'Process')
+    # Set both layers so the launcher cannot silently fall back to a different
+    # frontend port than the selected controlled profile.
+    [Environment]::SetEnvironmentVariable('JIUWENSWARM_FRONTEND_PORT', [string]$FrontendPort, 'Process')
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_AGENT_SERVER_PORT', '18092', 'Process')
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_WEB_PORT', '19000', 'Process')
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_GATEWAY_PORT', '19001', 'Process')
@@ -484,7 +531,34 @@ try {
         # profile. Remove the process entry itself so .env.live-voice can load.
         Remove-Item -LiteralPath "Env:\$frontendOverride" -ErrorAction SilentlyContinue
     }
-    Write-Pass 'P1/P2/P3、统一语义、Demo bypass、调整 checkpoint、Dedicated Media/EOT、Origin 与 Task Store 已绑定'
+    $requiredRuntimeFlags = @(
+        'JIUWENSWARM_ENABLE_ORIGIN_CHECK',
+        'JIUWENSWARM_LIVE_VOICE_P3_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED',
+        'JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED',
+        'LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED',
+        'LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED'
+    )
+    foreach ($requiredRuntimeFlag in $requiredRuntimeFlags) {
+        if ([Environment]::GetEnvironmentVariable($requiredRuntimeFlag, 'Process') -ne '1') {
+            Fail "受控运行配置缺少必需开关：$requiredRuntimeFlag"
+        }
+    }
+    if ([Environment]::GetEnvironmentVariable('JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE', 'Process') -ne $RuntimeProfile) {
+        Fail '受控运行配置的 profile 身份不一致。'
+    }
+    if ([Environment]::GetEnvironmentVariable('JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE', 'Process') -ne $ExecutorProfile) {
+        Fail '受控运行配置必须选择精确的 Direct D2 Executor profile。'
+    }
+    Write-Pass "$RuntimeProfileLabel 的 P1/P2/P3、统一语义、Demo bypass、调整 checkpoint、Dedicated Media/EOT、Origin 与 Task Store 已完整绑定"
 
     if (-not (Test-Path -LiteralPath $ProductionFrontendEnv -PathType Leaf)) {
         Fail "缺少普通 production 前端开关文件：$ProductionFrontendEnv"
@@ -514,7 +588,7 @@ try {
         if ($owners.Count -gt 0) {
             Write-Warn "预检未改动进程；当前有 $($owners.Count) 个 Demo 端口监听记录。正式启动时使用 -RestartExisting。"
         }
-        Write-Host "`n预检完成：没有启动、停止或重启任何服务。" -ForegroundColor Green
+        Write-Host "`n$RuntimeProfileLabel 预检完成：全部必需参数已校验；没有启动、停止或重启任何服务。" -ForegroundColor Green
         exit 0
     }
 
@@ -554,13 +628,15 @@ try {
             Fail "$($entry.Key) 端口 $($entry.Value) 未在时限内就绪。"
         }
     }
-    $indexUrl = 'http://127.0.0.1:6173/?live_voice_build_check=1'
-    $indexResponse = Invoke-WebRequest -UseBasicParsing -Uri $indexUrl -Headers @{ 'Cache-Control' = 'no-cache' } -TimeoutSec 10
-    if ($indexResponse.StatusCode -ne 200) { Fail "前端 HTTP 返回 $($indexResponse.StatusCode)。" }
+    $indexUrl = "http://127.0.0.1:$FrontendPort/?live_voice_build_check=1"
+    $indexResponse = Wait-HttpResponse -Uri $indexUrl -Deadline $deadline
+    if ($null -eq $indexResponse) { Fail '前端 HTTP 未在启动时限内就绪。' }
     $assetMatch = [regex]::Match([string]$indexResponse.Content, 'src="([^"]*index-[^"]+\.js)"')
     if (-not $assetMatch.Success) { Fail '前端 index.html 没有引用 Live Voice profile bundle。' }
     $assetPath = $assetMatch.Groups[1].Value
-    $bundle = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:6173${assetPath}?live_voice_build_check=1") -Headers @{ 'Cache-Control' = 'no-cache' } -TimeoutSec 20
+    $bundleUrl = "http://127.0.0.1:$FrontendPort${assetPath}?live_voice_build_check=1"
+    $bundle = Wait-HttpResponse -Uri $bundleUrl -Deadline $deadline
+    if ($null -eq $bundle) { Fail 'Live Voice 前端 bundle 未在启动时限内就绪。' }
     if (-not ([string]$bundle.Content).Contains('live_voice.composition.unified.submit')) {
         Fail '实际提供的前端 bundle 不包含 live_voice.composition.unified.submit；拒绝进入 Demo。'
     }
@@ -578,16 +654,73 @@ try {
     Write-Pass 'P3 authenticated route 与 P2/P3 product composition 已就绪'
     Write-Pass '四个固定端口均已就绪；未发生静默端口漂移'
 
+    $speechRoundTrip = 'not-required-for-this-profile'
+    $gatewayClaimPolicy = 'not-required-for-this-profile'
+    if ($RuntimeProfile -eq 'formal-web-validation') {
+        if (-not (Test-Path -LiteralPath $FormalWebRuntimeProbe -PathType Leaf)) {
+            Fail "缺少 Formal Web 运行探针：$FormalWebRuntimeProbe"
+        }
+        $probeOutput = @(& $Python $FormalWebRuntimeProbe)
+        if ($LASTEXITCODE -ne 0) {
+            Fail 'Formal Web 真实 Speech/receipt 运行探针失败。'
+        }
+        $probeLine = @($probeOutput | Where-Object { $_ -like 'FORMAL_WEB_RUNTIME_PROBE_RESULT *' })
+        if ($probeLine.Count -ne 1) {
+            Fail 'Formal Web 运行探针没有返回唯一的安全结果。'
+        }
+        $probeResult = $probeLine[0].Substring('FORMAL_WEB_RUNTIME_PROBE_RESULT '.Length) | ConvertFrom-Json
+        if (
+            $probeResult.provider_round_trip -ne 'passed' -or
+            $probeResult.gateway_claim_policy -ne 'trusted_demo_bypass' -or
+            $probeResult.identity_mismatch -ne 'rejected' -or
+            $probeResult.forged_claim -ne 'rejected' -or
+            $probeResult.business_effects -ne 0 -or
+            $probeResult.audio_retained -ne $false -or
+            $probeResult.transcript_retained -ne $false
+        ) {
+            Fail 'Formal Web 运行探针结果不满足安全合同。'
+        }
+        $speechRoundTrip = 'passed'
+        $gatewayClaimPolicy = 'trusted_demo_bypass'
+        Write-Pass '真实 Speech TTS→STT、critical receipt、身份错配拒绝和伪造 claim 拒绝均通过；业务副作用为 0'
+    }
+
+    $runtimeContractPath = Join-Path $RepoRoot 'logs\live_voice_runtime_contract.json'
+    $validatedFlags = [ordered]@{}
+    foreach ($requiredRuntimeFlag in $requiredRuntimeFlags) {
+        $validatedFlags[$requiredRuntimeFlag] = $true
+    }
+    [ordered]@{
+        schema_version            = 1
+        runtime_profile           = $RuntimeProfile
+        source_branch             = $branch
+        source_head               = $head
+        source_dirty_count        = $sourceDirty.Count
+        data_directory_validated  = $true
+        project_binding_validated = $true
+        project_remote_count      = $remotes.Count
+        ports                     = $ExpectedPorts
+        required_flags            = $validatedFlags
+        executor_profile          = $ExecutorProfile
+        credential                = 'ephemeral-process-only'
+        speech_provider           = 'openai'
+        speech_round_trip         = $speechRoundTrip
+        gateway_claim_policy      = $gatewayClaimPolicy
+        bundle_validated          = $true
+        backend_routes_validated  = $true
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $runtimeContractPath -Encoding UTF8
+    Write-Pass "已写入不含密钥的运行合同：$runtimeContractPath"
+
     $isolatedChromeProfile = $null
     if (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
-        $isolatedChromeProfile = Start-IsolatedChrome -ChromeExecutable $ChromeExecutable -Url 'http://localhost:6173'
+        $isolatedChromeProfile = Start-IsolatedChrome -ChromeExecutable $ChromeExecutable -Url "http://localhost:$FrontendPort"
         Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
     }
 
     Write-Host "`n============================================================" -ForegroundColor Green
-    Write-Host '  JiuwenSwarm Live Voice 免手 Demo 已准备完成' -ForegroundColor Green
-    Write-Host '  Web: http://localhost:6173' -ForegroundColor White
+    Write-Host "  JiuwenSwarm Live Voice $RuntimeProfileLabel 已准备完成" -ForegroundColor Green
+    Write-Host "  Web: http://localhost:$FrontendPort" -ForegroundColor White
     Write-Host "  Project: $ProjectPath" -ForegroundColor White
     Write-Host "  Log: $logPath" -ForegroundColor DarkGray
     if ($null -ne $isolatedChromeProfile) {

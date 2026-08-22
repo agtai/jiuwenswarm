@@ -250,7 +250,22 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
   const audioWorkletNodeDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'AudioWorkletNode');
   const webSocketDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
   const values = new Map();
-  const counts = { getUserMedia: 0, stoppedTracks: 0, enumerateDevices: 0, constraints: [], sinkIds: [], sourceStarts: 0, sourceStops: 0, sourceEnds: 0, socketOpens: 0 };
+  const counts = {
+    getUserMedia: 0,
+    stoppedTracks: 0,
+    enumerateDevices: 0,
+    constraints: [],
+    sinkIds: [],
+    sourceStarts: 0,
+    sourceStops: 0,
+    sourceEnds: 0,
+    audioContexts: 0,
+    closedAudioContexts: 0,
+    workletPorts: 0,
+    closedWorkletPorts: 0,
+    socketOpens: 0,
+    socketCloses: 0,
+  };
   let latestWorklet = null;
   let latestSource = null;
   let nextWorkletFirstFrameSamples = null;
@@ -299,6 +314,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
 
   class FakeAudioContext {
     constructor() {
+      counts.audioContexts += 1;
       this.sampleRate = 48_000;
       this.currentTime = 0;
       this.destination = {};
@@ -316,6 +332,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
     }
 
     async close() {
+      if (this.state !== 'closed') counts.closedAudioContexts += 1;
       this.state = 'closed';
     }
 
@@ -348,9 +365,16 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
   class FakeAudioWorkletNode extends FakeAudioNode {
     constructor(_context, _name, options) {
       super();
+      counts.workletPorts += 1;
       this.captureGeneration = options.processorOptions.captureGeneration;
       let onmessage = null;
-      this.port = { close() {} };
+      let portClosed = false;
+      this.port = {
+        close() {
+          if (!portClosed) counts.closedWorkletPorts += 1;
+          portClosed = true;
+        },
+      };
       Object.defineProperty(this.port, 'onmessage', {
         get: () => onmessage,
         set: handler => {
@@ -460,6 +484,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
     }
 
     close() {
+      if (this.readyState !== 3) counts.socketCloses += 1;
       this.readyState = 3;
     }
   }
@@ -6087,6 +6112,184 @@ test('mounted task submit recovery restores the exact voice origin for P3 create
   }
 });
 
+test('mounted same-tab refresh stays fail-closed until Listen again exactly cleans generation 12 and captures on its successor', async () => {
+  const i18n = await createI18n();
+  const binding = {
+    session_id: 'web_1a0264434af_931825e3380f',
+    correlation_id: 'integrated-web-7f885fb1-9e2a-4381-9051-466eb586662d-web_1a0264434af_931825e3380f-5e24a88e-36cf-478a-8d87-9c3c076a4a5c',
+    interaction_id: 'web-interaction-7f885fb1-9e2a-4381-9051-466eb586662d-web_1a0264434af_931825e3380f-5e24a88e-36cf-478a-8d87-9c3c076a4a5c',
+    activation_id: 'web-activation-mounted-result-unknown-12',
+    activation_generation: 12,
+  };
+  let activeP2Binding = { ...binding };
+  let activeMediaBinding = null;
+  let mediaGeneration = 0;
+  let deliveredKeepalive = false;
+  const calls = [];
+  const states = [];
+  const controlRef = { current: null };
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const key = `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(binding.session_id)}`;
+  globalThis.window.sessionStorage.setItem(key, JSON.stringify({
+    schema: 'live-voice.product-p2-activation-journal.v2',
+    revision: 7,
+    client_instance_id: 'mounted-result-unknown-client',
+    session_id: binding.session_id,
+    correlation_id: binding.correlation_id,
+    interaction_id: binding.interaction_id,
+    binding,
+    phase: 'result_unknown',
+    last_generation: binding.activation_generation,
+    pending_operation: null,
+    recovery_owner_id: null,
+    recovery_token: null,
+    recovery_epoch: 0,
+  }));
+  const sameP2Binding = params => activeP2Binding !== null
+    && params.session_id === activeP2Binding.session_id
+    && params.correlation_id === activeP2Binding.correlation_id
+    && params.interaction_id === activeP2Binding.interaction_id
+    && params.activation_id === activeP2Binding.activation_id
+    && params.activation_generation === activeP2Binding.activation_generation;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') {
+      const replayed = sameP2Binding(params);
+      if (!replayed) {
+        assert.equal(activeP2Binding, null, 'a successor P2 route must wait for exact predecessor cleanup');
+        activeP2Binding = { ...params };
+      }
+      return { ok: true, result: { status: 'active', ...params, replayed } };
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      assert.equal(sameP2Binding(params), true, 'P2 cleanup must target the exact active binding');
+      activeP2Binding = null;
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (deliveredKeepalive) return new Promise(() => {});
+      deliveredKeepalive = true;
+      return {
+        ok: true,
+        result: {
+          status: 'notification',
+          ...params,
+          kind: 'transport.keepalive',
+          response: null,
+          agent_event: null,
+          progress_event: null,
+          presentation_unit: null,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      mediaGeneration += 1;
+      activeMediaBinding = mountedMediaBinding(params, mediaGeneration);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-result-unknown-media-${mediaGeneration}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'R'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'fallback',
+          requested_capability: 'media.end_of_turn.v1',
+          reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
+          fallback: 'manual',
+          visible: true,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') {
+      activeMediaBinding = null;
+      return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    }
+    throw new Error(`unexpected result-unknown retry request: ${method}`);
+  };
+  const element = () => mountedP1Element(i18n, binding.session_id, request, {
+    productVoiceControlRef: controlRef,
+    onProductVoiceStateChange: state => states.push(state),
+  });
+  let first;
+  let second;
+  try {
+    await act(async () => {
+      first = create(element());
+      await waitForMounted(
+        () => states.some(state => state.recovery_diagnostic?.reason === 'P2_REFRESH_RECONCILIATION_REQUIRED'),
+        'first refresh did not publish the retained generation-12 barrier',
+      );
+    });
+    assert.equal(
+      calls.filter(call => call.method.startsWith('live_voice.composition.p2.') || call.method.startsWith('live_voice.media.')).length,
+      0,
+      'an automatic refresh must retain zero P2/media effects for generic unknown truth',
+    );
+    assert.equal(JSON.parse(globalThis.window.sessionStorage.getItem(key)).phase, 'result_unknown');
+
+    await act(async () => {
+      first.unmount();
+      first = null;
+      second = create(element());
+      await waitForMounted(
+        () => states.filter(state => state.recovery_diagnostic?.reason === 'P2_REFRESH_RECONCILIATION_REQUIRED').length >= 2,
+        'second same-tab refresh did not retain the exact barrier',
+      );
+    });
+    assert.equal(
+      calls.filter(call => call.method.startsWith('live_voice.composition.p2.') || call.method.startsWith('live_voice.media.')).length,
+      0,
+      'repeated F5 recovery must not guess or duplicate an old P2/media effect',
+    );
+
+    await act(async () => {
+      await controlRef.current.start();
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => browser.counts.getUserMedia === 1,
+        `Listen again did not recover P2 and start successor capture; calls=${JSON.stringify(calls)} states=${JSON.stringify(states.slice(-6))} journal=${globalThis.window.sessionStorage.getItem(key)}`,
+      );
+    });
+
+    const p2Calls = calls.filter(call => call.method === 'live_voice.composition.p2.activate' || call.method === 'live_voice.composition.p2.close');
+    assert.deepEqual(
+      p2Calls.slice(0, 3).map(call => [call.method, call.params.activation_generation]),
+      [
+        ['live_voice.composition.p2.activate', 12],
+        ['live_voice.composition.p2.close', 12],
+        ['live_voice.composition.p2.activate', 13],
+      ],
+    );
+    assert.equal(
+      p2Calls.filter(call => call.method === 'live_voice.composition.p2.close' && call.params.activation_generation === 12).length,
+      1,
+      'the exact old activation must close once',
+    );
+    assert.equal(browser.counts.getUserMedia, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 1);
+    assert.equal(calls.some(call => call.method.includes('submit') || call.method.includes('presentation.ack')), false);
+    const recoveredJournal = JSON.parse(globalThis.window.sessionStorage.getItem(key));
+    assert.equal(recoveredJournal.phase, 'active');
+    assert.equal(recoveredJournal.binding.activation_generation, 13);
+    assert.equal(states.at(-1).recovery_diagnostic, null);
+  } finally {
+    if (first) first.unmount();
+    if (second) {
+      await act(async () => {
+        second.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    browser.restore();
+  }
+});
+
 test('enabled mounted panel remount reconciles the exact predecessor and reopens P1', async () => {
   const i18n = await createI18n();
   const values = new Map();
@@ -8447,12 +8650,13 @@ test('mounted Exit during a retained presentation ACK settles once before openin
   }
 });
 
-test('mounted Exit and immediate re-enable recover after old unified success or rejection without replaying TTS', async () => {
+test('mounted Exit during Agent generation immediately captures on the successor and fences old output', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-exit-pending-unified-session';
   const controlRef = { current: null };
   const states = [];
   const calls = [];
+  const projectedMessages = [];
   const activateP2 = createMountedP2ActivationResponder();
   let activeMediaBinding = null;
   let releaseUnified = null;
@@ -8538,6 +8742,15 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
     if (method === 'live_voice.media.close') {
       return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
     }
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: 'mounted-exit-pending-current-receipt',
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
     if (method === 'live_voice.speech.recognize_batch') {
       recognitionIndex += 1;
       return mountedRecognition(params, '请回答这条退出前的问题。', recognitionIndex);
@@ -8586,7 +8799,35 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
       });
     }
     if (method === 'live_voice.speech.synthesize_batch') {
-      throw new Error('the pre-Exit answer must not be spoken into the new loop generation');
+      if (params.response?.response_id !== 'mounted-exit-pending-response-4') {
+        throw new Error('the pre-Exit answer must not be spoken into the new loop generation');
+      }
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'wav_pcm16_mono',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            data_base64: mountedWavBase64(),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
     }
     throw new Error(`unexpected pending-unified Exit request: ${method}`);
   };
@@ -8597,6 +8838,7 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
         mountedFullyEnabledElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef,
           onProductVoiceStateChange: state => states.push(state),
+          onProductVoiceMessage: entry => projectedMessages.push(entry),
         }),
       );
       await waitForMounted(
@@ -8647,14 +8889,8 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
     );
     await act(async () => {
       await waitForMounted(
-        () => ['waiting', 'failed'].includes(states.at(-1)?.text_status),
-        `old unified response did not settle after re-enable: ${states.map(state => `${state.p1_status}/${state.text_status}`).join(',')}`,
-      );
-      assert.equal(states.at(-1)?.text_status, 'waiting');
-      assert.notEqual(unifiedParams, null);
-      await waitForMounted(
-        () => hasPendingNotificationForGeneration(successorGeneration),
-        'successor P2 route did not restart notification.next for the retained Agent result',
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
+        'successor capture remained blocked by the old accepted response',
       );
       const latePresentation = {
         ok: true,
@@ -8672,7 +8908,12 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
             response_generation: 1,
           },
           agent_event: { event_type: 'chat.final', text: '这是退出前请求的迟到回答。' },
-          presentation_unit: { surface: 'text', unit_id: 'mounted-exit-pending-unit', seq: 0 },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-exit-pending-unit',
+            seq: 0,
+            content_ref: `sha256:${'1'.repeat(64)}`,
+          },
         },
       };
       publishNotificationForGeneration(predecessorGeneration, latePresentation);
@@ -8684,18 +8925,7 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
       );
       assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
       assert.equal(browser.counts.sourceStarts, 0);
-      assert.equal(states.at(-1)?.text_status, 'waiting');
-      publishNotificationForGeneration(successorGeneration, latePresentation);
-    });
-    await act(async () => {
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 1,
-        `late presentation was not acknowledged; waiters=${notificationWaiters.map(waiter => `${waiter.params.activation_generation}:${waiter.settled}`).join(',')}; states=${states.slice(-12).map(state => `${state.p1_status}/${state.text_status}`).join(',')}`,
-      );
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
-        'new loop generation did not resume after old presentation settlement',
-      );
+      assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 0);
       await browser.emitFirstFrame();
       await waitForMounted(
         () => states.at(-1)?.p1_status === 'capturing',
@@ -8789,11 +9019,94 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
       );
     });
 
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 3);
-    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
-    assert.equal(browser.counts.sourceStarts, 0);
-    assert.equal(browser.counts.getUserMedia, 4);
+    releaseUnified = null;
+    await act(async () => {
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => unifiedAttempt === 4 && typeof releaseUnified === 'function',
+        'current post-re-enable final did not enter one authoritative submit',
+      );
+      releaseUnified();
+      await waitForMounted(
+        () => states.at(-1)?.text_status === 'waiting',
+        'current post-re-enable round was not accepted',
+      );
+      await waitForMounted(
+        () => hasPendingNotificationForGeneration(successorGeneration + 1),
+        'current post-re-enable response did not retain its P2 notification poll',
+      );
+      publishNotificationForGeneration(successorGeneration + 1, {
+        ok: true,
+        result: {
+          status: 'notification',
+          session_id: sessionId,
+          correlation_id: unifiedParams.correlation_id,
+          interaction_id: unifiedParams.interaction_id,
+          activation_id: unifiedParams.activation_id,
+          activation_generation: unifiedParams.activation_generation,
+          kind: 'agent.output',
+          response: {
+            interaction_id: unifiedParams.interaction_id,
+            response_id: 'mounted-exit-pending-response-4',
+            response_generation: 4,
+          },
+          agent_event: { event_type: 'chat.final', text: '这是重新启用后的当前回答。' },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-exit-pending-current-unit',
+            seq: 0,
+            content_ref: `sha256:${'4'.repeat(64)}`,
+          },
+        },
+      });
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'playing',
+        'current post-re-enable response did not enter playout',
+      );
+      await waitForMounted(
+        () => browser.counts.sourceStarts === 1,
+        'current post-re-enable response did not start exactly one browser source',
+      );
+      browser.endLatestSource();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 1,
+        'current post-re-enable response was not ACKed exactly once after playout',
+      );
+      await waitForMounted(
+        () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status),
+        'current post-re-enable playout did not resume listening',
+      );
+      if (states.at(-1)?.p1_status === 'starting') await browser.emitFirstFrame();
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'capturing',
+        'current post-re-enable successor capture did not become ready',
+      );
+    });
+
+    const unifiedSubmissions = calls.filter(call => call.method === 'live_voice.composition.unified.submit');
+    const presentationAcks = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
+    assert.equal(unifiedSubmissions.length, 4);
+    assert.equal(new Set(unifiedSubmissions.map(call => call.requestId)).size, 4, 'committed finals must not duplicate Agent submission');
+    assert.deepEqual(
+      presentationAcks.map(call => call.params.response_id),
+      ['mounted-exit-pending-response-4'],
+      'only the current successor response may be ACKed',
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 1);
+    assert.equal(calls.filter(call => call.method.startsWith('live_voice.task.') && call.method !== 'live_voice.task.list').length, 0);
+    assert.equal(browser.counts.sourceStarts, 1);
+    assert.equal(browser.counts.sourceEnds, 1);
+    assert.equal(browser.counts.getUserMedia, 5);
+    assert.equal(new Set(projectedMessages.map(entry => entry.message.id)).size, projectedMessages.length);
+    assert.equal(projectedMessages.filter(entry => entry.message.role === 'user').length, 3);
+    assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 1);
     await act(async () => controlRef.current.close());
+    await waitForMounted(() => states.at(-1)?.p1_status === 'closed', 'final Exit did not publish closed capture state');
+    assert.equal(browser.counts.stoppedTracks, browser.counts.getUserMedia, 'final Exit leaked a microphone track');
+    assert.equal(browser.counts.closedAudioContexts, browser.counts.audioContexts, 'final Exit leaked an AudioContext');
+    assert.equal(browser.counts.closedWorkletPorts, browser.counts.workletPorts, 'final Exit leaked an AudioWorklet port');
+    assert.equal(browser.counts.socketCloses, browser.counts.socketOpens, 'final Exit leaked a dedicated media socket');
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
