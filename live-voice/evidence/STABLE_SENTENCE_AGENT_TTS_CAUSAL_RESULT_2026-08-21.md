@@ -127,6 +127,15 @@ The private artifacts remain outside Git. Their SHA-256 bindings are:
 | runner | `87769cc162901f20576d6270895a97fdab3124434aeae315f16546519fa24242` |
 | policy | `fb711c5f55a75ef5b93b37279dd9cad57541246d89cfaf8d61fd0b154534927f` |
 
+Durable-location note (2026-08-22): the bound screen artifacts survive at
+`/home/renan/openJiuwen-ai/live-voice-latency-runs/stable-sentence-screen-20260821/`
+(`controlled-v2/`, `provider-pilot-v2/`, `materiality-v2.json`; the
+unversioned `controlled/` and `provider-pilot/` directories hold the
+superseded first pilot and receive no credit). All five SHA-256 bindings for
+the credited v2 artifacts were re-computed against the surviving files on
+2026-08-22 and match exactly. This near-project root is the durable archive;
+volatile `/tmp` outputs must not be used for future runs.
+
 ## Interpretation and next action
 
 The former 1.5–2.5 second ordinary-gain estimate is not supported by this
