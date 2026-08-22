@@ -30,7 +30,7 @@
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
 - **Current highest priority:** execute the user-routed strict-review repair
-  packet against 88 unique current defects; **36/88 are closed** on this branch,
+  packet against 88 unique current defects; **37/88 are closed** on this branch,
   beginning with exact authority and privacy boundaries. Progress is counted
   only after reproduced defects,
   affected verification and independent module review close; the
@@ -144,7 +144,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** strict-review remediation — **36/88 closed**, 52 unique current
+- **Packet:** strict-review remediation — **37/88 closed**, 51 unique current
   defects remain on this branch.
 - **Authority:** the user's 2026-08-20 repair instruction activates a bounded
   D-060/D-062 parallel packet. The exact baseline, counting rule, worker
@@ -177,9 +177,9 @@ exact-source Alpha result.
   their exact positive, negative, boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
-- **Remaining accounting:** 52 unique defects remain: 6 A findings, 25 B
-  findings, 18 L findings and D1-D3. One is the still-open Wave 12 candidate
-  A7; the other 51 remain unactivated in the owner-scoped queue.
+- **Remaining accounting:** 51 unique defects remain: 5 A findings, 25 B
+  findings, 18 L findings and D1-D3, all unactivated in the owner-scoped
+  queue.
   C3 closed with B42 as its alias. A17 closed, so the product TTS ceiling A1
   left behind is lifted as well.
   A1 closed, but product TTS stays capped at 256 per channel owner until A17
@@ -191,19 +191,16 @@ exact-source Alpha result.
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** Wave 12 is frozen from `1bd8f8e89` with three disjoint packets
-  in §5.12, all from batch 3 of the revalidation ordering, cancellation and
-  shutdown and successor ordering: SRR-28 owns A7 in the conversation runtime
-  shutdown, SRR-29 owns B24 in the synthesis route's caller-task ownership and
-  SRR-30 owns the L7 residual in the progress return bridge. That record also
-  carries a standing evidence rule drawn from three consecutive rejections: any
-  safety property a packet claims must have a test that dies when the property
-  is mutated away. Wave 11 closed with SRR-25/A17 at `76817c34c`, SRR-26/A15 at
-  `8ce7a3645` and SRR-27/B42 at `799c6b407`. Each packet still requires
-  deterministic RED reproduction, a minimum owner-scoped fix,
-  negative/concurrency/restart evidence, independent review by someone who did
-  not implement it, and Main-only integration with an affected rerun before the
-  numerator advances.
+- **Next action:** Wave 12 is closed and no packet is in flight. SRR-29/B24
+  closed at `8f3396c1c`, SRR-30/L7 at `30a6fe962` and SRR-28/A7 at `deb805e0d`.
+  The wave's lesson is recorded in §5.12 and §6.1 of the execution contract:
+  the standing evidence rule it introduced — any safety property a packet
+  claims must have a test that dies when the property is mutated away — held
+  every packet to at least one extra round, and in each case the source was
+  already correct and only the evidence was missing. Three separate cases in
+  this wave were found to promise in their names a guard their bodies never
+  bought. Any next wave should activate disjoint packets from §6 and freeze
+  each from the latest integration branch before editing.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original

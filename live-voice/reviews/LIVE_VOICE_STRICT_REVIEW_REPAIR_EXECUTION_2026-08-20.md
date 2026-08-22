@@ -1,6 +1,6 @@
 # Live Voice strict-review repair execution — 2026-08-20
 
-> Status: **ACTIVE — 36/88 unique defects closed.** This is a user-routed,
+> Status: **ACTIVE — 37/88 unique defects closed.** This is a user-routed,
 > bounded D-060/D-062 parallel repair packet on the isolated strict-review
 > branch. It grants no product-readiness, capability-completion or physical
 > acceptance credit.
@@ -63,16 +63,18 @@ At the start of every new Session:
    `STATUS.md` `Current execution packet`, this checkpoint, §6 and §7. Read a
    closed wave record or the historical revalidation only for a disputed
    finding mechanism.
-3. Preserve the current **36/88 closed, 52 remaining** count. The closed set is
-   A1, A2, A3, A4, A6, A8, A11, A12, A13, A15, A16, A17, A18, A20, A21, A23, A25,
-   B2, B4, B6, B7, B9, B10, B12, B13, B14, B16, B24, B36, B41, B42, C5, L7, L14,
-   L20 and L21. C3 aliases B42 and closed with it. A8+B6 share
+3. Preserve the current **37/88 closed, 51 remaining** count. The closed set is
+   A1, A2, A3, A4, A6, A7, A8, A11, A12, A13, A15, A16, A17, A18, A20, A21, A23,
+   A25, B2, B4, B6, B7, B9, B10, B12, B13, B14, B16, B24, B36, B41, B42, C5, L7,
+   L14, L20 and L21. C3 aliases B42 and closed with it. A8+B6 share
    SRR-06, A2+B2 share SRR-10, B12+B13+B14 share SRR-20, B36+L20+L21 share
    SRR-21 and A6+B4 share SRR-22; each shared packet still counts one unique
    defect per finding.
-4. Wave 12 is in flight. SRR-29/B24 closed at `8f3396c1c`. SRR-28/A7 and SRR-30/L7
-   are implemented and awaiting independent review; see §5.12 for their exact
-   state. All worker branches stay unmerged. No closure credit
+4. No candidate is implemented or awaiting review. Wave 12 closed with
+   SRR-29/B24 at `8f3396c1c`, SRR-30/L7 at `30a6fe962` and SRR-28/A7 at
+   `deb805e0d`; the latter two each took two reject-then-repair cycles, both for
+   evidence rather than for any defect in their source. All worker branches
+   stay unmerged. No closure credit
    is granted before an independent reviewer who did not implement a packet
    passes its complete module diff.
 5. Activate one or more disjoint owner-scoped packets from §6. Freeze each
@@ -966,7 +968,7 @@ parallel on `agtai/hx/0812_live_voice_w3`.
   no other module owner. C3 remains an audit-ID alias of B42 and adds no unique
   defect, so closing B42 closes C3's surviving concern without a separate entry.
 
-## 5.12 Wave 12 ownership record — ACTIVE
+## 5.12 Wave 12 ownership record — CLOSED
 
 Wave 12 is frozen from integration baseline `1bd8f8e89`, the Wave 11 closure record.
 Its three writer surfaces are disjoint. All three come from batch 3 of the
@@ -1071,8 +1073,8 @@ its observed failure. A property that only a comment defends is not delivered.
 
 ## 6. Queued repair programs
 
-The 52 remaining unique defects consist of the one still-open Wave 12
-candidate A7 plus the 51 unactivated defects below. These
+The 51 remaining unique defects are the unactivated defects below; no
+candidate is in flight. These
 groups are not worker write authority. Each activation removes its IDs from
 this queue and freezes smaller owner-specific packets before editing.
 
@@ -1080,7 +1082,7 @@ this queue and freezes smaller owner-specific packets before editing.
   and L19. B12, B13, B14, B36, L20 and L21 moved to the active Wave 9 packets.
   B17 remains an inactive alias of B13 and is activated with it.
 - Cancellation/teardown/retained cleanup (**6**): A19, A22, B21, B23, D1 and
-  D3. A7 is the last active Wave 12 packet; B24 and L7 closed in Wave 12.
+  D3. A7, B24 and L7 closed in Wave 12.
 - Capacity/lifetime/replay (**5**): A5, A9, B11, L5 and L18. A1, A6, A13 and
   B4 closed in Wave 10; A15, A17 and B42 closed in Wave 11, and C3 closed with
   B42 as its audit-ID alias.
@@ -1090,10 +1092,9 @@ this queue and freezes smaller owner-specific packets before editing.
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L15, L16, L17 and L22.
 
-The queue arithmetic is `7 + 6 + 5 + 4 + 29 = 51`; adding the one still-open
-Wave 12 candidate gives the 52 unique remaining defects. By historical family
-that remainder is 6 A, 25 B, 18 L and three D findings, of which the
-unactivated 51 are 5 A, 25 B, 18 L and three D.
+The queue arithmetic is `7 + 6 + 5 + 4 + 29 = 51`, the complete remainder now
+that Wave 12 closed. By historical family that remainder is 5 A, 25 B, 18 L and
+three D findings.
 
 ### 6.1 Findings routed out of Wave 9
 
@@ -1124,6 +1125,25 @@ and risk checkpoint before activation.
   deterministically when that file runs alone, so it is a real defect rather
   than a load flake. It belongs to the panel owner on
   `agtai/hx/0819_live_voice_p1p2`.
+- **A hostile class name can attack the test runner, not just the module
+  (from SRR-28 review round two).** The reviewer's fix recipe let the hostile
+  exception propagate out of `close()` and asserted on it. Implemented
+  literally, that aborts the whole pytest session: rendering the failure sends
+  `saferepr` through `type(obj).__name__`, the same hostile lookup raises
+  again, and `_format_repr_exception`'s fallback reads it a third time —
+  measured as `exit=3` with 117 of 127 cases run. The case must catch the
+  escape into a local before asserting, so the failure traceback holds no frame
+  whose argument is the hostile object. Any future test in this family needs
+  the same care; the module's own guard is not the only reader of that name.
+- **A test named for a guard it cannot reach (from SRR-28 review round two).**
+  `test_hostile_owner_exception_class_cannot_escape_the_teardown_guard` says
+  cannot escape, but its hostile metaclass raises only `Exception`, so
+  narrowing the guard to `except Exception` leaves it green. Wave 12's third
+  instance of a name promising more than its body buys. The packet added a
+  sibling case rather than widening this one, because widening would have
+  edited a case frozen by the round-one review; the sibling's docstring names
+  this one and states that only the pair honours the older name. Renaming the
+  older case stays open.
 - **Four unguarded claims in the progress bridge's pre-existing close path
   (from SRR-30 review round three).** All four sit on `d911150d9` lines this
   packet did not touch, so they are pre-existing rather than introduced. Two
@@ -1277,6 +1297,7 @@ and risk checkpoint before implementation.
 | SRR-27 / B42 | 34/88 | `808d6cd4d`…`799c6b407`; six unbounded barge and cancel maps become two bounded exact ledgers behind a shared fail-closed replay fence, so completed control commands stop accumulating for the loop lifetime and an evicted identifier can never execute again. Retained failures keep only a stable code, reason and message: the raw exception object, its traceback and its cause chain are gone, which closes a real leak — review reproduced user transcript, subject identity and presentation content reaching a replayed exception through traceback frame locals. Classification uses physical type identity and never calls a hook on an unrecognised object. C3 is an audit-ID alias of B42, so its surviving concern closes here. Two review rounds: the source was correct throughout, but the first round rejected it for missing Tier-3 evidence, its own mutation pass leaving six survivors including the central privacy claim, which isinstance would have silently reopened. The repair is test-only and additionally makes explicit the implicit contract the whole projection rests on — that the three violation families carry static messages — via an AST walk over all 88 construction sites in the package; 53 focused and 168 consumer tests pass with Ruff parity and zero source diff |
 | SRR-29 / B24 | 35/88 | `8bbdc07cc`…`8f3396c1c`; the route stored the caller's own WebSocket or RPC task as its selection or opening work, so close or a successor cancelled it directly and killed the whole connection request task. Work records now carry an event, a first-reason latch and only the task the owner itself created; supersession publishes the reason and cancels nothing the caller owns, and the internal signal is translated into the existing RESPONSE_SUPERSEDED or OWNER_CLOSED outcome without leaving the module. A superseded open settles its Provider stream inside the cancelled task, so the canceller joins that cleanup instead of racing close's drain. Independent review verified zero new protocol surface by an AST-level public API diff, proved exhaustively that no residual path can cancel a caller task, and confirmed both SRR-25 properties survive by killing the mutants that remove them. Caller cancellation stays authoritative: the review seeded a mutant converting it into supersession and 12 tests died. 15 mutants seeded, 12 killed and 3 proved equivalent defensive guards; 54 focused and 232 adjacent cases pass with Ruff parity |
 | SRR-30 / L7 | 36/88 | `efda829ce`…`30a6fe962`; `close()` returned early for any externally settled state, so a failed drain could settle the business reason while the worker stayed parked inside the read it had started, leaving the source attached with no retry path. The early return now applies only when source and worker are both settled; otherwise cleanup runs idempotently and preserves the reason already settled. A partly attached source counts as open from the moment start is attempted, so a start that fails after attaching is still reachable by a later close. The same worker now contains its own background failure instead of ending as a task nobody retrieves, while caller cancellation still propagates. Three review rounds, all test-only after the first: the source was correct throughout and no round found a defect in it. Round one and two each found properties this module states in its own comments and defends with nothing else, including the scenario `close()`'s comment names by hand — and a case literally named for joining the worker that passed with the join removed, because its source released the parked read before close() ran. Round three proved the retargeting lost no coverage by A/B: same tree, same mutants, only the test file swapped — the two survivors flipped to killed while every existing kill list stayed word for word identical. 54 focused and 410 adjacent cases pass with Ruff parity |
+| SRR-28 / A7 | 37/88 | `51a501339`…`deb805e0d`; shutdown wrapped five owners in one `try`, so the first error skipped every later one — the bridge, the consumer, the harness, the conversation runtime and notification cleanup. Teardown is now ordered, independently guarded phases that aggregate failures and preserve the authoritative one, and a failed teardown still hands over the close-drain lease instead of stranding it. Three review rounds, all test-only after the first; no round found a defect in the source. Rounds one and two each found claims the module states in its own docstrings and defends with nothing else, all reachable only by hostile injection but all one edit away — Ruff itself flags the three `BLE001` suppressions these guards need, so narrowing `BaseException` to `Exception` or `type(x) is str` to `isinstance` is an ordinary future edit. One of those narrowings restores A7 itself: the name lookup raises out of the guard it was raised inside and no later owner runs at all. The existing case named for that exact promise passed anyway, because its hostile class only raised `Exception`. Main verified the final round by A/B — same tree, same mutants, only the test file swapped: the three survivors flipped to killed and every earlier kill kept its killer, parametrised into two. 127 focused and 373 adjacent cases pass, 2142 across live_voice, with Ruff parity and both SRR-06 and SRR-22 boundaries AST-identical to baseline |
 
 ### 7.1 Closed-fix revalidation entrypoints
 
@@ -1308,6 +1329,7 @@ mechanism and integration seam are reviewed again.
 | A17 | `python -m pytest tests/unit_tests/gateway/test_streaming_synthesis_route.py tests/unit_tests/gateway/test_product_streaming_synthesis.py --no-cov`; the disclosed `test_cancel_api_caller_cancel_retries_cleanup_then_rethrows` failure must stay unchanged |
 | A15 | `python -m pytest tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py --no-cov`; re-deriving the original RED needs the `3aa0e4744` test file, because the current one imports constants the baseline module does not define |
 | B42, C3 | `python -m pytest tests/unit_tests/live_voice/test_conversation_runtime_loop.py --no-cov` |
+| A7 | `python -m pytest tests/unit_tests/live_voice/test_agent_conversation_runtime.py --no-cov`; a mutant that lets the hostile name escape must be caught inside the case, because letting it reach pytest's own failure rendering makes `saferepr` read `__name__` again and abort the session with INTERNALERROR rather than a failure |
 | B24 | `python -m pytest tests/unit_tests/gateway/test_streaming_synthesis_route.py tests/unit_tests/gateway/test_product_streaming_synthesis.py --no-cov`; re-deriving the RED against baseline source hangs the pytest session in teardown on `test_an_open_completing_after_supersession_is_fenced_not_admitted`, so run that file with a timeout |
 | L7 | `python -m pytest tests/unit_tests/live_voice/test_task_progress_return.py --no-cov`; the file has no per-test timeout plugin, so a mutant that deadlocks `close()` hangs the session instead of failing — run it with an outer timeout and treat a hang as a kill that cannot name its own cause |
 | B12, B13, B14 | `python -m pytest tests/unit_tests/live_voice/test_product_composition_registry.py --no-cov`; also rerun the `test_voice_task_bridge.py`, `test_p3_authenticated_composition.py` and `test_critical_token_safety.py` seams and compare the disclosed `pywintypes` failure with the baseline |
