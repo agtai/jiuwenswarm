@@ -48,6 +48,17 @@ Machine/runtime labels: Linux `6.18.33.2-microsoft-standard-WSL2` on `x86_64`;
 Node `v24.18.0`; npm `12.0.1`; Python `3.11.15` from the named virtual
 environment.
 
+Artifact status note (2026-08-22): the `/tmp` raw report named above was
+written to a volatile location and is no longer present; no copy was found.
+The sanitized tables in this document remain the authoritative record of the
+credited final run at `8e5dab8b8`. The earlier A1 materiality run at source
+`bdd57bb6d` survives at
+`/home/renan/openJiuwen-ai/live-voice-latency-runs/eot-stt-a1-materiality-bdd57bb6d.json`
+(SHA-256 `ece322a06e199623e78cacb12cd89f2beed8c6bd44ca4fee5cc4c527726838c0`,
+20/20 completed attempts) as diagnostic support only; it is not the credited
+final population. Future runs must write `--output` under the durable
+`/home/renan/openJiuwen-ai/live-voice-latency-runs/` root instead of `/tmp`.
+
 ## Integrity and safety
 
 | Check | Result |
