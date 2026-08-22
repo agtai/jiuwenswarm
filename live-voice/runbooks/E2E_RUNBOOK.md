@@ -451,6 +451,12 @@ Remove-Item Env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED -ErrorAction Silently
 Presentation、ACK、history、cancel 或下一轮 capture。当前源码只有在 warm/cold
 两组真实运行都满足本节条件后才能取得 baseline credit。
 
+运行后的证据使用
+[latency experiment record template](../evidence/LATENCY_EXPERIMENT_RECORD_TEMPLATE.md)
+记录；跨实验结论和历史入口位于
+[latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)。
+本节仍然拥有执行命令，catalog 不替代本 runbook。
+
 #### 7.6.1 固定源码、私有目录和 `run.json`
 
 每个 smoke、warm baseline 和 cold baseline 使用不同的 `run_id`、不同的
@@ -654,6 +660,10 @@ the real saved-chat product path. It does not measure or accept microphone,
 capture quality, physical first-audible latency, a Production SLO, or a product
 journey. The methodology and decision boundary remain owned by the
 [fixed-audio benchmark draft](../roadmap/FIXED_AUDIO_LATENCY_BENCHMARK_DRAFT_2026-08-19.md).
+Record every resulting experiment with the
+[latency experiment record template](../evidence/LATENCY_EXPERIMENT_RECORD_TEMPLATE.md)
+and route cross-experiment comparisons through the
+[latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md).
 
 Use one clean implementation commit, a saved disposable Code Session, isolated
 `JIUWENSWARM_DATA_DIR`, and paths outside the repository. A dirty source may be

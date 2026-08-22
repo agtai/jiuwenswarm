@@ -14,6 +14,7 @@
 | W3 develop rebaseline/deletion intent | [D107 migration review](D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md), D-073, actual source/tests |
 | D-031 compatibility task | [D031 review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), D-056/D-057, [project-bound evidence](evidence/D031_20260805_PROJECT_BOUND.md), relevant scheduler/Agent source/tests and runbook section 7.4 |
 | Environment/runtime execution | Only the applicable historical-boundary or current-candidate section of the [E2E runbook](runbooks/E2E_RUNBOOK.md); never use a W2/V0 script to sign the current candidate |
+| Latency experiment history, comparison or artifact forensics | Start with the dated [latency experiment catalog](evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md), then the [optimization inventory](roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md), only the implicated branch-bound result and runbook section 7.6 or 7.7 |
 | 2026-08-17 Post-Alpha hands-free Demo defects | [completed defect-discovery record](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md), then current [STATUS](STATUS.md) and only the implicated D119/source boundary |
 | Current controlled product-candidate acceptance | [product-readiness contract](validation/PRODUCT_READINESS_ACCEPTANCE.md), [complete human Journey](demo/PRODUCT_READINESS_SHOWCASE.md), current [STATUS](STATUS.md) and only the required runbook sections |
 

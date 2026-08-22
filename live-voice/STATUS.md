@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-20. This is the only mutable source for current product
+> Updated: 2026-08-22. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -77,7 +77,7 @@ only one coherent packet at a time.
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** One-click hands-free shell, formal route, progress, TTS and current Task presentation exist | Formal route becomes the only supported default; truthful queued/running/terminal UX; device/privacy/recovery UX; legacy hook/flags removed | All P1/P2/P3 owners plus complete human journey |
-| Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist. The default-off minimal latency probe records the Browser timeline plus Gateway/Agent same-clock drill-downs and passed its final independent Tier-3 code review. The controlled-WAV Browser runner remains available for later physical validation. The candidate-neutral no-Browser P2 A1 at `c8f24834b` passed prospective batch size 16 to the legacy owner and reproduced the expected near-linear one-notification-per-RPC curve for 10/50/100 notifications with 15/15 successful attempts and zero forbidden effects. This is causal component evidence only; no physical baseline or optimization credit exists yet | Implement one named bounded P2 transport candidate B in a separate worktree; run unchanged-source A2 at exact `c8f24834b` and accept/revise/discard through A1/B/A2. Retain the controlled-WAV Browser route as later physical confirmation before any product-path claim, then continue the remaining [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md). Compare Hongxing's divergent P1/P2 fixes in a clean worktree rather than rebasing the active dirty branch | P2 notification transport owner first; fixed physical Browser corpus/environment and then Conversation Runtime/P1 media owners |
+| Observability, benchmark and latency | **PARTIAL.** Trace/correlation, the default-off minimal probe and controlled runners exist. The [latency experiment catalog](evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md) now separates physical diagnostic, controlled-round and component evidence. Bounded P2 pulls passed deterministic A1/B/A2 causality, but deployed validation failed TTS authorization because the Media observer did not process the final item inside `notification_batch`; the P2 product gate remains failed. TTS successor-ACK decoupling passed first-audio component causality. Fixed-threshold VAD and Provider connection reuse were rejected; EOT/STT early-wait and stable-sentence screens stopped on materiality. No clean physical A/B/A baseline exists | Repair atomic P2 batch observation and rerun deployed short/medium/long off/on Gate C with successful response/Task and TTS/playout truth. In parallel, run the already specified Provider-native Semantic VAD screen with the 1200 ms fallback. Use the resulting physical waterfall to select later WebAudio or settlement work; retain controlled-WAV/physical routes for affected Browser/device claims and continue the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) only from source-bound evidence | P2 Media observer repair plus deployed Gate C; Semantic VAD causal lane may run independently; Browser/device evidence is required when capture or playout is affected |
 | Automated verification and product acceptance | **PARTIAL.** Broad exact-source backend/frontend/build/review credit exists | Affected defect reruns, capability-owned test migration, cumulative feature-complete matrix, clean real Journey, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete | Explicit Demo profile; remove `.env.production` default-on dependency; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
@@ -209,14 +209,16 @@ not invalidate the historical exact-source Alpha result.
 - **Duplicates:** combine registry generation-index traversal only if its owner
   is touched by the defect repair. Formal validators/snapshots wait for the code
   organization batch; authority handlers remain explicit unless semantics match.
-- **Latency:** the code-fact diagnosis and implementation approach are now
-  defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
-  The default-off minimal probe candidate is implemented and its final
-  independent Tier-3 code review is closed with no open finding. Establish the
-  clean-source physical baseline before low-risk pipeline work, truthful acknowledgement and formal
-  sentence-level Agent→TTS overlap. This remains P1/P2 quality work, not
-  baseline or completion credit and not part of the current product-truth
-  repair packet.
+- **Latency:** the code-fact route remains in the
+  [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md),
+  while the dated [experiment catalog](evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
+  owns the complete run/evidence route. Current component evidence accepts TTS
+  successor-ACK decoupling, retains bounded P2 pull only as a causal candidate,
+  rejects fixed-threshold VAD and connection reuse, and stops EOT/STT
+  early-wait plus the tested stable-sentence packet. Repair the P2 batch
+  observer and close deployed Gate C; the no-Chrome Semantic VAD screen may run
+  in parallel. This remains P1/P2 quality work, not baseline or completion
+  credit and not part of the current product-truth repair packet.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.

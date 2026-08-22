@@ -8,6 +8,12 @@
 > mutable authority, and Git remains the implementation fact. Headroom ranges
 > below are not additive: several waits overlap, and perceived-response gains
 > do not necessarily reduce final completion time.
+>
+> The complete experiment/run ledger, method taxonomy, end-to-end boundaries
+> and artifact-retention route are in
+> [the latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md).
+> This inventory owns optimization decisions, headroom and execution order; it
+> is not a second raw-run ledger.
 
 ## 1. Source-state boundary
 
