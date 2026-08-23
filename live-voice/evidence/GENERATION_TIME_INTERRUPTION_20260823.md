@@ -1,7 +1,7 @@
 # Agent generation-time interruption — implementation evidence (2026-08-23)
 
 **Branch:** `hx/0823_generation_interruption`
-**Base:** `c31e85ade1a69e934d05bfb9c277568a1238663c` (`hx/0812_live_voice_w3`, bounded P2 notification pulls)
+**Base:** `5415a3d3fb2c3c50b0b59fb5f5ad3a0aec423465` (`hx/0812_live_voice_w3`, correlated L0 latency baseline)
 **Scope:** hands-free speech that arrives while an Agent answer is still being
 generated can now stop or replace that exact answer.
 
@@ -126,7 +126,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 72 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
-| Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing on `c31e85ade` + 8 new) |
+| Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing + 8 new); `test:live-voice-l0-measurement` 3 passed |
 | `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3893 passed, 11 failed — all 11 pre-existing (see §6) |
 
 ### 3.1 Mutation checks
@@ -213,7 +213,7 @@ flag must not be turned on until this is repaired.**
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
 * The 11 failures in the full backend sweep are pre-existing on the base commit
-  `c31e85ade` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  `5415a3d3f` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
   six in `test_product_composition_registry`, `test_task_progress_return`) and
   three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
   `test_upload_storage`). Each was reproduced by running the same files in a
