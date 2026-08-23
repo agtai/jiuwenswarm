@@ -12,7 +12,7 @@ grants no physical, latency, controlled-candidate or product-readiness credit.
 
 [STATUS.md](../STATUS.md) recorded, under Conversation Runtime, that *hands-free
 speech during Agent generation cannot currently interrupt or replace that
-response*. Two independent causes were located in code:
+response*. Four independent causes were located in code:
 
 | Layer | Cause |
 |---|---|
@@ -99,7 +99,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 72 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
-| Frontend `npm run test:live-voice-integrated-web` | 471 passed (466 pre-existing + 5 new) |
+| Frontend `npm run test:live-voice-integrated-web` | 472 passed (466 pre-existing + 6 new) |
 
 ### 3.1 Mutation checks
 
@@ -146,7 +146,7 @@ for intent clarity and is recorded here as uncovered rather than claimed.
 |---|---|
 | Exit | Backend `test_exit_owns_the_interaction_and_refuses_a_later_interruption`; frontend `mounted Exit during generation-time listening…` |
 | Session switch | Frontend `mounted Session switch during generation-time listening…` |
-| Browser capture ownership | Generation listening uses the same `runAuthorizedMediaStart` / capture-authority barrier as ordinary capture; the barrier is relaxed only for the exact bound response |
+| Browser capture ownership | Ownership is owned by `useProductVoiceBrowserOwnership` in the parent ChatPanel, which surrenders by driving the same `close()` the Exit case exercises, so the Exit coverage above is the ownership coverage. Within the panel, generation listening starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture; only the exact bound response relaxes that barrier. No dedicated cross-tab takeover × generation-window case was written |
 | Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, and exactly one `round.cancel` was issued |
 
 A mounted frontend Task-notification journey was attempted and removed: it needs
