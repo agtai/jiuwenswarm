@@ -1573,7 +1573,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       response_generation: number;
     }> | null;
   }>) => {
-    const sessionId = input.binding?.session_id ?? activeSessionRef.current;
+    const bindingSessionId = input.binding?.session_id ?? null;
+    if (bindingSessionId !== null && bindingSessionId !== activeSessionRef.current) return;
+    const sessionId = bindingSessionId ?? activeSessionRef.current;
     if (sessionId === null) return;
     const diagnostic = Object.freeze<ProductLiveVoiceRecoveryDiagnostic>({
       seam: input.seam,
@@ -4211,7 +4213,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (
       !FEATURE_LIVE_VOICE_INTEGRATED_P1 ||
       !isCurrentBinding() ||
-      p2Activation.status !== 'active' ||
       binding === null ||
       typeof window === 'undefined' ||
       hasCaptureAuthorityBarrier()

@@ -5650,6 +5650,90 @@ test('mounted P1 retained Start cannot allocate an old-binding successor after S
   }
 });
 
+test('mounted old-Session P2 cleanup failure cannot publish recovery state into the replacement Session', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const oldSessionId = 'mounted-p2-cleanup-old-session';
+  const newSessionId = 'mounted-p2-cleanup-new-session';
+  const states = [];
+  const p2Activations = [];
+  const p2Closes = [];
+  let oldCloseFailuresRemaining = 3;
+  let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
+  const request = async (method, params) => {
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Activations.push({ ...params });
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      p2Closes.push({ ...params });
+      if (params.session_id === oldSessionId && oldCloseFailuresRemaining > 0) {
+        oldCloseFailuresRemaining -= 1;
+        throw { code: 'UNAVAILABLE' };
+      }
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    throw new Error(`unexpected mounted cross-Session P2 cleanup request: ${method}`);
+  };
+  const element = sessionId => mountedP1Element(i18n, sessionId, request, {
+    onProductVoiceStateChange: state => states.push({ sessionId, state }),
+  });
+
+  try {
+    await act(async () => {
+      renderer = create(element(oldSessionId));
+      await waitForMounted(
+        () => p2Activations.some(activation => activation.session_id === oldSessionId),
+        'old Session did not activate P2',
+      );
+    });
+    await act(async () => {
+      renderer.update(element(newSessionId));
+      await waitForMounted(
+        () => oldCloseFailuresRemaining === 0,
+        'replacement Session did not exhaust the old P2 close failure',
+      );
+      await waitForMounted(
+        () => p2Activations.some(activation => activation.session_id === newSessionId),
+        'replacement Session did not activate after the bounded old P2 cleanup failure',
+        3_000,
+      );
+    });
+
+    assert.equal(
+      p2Closes.filter(close => close.session_id === oldSessionId).length,
+      3,
+      'the mounted schedule must exhaust the old P2 owner bounded close failure before successor activation',
+    );
+    assert.equal(
+      states.some(
+        entry =>
+          entry.sessionId === newSessionId &&
+          entry.state.recovery_diagnostic?.session_id === oldSessionId,
+      ),
+      false,
+      'the old P2 cleanup failure must have zero recovery-UI effect in the replacement Session',
+    );
+    assert.equal(
+      states.filter(entry => entry.sessionId === newSessionId).at(-1)?.state.recovery_diagnostic,
+      null,
+      'replacement activation must not retain the old-Session diagnostic',
+    );
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    browser.restore();
+  }
+});
+
 test('mounted P1 retained Start cannot allocate a successor after unmount wins during exact close', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();

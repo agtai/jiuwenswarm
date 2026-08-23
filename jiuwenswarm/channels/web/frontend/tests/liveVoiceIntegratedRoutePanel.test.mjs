@@ -1646,6 +1646,22 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   );
 });
 
+test('successor capture admission uses the authoritative activation owner instead of lagging rendered state', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const admission = source.match(
+    /const startProductVoiceCaptureOwned = async \(\) => \{(?<body>[\s\S]*?)\n  const startProductVoiceCapture =/,
+  )?.groups?.body;
+
+  assert.ok(admission);
+  assert.match(admission, /activationOwnerRef\.current\?\.snapshot\(\)/);
+  assert.match(admission, /activation\?\.status === 'active'/);
+  assert.match(admission, /current\.activation_generation === binding\.activation_generation/);
+  assert.doesNotMatch(
+    admission,
+    /p2Activation\.status/,
+    'an already-active successor owner must not lose its only scheduled capture to a lagging React publication',
+  );
+});
 test('voice Task origin is exact-session and exact-committed-text only', () => {
   const origin = Object.freeze({
     session_id: 'session-voice',
