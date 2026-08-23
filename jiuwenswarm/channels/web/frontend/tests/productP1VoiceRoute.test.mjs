@@ -4267,7 +4267,6 @@ async function runConcurrentCaptureJourney(options = {}) {
   } else {
     await owner.stopAndRecognize();
   }
-  });
   if (options.firstCaptureEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-1');
     assert.ok(uplinkSocket);
@@ -5026,6 +5025,8 @@ test('formal P1 initial and successor Speech adapters forward the exact request 
     2,
     'initial and successor Gateway Speech adapters must pass the same timeout/signal options object unchanged',
   );
+});
+
 test('capture latency separates owned media attach, first ACK, final send, and final ACK boundaries', async () => {
   const latency = latencyProbeHarness();
   const journey = await runConcurrentCaptureJourney({
