@@ -1,9 +1,8 @@
 # Agent generation-time interruption — implementation evidence (2026-08-23)
 
 **Branch:** `hx/0823_generation_interruption`
-**Base:** `8de91262a4f141c335f92c8e6dae42d0c8e303b6` (`hx/0812_live_voice_w3` at the time of writing, correlated L0 latency baseline)
-**Code freeze:** `dc659d8fe` — the last non-documentation commit on this branch; everything after it is documentation calibration.
-**Named-ref caveat:** `hx/0812_live_voice_w3` has been amended twice during this work (`5415a3d3f` -> `8de91262a` carry the same subject). Verify the base with `git merge-base` at review time rather than trusting the ref name.
+**Base:** `7c589dcda` (`hx/0812_live_voice_w3` at the time of writing)
+**Named-ref caveat:** that ref has now been amended **three** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda`, all carrying the same subject, and the last pair differ by 18 files). It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
 **Scope:** hands-free speech that arrives while an Agent answer is still being
 generated can now stop or replace that exact answer.
 
@@ -97,8 +96,9 @@ because the speaker asked for that answer to stop existing.
   applied `round.cancel` even when the CR fence had not been applied, so a
   terminal target still sent one cancel and a stale target had its cancel
   *accepted* -- a cancellation nobody asked for. Cancellation is now strictly
-  the companion of a fence this call actually applied; a settled or replaced
-  target returns `ALREADY_SETTLED` with `round_cancel=None` and
+  bound to a target that is still a fenceable live response, not to this call
+  being the one that produced the fencing effects (see §5); a settled or
+  replaced target returns `ALREADY_SETTLED` with `round_cancel=None` and
   `round_cancel_reason="GENERATION_ALREADY_SETTLED"`. The existing settled-target
   test never asserted a cancel count, which is exactly why this passed review-free;
   it now asserts zero, and a new stale-target case asserts zero cancellation and
@@ -128,7 +128,7 @@ because the speaker asked for that answer to stop existing.
 it opens a microphone between turn submission and first audio, which changes
 microphone occupancy, echo exposure and capture cost for every hands-free turn.
 With the flag off the browser behaves exactly as before -- no second microphone,
-no interruption -- which the unchanged 474-case baseline suite demonstrates. This
+no interruption -- which the unchanged 477-case baseline suite demonstrates. This
 is a browser-behaviour claim, not a protocol-surface one: the new RPC is
 registered on the server and in the Gateway allowlists regardless of the Vite
 flag, so an authenticated P2 client that sends the method explicitly gets it
@@ -139,17 +139,17 @@ method.
 
 | Suite | Result |
 |---|---|
-| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 15 passed |
+| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 17 passed |
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 73 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 48 passed |
 | `tests/unit_tests/live_voice/test_product_composition_registry.py` | 176 passed, 6 pre-existing failures |
-| Frontend `npm run test:live-voice-integrated-web` | 486 passed (474 pre-existing + 12 new); `test:live-voice-l0-measurement` 3 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3952 passed, 11 failed — the identical 11 pre-existing failures (see §6) |
+| Frontend `npm run test:live-voice-integrated-web` | 491 passed (477 pre-existing + 14 new); `test:live-voice-l0-measurement` 4 passed |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3955 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
 
 ### 3.1 Mutation checks
 
-Twenty-seven mutants were run in total: 24 killed, 3 disclosed survivors. The
+Thirty-one mutants were run in total: 26 killed, 5 disclosed survivors. The
 survivors are named below; every other listed invariant has at least one case
 that dies when it is broken. Invariants **not** in these tables are not claimed
 to be mutation-checked.
@@ -169,6 +169,7 @@ Backend (`test_generation_time_interruption.py`, baseline green):
 | Ledger eviction stops at the first pending action | KILLED |
 | Registry -> lease hop broken | KILLED |
 | Registry handler hop broken | KILLED |
+| Handler accepts a client-supplied `cancel_scope` | KILLED |
 
 A self-review after the first implementation found the CR-B interruption replay
 ledger unbounded. Unlike barge-in, which a user triggers by control action, an
@@ -199,6 +200,9 @@ Frontend (mounted panel suite, baseline green):
 | Surrendered capture leaves its listening window behind | **SURVIVED** |
 | Exit leaves its listening window behind | KILLED |
 | A retriable interruption handle is dropped unconditionally | **SURVIVED** |
+| `ALREADY_SETTLED` treated as fenced | KILLED |
+| Playout settled before the stand-down is decided | **SURVIVED** |
+| Cleanup acknowledges a deferred announcement | **SURVIVED** |
 
 The interruption-admission mutant is killed independently through both branch
 outcomes: `mounted in-flight interruption from a retired Session cannot touch its
@@ -207,8 +211,24 @@ successor` covers the rejection side (recovery reason, `failed` status) and
 covers the success side (cleared output, `idle` status, cleared reason) against a
 successor that is already waiting for its own answer.
 
-Two of the three survivors are state hygiene whose external effect is already
-guaranteed by an independent guard, so no case can distinguish them:
+Five survivors, in two groups.
+
+**Group A — the repair is applied but its trigger path is not reachable from a
+mounted case.** Both come from the third-review finding that Exit could
+acknowledge an announcement that stood down unspoken. The repair is in (the
+stand-down is decided before anything settles, and cleanup retires such an
+announcement without an ACK), and a case asserts the outcome, but I could not
+reproduce the reviewer's Exit-time settlement path: in my harness Exit does not
+reach `settleRetainedP2Operations` for that attempt, so removing either half of
+the repair changes nothing observable. **Treat this pair as repaired-but-
+unproven, not as covered.** The reviewer reproduced the original defect
+deterministically, so the trigger exists; my case does not reach it.
+
+* Playout settled before the stand-down is decided.
+* Cleanup acknowledges a deferred announcement.
+
+**Group B — state hygiene whose external effect is already guaranteed by an
+independent guard, so no case can distinguish them:**
 
 * **Surrendered-window cleanup.** With it removed the stale window is still not
   observable, because the notification poll is independently gated by the
@@ -237,6 +257,19 @@ for intent clarity and is recorded here as uncovered rather than claimed.
 | Production Registry -> lease -> Runtime | Backend `test_product_p2_generation_interrupt_reaches_the_runtime_round` drives the real `handle_p2_interrupt_generation` and asserts the effects and round cancellation the Runtime must have produced; breaking either hop kills it |
 | Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification stands down for the speaker and is spoken once they finish` — it is not spoken over the speaker, the P1 route carrying their utterance is never torn down, and the exact retained announcement is spoken and acknowledged once after they finish |
 
+### 3.2 Invariants with no mutation-sensitive oracle
+
+Stated so they are not mistaken for covered:
+
+* **Ordinary capture never keeps the notification poll alive.** Widening
+  `admitsGenerationListeningPoll` to any `starting`/`capturing` leaves the suite
+  green. The exception is correct in the code, but nothing stops a regression.
+* **A retired Session replays its interruption through the exact owner that
+  issued it.** The handle is now kept for that purpose, but the replay path runs
+  only through P2 recovery/successor activation, which no mounted case drives.
+  Cross-Session abandonment of an owner with pending work is pre-existing
+  cleanup behaviour shared with barge-in and was not changed here.
+
 ## 5. Cancellation is tied to a fenceable target, not to producing the effects
 
 `interrupt_generation` cancels the round whenever the target is still the latest
@@ -260,7 +293,7 @@ cancel nothing: there is no fenceable live target at all.
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
 * The 11 failures in the full backend sweep are pre-existing on the base commit
-  `5415a3d3f` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  `7c589dcda` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
   six in `test_product_composition_registry`, `test_task_progress_return`) and
   three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
   `test_upload_storage`). Each was reproduced by running the same files in a
