@@ -137,7 +137,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
 | Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing + 8 new); `test:live-voice-l0-measurement` 3 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3893 passed, 11 failed — all 11 pre-existing (see §5) |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3923 passed, 11 failed — the identical 11 pre-existing failures (see §5) |
 
 ### 3.1 Mutation checks
 
