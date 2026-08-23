@@ -5,6 +5,8 @@ export { productTaskProgressTranslationKey } from './productTaskProgressPresenta
 import {
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
+  FEATURE_LIVE_VOICE_LATENCY_PROBE,
+  FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
 } from '../../featureFlags';
@@ -91,6 +93,15 @@ import {
   ProductUnifiedCommittedInputOwner,
   type UnifiedAuthoritativeFinal,
 } from '../../features/live-voice/formal/unifiedCommittedInputOwner';
+import {
+  createBrowserLatencyProbe,
+  type BrowserLatencyBatchSettlement,
+  type BrowserLatencyProbe,
+  type LatencyBatch,
+  type LatencyProbeContext,
+} from '../../features/live-voice/formal/latencyProbe';
+import { createFixedAudioCaptureOwner, type FixedAudioCaptureOwner } from '../../features/live-voice/benchmark/fixedAudioCaptureEnvironment';
+import { createPostCapturePipelineBenchmark, parsePostCaptureBenchmarkConfig } from '../../features/live-voice/benchmark/postCapturePipelineBenchmark';
 import { extractWebErrorReason, webClient, webReconnectDelayMs } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
 import './LiveVoiceIntegratedRoutePanel.css';
@@ -768,6 +779,155 @@ function foregroundPresentationFenceMatchesResponse(
   );
 }
 
+type ProductLatencyBrowser = Readonly<{
+  location: Pick<Location, 'search'>;
+  sessionStorage: Pick<Storage, 'getItem' | 'setItem'>;
+  performance: Pick<Performance, 'now'>;
+  crypto: Pick<Crypto, 'randomUUID'>;
+}>;
+
+export function selectProductPostCaptureBenchmark(
+  enabled: boolean,
+  location: Pick<Location, 'search' | 'origin' | 'pathname'>,
+  activeSessionId: string | null,
+  visibilityState: string,
+): ReturnType<typeof parsePostCaptureBenchmarkConfig> {
+  if (enabled !== true || visibilityState !== 'visible') return null;
+  const config = parsePostCaptureBenchmarkConfig(true, location);
+  return config !== null && config.session_id === activeSessionId ? config : null;
+}
+
+export function createProductLatencyProbe(input: Readonly<{
+  enabled: boolean;
+  browser: ProductLatencyBrowser;
+  request: (method: string, params: Record<string, unknown>) => unknown;
+  onBatchSettled?: (batch: Readonly<LatencyBatch>, receipt: BrowserLatencyBatchSettlement) => void;
+  selection_search?: string;
+}>): BrowserLatencyProbe | null {
+  try {
+    if (input.enabled !== true) return null;
+    return createBrowserLatencyProbe({
+      enabled: true,
+      get location() {
+        return input.selection_search === undefined ? input.browser.location : { search: input.selection_search };
+      },
+      get storage() {
+        return input.browser.sessionStorage;
+      },
+      monotonicMs: () => input.browser.performance.now(),
+      randomId: () => input.browser.crypto.randomUUID(),
+      get request() {
+        return input.request;
+      },
+      onBatchSettled: input.onBatchSettled,
+    });
+  } catch {
+    return null;
+  }
+}
+
+export function productLatencyForegroundPresentation(
+  disposition: ProductP2NotificationDisposition,
+  taskId: string | null = null,
+): Readonly<{ response: Readonly<{ interaction_id: string; response_id: string; response_generation: number }>; task_id: string | null }> | null {
+  if (
+    disposition.kind !== 'presentation'
+    || disposition.replayed
+    || disposition.task_notification
+    || disposition.adjustment_notification
+  ) return null;
+  return Object.freeze({ response: disposition.response, task_id: taskId });
+}
+
+type ProductLatencyOwner = Pick<
+  ProductP1VoiceRouteOwner,
+  'bindUnifiedSubmitLatency' | 'observeForegroundPresentationLatency'
+>;
+
+type ProductLatencySubmitOwner = Pick<
+  ProductP1VoiceRouteOwner,
+  'prepareUnifiedSubmitLatency' | 'bindUnifiedSubmitLatency'
+>;
+
+export function bindProductLatencyUnifiedResult(
+  owner: Pick<ProductLatencyOwner, 'bindUnifiedSubmitLatency'> | null,
+  submitResult: unknown,
+): boolean {
+  if (owner === null) return false;
+  try {
+    const envelope = recordValue(submitResult);
+    const result = recordValue(envelope?.result);
+    const response = recordValue(result?.response);
+    if (
+      envelope?.ok !== true
+      || envelope.error !== null
+      || !['authoritative_presentation_accepted', 'round_accepted'].includes(String(result?.status))
+      || response === null
+      || typeof response.interaction_id !== 'string'
+      || typeof response.response_id !== 'string'
+      || !Number.isSafeInteger(response.response_generation)
+      || (response.response_generation as number) < 0
+    ) return false;
+    const taskId = typeof result?.task_id === 'string' && result.task_id.trim() ? result.task_id : null;
+    return owner.bindUnifiedSubmitLatency(
+      Object.freeze({
+        interaction_id: response.interaction_id,
+        response_id: response.response_id,
+        response_generation: response.response_generation as number,
+      }),
+      taskId,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function createProductLatencyUnifiedSubmitBinding(turnId: string): Readonly<{
+  prepare(owner: ProductLatencySubmitOwner | null): Readonly<LatencyProbeContext> | null;
+  bind(submitResult: unknown): boolean;
+}> {
+  let retainedOwner: ProductLatencySubmitOwner | null | undefined;
+  let retainedContext: Readonly<LatencyProbeContext> | null | undefined;
+  return Object.freeze({
+    prepare(owner: ProductLatencySubmitOwner | null): Readonly<LatencyProbeContext> | null {
+      if (retainedContext !== undefined) return retainedContext;
+      retainedOwner = owner;
+      try {
+        retainedContext = owner?.prepareUnifiedSubmitLatency(turnId) ?? null;
+      } catch {
+        retainedContext = null;
+      }
+      if (retainedContext === null) retainedOwner = null;
+      return retainedContext;
+    },
+    bind(submitResult: unknown): boolean {
+      if (retainedContext === undefined || retainedContext === null || retainedOwner === undefined || retainedOwner === null) {
+        return false;
+      }
+      return bindProductLatencyUnifiedResult(retainedOwner, submitResult);
+    },
+  });
+}
+
+export function runProductLatencyPresentationBoundary(
+  owner: Pick<ProductLatencyOwner, 'observeForegroundPresentationLatency'> | null,
+  disposition: ProductP2NotificationDisposition,
+  taskId: string | null,
+  effect: () => void,
+): boolean {
+  let accepted = false;
+  try {
+    const presentation = productLatencyForegroundPresentation(disposition, taskId);
+    if (owner !== null && presentation !== null) {
+      accepted = owner.observeForegroundPresentationLatency(presentation.response, presentation.task_id) === true;
+    }
+  } catch {
+    // Diagnostics never own or delay product presentation effects.
+  }
+  effect();
+  return accepted;
+}
+
 export type TerminalAnnouncementState = 'idle' | 'queued' | 'suspending_capture' | 'fetching' | 'playing' | 'acking' | 'recovering';
 
 export function terminalAnnouncementArbitrationAction(
@@ -1320,6 +1480,45 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const reactId = useId();
   const fallbackCorrelationId = useMemo(() => `integrated-web-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}`, [reactId]);
   const pageInstanceIdRef = useRef<string | null>(null);
+  const postCaptureConfigRef = useRef<ReturnType<typeof parsePostCaptureBenchmarkConfig> | undefined>(undefined);
+  const postCaptureControllerRef = useRef<ReturnType<typeof createPostCapturePipelineBenchmark>>(null);
+  const postCaptureAudioOwnerRef = useRef<FixedAudioCaptureOwner | null>(null);
+  if (postCaptureConfigRef.current === undefined) {
+    postCaptureConfigRef.current = typeof window === 'undefined' || typeof document === 'undefined'
+      ? null
+      : parsePostCaptureBenchmarkConfig(
+          FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK,
+          window.location,
+        );
+  }
+  const latencyProbeRef = useRef<BrowserLatencyProbe | null | undefined>(undefined);
+  if (latencyProbeRef.current === undefined) {
+    const benchmarkConfig = postCaptureConfigRef.current ?? null;
+    latencyProbeRef.current = (FEATURE_LIVE_VOICE_LATENCY_PROBE || benchmarkConfig !== null) && typeof window !== 'undefined'
+      ? createProductLatencyProbe({
+          enabled: true,
+          browser: {
+            get location() { return window.location; },
+            get sessionStorage() { return window.sessionStorage; },
+            get performance() { return window.performance; },
+            get crypto() { return window.crypto; },
+          },
+          request: (method, params) => productRequest(method, params),
+          onBatchSettled: (batch, receipt) => {
+            void postCaptureControllerRef.current?.observeBatch(batch, receipt);
+          },
+          ...(benchmarkConfig === null
+            ? {}
+            : {
+                selection_search: new URLSearchParams({
+                  lv_latency_run: benchmarkConfig.run_id,
+                  lv_latency_profile: benchmarkConfig.profile_id,
+                  lv_latency_case: benchmarkConfig.input_case_id,
+                }).toString(),
+              }),
+        })
+      : null;
+  }
   if (pageInstanceIdRef.current === null) {
     pageInstanceIdRef.current = globalThis.crypto?.randomUUID?.() ?? `page-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}-${Date.now()}`;
   }
@@ -1469,6 +1668,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     input: UnifiedAuthoritativeFinal;
   }> | null>(null);
   const pendingForegroundPresentationRef = useRef<PendingForegroundPresentationFence | null>(null);
+  const latencyForegroundTaskIdRef = useRef<string | null>(null);
   const pendingProductTurnRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: ProductTurnInput;
@@ -1807,7 +2007,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               response: retained.response,
             });
           }
-          if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+          const benchmarkController = postCaptureControllerRef.current;
+          if (benchmarkController !== null) {
+            voiceLoopEnabledRef.current = false;
+            voiceLoopGenerationRef.current += 1;
+            void benchmarkController.observePresentationAck();
+          } else if (!continuePendingVoiceLoopP2Refresh()) {
+            scheduleProductVoiceLoopCapture();
+          }
           return;
         }
         setProductTextReason(reason);
@@ -1983,6 +2190,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
     pendingForegroundPresentationRef.current = null;
+    latencyForegroundTaskIdRef.current = null;
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || !hasDurableProductVoiceSession(sessionId)) {
       setP2JournalState(null);
@@ -2071,6 +2279,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       ) {
         pendingForegroundPresentationRef.current = null;
       }
+      latencyForegroundTaskIdRef.current = null;
       const reason = stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
       setProductTextReason(reason);
       setProductTextStatus('failed');
@@ -2109,6 +2318,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       presentationBinding,
       disposition.response,
     );
+    const latencyAccepted = runProductLatencyPresentationBoundary(
+      p1VoiceOwnerRef.current,
+      disposition,
+      latencyForegroundTaskIdRef.current,
+      () => undefined,
+    );
+    if (latencyAccepted) latencyForegroundTaskIdRef.current = null;
     if (!disposition.task_notification) {
       const expectedForegroundPresentation = admission?.foreground_presentation ?? null;
       const requiresForegroundPresentation =
@@ -4244,12 +4460,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         receipt: recognized.voice_commit_receipt,
         input,
       });
+      latencyForegroundTaskIdRef.current = null;
       setProductOutput(null);
       setProductTextReason(null);
       setProductTextStatus('submitting');
       try {
+        const latencyBinding = createProductLatencyUnifiedSubmitBinding(input.turn_id);
         const submitResult = await retryRetainedProductOperation({
-          operation: () => owner!.submit(binding, input),
+          operation: () => owner!.submit(binding, input, latencyBinding.prepare(p1VoiceOwnerRef.current)),
           is_current: () =>
             activationOwnerRef.current?.snapshot().status === 'active' &&
             activeSessionRef.current === binding.session_id,
@@ -4258,6 +4476,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // Presentation ownership begins only after the server has accepted
         // this exact final; the wake epoch below can then restart a poll that
         // yielded while the network request was in flight.
+        latencyBinding.bind(submitResult);
         const unifiedResult = (submitResult as Readonly<Record<string, unknown>>).result as
           | Readonly<Record<string, unknown>>
           | null
@@ -4305,6 +4524,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           typeof unifiedResult?.task_id === 'string' && unifiedResult.task_id.trim()
             ? unifiedResult.task_id
             : null;
+        latencyForegroundTaskIdRef.current = createdTaskId;
         if (createdTaskId !== null) {
           // Unified voice create already mutated Task authority.  Bootstrap
           // the exact task.status/task.events leaf before activation so replayed
@@ -4332,6 +4552,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (pendingForegroundPresentationRef.current === presentationFence) {
           pendingForegroundPresentationRef.current = null;
         }
+        latencyForegroundTaskIdRef.current = null;
         let settledWithoutPresentation = false;
         if (!owner.hasPending() && pendingUnifiedFinalRef.current?.input === input) {
           pendingUnifiedFinalRef.current = null;
@@ -4496,6 +4717,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         enabled: true,
         expected_origin: window.location.origin,
         request: productRequest,
+        latency_probe: latencyProbeRef.current,
+        ...(latencyProbeRef.current === null
+          ? {}
+          : { latency_monotonic_ms: () => window.performance.now() }),
+        ...(postCaptureAudioOwnerRef.current === null
+          ? {}
+          : { audio_environment: postCaptureAudioOwnerRef.current.environment }),
         on_status: (status, reason) => {
           if (callbackOwner !== null && p1VoiceOwnerRef.current === callbackOwner) {
             if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
@@ -4780,11 +5008,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopGenerationRef.current === loopGeneration;
     try {
       const recognition = await owner.stopAndRecognize();
-      if (
-        props.activeSessionId !== null &&
-        voiceLoopEnabledRef.current &&
-        voiceLoopGenerationRef.current === loopGeneration
-      ) {
+      if (props.activeSessionId !== null && voiceLoopEnabledRef.current && voiceLoopGenerationRef.current === loopGeneration) {
+        const benchmarkController = postCaptureControllerRef.current;
+        if (benchmarkController !== null && !(await benchmarkController.acceptRecognizedText(recognition.text))) {
+          p1VoiceCaptureBindingRef.current = null;
+          return;
+        }
         updateRecognizedSpeechConfirmation(null);
         const recognized = Object.freeze({
           session_id: props.activeSessionId,
@@ -6075,6 +6304,102 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     await startProductVoiceCapture();
   };
+
+  useEffect(() => {
+    const config = postCaptureConfigRef.current ?? null;
+    if (
+      config === null ||
+      postCaptureControllerRef.current !== null ||
+      latencyProbeRef.current === null ||
+      props.activeSessionId !== config.session_id ||
+      !props.isConnected ||
+      !props.agentRouteAvailable ||
+      p2Activation.status !== 'active' ||
+      voiceLoopEnabledRef.current ||
+      pendingProductTurnRef.current !== null ||
+      pendingUnifiedFinalRef.current !== null ||
+      pendingPresentationAttemptRef.current !== null ||
+      pendingBargeInRef.current !== null ||
+      activationOwnerRef.current?.hasPendingSubmission() ||
+      activationOwnerRef.current?.hasPendingPresentationAck() ||
+      activationOwnerRef.current?.hasPendingBargeIn() ||
+      typeof document === 'undefined' ||
+      document.visibilityState !== 'visible' ||
+      typeof fetch !== 'function'
+    )
+      return;
+    const controller = createPostCapturePipelineBenchmark(config, {
+      async fetchFixture(url, signal) {
+        const response = await fetch(url, {
+          method: 'GET',
+          signal,
+          cache: 'no-store',
+          credentials: 'omit',
+        });
+        if (!response.ok) throw new Error('FIXED_AUDIO_FETCH_FAILED');
+        const expectedTranscriptSha256 = response.headers.get(
+          'X-Live-Voice-Transcript-Sha256',
+        );
+        if (expectedTranscriptSha256 === null) {
+          throw new Error('FIXED_AUDIO_TRANSCRIPT_DIGEST_MISSING');
+        }
+        return Object.freeze({
+          wav_bytes: await response.arrayBuffer(),
+          expected_transcript_sha256: expectedTranscriptSha256,
+        });
+      },
+      async postResult(result) {
+        const response = await fetch(config.result_url, {
+          method: 'POST',
+          cache: 'no-store',
+          credentials: 'omit',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(result),
+        });
+        if (!response.ok) throw new Error('POST_CAPTURE_RESULT_FAILED');
+      },
+      async digestTranscript(value) {
+        if (typeof globalThis.crypto?.subtle?.digest !== 'function') {
+          throw new Error('POST_CAPTURE_DIGEST_UNAVAILABLE');
+        }
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+        return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      },
+    });
+    if (controller === null) return;
+    postCaptureControllerRef.current = controller;
+    void controller.start({
+      async startFixture(wavBytes) {
+        const audioOwner = createFixedAudioCaptureOwner({
+          input_case_id: config.input_case_id,
+          wav_bytes: wavBytes,
+          expected_sample_rate_hz: 48_000,
+          start_delay_ms: config.start_delay_ms,
+        });
+        postCaptureAudioOwnerRef.current = audioOwner;
+        await startProductVoiceLoop();
+        if (p1VoiceOwnerRef.current?.status().status !== 'capturing') {
+          throw new Error('POST_CAPTURE_PRODUCT_START_FAILED');
+        }
+      },
+      async close() {
+        voiceLoopEnabledRef.current = false;
+        voiceLoopGenerationRef.current += 1;
+        const voiceOwner = p1VoiceOwnerRef.current;
+        if (voiceOwner !== null) {
+          await voiceOwner.close().catch(() => undefined);
+          if (p1VoiceOwnerRef.current === voiceOwner) p1VoiceOwnerRef.current = null;
+        }
+        const audioOwner = postCaptureAudioOwnerRef.current;
+        postCaptureAudioOwnerRef.current = null;
+        await audioOwner?.close();
+      },
+    });
+    return () => {
+      if (postCaptureControllerRef.current === controller) postCaptureControllerRef.current = null;
+      void controller.close();
+    };
+  }, [p2Activation.status, props.activeSessionId, props.agentRouteAvailable, props.isConnected]);
 
   useEffect(() => {
     const taskControlsLocked =
