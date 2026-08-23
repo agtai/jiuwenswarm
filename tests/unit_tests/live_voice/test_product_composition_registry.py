@@ -83,9 +83,11 @@ from jiuwenswarm.server.live_voice.batch_speech import (
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
+    P3_PRODUCTION_OPERATIONS,
     P3AuthenticatedComposition,
     P3RouteResult,
     PreparedP3MutationConfirmation,
+    PreparedProductionIntentAuthority,
     ResolvedAuthority,
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
@@ -134,6 +136,13 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
 from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
     ProductP3AuthorizedQuery,
 )
+from jiuwenswarm.server.live_voice.production_task_intent import (
+    AuthenticatedTaskFact,
+    TaskAuthorityRead,
+)
+from jiuwenswarm.server.live_voice.p3_production_intent_composition import (
+    StoreProductionTaskAuthorityReader,
+)
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     TaskPresentationConsumptionOwner,
 )
@@ -160,6 +169,7 @@ from jiuwenswarm.server.live_voice.task_store import (
     TaskDurabilityDiagnosticSnapshot,
     TaskOutboxDiagnosticFact,
 )
+from jiuwenswarm.server.live_voice.task_core import AttemptState, TaskState
 from jiuwenswarm.server.live_voice.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
@@ -454,6 +464,62 @@ class _Subscription:
         self._closed.set()
 
 
+def _fixture_production_task_fact(task_id: str) -> AuthenticatedTaskFact:
+    return AuthenticatedTaskFact(
+        task_id=task_id,
+        stable_reference=task_id,
+        name="Fixture task",
+        state=TaskState.RUNNING,
+        outcome=None,
+        revision_number=1,
+        event_head=3,
+        event_head_id=f"event-head-{task_id}",
+        terminal_event_id=None,
+        attempt_id=f"attempt-{task_id}",
+        attempt_state=AttemptState.RUNNING,
+        attempt_outcome=None,
+        capability_profile_digest=hashlib.sha256(
+            b"registry-production-authority-fixture"
+        ).hexdigest(),
+        supported_operations=frozenset({"task.adjust", "task.cancel"}),
+    )
+
+
+class _FixtureProductionTaskReader:
+    """Production-reader test double with the exact frozen read interface."""
+
+    def __init__(self, owner: "_P3Composition") -> None:
+        self._owner = owner
+
+    def _read(self, operation: str, task_id: str) -> AuthenticatedTaskFact:
+        self._owner.production_reader_calls.append((operation, task_id))
+        return _fixture_production_task_fact(task_id)
+
+    def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
+        assert scope == SCOPE
+        self._owner.production_reader_calls.append(("task.list", ""))
+        return TaskAuthorityRead(scope, "fixture-task-set-generation", ())
+
+    def get_task(self, scope: ScopeRef, task_id: str) -> AuthenticatedTaskFact | None:
+        assert scope == SCOPE
+        return self._read("task.get", task_id)
+
+    def task_status(
+        self, scope: ScopeRef, task_id: str
+    ) -> AuthenticatedTaskFact | None:
+        assert scope == SCOPE
+        return self._read("task.status", task_id)
+
+    def event_head(self, scope: ScopeRef, task_id: str) -> tuple[int, str]:
+        assert scope == SCOPE
+        fact = self._read("task.events", task_id)
+        return fact.event_head, fact.event_head_id
+
+    def result_digest(self, scope: ScopeRef, task_id: str) -> str | None:
+        assert scope == SCOPE
+        return self._read("task.result", task_id).result_digest
+
+
 class _P3Composition(P3AuthenticatedComposition):
     def __init__(
         self,
@@ -468,6 +534,9 @@ class _P3Composition(P3AuthenticatedComposition):
         self.project_dir = project_dir
         self.authority_calls: list[dict[str, object]] = []
         self.query_calls: list[ProductP3AuthorizedQuery] = []
+        self.production_authority_calls: list[dict[str, object]] = []
+        self.production_reader_calls: list[tuple[str, str]] = []
+        self._production_reader = _FixtureProductionTaskReader(self)
         self.retry_admission_calls: list[dict[str, object]] = []
         self.retry_admission_failure: FormalTaskViolation | None = None
         self.subscription_calls: list[TaskProgressOriginBinding] = []
@@ -656,10 +725,71 @@ class _P3Composition(P3AuthenticatedComposition):
         now: str | None = None,
     ) -> ResultEnvelope:
         self.query_calls.append(query)
+        query_type = query.envelope.query_type
+        if query_type == "task.list":
+            result: dict[str, object] = {"tasks": []}
+        elif query_type == "task.status":
+            fact = _fixture_production_task_fact(query.envelope.target_ref.id)
+            result = {
+                "task": {
+                    "scope": query.envelope.scope.to_dict(),
+                    "task_id": fact.task_id,
+                    "attempt_id": fact.attempt_id,
+                    "event_head": fact.event_head,
+                    "state": fact.state.value,
+                    "outcome": None,
+                    "revision": {"number": fact.revision_number},
+                    "spec": {"name": fact.name},
+                },
+                "attempt": {
+                    "task_id": fact.task_id,
+                    "attempt_id": fact.attempt_id,
+                    "state": fact.attempt_state.value,
+                    "outcome": None,
+                },
+            }
+        else:
+            result = {"query_type": query_type}
         return ResultEnvelope.success(
             owner=query.envelope,
-            result={"query_type": query.envelope.query_type},
+            result=result,
             observed_at=now or NOW,
+        )
+
+    def prepare_production_intent_authority(
+        self,
+        *,
+        bearer_token: object,
+        operation: str,
+        session_id: str,
+    ) -> PreparedProductionIntentAuthority:
+        self.production_authority_calls.append(
+            {
+                "bearer_token": bearer_token,
+                "operation": operation,
+                "session_id": session_id,
+            }
+        )
+        if bearer_token != "trusted-token" or session_id != SCOPE.session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        if operation not in P3_PRODUCTION_OPERATIONS:
+            raise FormalTaskViolation(
+                "UNSUPPORTED_FORMAL_TASK_INTENT",
+                "production Task intent operation is unsupported",
+                ErrorCode.UNSUPPORTED,
+            )
+        return PreparedProductionIntentAuthority(
+            principal_id=SCOPE.subject_id,
+            scope=SCOPE,
+            reader=cast(
+                StoreProductionTaskAuthorityReader,
+                self._production_reader,
+            ),
+            observed_at=NOW,
         )
 
     async def read_product_status_retry_admission(
@@ -6527,9 +6657,16 @@ async def test_p3_bounded_list_events_and_result_reach_formal_query_owner(
         assert result.ok is True
         assert p3.query_calls[-1].envelope.query_type == operation
         assert p3.query_calls[-1].envelope.payload == expected_payload
+        if operation == "task.list":
+            assert result.payload["result"] == {
+                "tasks": [],
+                "supported_operations": [],
+            }
 
     assert len(p3.authority_calls) == 3
     assert len(p3.query_calls) == 3
+    assert p3.production_authority_calls == []
+    assert p3.production_reader_calls == []
     assert manager.get_calls == []
 
 
@@ -6558,6 +6695,7 @@ async def test_p3_status_preserves_authoritative_retry_admission(
         "attempt_id": None,
         "attempt_number": None,
     }
+    assert result.payload["result"]["supported_operations"] == []
     assert p3.retry_admission_calls == [
         {
             "bearer_token": "trusted-token",
@@ -6567,6 +6705,14 @@ async def test_p3_status_preserves_authoritative_retry_admission(
     ]
     assert len(p3.authority_calls) == 1
     assert len(p3.query_calls) == 1
+    assert p3.production_authority_calls == [
+        {
+            "bearer_token": "trusted-token",
+            "operation": "task.status",
+            "session_id": "session-product",
+        }
+    ]
+    assert p3.production_reader_calls == [("task.status", "task-1")]
     assert manager.get_calls == []
 
 
@@ -6601,7 +6747,16 @@ async def test_p3_status_retry_admission_failure_is_stable_and_fail_closed(
     assert len(p3.authority_calls) == 1
     assert len(p3.query_calls) == 1
     assert len(p3.retry_admission_calls) == 1
+    assert p3.production_authority_calls == [
+        {
+            "bearer_token": "trusted-token",
+            "operation": "task.status",
+            "session_id": "session-product",
+        }
+    ]
+    assert p3.production_reader_calls == []
     assert manager.get_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -10548,6 +10703,10 @@ async def test_disconnect_cleanup_closes_p2_and_progress_without_stopping_regist
         session_id="session-product",
     )
     assert second.ok is True
+    assert second.payload["result"] == {
+        "tasks": [],
+        "supported_operations": [],
+    }
     await registry.close_active_routes()
 
 
@@ -10657,6 +10816,10 @@ async def test_stop_waits_for_inflight_query_before_closing_registry(
     await stop_task
 
     assert result.ok is True
+    assert result.payload["result"] == {
+        "tasks": [],
+        "supported_operations": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -13589,6 +13752,14 @@ async def test_text_status_dispatches_formal_query_and_partial_like_form_clarifi
     assert status.ok is True, status.payload
     assert cast(dict, status.payload["result"])["status"] == "dispatched"
     assert len(composition.query_calls) == 1
+    assert composition.production_authority_calls == [
+        {
+            "bearer_token": "trusted-token",
+            "operation": "task.status",
+            "session_id": "session-product",
+        }
+    ]
+    assert composition.production_reader_calls == [("task.status", "task-alpha")]
 
     unclear = await registry.handle_p3_intent(
         params=_text_intent_params(
@@ -13603,6 +13774,8 @@ async def test_text_status_dispatches_formal_query_and_partial_like_form_clarifi
     assert unclear.ok is True
     assert cast(dict, unclear.payload["result"])["status"] == "clarification"
     assert len(composition.query_calls) == 1
+    assert len(composition.production_authority_calls) == 1
+    assert len(composition.production_reader_calls) == 1
 
 
 @pytest.mark.asyncio
