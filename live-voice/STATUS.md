@@ -201,9 +201,11 @@ exact-source Alpha result.
   remains Hongxing's. The P2 batch-16 owner, probe and catalog overlay remain
   the latency lane. The four frozen lifecycle boundaries were not reopened.
 - **Integration hub:** `latency/hx-optimizations`. `latency/p2-bounded-pull-b`
-  follows that composed tip. `0812_live_voice_w3_renan` and
-  `latency_checkpoint_accepted_optimizations` were not updated and stay
-  separate evidence/checkpoint owners.
+  follows that composed tip. `0812_live_voice_w3_renan` contains the same
+  composed product via merge `4e60ea455` and remains the documentation-hub
+  first parent. `latency_checkpoint_accepted_optimizations` contains it via
+  merge `70224f80f` and remains the LVL-05 runner / Semantic VAD spec first
+  parent. Neither fast-forwarded; unique evidence owners were kept.
 - **Scoped automation:** focused P2 owner/causal benchmark and selected
   Registry/adapter pytest passed on the composed source. This does not replace
   the lifecycle Formal Web matrix, Gate C or physical credit.

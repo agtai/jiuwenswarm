@@ -30,8 +30,11 @@ checkpoint evidence documentation referenced here was recorded at
 On 2026-08-23 the P2 bounded-pull candidate was also merged onto Hongxing
 lifecycle tip `67381193a`. That product composition lives on
 `latency/hx-optimizations`, with `latency/p2-bounded-pull-b` fast-forwarded to
-the same tip. It does not replace the checkpoint hashes above, does not close
-Gate C, and does not update `_renan` or the checkpoint branch.
+the same tip. `0812_live_voice_w3_renan` and
+`latency_checkpoint_accepted_optimizations` later merged the same composed
+source; they remain first-parent owners of the catalog-close and LVL-05 /
+Semantic VAD evidence. This does not replace the checkpoint hashes above or
+close Gate C.
 
 The later EOT/STT materiality screen is bound separately to clean source
 `8e5dab8b8c6651b2be784cf103df9239a93814a0`; its reviewed documentation closure
