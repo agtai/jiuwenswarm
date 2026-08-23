@@ -78,10 +78,12 @@ Construction-time heads above stay evidence inputs. After Hongxing closed the
 four P1/P2 lifecycle boundaries on `67381193a`, the accepted P2 bounded-pull
 candidate was merged onto that tip. The current integration hub is
 `latency/hx-optimizations`; `latency/p2-bounded-pull-b` follows the same
-composed tip. `0812_live_voice_w3_renan` remains the pre-composition
-documentation hub. `latency_checkpoint_accepted_optimizations` remains the
-controlled LVL-05 / Semantic VAD spec owner and was not merged. This overlay
-does not change any LVL result, Gate C failure or §15 decision route.
+composed tip. `0812_live_voice_w3_renan` now contains that composition via
+merge `4e60ea455` and remains the documentation-hub first parent.
+`latency_checkpoint_accepted_optimizations` now contains it via merge
+`70224f80f` and remains the controlled LVL-05 / Semantic VAD spec first
+parent. This overlay does not change any LVL result, Gate C failure or §15
+decision route.
 
 ## 3. Experiment index
 
