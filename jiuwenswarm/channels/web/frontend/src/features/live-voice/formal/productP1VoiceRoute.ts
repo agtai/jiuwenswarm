@@ -434,6 +434,7 @@ export class ProductP1VoiceRouteOwner {
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
   #captureStopExpected = false;
   #captureLatencyRound: OwnedLatencyRound | null = null;
+  #latencyRoundAllocationFailed = false;
   #responseLatencyRound: OwnedLatencyRound | null = null;
 
   constructor(
@@ -1213,6 +1214,10 @@ export class ProductP1VoiceRouteOwner {
           this.#setStatus('capturing', pendingPlayout.degradationReason);
           this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
         } else {
+          // A requested successor that never became ready must not hold the
+          // response-N diagnostic round open: settle it unknown without
+          // donating successor-ready or next-turn marks.
+          this.#finishLatencyRound(latencyRound, 'unknown');
           this.#setStatus('recognized', captureReadiness?.reason ?? 'AUDIO_CAPTURE_FAILED');
         }
       } else {
@@ -1469,13 +1474,24 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
     const latencyRound = this.#beginCaptureLatencyRound();
-    if (
-      requestedBy !== null
+    if (latencyRound !== null
+      && requestedBy !== null
       && !requestedBy.finished
       && requestedBy.successorRequested
       && requestedBy.successorRound === null
     ) {
       requestedBy.successorRound = latencyRound;
+    } else if (
+      requestedBy !== null
+      && latencyRound === null
+      && this.#latencyRoundAllocationFailed
+      && !requestedBy.finished
+      && requestedBy.successorRequested
+      && requestedBy.successorRound === null
+    ) {
+      // A successor whose diagnostic round allocation failed must not hold the
+      // response-N round open: settle it unknown without donating ready/B10.
+      this.#finishLatencyRound(requestedBy, 'unknown');
     }
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
@@ -2729,6 +2745,7 @@ export class ProductP1VoiceRouteOwner {
   #beginCaptureLatencyRound(): OwnedLatencyRound | null {
     const identity = this.#latencyIdentity();
     if (this.#latencyProbe === null || identity === null || this.#sessionId === null) return null;
+    this.#latencyRoundAllocationFailed = false;
     try {
       const priorCapture = this.#captureLatencyRound;
       if (priorCapture !== null && priorCapture !== this.#responseLatencyRound) {
@@ -2760,6 +2777,7 @@ export class ProductP1VoiceRouteOwner {
       this.#captureLatencyRound = owned;
       return owned;
     } catch {
+      this.#latencyRoundAllocationFailed = true;
       return null;
     }
   }
