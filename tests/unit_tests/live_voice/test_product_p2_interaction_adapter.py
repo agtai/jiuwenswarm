@@ -426,7 +426,9 @@ async def test_authority_succeeds_before_any_factory_or_runtime_effect() -> None
 
 
 @pytest.mark.asyncio
-async def test_activation_lease_reads_one_then_drains_a_bounded_notification_batch() -> None:
+async def test_activation_lease_reads_one_then_drains_a_bounded_notification_batch() -> (
+    None
+):
     runtime = FakeRuntime()
     response = ResponseRef("interaction-1", "response-batch", 0)
     runtime.notifications = [

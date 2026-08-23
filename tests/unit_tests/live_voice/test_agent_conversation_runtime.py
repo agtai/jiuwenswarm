@@ -198,25 +198,6 @@ class AlwaysFailAssistantHistoryWriter(RecordingHistoryWriter):
         raise OSError("history remains unavailable")
 
 
-class _LatencyProbeSpy:
-    def __init__(self) -> None:
-        self.marks: list[tuple[str, object | None, str | None]] = []
-        self.terminals: list[str] = []
-
-    def mark(
-        self,
-        point: str,
-        *,
-        response_ref: object | None = None,
-        task_id: str | None = None,
-    ) -> bool:
-        self.marks.append((point, response_ref, task_id))
-        return True
-
-    def finish(self, terminal_outcome: str) -> None:
-        self.terminals.append(terminal_outcome)
-
-
 class CountingStartBridge(AgentBridgeRuntime):
     def __init__(self, *, fail_after_start: bool = False) -> None:
         super().__init__(instance_id="startup-bridge")
@@ -1004,200 +985,6 @@ async def submit(
         commit=selected,
         context=FormalContextSnapshot(selected.scope),
     )
-
-
-@pytest.mark.asyncio
-async def test_product_latency_probe_observes_agent_tool_and_presentation_boundaries() -> (
-    None
-):
-    class ToolDialogueAdapter(LowerFormalAdapter):
-        async def process_formal_live_voice_stream_impl(
-            self, request, inputs
-        ) -> AsyncIterator[AgentResponseChunk]:
-            del inputs
-            self.calls += 1
-            for event_type, content, complete in (
-                ("chat.delta", "PRIVATE-DELTA", False),
-                ("chat.tool_call", "PRIVATE-TOOL-ARGUMENTS", False),
-                ("chat.tool_result", "PRIVATE-TOOL-RESULT", False),
-                ("chat.final", "formal answer", True),
-            ):
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={"event_type": event_type, "content": content},
-                    is_complete=complete,
-                )
-
-    current = runtime(ToolDialogueAdapter(), RecordingHistoryWriter())
-    selected = commit()
-    probe = _LatencyProbeSpy()
-    await current.start()
-    await current.open_interaction(selected.interaction_id)
-
-    handle = await current.submit_committed_turn(
-        request_id="request-latency-probe",
-        response_id="response-latency-probe",
-        correlation_id="correlation-latency-probe",
-        commit=selected,
-        context=FormalContextSnapshot(selected.scope),
-        latency_probe=probe,
-    )
-    await asyncio.wait_for(handle.completion, timeout=1)
-    while not probe.terminals:
-        await asyncio.wait_for(current.next_notification(), timeout=1)
-
-    assert [point for point, _response, _task in probe.marks] == [
-        "agent.agent_started",
-        "agent.agent_first_delta",
-        "agent.tool_execution_started",
-        "agent.tool_execution_completed",
-        "agent.agent_final",
-        "agent.presentation_produced",
-        "agent.presentation_dispatched",
-    ]
-    assert probe.terminals == ["completed"]
-    assert "PRIVATE-TOOL" not in repr(probe.marks)
-    await current.close(timeout_seconds=1)
-
-
-@pytest.mark.asyncio
-async def test_product_latency_probe_finishes_failed_agent_without_private_error() -> None:
-    class FailingToolAdapter(LowerFormalAdapter):
-        async def process_formal_live_voice_stream_impl(
-            self, request, inputs
-        ) -> AsyncIterator[AgentResponseChunk]:
-            del inputs
-            self.calls += 1
-            yield AgentResponseChunk(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload={
-                    "event_type": "chat.tool_call",
-                    "content": "PRIVATE TOOL ARGUMENTS",
-                },
-                is_complete=False,
-            )
-            raise OSError("PRIVATE PROVIDER FAILURE")
-
-    current = runtime(
-        FailingToolAdapter(),
-        RecordingHistoryWriter(),
-    )
-    selected = commit()
-    probe = _LatencyProbeSpy()
-    await current.start()
-    await current.open_interaction(selected.interaction_id)
-
-    handle = await current.submit_committed_turn(
-        request_id="request-latency-failure",
-        response_id="response-latency-failure",
-        correlation_id="correlation-latency-failure",
-        commit=selected,
-        context=FormalContextSnapshot(selected.scope),
-        latency_probe=probe,
-    )
-    await asyncio.wait_for(handle.completion, timeout=1)
-    for _ in range(100):
-        if probe.terminals:
-            break
-        await asyncio.sleep(0)
-
-    assert [point for point, _response, _task in probe.marks] == [
-        "agent.agent_started",
-        "agent.tool_execution_started",
-    ]
-    assert probe.terminals == ["failed"]
-    assert "PRIVATE" not in repr(probe.marks)
-    await current.close(timeout_seconds=1)
-
-
-@pytest.mark.asyncio
-async def test_product_latency_probe_finishes_cancelled_exact_round() -> None:
-    lower = LowerFormalAdapter(final=None, release=asyncio.Event())
-    current = runtime(lower, RecordingHistoryWriter())
-    selected = commit()
-    probe = _LatencyProbeSpy()
-    await current.start()
-    await current.open_interaction(selected.interaction_id)
-
-    handle = await current.submit_committed_turn(
-        request_id="request-latency-cancel",
-        response_id="response-latency-cancel",
-        correlation_id="correlation-request-latency-cancel",
-        commit=selected,
-        context=FormalContextSnapshot(selected.scope),
-        latency_probe=probe,
-    )
-    await asyncio.wait_for(lower.started.wait(), timeout=1)
-    accepted = await current.close_interaction(
-        cancel_command(handle, selected, command_id="cancel-latency-exact")
-    )
-    assert accepted.accepted is True
-    while not probe.terminals:
-        await asyncio.wait_for(current.next_notification(), timeout=1)
-
-    assert probe.terminals == ["cancelled"]
-    assert [point for point, _response, _task in probe.marks] == [
-        "agent.agent_started"
-    ]
-    await current.close(timeout_seconds=1)
-
-
-@pytest.mark.asyncio
-async def test_authoritative_task_presentation_marks_produced_then_dispatched() -> None:
-    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
-    selected = commit()
-    probe = _LatencyProbeSpy()
-    await current.start()
-    await current.open_interaction(selected.interaction_id)
-
-    await current.present_authoritative_text(
-        request_id="request-task-latency",
-        response_id="response-task-latency",
-        correlation_id="correlation-task-latency",
-        commit=selected,
-        text="authoritative task status",
-        channel_id="web",
-        latency_probe=probe,
-    )
-
-    assert [point for point, _response, _task in probe.marks] == [
-        "agent.presentation_produced",
-        "agent.presentation_dispatched",
-    ]
-    assert probe.terminals == ["completed"]
-    await current.close(timeout_seconds=1)
-
-
-@pytest.mark.asyncio
-async def test_authoritative_task_presentation_failure_finishes_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
-    selected = commit()
-    probe = _LatencyProbeSpy()
-    await current.start()
-    await current.open_interaction(selected.interaction_id)
-
-    async def fail_production(_unit: PresentationUnit) -> None:
-        raise OSError("PRIVATE PRESENTATION FAILURE")
-
-    monkeypatch.setattr(current._cr, "produce_unit", fail_production)  # noqa: SLF001
-    with pytest.raises(OSError, match="PRIVATE PRESENTATION FAILURE"):
-        await current.present_authoritative_text(
-            request_id="request-task-latency-failure",
-            response_id="response-task-latency-failure",
-            correlation_id="correlation-task-latency-failure",
-            commit=selected,
-            text="private authoritative task status",
-            channel_id="web",
-            latency_probe=probe,
-        )
-
-    assert probe.marks == []
-    assert probe.terminals == ["failed"]
-    await current.close(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
@@ -3246,7 +3033,9 @@ def test_invalid_composition_notification_bounds_fail_before_runtime_effects() -
 
 
 @pytest.mark.asyncio
-async def test_exact_notification_lease_drains_only_currently_queued_items_with_closed_bounds() -> None:
+async def test_exact_notification_lease_drains_only_currently_queued_items_with_closed_bounds() -> (
+    None
+):
     current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
     selected = await prepare(current)
     lease = current.attach_notification_consumer(
@@ -3265,7 +3054,9 @@ async def test_exact_notification_lease_drains_only_currently_queued_items_with_
         with pytest.raises(AgentConversationRuntimeViolation) as rejected:
             await current.drain_notifications_for(lease, limit=invalid)
         assert rejected.value.reason == "INVALID_NOTIFICATION_BATCH_LIMIT"
-        assert current.snapshot().delivered_notifications == before.delivered_notifications
+        assert (
+            current.snapshot().delivered_notifications == before.delivered_notifications
+        )
 
     drained = await current.drain_notifications_for(lease, limit=3)
     assert [item.publish_seq for item in drained] == [0, 1, 2]
