@@ -4264,8 +4264,6 @@ async function runConcurrentCaptureJourney(options = {}) {
   if (options.pauseForNotificationBeforePlayout === true) {
     notificationPausedFrameHandler = environment.worklet.port.onmessage;
     notificationPauseOutcome = await owner.pauseIdleCaptureForNotification();
-  } else {
-    await owner.stopAndRecognize();
   }
   if (options.firstCaptureEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-1');
@@ -4322,7 +4320,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     const recognizing = owner.stopAndRecognize();
     uplinkSocket.bufferedAmount = 0;
     await recognizing;
-  } else {
+  } else if (options.pauseForNotificationBeforePlayout !== true) {
     await owner.stopAndRecognize();
   }
   if (options.advanceActivationBeforePlayout === true) {
@@ -5241,13 +5239,16 @@ test('real latency recorder retains response N capture identity through overlapp
       'browser.presentation_received',
       'browser.tts_request_started',
       'browser.successor_capture_requested',
-      'browser.successor_capture_ready',
+      // Successor-ACK decoupling (accepted L2A): the authoritative downlink
+      // starts independently, so the successor-ready mark lands after playout,
+      // whenever the real successor capture is first acknowledged.
       'browser.downlink_attach_started',
       'browser.downlink_attached',
       'browser.downlink_first_frame_received',
       'browser.playout_first_frame_scheduled',
       'browser.playout_first_frame_started_estimate',
       'browser.playout_completed',
+      'browser.successor_capture_ready',
       'browser.playout_ack_received',
       'browser.next_turn_capture_activated',
     ],
