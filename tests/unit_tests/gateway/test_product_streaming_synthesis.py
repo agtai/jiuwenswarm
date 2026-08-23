@@ -325,6 +325,7 @@ def _authorized_registry(
     provider: _Provider,
     *,
     observability: LiveVoiceObservabilityCollector | None = None,
+    notification_batch: bool = False,
 ):
     registry = DedicatedMediaProductRegistry(enabled=True)
     registry.set_provider_available(True)
@@ -371,25 +372,43 @@ def _authorized_registry(
     parent.route_completed = True
     parent.accepted_frames = 1
     text = "authoritative agent text"
-    registry.observe_agent_response(
-        {
-            "ok": True,
-            "result": {
-                "status": "notification",
-                "kind": "agent.output",
-                "session_id": "session-1",
-                "correlation_id": "correlation-1",
-                "activation_id": "activation-1",
-                "activation_generation": 1,
-                "response": {
-                    "interaction_id": "interaction-1",
-                    "response_id": "response-1",
-                    "response_generation": 0,
-                },
-                "agent_event": {"event_type": "chat.final", "text": text},
-                "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
-            },
+    final_notification: dict[str, object] = {
+        "status": "notification",
+        "kind": "agent.output",
+        "request_id": "request-notification-1",
+        "round_id": "round-1",
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-1",
+            "response_generation": 0,
         },
+        "agent_event": {"event_type": "chat.final", "text": text},
+        "source_event": None,
+        "progress_event": None,
+        "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
+        "error_reason": None,
+        "publish_seq": 0,
+    }
+    result: dict[str, object]
+    if notification_batch:
+        result = {
+            "status": "notification_batch",
+            "notifications": [final_notification],
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        }
+    else:
+        result = final_notification
+    registry.observe_agent_response(
+        {"ok": True, "result": result},
         routed_session_id="session-1",
         user_id="user-1",
         connection_id="connection-1",
@@ -522,16 +541,11 @@ async def test_exact_agent_final_opens_real_streaming_product_downlink() -> None
 
 
 @pytest.mark.asyncio
-async def test_untrusted_probe_context_is_stripped_before_synthesis_contract() -> None:
+async def test_batched_agent_final_opens_real_streaming_product_downlink() -> None:
     provider = _Provider()
-    registry, owner, context, params = _authorized_registry(provider)
-    params = {
-        **params,
-        "latency_probe_context": {
-            "schema_version": "private-invalid",
-            "text": "PRIVATE-DIAGNOSTIC-CONTENT",
-        },
-    }
+    registry, owner, context, params = _authorized_registry(
+        provider, notification_batch=True
+    )
     batch = _Batch()
 
     result = await registry.try_streaming_synthesis(
@@ -544,7 +558,9 @@ async def test_untrusted_probe_context_is_stripped_before_synthesis_contract() -
 
     assert result is not None and result["ok"] is True
     assert len(provider.requests) == 1
-    assert "PRIVATE-DIAGNOSTIC-CONTENT" not in repr(provider.requests)
+    assert provider.requests[0].ref.response.response_id == "response-1"
+    assert provider.requests[0].ref.unit_id == "unit-1"
+    assert batch.calls == 0
     await owner.close()
 
 

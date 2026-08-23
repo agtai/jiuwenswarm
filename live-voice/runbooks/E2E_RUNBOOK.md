@@ -360,8 +360,11 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 当前 Post-Alpha Demo 在前台 Agent 生成回答期间不保持 capture。页面显示
 “Understanding and answering”时不要继续说话；本节的插话验证只在回答已经开始
-播放后执行，不能据此声称支持 generation-time interruption。Agent `ask_user`
-问题及用户回答的完整语音回路属于 Later；当前候选不得把文字交互冒充该能力。
+播放后执行，不能据此声称支持 generation-time interruption。Formal Live Voice
+当前显式禁用 interactive Agent tools；普通澄清由 Agent 在正常回答中提问，用户
+听到后用下一条 committed voice turn 回答。只有未来产品明确要求恢复同一个被
+挂起的 Agent/workflow 时，结构化 `ask_user` interrupt/resume 语音回路才作为
+可选兼容能力单独立项；当前候选不得把文字交互冒充该能力。
 
 当前受控启动器是本节的执行入口；不得再用临时 AgentServer/Gateway/Vite
 命令进入人工验收。固定订单 Journey 使用默认 `hands-free-demo` profile；普通
