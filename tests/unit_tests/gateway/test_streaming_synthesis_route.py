@@ -489,9 +489,14 @@ async def test_real_openai_adapter_streams_through_route_without_batch_materiali
 async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None:
     socket = _FakeRealtimeSocket(
         (
-            {"type": "session.created", "session": {"id": "native-session"}},
+            {
+                "type": "session.created",
+                "event_id": "event-session-created",
+                "session": {"id": "native-session"},
+            },
             {
                 "type": "session.updated",
+                "event_id": "event-session-updated",
                 "session": {
                     "type": "realtime",
                     "model": "gpt-realtime-1.5",
@@ -542,13 +547,41 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
     socket.push(
         {
             "type": "response.created",
+            "event_id": "event-response-created",
             "response": {"id": response_id, "metadata": metadata},
+        }
+    )
+    socket.push(
+        {
+            "type": "response.output_item.added",
+            "event_id": "event-output-item-added",
+            "response_id": response_id,
+            "output_index": 0,
+            "item": {
+                "id": "native-output-item",
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        }
+    )
+    socket.push(
+        {
+            "type": "response.content_part.added",
+            "event_id": "event-content-part-added",
+            "response_id": response_id,
+            "item_id": "native-output-item",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "audio", "transcript": ""},
         }
     )
     pcm = struct.pack("<480h", *((1000,) * 480))
     socket.push(
         {
             "type": "response.output_audio.delta",
+            "event_id": "event-output-audio-delta",
             "response_id": response_id,
             "item_id": "native-output-item",
             "output_index": 0,
@@ -559,6 +592,7 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
     socket.push(
         {
             "type": "response.output_audio.done",
+            "event_id": "event-output-audio-done",
             "response_id": response_id,
             "item_id": "native-output-item",
             "output_index": 0,
@@ -568,6 +602,7 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
     socket.push(
         {
             "type": "response.output_audio_transcript.done",
+            "event_id": "event-output-transcript-done",
             "response_id": response_id,
             "item_id": "native-output-item",
             "output_index": 0,
@@ -575,9 +610,37 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
             "transcript": request.spoken_text,
         }
     )
+    completed_item = {
+        "id": "native-output-item",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_audio", "transcript": request.spoken_text}],
+    }
+    socket.push(
+        {
+            "type": "response.content_part.done",
+            "event_id": "event-content-part-done",
+            "response_id": response_id,
+            "item_id": "native-output-item",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "audio", "transcript": request.spoken_text},
+        }
+    )
+    socket.push(
+        {
+            "type": "response.output_item.done",
+            "event_id": "event-output-item-done",
+            "response_id": response_id,
+            "output_index": 0,
+            "item": completed_item,
+        }
+    )
     socket.push(
         {
             "type": "response.done",
+            "event_id": "event-response-done",
             "response": {
                 "id": response_id,
                 "status": "completed",
@@ -590,20 +653,7 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
                         "voice": "marin",
                     }
                 },
-                "output": [
-                    {
-                        "id": "native-output-item",
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_audio",
-                                "transcript": request.spoken_text,
-                            }
-                        ],
-                    }
-                ],
+                "output": [completed_item],
             },
         }
     )

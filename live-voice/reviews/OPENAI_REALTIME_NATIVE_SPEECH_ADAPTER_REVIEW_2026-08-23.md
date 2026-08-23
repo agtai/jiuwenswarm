@@ -2,16 +2,20 @@
 
 ## Disposition
 
-**SOURCE/AUTOMATION PASS — PHYSICAL PROVIDER AND INDEPENDENT-REVIEW CREDIT
-UNCLAIMED.**
+**REPAIR SOURCE/AUTOMATION PASS — INDEPENDENT FOLLOW-UP REVIEW REQUIRED.**
 
-The coherent Tier-3 implementation and affected automated matrix pass. A
-same-session cold complete-diff review found and corrected protocol and
-authority defects, with no remaining actionable finding (`C0/I0/M0`) in that
-substitute review. It is not independent review under the repository rule, so
-this document does not close that acceptance dimension. No OpenAI credential,
-network session, microphone or speaker was available; real Provider, device,
-quality and latency claims also remain open.
+The original automated matrix passed, but a later independent review of exact
+source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
+demonstrated replayed audio release, illegal transcript/audio order acceptance,
+no-progress events renewing the stream indefinitely, permissive native VAD
+authority echoes, and effective translate/whisper model-purpose bypass. It
+also identified missing production-factory and exact audio-boundary regression
+oracles. The earlier same-session `C0/I0/M0` statement is therefore not a valid
+semantic disposition and must not be used for acceptance. The bounded repair
+and its automated matrix now pass, but no independent reviewer has inspected
+the repaired source. A new independent follow-up review is required before any
+real Provider/device validation. No OpenAI credential, network session,
+microphone or speaker was used, so all physical claims remain open.
 
 The review covers the change based on
 `2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the containing commit is the
@@ -81,39 +85,74 @@ continuous native duplex.
 | `P` positive | Native recognition negotiation/final and exact native synthesis reach the existing product downlink. |
 | `N` negative | Invalid model/configuration, changed text, non-audio output, malformed audio and downgraded sessions fail closed. |
 | `B` boundary | PCM/rate/model family, provider delta, stream buffer, text, queue and timeout bounds remain explicit. |
-| `S` stale/replay | Exact response/item/output/content and existing response/generation/unit identities reject cross-response and stale data. |
-| `T` timeout/retry | Event/connect/send/receive/cleanup operations are bounded; timeout degrades visibly without business effects. |
+| `S` stale/replay | A bounded server-event-ID ledger plus exact response/item/output/content and existing response/generation/unit identities reject replay, cross-response and stale data. |
+| `T` timeout/retry | An explicit response lifecycle rejects illegal terminal order; valid progress alone renews the bounded progress deadline. Connect/send/receive/cleanup remain bounded. |
 | `C` concurrency/cancel | Exact response cancel is emitted when known; local/transport completion does not forge cancel acknowledgement. |
 | `R` restart/reconnect | Each synthesis unit owns a separate bounded socket; no conversational state is silently resumed or inferred. |
-| `I` isolation | Credentials stay Gateway-private; the Adapter cannot invoke Agent/Tool/Task/history authority. |
+| `I` isolation | Credentials stay Gateway-private; native effective VAD controls must be strict booleans set to false, effective translate/whisper purpose changes fail closed, and the Adapter cannot invoke Agent/Tool/Task/history authority. |
 | `F` forbidden effects | Partial, mismatched, malformed, tool-shaped and failed paths assert zero Agent, Tool, Task and history effects and zero audio release. |
-| `K` compatibility | The existing `openai` cascade, provider-neutral route and flag-off/fallback behaviour retain regression coverage. |
+| `K` compatibility | A production Web-factory composition test covers native selection, invalid-config TEXT fallback and flag-off; the existing `openai` cascade and provider-neutral route retain regression coverage. |
 | `X` observability/privacy | Provider/config facts are content-free, secrets stay out of repr/errors, and degradation remains typed and visible. |
+
+## Repair response to the independent findings
+
+The repair is deliberately limited to the four reported findings:
+
+1. **I1 — replay/order/progress:** every native synthesis server event now
+   requires a unique bounded `event_id`; negotiation and response events move
+   through explicit created/item/content/audio/transcript/terminal phases; only
+   valid protocol progress renews the whole-response progress deadline. Replay,
+   transcript-before-audio completion, audio-after-done, premature terminal,
+   missing event ID, exact ledger saturation and no-progress event flood tests
+   all fail before audio release and assert zero Agent/Tool/Task/history effects.
+2. **I2 — native VAD authority:** native Realtime server-VAD negotiation now
+   requires both `create_response` and `interrupt_response` to be present,
+   exactly `bool`, and exactly `False`. Missing, `None`, `0` and `True` fail
+   closed; the older transcription-only omission compatibility test still
+   passes.
+3. **I3 — effective model purpose:** configuration and effective session echoes
+   share one predicate. Exact/generic voice aliases remain supported while
+   `gpt-realtime-translate*` and `gpt-realtime-whisper*` are rejected for both
+   recognition and synthesis.
+4. **M1 — persistent composition/bounds:** the real production Web factory now
+   has native, invalid-config and flag-off selection oracles. Audio tests cover
+   exact `96,000`-byte delta acceptance versus `96,002` rejection and exact
+   8 MiB aggregate acceptance versus `+2` rejection.
+
+These are implementer-run repair results, not an independent follow-up
+disposition. The independent `C0/I3/M1` result remains the last independent
+judgement until a detached reviewer inspects the repaired commit.
 
 ## Verification
 
-Executed in the independent worktree on Windows:
+Executed in the repair worktree on Windows after the independent findings:
 
 ```text
 uv run pytest -q --no-cov tests\unit_tests\live_voice\test_openai_streaming_speech.py
-83 passed in 2.94s
+107 passed in 10.94s
 
 uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term-missing
-83 passed; openai_streaming_speech.py 1716 statements, 212 missed, 88%
+107 passed; openai_streaming_speech.py 1821 statements, 210 missed, 88%
 
 uv run pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
-171 passed, 1 deselected in 4.19s
+171 passed, 1 deselected in 15.71s
 
 C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
-79 passed in 6.48s
+80 passed in 43.93s
 
-uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py
+uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
+
+uv run ruff format --check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py
+3 files already formatted
 
 uv run mypy --follow-imports=skip --ignore-missing-imports jiuwenswarm\server\live_voice\openai_streaming_speech.py
 Success: no issues found in 1 source file
 
-uv run python -m py_compile jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py
+uv run python -m py_compile jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
+PASS
+
+git diff --check
 PASS
 ```
 
@@ -124,10 +163,8 @@ unchanged base worktree. It is an inherited baseline failure and does not
 exercise the new native Realtime Adapter. It is recorded rather than hidden or
 reclassified as a pass.
 
-Python 3.13 cannot collect the Web-factory file because the installed
-third-party `pysbd` release contains an invalid escape rejected by that Python
-version. The repository's existing Python 3.11 environment collected and
-passed all 79 Web-factory tests.
+The repository's existing Python 3.11 environment collected and passed all 80
+Web-factory tests. The focused and affected speech matrices used Python 3.13.
 
 ## Cold complete-diff review
 
@@ -147,9 +184,9 @@ matrix:
 7. bounded exact `response.cancel` sending and added a negative oracle for
    terminal function/tool-shaped output.
 
-Final substitute-review result: **`C0/I0/M0`**. The reviewer and implementer
-were the same session, so an independent reviewer must still inspect the
-complete commit before repository rules permit independent-review credit.
+That historical substitute-review result was **`C0/I0/M0`**, but the subsequent
+independent `C0/I3/M1` result superseded it. It is retained only to explain the
+review sequence and grants no current acceptance credit.
 
 ## Activation contract and remaining trigger
 
@@ -163,8 +200,10 @@ LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
-The next acceptance trigger is a shortest real server-to-server probe followed
-by the existing microphone/Agent/playout journey on the exact committed source.
-It must record Provider/session model truth, final transcript, audible exact
-Agent text, cancel/degradation behaviour and fixed-corpus latency. That run
-must not reuse the API key in browser state, logs or evidence.
+The next acceptance trigger is a detached independent Tier-3 follow-up review
+of the exact repair commit and its complete boundary. Only after that review
+passes may a shortest real server-to-server probe be followed by the existing
+microphone/Agent/playout journey. The physical run must record Provider/session
+model truth, final transcript, audible exact Agent text, cancel/degradation
+behaviour and fixed-corpus latency, and must not reuse the API key in browser
+state, logs or evidence.

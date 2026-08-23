@@ -27,8 +27,16 @@ from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
 from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
     StreamingRecognitionRouteOwner,
 )
+from jiuwenswarm.server.live_voice.batch_speech import (
+    SPEECH_API_BASE_ENV,
+    SPEECH_API_KEY_ENV,
+    SPEECH_PROVIDER_ENV,
+)
 from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    SPEECH_REALTIME_MODEL_ENV,
     STREAMING_SPEECH_FLAG,
+    SpeechDegradationReason,
+    SpeechRouteTier,
 )
 
 
@@ -198,6 +206,62 @@ async def test_web_registration_constructs_both_streaming_direction_owners(
         StreamingRecognitionRouteOwner,
     )
     await disabled_channel.live_voice_streaming_speech_owner.close()
+
+
+@pytest.mark.asyncio
+async def test_web_production_factory_selects_native_realtime_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MEDIA_FEATURE_ENV, "true")
+    monkeypatch.setenv(STREAMING_SPEECH_FLAG, "true")
+    monkeypatch.setenv(SPEECH_PROVIDER_ENV, "openai-realtime")
+    monkeypatch.setenv(SPEECH_API_BASE_ENV, "https://api.openai.com/v1")
+    monkeypatch.setenv(SPEECH_API_KEY_ENV, "gateway-private-test-key")
+    monkeypatch.setenv(SPEECH_REALTIME_MODEL_ENV, "gpt-realtime-1.5")
+
+    native_channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=native_channel))
+    native_owner = native_channel.live_voice_streaming_synthesis_owner
+    assert isinstance(native_owner, StreamingSynthesisRouteOwner)
+    native_selection = await native_owner._select()
+    assert native_selection.tier is SpeechRouteTier.STREAMING
+    assert native_selection.fact is None
+    assert native_selection.provider is not None
+    assert (
+        native_selection.provider.capability.provider.provider_id
+        == "openai-realtime-native-speech"
+    )
+    await native_owner.close()
+    await native_channel.live_voice_streaming_speech_owner.close()
+
+    monkeypatch.setenv(SPEECH_REALTIME_MODEL_ENV, "gpt-realtime-translate")
+    invalid_channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=invalid_channel))
+    invalid_owner = invalid_channel.live_voice_streaming_synthesis_owner
+    assert isinstance(invalid_owner, StreamingSynthesisRouteOwner)
+    invalid_selection = await invalid_owner._select()
+    assert invalid_selection.tier is SpeechRouteTier.TEXT
+    assert invalid_selection.provider is None
+    assert invalid_selection.fact is not None
+    assert (
+        invalid_selection.fact.reason
+        is SpeechDegradationReason.CONFIGURATION_UNAVAILABLE
+    )
+    await invalid_owner.close()
+    await invalid_channel.live_voice_streaming_speech_owner.close()
+
+    monkeypatch.setenv(STREAMING_SPEECH_FLAG, "false")
+    disabled_channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=disabled_channel))
+    assert disabled_channel.live_voice_streaming_synthesis_owner is None
+    disabled_owner = disabled_channel.live_voice_streaming_speech_owner
+    assert isinstance(disabled_owner, StreamingRecognitionRouteOwner)
+    disabled_selection = await disabled_owner._select()
+    assert disabled_selection.tier is SpeechRouteTier.TEXT
+    assert disabled_selection.provider is None
+    assert disabled_selection.fact is not None
+    assert disabled_selection.fact.reason is SpeechDegradationReason.FEATURE_OFF
+    await disabled_owner.close()
 
 
 @pytest.mark.asyncio
