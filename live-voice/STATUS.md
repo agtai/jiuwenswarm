@@ -139,13 +139,20 @@ Hermes remains an architecture-only reference with no copied code or dependency.
 This audit does not change capability status, priority or acceptance.
 
 The follow-up [OJ-G0 module conformance packet](reviews/OPENJIUWEN_G0_CONFORMANCE_PACKET_2026-08-23.md)
-now records `5 passed, 8 xfailed` on exact locked AgentCore source and prepares
-one local minimal AgentCore candidate (`d143b04b`) for the proven cross-team
-Task read/cancel scope defect. That candidate closes only OJ-G0-05 when loaded
-directly; it is not pushed, is not the installed dependency, and grants no
-Live Voice replacement, migration, product or deletion credit. Cancel/Tool
-relation, restart ownership, D1/D2 reconcile, event envelope and cursor/ACK
-gaps remain red.
+records `5 passed, 8 xfailed` on exact locked AgentCore source. Its initial
+`d143b04b` scope candidate is now superseded evidence: fresh refs showed the
+correct main base is `origin/develop@4f2c29c3`, and horizontal testing proved
+that `d143b04b` still allowed foreign complete and dependency mutation. The
+replacement local scope branch has three unpushed commits
+`759fdf54` / `c6564a59` / `c2e958e7`; `43` scope contracts and the final
+`552 passed, 14 skipped` affected regression pass. OJ-G1-A separately records
+`9 passed, 5 xfailed` and `--runxfail` `5 failed, 9 passed`. Thin Adapters are
+enough for static checkpoint mismatch rejection and the tested cooperative
+cancel/complete race, but cancel settlement/terminal fences, restart reconcile,
+atomic generation admission and duplicate execution identity still require a
+minimum generic AgentCore change. D2 receipt/reconcile, event envelope and
+cursor/ACK remain later work. No result grants Live Voice replacement,
+migration, product or deletion credit.
 
 The detailed complete-P3 workload, P3alpha inheritance, package acceptance,
 critical path and parallel collision rules are defined in the
@@ -217,6 +224,36 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### OJ-G1-A execution ownership and scope upstream readiness — CONFORMANCE COMPLETE / PRODUCTION RE-SCOPE REQUIRED
+
+The D-060/D-062 bounded investigation packet has closed both lanes in dependency
+order. Fresh upstream refs identify `origin/develop@4f2c29c3` as the primary
+scope PR base; the replacement local branch contains the three unpushed scope
+commits `759fdf54` / `c6564a59` / `c2e958e7`, with 22 manager/monitor, 20
+direct-DAO and one signature isolation contract passing. The execution lane's
+real-module suite produces `9 passed, 5 xfailed`; `--runxfail` confirms exactly
+five business assertion failures for cancel settlement, Runtime-owned spill and
+terminal revival, restart owner reconcile, stale-after-validation and duplicate
+AsyncTool identity. The five static checkpoint mismatch cases now pass through
+a real thin pre-dispatch Adapter, and every xfail accepts only business
+`AssertionError` failures. Restart reconcile and atomic-admission red cases are
+gap characterizations that must be reconnected to the selected public seams in
+the production PR; they are not advertised as automatic future XPASS oracles.
+
+The evidence narrows rather than rejects composition: static admission and the
+tested cooperative relation/race path stay thin, while the remaining boundary
+requires a scoped durable ExecutionRecord or equivalent canonical backend,
+AsyncTool cancellation/terminal fences, atomic per-task Scheduler admission and
+restart orphan reconcile. That is a new shared protocol/backend crossing
+multiple production owners, so production code stops here until a separate
+minimum AgentCore PR packet re-scopes it. Exact evidence, commands, ownership
+and exclusions are in the [OJ-G1-A packet](reviews/OPENJIUWEN_G1_A_EXECUTION_OWNERSHIP_CONFORMANCE_PACKET_2026-08-23.md).
+
+EventEnvelope/order/cursor-ACK, D2 receipt/reconcile, real Agent/file-Tool crash
+injection, migration, canary and duplicate deletion remain later packets and
+receive no credit here. Main is the sole shared-semantics, integration,
+documentation and Git-history owner; parallel workers are read-only.
 
 ### P1/P2 lifecycle repair closure
 
