@@ -472,9 +472,10 @@ from the reference materials:
 
 This plan is queued under the `Observability, benchmark and latency` capability
 and dependency route to feature complete in [STATUS](../STATUS.md). The
-2026-08-23 lifecycle repair packet is closed. Remaining product work includes
-P2 notification latency. The `e1df8b452` physical run supplies a scoped
-diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
+2026-08-23 lifecycle repair packet is closed. The accepted P2 bounded-pull
+candidate is now composed on that source; remaining product work is atomic
+batch observation and deployed Gate C. The `e1df8b452` physical run supplies a
+scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
 fixed-corpus baseline required by this plan. The
 [latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
 owns the dated causal/deployed evidence. Compatible instrumentation may be
