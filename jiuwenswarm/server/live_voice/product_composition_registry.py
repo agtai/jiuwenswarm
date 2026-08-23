@@ -812,6 +812,47 @@ def _bind_unified_response_request(
     return bound
 
 
+def _mark_foreground_latency(
+    probe: object | None,
+    point: str,
+    *,
+    response_ref: ResponseRef | None = None,
+    task_id: str | None = None,
+) -> None:
+    if probe is None:
+        return
+    try:
+        marker = getattr(probe, "mark", None)
+        if callable(marker):
+            marker(point, response_ref=response_ref, task_id=task_id)
+    except BaseException:
+        return
+
+
+def _finish_foreground_latency(
+    probe: object | None, terminal_outcome: str
+) -> None:
+    if probe is None:
+        return
+    try:
+        finish = getattr(probe, "finish", None)
+        if callable(finish):
+            finish(terminal_outcome)
+    except BaseException:
+        return
+
+
+def _abandon_foreground_latency(probe: object | None) -> None:
+    if probe is None:
+        return
+    try:
+        abandon = getattr(probe, "abandon", None)
+        if callable(abandon):
+            abandon()
+    except BaseException:
+        return
+
+
 def _formal_live_voice_capable(agent: object) -> bool:
     """Report whether one Agent facade actually owns the formal Live Voice seam.
 
@@ -6640,6 +6681,7 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
         session_id: str | None,
         channel_id: str,
+        latency_probe: object | None = None,
     ) -> P3RouteResult:
         """Admit exactly one Gateway-claimed ASR final into semantic routing."""
 
@@ -6654,8 +6696,10 @@ class AgentServerProductCompositionRegistry:
         operation_task: asyncio.Task[P3RouteResult] | None = None
         journal_completion_pending = False
         if not self._settings.p2_enabled:
+            _finish_foreground_latency(latency_probe, "failed")
             return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
         if journal is None or bridge is None:
+            _finish_foreground_latency(latency_probe, "failed")
             return _error_result(request_id, reason="UNIFIED_INPUT_UNAVAILABLE")
         try:
             _require_exact_params(
@@ -6768,6 +6812,7 @@ class AgentServerProductCompositionRegistry:
                     "committed_at": committed_at,
                 }
             )
+            _mark_foreground_latency(latency_probe, "agent.commit_accepted")
             preliminary = bridge.resolve_unified(commit, commit.scope, None)
             preliminary = self._bind_frozen_one_current_task_status(
                 preliminary,
@@ -6813,6 +6858,7 @@ class AgentServerProductCompositionRegistry:
                 semantic_binding=proposed_semantic_binding,
             )
             if admission.replay_result is not None:
+                _abandon_foreground_latency(latency_probe)
                 payload = _bind_unified_response_request(
                     admission.replay_result,
                     request_id,
@@ -6861,6 +6907,7 @@ class AgentServerProductCompositionRegistry:
                         current = None
                         background_authority_unavailable = True
             if not admission.execute:
+                _abandon_foreground_latency(latency_probe)
                 payload = await asyncio.to_thread(
                     journal.wait_for_completion,
                     voice_identity_sha256=voice_identity,
