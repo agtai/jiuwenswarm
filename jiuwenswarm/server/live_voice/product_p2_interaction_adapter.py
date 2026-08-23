@@ -617,7 +617,6 @@ class P2ActivationLease:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
-        latency_probe: object | None = None,
     ) -> AgentConversationHandle:
         """Forward one exact committed turn through the retained runtime owner."""
 
@@ -641,7 +640,6 @@ class P2ActivationLease:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
-                latency_probe=latency_probe,
             )
             if not isinstance(outcome, AgentConversationHandle):
                 raise _violation(
@@ -727,7 +725,6 @@ class P2ActivationLease:
         source_provenance: str = "server.authoritative",
         before_publish: Callable[[AuthoritativePresentationHandle], Awaitable[None]]
         | None = None,
-        latency_probe: object | None = None,
     ) -> AuthoritativePresentationHandle:
         """Publish server-owned text through the retained CR presentation path."""
 
@@ -750,7 +747,6 @@ class P2ActivationLease:
                 channel_id=channel_id,
                 response_generation=response_generation,
                 before_publish=before_publish,
-                latency_probe=latency_probe,
                 _source_provenance=source_provenance,
             )
             if not isinstance(outcome, AuthoritativePresentationHandle):
@@ -988,9 +984,7 @@ class P2ActivationLease:
                 ErrorCode.INVALID_ARGUMENT,
             )
         first = await self.next_notification(binding)
-        if limit == 1 or (
-            continue_after is not None and not continue_after(first)
-        ):
+        if limit == 1 or (continue_after is not None and not continue_after(first)):
             return (first,)
         drain = getattr(self._runtime, "drain_notifications_for", None)
         if not callable(drain) or self._notification_lease is None:

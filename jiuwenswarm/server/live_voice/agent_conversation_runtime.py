@@ -10,7 +10,7 @@ import math
 import threading
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -287,9 +287,8 @@ class _BoundedNotificationBuffer:
         lease_active: Callable[[], bool] | None = None,
         detached: asyncio.Event | None = None,
     ) -> AgentConversationNotification | None:
-        if (
-            (lease_active is not None and not lease_active())
-            or (detached is not None and detached.is_set())
+        if (lease_active is not None and not lease_active()) or (
+            detached is not None and detached.is_set()
         ):
             raise _NotificationConsumerDetached
         queued = self._pop_next()
@@ -551,59 +550,6 @@ class _ResponseOutputState:
     usable_finals: int = 0
     terminal_outcome: TerminalOutcome | None = None
     terminal_event: EventEnvelope | None = None
-    latency_probe: object | None = field(default=None, repr=False)
-    latency_points: set[str] = field(default_factory=set, repr=False)
-    latency_finished: bool = False
-
-
-def _mark_latency_probe(
-    probe: object | None,
-    point: str,
-    *,
-    response_ref: ResponseRef | None = None,
-    task_id: str | None = None,
-) -> None:
-    if probe is None:
-        return
-    try:
-        marker = getattr(probe, "mark", None)
-        if callable(marker):
-            marker(point, response_ref=response_ref, task_id=task_id)
-    except BaseException:
-        return
-
-
-def _finish_latency_probe(probe: object | None, terminal_outcome: str) -> None:
-    if probe is None:
-        return
-    try:
-        finish = getattr(probe, "finish", None)
-        if callable(finish):
-            finish(terminal_outcome)
-    except BaseException:
-        return
-
-
-def _mark_output_latency(state: _ResponseOutputState, point: str) -> None:
-    if point in state.latency_points or state.latency_finished:
-        return
-    state.latency_points.add(point)
-    _mark_latency_probe(
-        state.latency_probe,
-        point,
-        response_ref=(
-            state.handle.response_ref if state.handle is not None else None
-        ),
-    )
-
-
-def _finish_output_latency(
-    state: _ResponseOutputState, terminal_outcome: str
-) -> None:
-    if state.latency_finished:
-        return
-    state.latency_finished = True
-    _finish_latency_probe(state.latency_probe, terminal_outcome)
 
 
 class AgentConversationRuntime:
@@ -1107,7 +1053,6 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
-        latency_probe: object | None = None,
     ) -> AgentConversationHandle:
         """Own one retained product submission from TurnCommit through dispatch.
 
@@ -1196,7 +1141,6 @@ class AgentConversationRuntime:
                         before_dispatch=before_dispatch,
                         after_dispatch=after_dispatch,
                         allow_tools=allow_tools,
-                        latency_probe=latency_probe,
                     )
                 else:
                     turn_key = (commit.interaction_id, commit.turn_id)
@@ -1223,7 +1167,6 @@ class AgentConversationRuntime:
                             before_dispatch=before_dispatch,
                             after_dispatch=after_dispatch,
                             allow_tools=allow_tools,
-                            latency_probe=latency_probe,
                         )
                     except BaseException:
                         self._release_product_identity(claim)
@@ -1346,7 +1289,6 @@ class AgentConversationRuntime:
         response_generation: int | None = None,
         before_publish: Callable[[AuthoritativePresentationHandle], Awaitable[None]]
         | None = None,
-        latency_probe: object | None = None,
         _persist_user_history: bool = True,
         _source_provenance: str = "server.authoritative",
         _presentation_surface: PresentationSurface = PresentationSurface.TEXT,
@@ -1521,14 +1463,12 @@ class AgentConversationRuntime:
                     total_utf8=len(content),
                     usable_finals=1,
                     terminal_outcome=TerminalOutcome.COMPLETED,
-                    latency_probe=latency_probe,
                 )
                 self._outputs[response_ref] = state
                 await self._cr.produce_unit(unit)
                 await self._cr.enqueue_unit(
                     response_ref, _presentation_surface, unit.unit_id
                 )
-                _mark_output_latency(state, "agent.presentation_produced")
                 presentation_handle = AuthoritativePresentationHandle(
                     request_id=request_id,
                     round_id=f"authoritative:{request_id}",
@@ -1559,8 +1499,6 @@ class AgentConversationRuntime:
                         ),
                         critical_key=("presentation", request_id),
                     )
-                    _mark_output_latency(state, "agent.presentation_dispatched")
-                    _finish_output_latency(state, "completed")
                 await self._cr.transition_response(
                     response_ref,
                     ResponseState.TERMINAL,
@@ -1576,7 +1514,6 @@ class AgentConversationRuntime:
                     history_task.add_done_callback(self._history_tasks.discard)
                 return presentation_handle
             except BaseException:
-                _finish_latency_probe(latency_probe, "failed")
                 if response_ref is None:
                     self._release_product_identity(claim)
                 else:
@@ -2070,7 +2007,6 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
-        latency_probe: object | None,
     ) -> asyncio.Future[_AdmissionOutcome]:
         """Register one preflighted submission while admission fence is held."""
 
@@ -2181,7 +2117,6 @@ class AgentConversationRuntime:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
-                latency_probe=latency_probe,
             ),
             name=f"live-voice-product-turn:{request_id}",
         )
@@ -2500,10 +2435,7 @@ class AgentConversationRuntime:
                         self._active_notification_lease is record
                         and (
                             record.active
-                            or (
-                                self._notifications.closed
-                                and record.drain_after_close
-                            )
+                            or (self._notifications.closed and record.drain_after_close)
                         )
                     ),
                     detached=record.detached,
@@ -3041,7 +2973,6 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
-        latency_probe: object | None = None,
     ) -> None:
         reservation = entry.harness_reservation
         bridge_reservation = entry.bridge_reservation
@@ -3082,11 +3013,6 @@ class AgentConversationRuntime:
                 # the exact accepted control result before Agent/Tool work gets
                 # an event-loop turn, closing its false-success checkpoint gap.
                 after_dispatch(handle)
-            _mark_latency_probe(
-                latency_probe,
-                "agent.agent_started",
-                response_ref=handle.response_ref,
-            )
             self._handles[handle.request_id] = handle
             self._round_handles[handle.round_id] = round_handle
             self._outputs[handle.response_ref] = _ResponseOutputState(
@@ -3095,7 +3021,6 @@ class AgentConversationRuntime:
                 channel_id=channel_id,
                 handle=round_handle,
                 unit_contents={},
-                latency_probe=latency_probe,
             )
             history_task = asyncio.create_task(
                 self._persist_user_history(reservation.binding.commit, channel_id),
@@ -3156,7 +3081,6 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
-        latency_probe: object | None,
     ) -> None:
         try:
             await self._commit_admitted_turn(
@@ -3170,7 +3094,6 @@ class AgentConversationRuntime:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
-                latency_probe=latency_probe,
             )
         except BaseException as error:  # noqa: BLE001 - retained outcome truth
             try:
@@ -3219,14 +3142,6 @@ class AgentConversationRuntime:
         presentation: PresentationUnit | None = None
         error_reason: str | None = None
         consumable_event: AgentEvent | None = event
-        point = {
-            "chat.delta": "agent.agent_first_delta",
-            "chat.tool_call": "agent.tool_execution_started",
-            "chat.tool_result": "agent.tool_execution_completed",
-            "chat.final": "agent.agent_final",
-        }.get(event.event_type)
-        if point is not None:
-            _mark_output_latency(state, point)
         if event.event_type == "chat.final":
             text = event.text
             if not isinstance(text, str) or not text.strip():
@@ -3264,7 +3179,6 @@ class AgentConversationRuntime:
                 else:
                     state.usable_finals += 1
                     state.total_utf8 += len(content)
-                    _mark_output_latency(state, "agent.presentation_produced")
             if presentation is None:
                 consumable_event = None
         self._publish(
@@ -3283,9 +3197,6 @@ class AgentConversationRuntime:
                 else None
             ),
         )
-        if presentation is not None:
-            _mark_output_latency(state, "agent.presentation_dispatched")
-            _finish_output_latency(state, "completed")
 
     async def _consume_progress(self, delivery: WorkProgressDelivery) -> None:
         request = delivery.request
@@ -3347,16 +3258,6 @@ class AgentConversationRuntime:
                 else None
             ),
         )
-        if progress.state is WorkState.TERMINAL:
-            terminal_latency_outcome = (
-                "cancelled"
-                if progress.outcome is TerminalOutcome.CANCELLED
-                else "completed"
-                if progress.outcome is TerminalOutcome.COMPLETED
-                and state.usable_finals > 0
-                else "failed"
-            )
-            _finish_output_latency(state, terminal_latency_outcome)
 
     async def _close_interaction_after_terminal(self, interaction_id: str) -> None:
         snapshot = self._cr.snapshot().conversation

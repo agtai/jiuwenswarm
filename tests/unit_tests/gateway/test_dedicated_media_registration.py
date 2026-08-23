@@ -1431,6 +1431,144 @@ def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> No
     assert registry.authorize(wrong) is None
 
 
+def test_mismatched_notification_batch_has_zero_partial_speech_authority() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+    valid_final = {
+        "status": "notification",
+        "kind": "agent.output",
+        "request_id": "request-valid",
+        "round_id": "round-valid",
+        **binding,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-valid",
+            "response_generation": 0,
+        },
+        "agent_event": {"event_type": "chat.final", "text": "valid first item"},
+        "source_event": None,
+        "progress_event": None,
+        "presentation_unit": {"surface": "text", "unit_id": "unit-valid"},
+        "error_reason": None,
+        "publish_seq": 0,
+    }
+    mismatched_final = {
+        **valid_final,
+        "activation_generation": 2,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-mismatched",
+            "response_generation": 1,
+        },
+        "agent_event": {
+            "event_type": "chat.final",
+            "text": "mismatched second item",
+        },
+        "presentation_unit": {
+            "surface": "text",
+            "unit_id": "unit-mismatched",
+        },
+        "publish_seq": 1,
+    }
+
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification_batch",
+                "notifications": [valid_final, mismatched_final],
+                **binding,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    assert record.synthesis_content_sha256 == {}
+
+
+def test_same_binding_final_before_invalid_batch_tail_has_zero_speech_authority() -> (
+    None
+):
+    registry = _active_registry()
+    activation = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+    valid_final = {
+        "status": "notification",
+        "kind": "agent.output",
+        "request_id": "request-valid",
+        "round_id": "round-valid",
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-valid",
+            "response_generation": 0,
+        },
+        "agent_event": {"event_type": "chat.final", "text": "valid first item"},
+        "source_event": None,
+        "progress_event": None,
+        "presentation_unit": {"surface": "text", "unit_id": "unit-valid"},
+        "error_reason": None,
+        "publish_seq": 0,
+        **binding,
+    }
+    invalid_tail = {
+        "status": "notification",
+        "kind": "transport.keepalive",
+        "request_id": "request-invalid-tail",
+        "round_id": None,
+        "response": None,
+        "agent_event": None,
+        "source_event": None,
+        "progress_event": None,
+        "presentation_unit": None,
+        "error_reason": None,
+        "publish_seq": 1,
+        **binding,
+    }
+
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification_batch",
+                "notifications": [valid_final, invalid_tail],
+                **binding,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    assert record.synthesis_content_sha256 == {}
+
+
 def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow() -> (
     None
 ):
