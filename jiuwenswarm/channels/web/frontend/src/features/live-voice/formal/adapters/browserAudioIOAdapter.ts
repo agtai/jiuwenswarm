@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import {
   AudioPort,
   AudioPortViolation,
@@ -405,7 +406,29 @@ const CAPTURE_DIAGNOSTIC_STORAGE_KEY = 'jiuwenswarm.liveVoice.captureDiagnostic'
 // first sustained burst.  Schedule the browser graph slightly ahead so that
 // ordered 20 ms sources remain contiguous instead of exposing that Provider
 // interarrival gap as a click or a short dropout.
-const PLAYOUT_STARTUP_LEAD_SECONDS = 1.0;
+//
+// Latency-screen hook (inventory ref #4): the historical fixed 1.0 s lead is
+// the measured `schedule -> start estimate` dead wait. A bounded screen may
+// lower it via VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS (clamped to
+// [160, 1000] ms; production default stays 1000 ms).
+const PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 1000;
+const PLAYOUT_STARTUP_LEAD_MIN_MS = 160;
+
+function resolvePlayoutStartupLeadSeconds(): number {
+  try {
+    const raw = import.meta.env?.VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS;
+    const parsed = Number.parseInt(String(raw ?? ''), 10);
+    if (!Number.isInteger(parsed)) return PLAYOUT_STARTUP_LEAD_DEFAULT_MS / 1000;
+    return (
+      Math.min(PLAYOUT_STARTUP_LEAD_DEFAULT_MS, Math.max(PLAYOUT_STARTUP_LEAD_MIN_MS, parsed)) /
+      1000
+    );
+  } catch {
+    return PLAYOUT_STARTUP_LEAD_DEFAULT_MS / 1000;
+  }
+}
+
+const PLAYOUT_STARTUP_LEAD_SECONDS = resolvePlayoutStartupLeadSeconds();
 
 const DISABLED_BROWSER_AUDIO_ENVIRONMENT: BrowserAudioEnvironment = Object.freeze({
   isSecureContext: false,
