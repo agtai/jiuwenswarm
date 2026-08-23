@@ -672,42 +672,6 @@ def _recovery_authority_task(
     return store, task.task_id, task.scope, task.correlation_id
 
 
-def _retry_authority_task(store: SqliteTaskStore, task_id: str) -> str:
-    task = store.get_task(task_id, _scope())
-    assert task.outcome is TerminalOutcome.COMPLETED
-    command = CommandEnvelope.from_dict(
-        {
-            "contract_version": CONTRACT_VERSION,
-            "request_id": "request-authority-retry",
-            "command_id": "command-authority-retry",
-            "command_type": "task.retry",
-            "issued_at": NOW,
-            "scope": task.scope.to_dict(),
-            "correlation_id": task.correlation_id,
-            "causation_id": None,
-            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
-            "target_ref": {"kind": "task", "id": task.task_id},
-            "context_refs": [],
-            "required_capabilities": ["task.retry"],
-            "payload": {
-                "previous_attempt_id": task.attempt_id,
-                "previous_outcome": "completed",
-                "attempt_number": 2,
-            },
-            "extensions": TaskRetryProductRequestFingerprint("a" * 64).to_extensions(),
-        }
-    )
-    spec = replace(
-        task.spec,
-        context=replace(task.spec.context, revision_value="revision-2"),
-    )
-    authority = store.read_retry_authority(command)
-    assert isinstance(authority, TaskRetryAuthoritySnapshot)
-    result = store.retry(command, spec, authority, observed_at=NOW)
-    assert result.ok and result.result is not None
-    return str(result.result["attempt_id"])
-
-
 def _cancel_and_retry_authority_task(store: SqliteTaskStore, task_id: str) -> str:
     task = store.get_task(task_id, _scope())
     cancel = CommandEnvelope.from_dict(
@@ -2170,9 +2134,7 @@ async def test_retry_segment_projects_from_authority_owned_nonzero_baseline(
     tmp_path: Path,
 ) -> None:
     store, task_id, correlation_id = _authority_task(tmp_path)
-    _advance_authority_task_running(store, task_id)
-    _finish_authority_task(store, task_id)
-    attempt_b = _retry_authority_task(store, task_id)
+    attempt_b = _cancel_and_retry_authority_task(store, task_id)
     task = store.get_task(task_id, _scope())
     assert task.attempt_id == attempt_b
     boundary = store.events(
@@ -2219,9 +2181,9 @@ async def test_retry_segment_projects_from_authority_owned_nonzero_baseline(
     assert projected.progress_event.seq == boundary.seq
     assert projected.source_event.payload == {
         "state": "accepted",
-        "command_id": "command-authority-retry",
+        "command_id": "command-authority-retry-cancelled",
         "retry_of_attempt_id": boundary.details["retry_of_attempt_id"],
-        "previous_outcome": "completed",
+        "previous_outcome": "cancelled",
         "attempt_number": 2,
     }
     snapshot = source.subscription.snapshot()

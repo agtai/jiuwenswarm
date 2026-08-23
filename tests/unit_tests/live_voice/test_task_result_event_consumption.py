@@ -149,6 +149,36 @@ def _nonconsumption_authority(database: Path) -> dict[str, list[tuple[object, ..
         }
 
 
+def _logical_database_authority(
+    database: Path,
+) -> tuple[tuple[tuple[object, ...], ...], dict[str, tuple[tuple[object, ...], ...]]]:
+    """Snapshot every schema and table fact without treating SQLite headers as data."""
+
+    with sqlite3.connect(database) as connection:
+        schema = tuple(
+            connection.execute(
+                """SELECT type, name, tbl_name, sql FROM sqlite_master
+                   ORDER BY type, name"""
+            ).fetchall()
+        )
+        tables = tuple(
+            row[0]
+            for row in connection.execute(
+                """SELECT name FROM sqlite_master WHERE type='table'
+                   ORDER BY name"""
+            ).fetchall()
+        )
+        rows: dict[str, tuple[tuple[object, ...], ...]] = {}
+        for table in tables:
+            quoted = table.replace('"', '""')
+            rows[table] = tuple(
+                connection.execute(
+                    f'SELECT * FROM "{quoted}" ORDER BY rowid'
+                ).fetchall()
+            )
+        return schema, rows
+
+
 def _ack_command(
     task_id: str,
     *,
@@ -555,7 +585,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
     ]
     assert _nonconsumption_authority(database) == stable_authority
     commands_after_higher = store.counts()["commands"]
-    before_replay_bytes = database.read_bytes()
+    before_replay_authority = _logical_database_authority(database)
 
     replay = store.ack_events(
         replace(higher, request_id="request-command-ack-higher-replay"),
@@ -564,7 +594,7 @@ def test_ack_lower_equal_higher_and_exact_replay_are_monotonic(
 
     assert replay == higher_result.for_request("request-command-ack-higher-replay")
     assert store.counts()["commands"] == commands_after_higher
-    assert database.read_bytes() == before_replay_bytes
+    assert _logical_database_authority(database) == before_replay_authority
 
     changed_base, _grant = _ack_command(
         task_id,

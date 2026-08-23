@@ -1522,7 +1522,10 @@ def test_private_preflight_rejects_real_configuration_symlinks(
     tmp_path: Path,
     linked_basename: str,
 ) -> None:
-    private_root = tmp_path / f"{linked_basename}-private"
+    private_root_stem = (
+        "dotenv" if linked_basename == ".env" else linked_basename
+    )
+    private_root = tmp_path / f"{private_root_stem}-private"
     (private_root / "config").mkdir(parents=True)
     config = private_root / "config" / "config.yaml"
     dotenv = private_root / ".env"
