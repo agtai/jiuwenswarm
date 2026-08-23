@@ -580,7 +580,7 @@ async def test_replacement_turn_supersedes_exact_round_and_answers() -> None:
 async def test_settled_generation_still_admits_the_speech_as_next_turn() -> None:
     lower = SequencedFormalAdapter(rounds=2)
     history = RecordingHistoryWriter()
-    current, _harness = build_runtime(lower, history)
+    current, harness = build_runtime(lower, history)
     await open_runtime(current)
 
     first = await submit_turn(current, index=1)
@@ -604,6 +604,11 @@ async def test_settled_generation_still_admits_the_speech_as_next_turn() -> None
         is GenerationInterruptionFenceStatus.ALREADY_SETTLED
     )
     assert second.superseded.fence_reason == "RESPONSE_ALREADY_TERMINAL"
+    # A settled target has no fence to accompany, so nothing may be cancelled.
+    assert second.superseded.round_cancel is None
+    assert second.superseded.round_cancel_reason == "GENERATION_ALREADY_SETTLED"
+    assert harness.cancel_commands == []
+    assert current.snapshot().harness.cancel_effects == 0
 
     await asyncio.wait_for(lower.entered[1].wait(), timeout=1)
     lower.gates[1].set()
@@ -682,6 +687,76 @@ async def test_task_notification_still_speaks_after_a_generation_interruption() 
 
     lower.tails[0].set()
     lower.gates[0].set()
+    await shutdown(current)
+
+
+@pytest.mark.asyncio
+async def test_stale_target_cancels_nothing_and_leaves_its_successor_running() -> None:
+    """Speech aimed at an already replaced answer must not touch any round.
+
+    The predecessor is already fenced by CR, and the successor is the answer the
+    speaker is actually waiting for.  Cancelling either one would be a cancel
+    nobody asked for, so a stale target is admitted as an ordinary next turn
+    with zero cancellation effect.
+    """
+
+    lower = SequencedFormalAdapter(rounds=2, hold_final=True)
+    history = RecordingHistoryWriter()
+    current, harness = build_runtime(lower, history)
+    await open_runtime(current)
+
+    first = await submit_turn(current, index=1)
+    await asyncio.wait_for(lower.entered[0].wait(), timeout=1)
+    await drain_until_generating(current, first.response_ref)
+
+    # No supersedes: CR replaces the predecessor on its own, so the first
+    # response becomes stale rather than settled.
+    second = await submit_turn(current, index=2)
+    assert second.superseded is None
+    assert response_record(current, first.response_ref).fenced is True
+    assert response_record(current, first.response_ref).state is not ResponseState.TERMINAL
+
+    interruption = await current.interrupt_generation(
+        action_id="interrupt-stale", ref=first.response_ref
+    )
+    assert (
+        interruption.fence_status is GenerationInterruptionFenceStatus.ALREADY_SETTLED
+    )
+    assert interruption.fence_reason == "STALE_RESPONSE_OUTPUT"
+    assert interruption.fence is None
+    assert interruption.round_cancel is None
+    assert interruption.round_cancel_reason == "GENERATION_ALREADY_SETTLED"
+    assert harness.cancel_commands == []
+    assert current.snapshot().harness.cancel_effects == 0
+
+    # The successor was never cancelled and still answers normally.
+    await asyncio.wait_for(lower.entered[1].wait(), timeout=1)
+    lower.gates[1].set()
+    unit = None
+    for _ in range(12):
+        published = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if (
+            published.presentation_unit is not None
+            and published.response_ref == second.response_ref
+        ):
+            unit = published.presentation_unit
+            break
+    assert unit is not None
+    accepted = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=second.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=unit.unit_id,
+            contiguous_cursor=unit.seq,
+            presented_at="2026-08-23T08:00:03Z",
+        )
+    )
+    assert accepted.accepted is True
+    assert lower.cancelled_requests == []
+
+    lower.gates[0].set()
+    lower.tails[0].set()
+    lower.tails[1].set()
     await shutdown(current)
 
 

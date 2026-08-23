@@ -2873,9 +2873,13 @@ class AgentConversationRuntime:
         the exact conversational round; a Task started by that round keeps its
         own authority and is never cancelled here.
 
-        A target that already settled on its own is not an error.  The result
-        reports ``ALREADY_SETTLED`` so the caller can still admit the speech as
-        an ordinary next turn instead of discarding what the user said.
+        A target that already settled on its own, or that a successor already
+        replaced, is not an error.  The result reports ``ALREADY_SETTLED`` so
+        the caller can still admit the speech as an ordinary next turn instead
+        of discarding what the user said, and no cancellation of any kind is
+        issued in that case: a cancellation is only ever the companion of a
+        fence this call actually applied, so neither the settled round nor the
+        successor that replaced it is touched.
         """
 
         self._require_started()
@@ -2920,14 +2924,25 @@ class AgentConversationRuntime:
                     error.reason, str(error), error.code
                 ) from error
             fence_reason = error.reason
-        status = (
-            GenerationInterruptionFenceStatus.FENCED
-            if fence is not None
-            else GenerationInterruptionFenceStatus.ALREADY_SETTLED
-        )
+        handle = None if state is None else state.handle
+        if fence is None:
+            # The target settled on its own or a successor already replaced it.
+            # Speech that arrives now is an ordinary next turn, so it must leave
+            # every existing and successor round untouched: a cancellation is
+            # only ever the companion of a fence this call actually applied.
+            return AgentGenerationInterruption(
+                action_id=action_id,
+                response_ref=ref,
+                fence_status=GenerationInterruptionFenceStatus.ALREADY_SETTLED,
+                fence=None,
+                fence_reason=fence_reason,
+                request_id=None if state is None else state.request_id,
+                round_id=None if handle is None else handle.round_id,
+                round_cancel=None,
+                round_cancel_reason="GENERATION_ALREADY_SETTLED",
+            )
         round_cancel: RoundCancelResult | None = None
         round_cancel_reason: str | None = None
-        handle = None if state is None else state.handle
         if handle is None:
             round_cancel_reason = "NO_AGENT_ROUND"
         else:
@@ -2940,7 +2955,7 @@ class AgentConversationRuntime:
         return AgentGenerationInterruption(
             action_id=action_id,
             response_ref=ref,
-            fence_status=status,
+            fence_status=GenerationInterruptionFenceStatus.FENCED,
             fence=fence,
             fence_reason=fence_reason,
             request_id=None if state is None else state.request_id,

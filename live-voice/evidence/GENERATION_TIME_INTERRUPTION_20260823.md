@@ -8,6 +8,12 @@ generated can now stop or replace that exact answer.
 This record is implementation and automated-verification evidence only. It
 grants no physical, latency, controlled-candidate or product-readiness credit.
 
+An independent review of the first implementation returned **FAIL — C0 / I2 /
+M0**. Both Important findings are repaired below (§2.6), each with the direct
+oracle whose absence let them through. The review also found a known limitation
+that only generation-time listening makes reachable; it is recorded in §5 as a
+flag-on blocker rather than repaired here.
+
 ## 1. The defect this closes
 
 [STATUS.md](../STATUS.md) recorded, under Conversation Runtime, that *hands-free
@@ -83,7 +89,28 @@ because the speaker asked for that answer to stop existing.
   the time the utterance ends.
 * The P2 notification poll now stays active for that one listening window.
 
-### 2.5 Feature flag
+### 2.5 Repairs from the independent review
+
+* **Stale or settled targets now cancel nothing.** The first implementation
+  applied `round.cancel` even when the CR fence had not been applied, so a
+  terminal target still sent one cancel and a stale target had its cancel
+  *accepted* -- a cancellation nobody asked for. Cancellation is now strictly
+  the companion of a fence this call actually applied; a settled or replaced
+  target returns `ALREADY_SETTLED` with `round_cancel=None` and
+  `round_cancel_reason="GENERATION_ALREADY_SETTLED"`. The existing settled-target
+  test never asserted a cancel count, which is exactly why this passed review-free;
+  it now asserts zero, and a new stale-target case asserts zero cancellation and
+  that the successor still answers.
+* **A late interruption can no longer touch a successor Session.** The success
+  and failure callbacks only checked `mountedRef`, so an interruption still on
+  the wire when the user switched Session could clear or fail the successor
+  route state. They now require the exact activation owner, Session and voice
+  loop generation. A pending interruption is additionally part of the capture
+  authority barrier, the close recovery barrier, the cleanup precondition, the
+  turn/text admission guards and `settleRetainedP2Operations`, which settles it
+  through the exact owner that issued it.
+
+### 2.6 Feature flag
 
 `VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` is **default-off**. Enabling
 it opens a microphone between turn submission and first audio, which changes
@@ -95,12 +122,12 @@ the unchanged 466-case cumulative suite demonstrates.
 
 | Suite | Result |
 |---|---|
-| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 12 passed |
+| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 13 passed |
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 72 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
-| Frontend `npm run test:live-voice-integrated-web` | 472 passed (466 pre-existing + 6 new) |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3884 passed, 11 failed — all 11 pre-existing (see §5) |
+| Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing on `c31e85ade` + 8 new) |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3884 passed, 11 failed — all 11 pre-existing (see §5); measured on the pre-rebase tree and unchanged in scope by the rebase |
 
 ### 3.1 Mutation checks
 
@@ -122,6 +149,10 @@ A self-review after the first implementation found the CR-B interruption replay
 ledger unbounded. Unlike barge-in, which a user triggers by control action, an
 interruption ledger grows with conversation length, so it is now oldest-first
 bounded at 256 with a test that asserts the bound directly.
+
+A second self-review found that the first repair of the stale/terminal cancel
+semantics never reached disk — the new zero-cancel assertions caught it on the
+next run, which is the behaviour those assertions exist for.
 
 Frontend (mounted panel suite, baseline green):
 
@@ -146,15 +177,28 @@ for intent clarity and is recorded here as uncovered rather than claimed.
 | Concurrent owner | Covered by |
 |---|---|
 | Exit | Backend `test_exit_owns_the_interaction_and_refuses_a_later_interruption`; frontend `mounted Exit during generation-time listening…` |
-| Session switch | Frontend `mounted Session switch during generation-time listening…` |
+| Session switch | Frontend `mounted Session switch during generation-time listening…`, which also asserts a retired Session stops polling notifications, plus `mounted in-flight interruption from a retired Session cannot touch its successor`, which holds a rejected interruption on the wire across the switch and asserts the successor never sees its failure or reason |
 | Browser capture ownership | Ownership is owned by `useProductVoiceBrowserOwnership` in the parent ChatPanel, which surrenders by driving the same `close()` the Exit case exercises, so the Exit coverage above is the ownership coverage. Within the panel, generation listening starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture; only the exact bound response relaxes that barrier. No dedicated cross-tab takeover × generation-window case was written |
-| Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, and exactly one `round.cancel` was issued |
+| Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification survives a generation interruption without being spoken over it` — the announcement is neither dropped nor acknowledged unspoken, and the fenced answer stays silent |
 
-A mounted frontend Task-notification journey was attempted and removed: it needs
-the full P3 progress-route bootstrap to reach the terminal-announcement state,
-which is out of this packet. The backend case above is the retained coverage.
+## 5. Known limitation that blocks turning the flag on
 
-## 5. Explicit non-claims
+A Task terminal announcement that arrives while the speaker is mid-interruption
+cannot be spoken without talking over them. Playout is now refused rather than
+attempted, so the route no longer fails on the speaker, but the existing Task
+announcement recovery still rebuilds the P1 route to retry, and that rebuild
+discards the utterance in progress.
+
+Generation-time listening is what makes this reachable at all: before it, no
+capture was open while an answer was outstanding. Repairing it means teaching
+Task announcement recovery to wait for the speaker instead of rebuilding, which
+belongs to the cross-load arbitration work rather than to this boundary.
+
+The frontend case above asserts the current shape of this limitation on purpose,
+so it fails loudly when the behaviour is fixed and cannot be forgotten. **The
+flag must not be turned on until this is repaired.**
+
+## 6. Explicit non-claims
 
 * No physical microphone/speaker run was performed for this packet. No latency
   measurement is claimed, including for the generation listening window itself.

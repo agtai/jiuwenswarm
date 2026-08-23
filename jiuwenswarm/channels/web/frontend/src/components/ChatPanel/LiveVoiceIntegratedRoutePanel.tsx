@@ -2247,16 +2247,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
-      // Nobody spoke during generation, so close that listening window before
-      // playout. P1 refuses Agent playout while a capture is still open.
-      void releaseSilentGenerationCapture()
-        .then(() =>
-          voiceOwner.playAgentText({
+      // Clear a silent listening window before playout, and yield entirely to a
+      // speaker who is mid-utterance instead of failing the route on them.
+      void settleCaptureBeforePlayout()
+        .then(readiness => {
+          if (readiness !== 'ready') {
+            throw Object.assign(new Error('playout yielded to an active speaker'), {
+              reason: 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER',
+            });
+          }
+          return voiceOwner.playAgentText({
             response: disposition.response,
             unit_id: disposition.unit_id,
             text: disposition.text,
-          }),
-        )
+          });
+        })
         .then(() => {
           if (!isCurrentVoicePlayout()) {
             presentationAttempt.markPlayoutSettled();
@@ -2430,6 +2435,25 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (owner.hasPendingBargeIn()) throw error;
         if (pendingBargeInRef.current === pendingBargeIn) {
           pendingBargeInRef.current = null;
+        }
+      }
+    }
+    const pendingGenerationInterrupt = pendingGenerationInterruptRef.current;
+    if (pendingGenerationInterrupt?.owner === owner) {
+      // Settled through the exact owner that issued it. `is_current` keeps a
+      // retired Session or activation from resurrecting it against a successor.
+      try {
+        await retryRetainedProductOperation({
+          operation: () => owner.interruptGeneration(pendingGenerationInterrupt.input),
+          is_current: isCurrent,
+        });
+        if (pendingGenerationInterruptRef.current === pendingGenerationInterrupt) {
+          pendingGenerationInterruptRef.current = null;
+        }
+      } catch (error) {
+        if (owner.hasPendingGenerationInterrupt()) throw error;
+        if (pendingGenerationInterruptRef.current === pendingGenerationInterrupt) {
+          pendingGenerationInterruptRef.current = null;
         }
       }
     }
@@ -3494,10 +3518,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingProductTurnRef.current?.owner === closing ||
         pendingPresentationAttemptRef.current?.owner === closing ||
         pendingBargeInRef.current?.owner === closing ||
+        pendingGenerationInterruptRef.current?.owner === closing ||
         closing.hasPendingSubmission() ||
         closing.hasPendingPresentationAck() ||
         closing.hasPendingPresentationFailure() ||
-        closing.hasPendingBargeIn(),
+        closing.hasPendingBargeIn() ||
+        closing.hasPendingGenerationInterrupt(),
       );
       if (recoveryBarrier) {
         if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
@@ -3735,7 +3761,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             !retained.hasPendingSubmission() &&
             !retained.hasPendingPresentationAck() &&
             !retained.hasPendingPresentationFailure() &&
-            !retained.hasPendingBargeIn()
+            !retained.hasPendingBargeIn() &&
+            !retained.hasPendingGenerationInterrupt()
           ) {
             if (activationOwnerRef.current === retained) {
               activationOwnerRef.current = null;
@@ -4094,10 +4121,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingPresentationAck !== null ||
         pendingPresentationAttemptRef.current !== null ||
         pendingBargeInRef.current !== null ||
+        pendingGenerationInterruptRef.current !== null ||
         owner.hasPendingSubmission() ||
         owner.hasPendingPresentationAck() ||
         owner.hasPendingPresentationFailure() ||
-        owner.hasPendingBargeIn()
+        owner.hasPendingBargeIn() ||
+        owner.hasPendingGenerationInterrupt()
       ) {
         setProductTextStatus('failed');
         return null;
@@ -4475,7 +4504,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       Boolean(terminalNotificationCheckRequiredRef.current && activationOwnerRef.current?.hasPendingNotification()) ||
       Boolean(activationOwnerRef.current?.hasPendingPresentationAck()) ||
       Boolean(activationOwnerRef.current?.hasPendingPresentationFailure()) ||
-      Boolean(activationOwnerRef.current?.hasPendingBargeIn());
+      Boolean(activationOwnerRef.current?.hasPendingBargeIn()) ||
+      Boolean(activationOwnerRef.current?.hasPendingGenerationInterrupt());
     const isCurrentBinding = () => {
       const activation = activationOwnerRef.current?.snapshot();
       const current = activation?.binding;
@@ -5039,6 +5069,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       response_generation: fence.response_generation,
     });
     const pending = Object.freeze({ owner: p2Owner, input });
+    const loopGeneration = retained.loop_generation;
+    // An interruption can settle long after the route that issued it stopped
+    // owning the foreground: the user can Exit, switch Session or hand the
+    // microphone to another tab while it is still on the wire. Its outcome may
+    // therefore only touch UI state that still belongs to that exact activation,
+    // Session and voice loop; a successor must never inherit it.
+    const ownsInterruptionOutcome = () =>
+      mountedRef.current &&
+      activationOwnerRef.current === p2Owner &&
+      activeSessionRef.current === fence.session_id &&
+      voiceLoopEnabledRef.current &&
+      voiceLoopGenerationRef.current === loopGeneration;
     pendingGenerationInterruptRef.current = pending;
     // Recorded before the request leaves, so an answer that crosses it on the
     // wire is refused by identity even if the fence has not settled yet.
@@ -5052,7 +5094,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingForegroundPresentationRef.current = null;
       }
       if (generationCaptureRef.current === retained) generationCaptureRef.current = null;
-      if (mountedRef.current) {
+      if (ownsInterruptionOutcome()) {
         // The fenced answer is gone and the replacement utterance is still
         // being captured, so the route is waiting for input again, not for a
         // response that can no longer arrive.
@@ -5061,7 +5103,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setProductTextReason(null);
       }
     } catch (error) {
-      if (mountedRef.current) {
+      if (ownsInterruptionOutcome()) {
         setProductTextReason(stableProductTextReason(error, 'PRODUCT_GENERATION_INTERRUPT_RECOVERY_REQUIRED'));
         setProductTextStatus('failed');
       }
@@ -5102,32 +5144,39 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   /**
-   * Close a silent generation-time listening window before the answer plays.
+   * Decide whether an answer may be spoken right now, and clear the way if so.
    *
-   * A capture that already observed provider speech-start is never discarded:
-   * it owns a real utterance and its interruption is already in flight.
+   * A silent generation-time listening window is released, because nobody is
+   * speaking into it. A capture that already observed provider speech-start is
+   * never discarded: it owns a real utterance. In that case the answer is not
+   * handed to P1 at all -- asking P1 to play over a live capture fails the whole
+   * route and would throw away the words the user is in the middle of saying.
+   * The caller treats `speaker_active` as an ordinary unplayed presentation, so
+   * Task notifications keep their existing retained-recovery path.
    */
-  const releaseSilentGenerationCapture = async (): Promise<void> => {
+  const settleCaptureBeforePlayout = async (): Promise<'ready' | 'speaker_active'> => {
     const retained = generationCaptureRef.current;
-    if (retained === null) return;
-    // An answer can arrive while that listening window is still being opened.
-    // Join the exact start first, otherwise a half-started capture would stay
-    // open and P1 would refuse the playout it is about to be asked for.
-    const startInFlight = pendingP1VoiceStartRef.current?.promise;
-    if (startInFlight !== undefined) await startInFlight.catch(() => undefined);
-    if (generationCaptureRef.current !== retained) return;
+    if (retained !== null) {
+      // An answer can arrive while that window is still being opened. Join the
+      // exact start first, otherwise a half-started capture would stay open.
+      const startInFlight = pendingP1VoiceStartRef.current?.promise;
+      if (startInFlight !== undefined) await startInFlight.catch(() => undefined);
+      if (generationCaptureRef.current === retained) generationCaptureRef.current = null;
+    }
     const owner = p1VoiceOwnerRef.current;
-    generationCaptureRef.current = null;
-    if (owner === null || owner.status().status !== 'capturing') return;
-    if (owner.captureDiagnostics().provider_speech_start_observed) return;
+    if (owner === null) return 'ready';
+    if (owner.status().status !== 'capturing') {
+      return ['starting', 'recognizing'].includes(owner.status().status) ? 'speaker_active' : 'ready';
+    }
+    if (owner.captureDiagnostics().provider_speech_start_observed) return 'speaker_active';
     try {
       await owner.abandonCapture('formal_generation_listening_released');
     } catch {
       // The owner publishes a content-free reason and retains cleanup.
     }
-    if (p1VoiceCaptureBindingRef.current !== null && owner.status().status !== 'capturing') {
-      p1VoiceCaptureBindingRef.current = null;
-    }
+    if (owner.status().status === 'capturing') return 'speaker_active';
+    if (p1VoiceCaptureBindingRef.current !== null) p1VoiceCaptureBindingRef.current = null;
+    return 'ready';
   };
 
   const commitRecognizedVoiceTaskOrigin = async (): Promise<ProductVoiceTaskOrigin | null> => {
@@ -5145,10 +5194,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationBinding === null ||
       pendingProductTurnRef.current !== null ||
       pendingBargeInRef.current !== null ||
+      pendingGenerationInterruptRef.current !== null ||
       owner.hasPendingSubmission() ||
       owner.hasPendingPresentationAck() ||
       owner.hasPendingPresentationFailure() ||
-      owner.hasPendingBargeIn()
+      owner.hasPendingBargeIn() ||
+      owner.hasPendingGenerationInterrupt()
     )
       return null;
     productTurnSequenceRef.current += 1;
@@ -6017,10 +6068,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     unifiedInputOwnerRef.current?.hasPending() ||
     pendingPresentationAttemptRef.current ||
     pendingBargeInRef.current ||
+    pendingGenerationInterruptRef.current ||
     activationOwnerRef.current?.hasPendingSubmission() ||
     activationOwnerRef.current?.hasPendingPresentationAck() ||
     activationOwnerRef.current?.hasPendingPresentationFailure() ||
-    activationOwnerRef.current?.hasPendingBargeIn(),
+    activationOwnerRef.current?.hasPendingBargeIn() ||
+    activationOwnerRef.current?.hasPendingGenerationInterrupt(),
   );
   const productOperationRetained = Boolean(recognizedSpeechConfirmation || editedVoiceDraftConfirmation || productTextTransportRetained);
   const productVoiceAvailable = FEATURE_LIVE_VOICE_INTEGRATED_P1 && props.isConnected && p2Activation.status === 'active';
@@ -6031,10 +6084,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
+      pendingGenerationInterruptRef.current ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
-      owner?.hasPendingBargeIn()
+      owner?.hasPendingBargeIn() ||
+      owner?.hasPendingGenerationInterrupt()
     )
       return;
     updateRecognizedSpeechConfirmation(null);
@@ -6051,10 +6106,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
+      pendingGenerationInterruptRef.current ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
       owner?.hasPendingBargeIn() ||
+      owner?.hasPendingGenerationInterrupt() ||
       taskIntentSnapshot.retained_transport
     )
       return;

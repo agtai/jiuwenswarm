@@ -11176,6 +11176,12 @@ function generationInterruptResponder(options) {
     if (method === 'live_voice.composition.p2.interrupt_generation') {
       state.interruptCalls.push({ ...params });
       if (state.interruptGate) await state.interruptGate;
+      if (state.interruptRejection) {
+        throw Object.assign(new Error('generation interruption was rejected'), {
+          code: 'CONFLICT',
+          reason: state.interruptRejection,
+        });
+      }
       return {
         request_id: options_.requestId,
         ok: true,
@@ -11668,6 +11674,103 @@ test('mounted fenced generation answer stays silent even when no replacement tur
   }
 });
 
+async function driveGenerationListening(i18n, sessionId, responder, browser, extraProps) {
+  const renderer = create(
+    mountedGenerationInterruptElement(i18n, sessionId, responder.request, true, extraProps),
+  );
+  await waitForMounted(
+    () => extraProps.productVoiceControlRef.current !== null && extraProps.states.at(-1)?.available === true,
+    'Live Voice did not become available',
+  );
+  void extraProps.productVoiceControlRef.current.start();
+  await waitForMounted(() => extraProps.states.at(-1)?.p1_status === 'starting', 'first capture did not start');
+  await browser.emitFirstFrame();
+  await waitForMounted(() => extraProps.states.at(-1)?.p1_status === 'capturing', 'first capture did not listen');
+  await browser.emitSpeechEndOfTurn();
+  await waitForMounted(() => responder.submits.length === 1, 'the first utterance was not auto-submitted');
+  await waitForMounted(
+    () => extraProps.states.at(-1)?.p1_status === 'starting' && extraProps.states.at(-1)?.text_status === 'waiting',
+    'generation-time listening did not open',
+  );
+  await browser.emitFirstFrame();
+  await waitForMounted(() => extraProps.states.at(-1)?.p1_status === 'capturing', 'generation-time listening did not reach capturing');
+  return renderer;
+}
+
+test('mounted in-flight interruption from a retired Session cannot touch its successor', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-inflight-a';
+  const successorSessionId = 'mounted-generation-inflight-b';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  // The interruption is rejected, which is the outcome that would otherwise
+  // publish a recovery error and a failed status onto whatever route is mounted
+  // when it finally settles.
+  let releaseInterrupt = () => undefined;
+  responder.interruptGate = new Promise(resolve => {
+    releaseInterrupt = resolve;
+  });
+  responder.interruptRejection = 'PRODUCT_P2_GENERATION_INTERRUPT_FAILED';
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+    });
+
+    // Session A is retired while its interruption is still on the wire.
+    await act(async () => {
+      renderer.update(
+        mountedGenerationInterruptElement(i18n, successorSessionId, responder.request, true, extraProps),
+      );
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    const successorStatesBefore = states.length;
+
+    // The retired request now fails. Session B must observe nothing at all.
+    await act(async () => {
+      releaseInterrupt();
+      await new Promise(resolve => setTimeout(resolve, 60));
+    });
+    const successorStates = states.slice(successorStatesBefore);
+    assert.equal(
+      successorStates.some(state => state.text_status === 'failed'),
+      false,
+      `a retired interruption failure reached the successor; states=${successorStates
+        .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`)
+        .join(' | ')}`,
+    );
+    assert.equal(
+      successorStates.some(state => state.text_reason === 'PRODUCT_GENERATION_INTERRUPT_RECOVERY_REQUIRED'),
+      false,
+      'a retired interruption reason reached the successor',
+    );
+    assert.equal(states.at(-1)?.text_status !== 'failed', true);
+    assert.equal(responder.interruptCalls.length, 1);
+    assert.equal(responder.submits.length, 1, 'a retired Session must not submit a replacement turn');
+  } finally {
+    releaseInterrupt();
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted Session switch during generation-time listening abandons it without interruption or submit', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-switch-session';
@@ -11722,13 +11825,109 @@ test('mounted Session switch during generation-time listening abandons it withou
       await new Promise(resolve => setTimeout(resolve, 30));
     });
     const submitsAfterSwitch = responder.submits.length;
+    const retiredPolls = () =>
+      responder.calls.filter(
+        call => call.method === 'live_voice.composition.p2.notification.next' && call.params.session_id === sessionId,
+      ).length;
+    const retiredPollsAfterSwitch = retiredPolls();
     await act(async () => {
       await browser.emitSpeechStart();
       await new Promise(resolve => setTimeout(resolve, 40));
     });
     assert.equal(responder.interruptCalls.length, 0, 'a retired Session must not interrupt anything');
     assert.equal(responder.submits.length, submitsAfterSwitch, 'a retired Session must not submit a replacement turn');
+    // The generation-time listening window is the one capture that keeps the
+    // notification poll alive; a retired Session must not keep that privilege.
+    assert.equal(retiredPolls(), retiredPollsAfterSwitch, 'a retired Session kept polling notifications');
     assert.equal(responder.heldResponses.size, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted Task notification survives a generation interruption without being spoken over it', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-task-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '算了，先告诉我现在几点。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '现在是下午三点。',
+  });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+    });
+
+    // A background Task reports its terminal result on its own response while
+    // the speaker is still mid-utterance. It belongs to Task authority, not to
+    // the fenced conversational answer, so it must neither be discarded nor
+    // spoken over the person who is talking.
+    const taskResponse = {
+      interaction_id: responder.submits[0].params.interaction_id,
+      response_id: 'mounted-generation-task-response',
+      response_generation: 90,
+    };
+    await act(async () => {
+      responder.publishAgentAnswer(taskResponse, '后台任务已完成，结果已经准备好。', responder.submits[0].params, 'server.task_notification');
+      await new Promise(resolve => setTimeout(resolve, 60));
+    });
+    assert.equal(
+      responder.calls.filter(
+        call =>
+          call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === taskResponse.response_id,
+      ).length,
+      0,
+      'a Task notification that was never spoken must not be acknowledged',
+    );
+    // The notification is retained for recovery rather than dropped.
+    assert.equal(
+      states.some(state => state.terminal_announcement_state === 'recovering'),
+      true,
+      `the Task notification was silently dropped; states=${states
+        .slice(-10)
+        .map(state => `${state.p1_status}/${state.terminal_announcement_state}`)
+        .join(' | ')}`,
+    );
+    // KNOWN LIMITATION, asserted so it cannot be forgotten: a Task terminal
+    // announcement that lands while the speaker is mid-interruption still
+    // rebuilds the P1 route to retry, which discards the utterance in progress.
+    // Generation-time listening is what makes this reachable at all, so it is a
+    // blocker for turning the flag on, not for this implementation boundary.
+    // When Task announcement recovery learns to wait for the speaker instead,
+    // this assertion is expected to fail and must be replaced by the resumed
+    // announcement it will then produce.
+    assert.equal(
+      states.some(state => state.p1_status === 'cleanup_pending'),
+      true,
+      'the known Task-announcement-versus-speaker limitation changed shape',
+    );
+    // The fenced conversational answer stays silent throughout.
+    assert.equal(
+      responder.calls.filter(
+        call =>
+          call.method === 'live_voice.speech.synthesize_batch' &&
+          call.params.response.response_id === responder.submits[0].response.response_id,
+      ).length,
+      0,
+      'the fenced answer must still stay silent',
+    );
+    assert.equal(responder.interruptCalls.length, 1, 'Task truth must not trigger another interruption');
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
