@@ -138,6 +138,15 @@ L2/L3/L4, a quiesced single-writer migration and post-cutover canary Gate.
 Hermes remains an architecture-only reference with no copied code or dependency.
 This audit does not change capability status, priority or acceptance.
 
+The follow-up [OJ-G0 module conformance packet](reviews/OPENJIUWEN_G0_CONFORMANCE_PACKET_2026-08-23.md)
+now records `5 passed, 8 xfailed` on exact locked AgentCore source and prepares
+one local minimal AgentCore candidate (`d143b04b`) for the proven cross-team
+Task read/cancel scope defect. That candidate closes only OJ-G0-05 when loaded
+directly; it is not pushed, is not the installed dependency, and grants no
+Live Voice replacement, migration, product or deletion credit. Cancel/Tool
+relation, restart ownership, D1/D2 reconcile, event envelope and cursor/ACK
+gaps remain red.
+
 The detailed complete-P3 workload, P3alpha inheritance, package acceptance,
 critical path and parallel collision rules are defined in the
 [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md). That
