@@ -25,6 +25,7 @@ import {
 } from '../../features/live-voice/formal/productTextProgress';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+  PRODUCT_P2_PRESENTATION_ACK_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
   PRODUCT_P3_TASK_EVENTS_METHOD,
@@ -54,6 +55,7 @@ import {
   PRODUCT_P2_REFRESH_SERVER_STATE_LOST,
   ProductP2ActivationJournal,
   reconcileProductP2Predecessor,
+  reconcileRetiredProductP2PresentationAcks,
 } from '../../features/live-voice/formal/productP2ActivationJournal';
 import { inspectProductP3TaskTarget, persistProductP3TaskTarget } from '../../features/live-voice/formal/productP3TaskTargetJournal';
 import { claimProductP3ProgressGeneration } from '../../features/live-voice/formal/productP3ProgressGenerationJournal';
@@ -241,6 +243,17 @@ function sameProductPresentation(
     left.surface === right.surface &&
     left.unit_id === right.unit_id &&
     left.contiguous_cursor === right.contiguous_cursor
+  );
+}
+
+function durablePresentationAckMatches(
+  operation: Readonly<{ method: string; params: Readonly<Record<string, unknown>> }>,
+  input: ProductPresentationAckInput & { presented_at: string },
+): boolean {
+  return (
+    operation.method === PRODUCT_P2_PRESENTATION_ACK_METHOD &&
+    sameProductPresentation(operation.params as ProductPresentationAckInput, input) &&
+    operation.params.presented_at === input.presented_at
   );
 }
 
@@ -706,11 +719,13 @@ type PendingForegroundPresentationFence = Readonly<{
   interaction_id: string;
   activation_id: string;
   activation_generation: number;
-  turn_id: string;
-  commit_id: string;
   response_id: string;
   response_generation: number;
-  origin_voice_loop_generation: number;
+}>;
+
+type ProductP2NotificationAdmission = Readonly<{
+  voice_loop_generation: number;
+  foreground_presentation: PendingForegroundPresentationFence | null;
 }>;
 
 function foregroundPresentationFenceMatchesResponse(
@@ -1311,6 +1326,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     reason: null,
   });
   const [p2RecoveryEpoch, setP2RecoveryEpoch] = useState(0);
+  const [retiredPresentationAckRecoveryEpoch, setRetiredPresentationAckRecoveryEpoch] = useState(0);
   const [p2NotificationWakeEpoch, setP2NotificationWakeEpoch] = useState(0);
   const [p3Activation, setP3Activation] = useState<Readonly<ProductWebP3ProgressSnapshot>>({
     status: FEATURE_LIVE_VOICE_INTEGRATED_WEB ? 'idle' : 'disabled',
@@ -1410,6 +1426,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const progressDomRef = useRef<HTMLDivElement | null>(null);
   const activationOwnerRef = useRef<ProductWebP2ActivationOwner | null>(null);
   const p2ActivationJournalRef = useRef<ProductP2ActivationJournal | null>(null);
+  const retiredPresentationAckInFlightRef = useRef(new Set<string>());
+  const retiredPresentationAckOwnerRequestRef = useRef(new Map<ProductWebP2ActivationOwner, string>());
+  const retiredPresentationAckDrainIdentityRef = useRef(0);
   const p1VoiceOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
   const p1VoiceOwnerSessionRef = useRef<string | null>(null);
   const unifiedInputOwnerRef = useRef<ProductUnifiedCommittedInputOwner | null>(null);
@@ -1805,14 +1824,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationOwnerRef.current === owner &&
       ownerSession !== undefined &&
       activeSessionRef.current === ownerSession;
+    const isCurrentPresentationOwner = () =>
+      isCurrentOwner() &&
+      pendingPresentationAttemptRef.current === retained;
+    const canMutateCurrentPresentationUi = () =>
+      isCurrentPresentationOwner() && voiceLoopP2RefreshAfterGenerationRef.current === null;
+    let ackAttemptStarted = false;
+    const canAttemptPresentationAck = () =>
+      isCurrentPresentationOwner() &&
+      (voiceLoopP2RefreshAfterGenerationRef.current === null || !ackAttemptStarted);
     let settlement: Promise<void>;
     settlement = Promise.resolve()
       .then(() => retryRetainedProductOperation({
         operation: async () => {
+          ackAttemptStarted = true;
           try {
             return await owner.acknowledgePresentation(retained.input);
           } catch (error) {
-            if (isCurrentOwner() && pendingPresentationAttemptRef.current === retained && isRetriableProductOperationError(error)) {
+            if (canMutateCurrentPresentationUi() && isRetriableProductOperationError(error)) {
               const reason = stableProductTextReason(error, 'PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED');
               setProductTextReason(reason);
               setProductTextStatus('failed');
@@ -1827,16 +1856,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             throw error;
           }
         },
-        is_current: isCurrentOwner,
+        is_current: canAttemptPresentationAck,
       }))
       .then(() => {
         const currentPresentation = pendingPresentationAttemptRef.current;
         if (
-          mountedRef.current &&
-          activationOwnerRef.current === owner &&
+          isCurrentPresentationOwner() &&
           currentPresentation === retained &&
           sameProductPresentation(currentPresentation.input, retained.input)
         ) {
+          const mayMutateUi = canMutateCurrentPresentationUi();
+          pendingPresentationAttemptRef.current = null;
+          setPendingPresentationAck(null);
+          if (!mayMutateUi) return;
           const terminal = retained.task_notification;
           if (terminal !== null) {
             retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, retained.input.response_id);
@@ -1845,8 +1877,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             terminalAnnouncementSpeechOwnerRef.current = null;
             updateTerminalAnnouncementState('idle', null);
           }
-          pendingPresentationAttemptRef.current = null;
-          setPendingPresentationAck(null);
           setProductTextReason(null);
           setProductTextStatus('acknowledged');
           clearProductRecoveryDiagnostic({
@@ -1858,11 +1888,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
       })
       .catch(error => {
-        if (mountedRef.current && activationOwnerRef.current === owner && pendingPresentationAttemptRef.current === retained) {
+        if (isCurrentPresentationOwner()) {
+          const mayMutateUi = canMutateCurrentPresentationUi();
           const reason = stableProductTextReason(error, 'PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED');
           if (!owner.hasPendingPresentationAck()) {
             pendingPresentationAttemptRef.current = null;
             setPendingPresentationAck(null);
+            if (!mayMutateUi) return;
             if (isStaleProductResponseError(error)) {
               // A newer committed utterance already owns the response lane.
               // The predecessor ACK is definitively obsolete, not a voice
@@ -1900,7 +1932,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 response: retained.response,
               });
             }
-          } else {
+          } else if (mayMutateUi) {
             setProductTextReason(reason);
             setProductTextStatus('failed');
             publishProductRecoveryDiagnostic({
@@ -1916,6 +1948,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       })
       .finally(() => {
         if (retained.settlement === settlement) retained.settlement = undefined;
+        const retiredRequestId = retiredPresentationAckOwnerRequestRef.current.get(owner);
+        if (retiredRequestId !== undefined) {
+          retiredPresentationAckOwnerRequestRef.current.delete(owner);
+          retiredPresentationAckInFlightRef.current.delete(retiredRequestId);
+          if (mountedRef.current) setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
+        }
       });
     retained.settlement = settlement;
     return settlement;
@@ -1991,11 +2029,25 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     ],
   );
 
-  const adoptProductP2Notification = (owner: ProductWebP2ActivationOwner, notification: Readonly<Record<string, unknown>>) => {
+  const adoptProductP2Notification = (
+    owner: ProductWebP2ActivationOwner,
+    notification: Readonly<Record<string, unknown>>,
+    admission: ProductP2NotificationAdmission | null = null,
+  ) => {
     const response = recordValue(notification.response);
     const responseId = typeof response?.response_id === 'string' ? response.response_id : null;
     const disposition = classifyProductP2Notification(notification, responseId !== null && presentedProductResponsesRef.current.has(responseId));
     const presentationBinding = owner.snapshot().binding;
+    if (
+      admission !== null &&
+      (voiceLoopGenerationRef.current !== admission.voice_loop_generation ||
+        voiceLoopP2RefreshAfterGenerationRef.current !== null)
+    ) {
+      // Exit and P2 refresh retire the entire poll admission before any UI,
+      // history, TTS or ACK effect. The durable route may replay the
+      // notification to the exact successor owner after cleanup completes.
+      return disposition;
+    }
     if (disposition.kind === 'failed') {
       if (
         foregroundPresentationFenceMatchesResponse(
@@ -2045,6 +2097,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       disposition.response,
     );
     if (!disposition.task_notification) {
+      const expectedForegroundPresentation = admission?.foreground_presentation ?? null;
+      const requiresForegroundPresentation =
+        expectedForegroundPresentation !== null || foregroundPresentationFence !== null;
+      const exactForegroundPresentationRetained =
+        expectedForegroundPresentation === null || foregroundPresentationFence === expectedForegroundPresentation;
+      if (
+        requiresForegroundPresentation &&
+        (!exactForegroundPresentationRetained || !ownsForegroundPresentation)
+      ) {
+        // A foreground voice result is admitted only by the exact retained
+        // response fence. Text-only P2 presentations have no such fence and
+        // remain available while Live Voice is idle.
+        return disposition;
+      }
       if (ownsForegroundPresentation) pendingForegroundPresentationRef.current = null;
       retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
     }
@@ -2124,11 +2190,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setPendingPresentationAck(disposition.ack);
       void settleProductPresentationAck(presentationAttempt);
     };
-    const crossesExitedVoiceLoopGeneration =
-      ownsForegroundPresentation &&
-      foregroundPresentationFence !== null &&
-      foregroundPresentationFence.origin_voice_loop_generation !== voiceLoopGenerationRef.current;
-    const voiceOwner = crossesExitedVoiceLoopGeneration ? null : p1VoiceOwnerRef.current;
+    const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
       void voiceOwner
@@ -2783,7 +2845,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (
             activePresentation?.owner === previous &&
             activePresentation.settlement !== undefined &&
-            !(voiceLoopP2RefreshInFlightRef.current && voiceLoopP2RefreshAfterGenerationRef.current !== null)
+            voiceLoopP2RefreshAfterGenerationRef.current === null
           ) {
             // A live-page ACK owns its own single-flight settlement. The
             // durable checkpoint may rerender this recovery effect, but it is
@@ -2800,10 +2862,35 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
           let operationsSettled = false;
           try {
-            await settleRetainedP2Operations(previous, {
-              abandon_pending_notification:
-                voiceLoopP2RefreshInFlightRef.current && voiceLoopP2RefreshAfterGenerationRef.current !== null,
-            });
+            const pendingDurableOperation = journalReady ? journal!.snapshot().pending_operation : null;
+            const retiresPresentationAck = Boolean(
+              pendingDurableOperation?.method === PRODUCT_P2_PRESENTATION_ACK_METHOD &&
+                voiceLoopP2RefreshAfterGenerationRef.current !== null,
+            );
+            if (retiresPresentationAck && pendingDurableOperation !== null && snapshot.binding !== null && journalReady) {
+              const activePresentationMatchesRetiredAck = Boolean(
+                activePresentation?.owner === previous &&
+                  durablePresentationAckMatches(pendingDurableOperation, activePresentation.input),
+              );
+              const retainsOriginalInFlightRequest = Boolean(
+                activePresentationMatchesRetiredAck && activePresentation?.settlement !== undefined,
+              );
+              const retired = journal!.retirePendingPresentationAck(snapshot.binding);
+              if (retainsOriginalInFlightRequest) {
+                retiredPresentationAckInFlightRef.current.add(retired.request_id);
+                retiredPresentationAckOwnerRequestRef.current.set(previous, retired.request_id);
+              }
+              if (activePresentationMatchesRetiredAck && pendingPresentationAttemptRef.current === activePresentation) {
+                pendingPresentationAttemptRef.current = null;
+                setPendingPresentationAck(null);
+              }
+              setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
+            } else {
+              await settleRetainedP2Operations(previous, {
+                abandon_pending_notification:
+                  voiceLoopP2RefreshInFlightRef.current && voiceLoopP2RefreshAfterGenerationRef.current !== null,
+              });
+            }
             operationsSettled = true;
             if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosing(snapshot.binding);
@@ -2977,6 +3064,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         operation_retryable: isRetriableProductOperationError,
         is_current: isCurrentRun,
       });
+      if (isCurrentRun() && journal.snapshot().retired_presentation_acks.length > 0) {
+        setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
+      }
       if (!isCurrentRun()) {
         const staleOwner = recovery.owner;
         const staleBinding = staleOwner?.snapshot().binding ?? null;
@@ -3254,6 +3344,74 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [correlationId, p2JournalState, p2RecoveryEpoch, props.activeSessionId, props.agentRouteAvailable, props.isConnected]);
 
   useEffect(() => {
+    const identity = retiredPresentationAckDrainIdentityRef.current + 1;
+    retiredPresentationAckDrainIdentityRef.current = identity;
+    return () => {
+      if (retiredPresentationAckDrainIdentityRef.current === identity) {
+        retiredPresentationAckDrainIdentityRef.current += 1;
+      }
+    };
+  }, [p2JournalState, props.activeSessionId, props.agentRouteAvailable, props.isConnected]);
+
+  useEffect(() => {
+    let triggerSuperseded = false;
+    let retryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+    const journal = p2ActivationJournalRef.current;
+    const ownedSessionId = props.activeSessionId;
+    const drainIdentity = retiredPresentationAckDrainIdentityRef.current;
+    const isCurrent = () =>
+      Boolean(
+        mountedRef.current &&
+          retiredPresentationAckDrainIdentityRef.current === drainIdentity &&
+          ownedSessionId &&
+          activeSessionRef.current === ownedSessionId &&
+          p2ActivationJournalRef.current === journal &&
+          props.agentRouteAvailable &&
+          props.isConnected,
+      );
+    if (
+      journal === null ||
+      !ownedSessionId ||
+      p2JournalState?.session_id !== ownedSessionId ||
+      p2JournalState.status !== 'ready' ||
+      !props.agentRouteAvailable ||
+      !props.isConnected
+    ) {
+      return () => undefined;
+    }
+    void reconcileRetiredProductP2PresentationAcks({
+      journal,
+      replay_operation: operation =>
+        replayProductP2DurableOperation({
+          operation,
+          request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+        }),
+      operation_definitive: error =>
+        isDefinitiveProductOperationError(error) ||
+        ['PRODUCT_P2_ROUTE_NOT_FOUND', 'STALE_RESPONSE_OUTPUT', 'UNKNOWN_AGENT_RESPONSE'].includes(extractWebErrorReason(error) ?? ''),
+      operation_in_flight: operation => retiredPresentationAckInFlightRef.current.has(operation.request_id),
+      is_current: isCurrent,
+    }).then(result => {
+      if (!isCurrent() || result.kind !== 'retry') return;
+      if (triggerSuperseded) {
+        setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
+        return;
+      }
+      retryTimer = globalThis.setTimeout(() => setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1), 1000);
+    });
+    return () => {
+      triggerSuperseded = true;
+      if (retryTimer !== null) globalThis.clearTimeout(retryTimer);
+    };
+  }, [
+    p2JournalState,
+    props.activeSessionId,
+    props.agentRouteAvailable,
+    props.isConnected,
+    retiredPresentationAckRecoveryEpoch,
+  ]);
+
+  useEffect(() => {
     const journal = p2ActivationJournalRef.current;
     return () => {
       const closing = activationOwnerRef.current;
@@ -3391,11 +3549,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingPresentationAck !== null ||
       pendingPresentationAttemptRef.current !== null ||
       activeVoiceResponseRef.current !== null ||
+      voiceLoopP2RefreshAfterGenerationRef.current !== null ||
       (!['idle', 'fetching'].includes(terminalAnnouncementState) && !(terminalAnnouncementState === 'queued' && productTextStatus === 'waiting')) ||
       (terminalAnnouncementState === 'fetching' && !voiceLoopEnabledRef.current) ||
-      ['starting', 'capturing', 'recognizing', 'playing'].includes(p1VoiceStatus)
+      ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(p1VoiceStatus)
     )
       return;
+    const notificationAdmission: ProductP2NotificationAdmission = Object.freeze({
+      voice_loop_generation: voiceLoopGenerationRef.current,
+      foreground_presentation: pendingForegroundPresentationRef.current,
+    });
     let cancelled = false;
     const poll = async () => {
       while (!cancelled && activationOwnerRef.current === owner) {
@@ -3461,8 +3624,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             scheduleProductVoiceLoopCapture();
             return;
           }
-          if (cancelled || activationOwnerRef.current !== owner) return;
-          const disposition = adoptProductP2Notification(owner, outcome.notification);
+          if (
+            cancelled ||
+            activationOwnerRef.current !== owner ||
+            voiceLoopGenerationRef.current !== notificationAdmission.voice_loop_generation ||
+            voiceLoopP2RefreshAfterGenerationRef.current !== null
+          ) {
+            return;
+          }
+          const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
           // A presentation owns the P2 lane until its TEXT ACK settles.  Do
           // not let an immediately rejected TTS attempt race a successor
           // notification long-poll and strand that ACK behind it.
@@ -4093,11 +4263,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           interaction_id: binding.interaction_id,
           activation_id: binding.activation_id,
           activation_generation: binding.activation_generation,
-          turn_id: input.turn_id,
-          commit_id: input.commit_id,
           response_id: acceptedResponse.response_id,
           response_generation: acceptedResponse.response_generation as number,
-          origin_voice_loop_generation: originVoiceLoopGeneration,
         });
         const retainsCurrentSession = mountedRef.current && activeSessionRef.current === binding.session_id;
         const retainsOriginVoiceLoop =

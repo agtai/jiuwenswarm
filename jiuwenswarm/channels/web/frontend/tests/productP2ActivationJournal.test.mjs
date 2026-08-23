@@ -6,6 +6,7 @@ import {
   PRODUCT_P2_REFRESH_SERVER_STATE_LOST,
   ProductP2ActivationJournal,
   reconcileProductP2Predecessor,
+  reconcileRetiredProductP2PresentationAcks,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP2ActivationJournal.js';
 import { replayProductP2DurableOperation } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
 
@@ -329,9 +330,9 @@ test('v1 generic result-unknown upgrades in place and retains its zero-effect ba
     reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
   });
   assert.equal(callbacks, 0);
-  assert.equal(upgraded.snapshot().schema, 'live-voice.product-p2-activation-journal.v2');
+  assert.equal(upgraded.snapshot().schema, 'live-voice.product-p2-activation-journal.v3');
   assert.equal(upgraded.snapshot().phase, 'result_unknown');
-  assert.equal(JSON.parse(storage.values.get(key)).schema, 'live-voice.product-p2-activation-journal.v2');
+  assert.equal(JSON.parse(storage.values.get(key)).schema, 'live-voice.product-p2-activation-journal.v3');
 });
 
 test('v2 journal upgrades in place and retains its exact pending-operation recovery barrier', () => {
@@ -392,13 +393,37 @@ test('submit ACK and barge-in replay exact durable operation before activation c
     });
 
     assert.deepEqual(recovered, { kind: 'ready' });
-    assert.deepEqual(effects, [
-      ['operation', operation],
-      ['activate', binding],
-      ['close', binding],
-    ]);
+    assert.deepEqual(
+      effects,
+      expectedOperation === 'presentation.ack'
+        ? [
+            ['activate', binding],
+            ['close', binding],
+          ]
+        : [
+            ['operation', operation],
+            ['activate', binding],
+            ['close', binding],
+          ],
+    );
     assert.equal(refreshedPage.snapshot().phase, 'closed');
     assert.equal(refreshedPage.snapshot().pending_operation, null);
+    if (expectedOperation === 'presentation.ack') {
+      assert.deepEqual(refreshedPage.snapshot().retired_presentation_acks, [operation]);
+      const successor = refreshedPage.prepareSuccessor('page-after-retired-ack');
+      refreshedPage.markActive(successor);
+      const background = await reconcileRetiredProductP2PresentationAcks({
+        journal: refreshedPage,
+        replay_operation: async retained => effects.push(['operation', retained]),
+        operation_definitive: () => false,
+      });
+      assert.deepEqual(background, { kind: 'ready', retained: 0 });
+      assert.deepEqual(refreshedPage.snapshot().binding, successor);
+      assert.equal(refreshedPage.snapshot().phase, 'active');
+      assert.deepEqual(refreshedPage.snapshot().retired_presentation_acks, []);
+    } else {
+      assert.deepEqual(refreshedPage.snapshot().retired_presentation_acks, []);
+    }
   }
 });
 
@@ -565,7 +590,7 @@ test('same-tab Session switches allocate independent interaction and correlation
   assert.equal(restoredFirst.snapshot().last_generation, 1);
 });
 
-test('refresh drops a retained presentation ACK when the exact P2 route no longer exists', async () => {
+test('refresh activates a successor before a retired presentation ACK reports route-not-found', async () => {
   const storage = memoryStorage();
   const firstPage = openJournal(storage, 'client-missing-ack-route');
   const binding = firstPage.prepareSuccessor('page-missing-ack-route');
@@ -577,13 +602,9 @@ test('refresh drops a retained presentation ACK when the exact P2 route no longe
 
   const recovered = await reconcileProductP2Predecessor({
     journal: refreshedPage,
-    replay_operation: async retained => {
-      effects.push(['operation', retained.request_id]);
-      throw { code: 'NOT_FOUND', reason: 'PRODUCT_P2_ROUTE_NOT_FOUND' };
-    },
     activate_exact: async () => {
       effects.push(['activate']);
-      return { replayed: true };
+      return { replayed: false };
     },
     close_exact: async () => effects.push(['close']),
     error_reason: error => error?.reason,
@@ -592,13 +613,27 @@ test('refresh drops a retained presentation ACK when the exact P2 route no longe
   });
 
   assert.deepEqual(recovered, { kind: 'ready' });
-  assert.deepEqual(effects, [['operation', operation.request_id]]);
+  assert.deepEqual(effects, [['activate'], ['close']]);
   assert.equal(refreshedPage.snapshot().phase, 'closed');
   assert.equal(refreshedPage.snapshot().pending_operation, null);
-  assert.equal(refreshedPage.prepareSuccessor('page-after-missing-route').activation_generation, binding.activation_generation + 1);
+  assert.deepEqual(refreshedPage.snapshot().retired_presentation_acks, [operation]);
+  const successor = refreshedPage.prepareSuccessor('page-after-missing-route');
+  refreshedPage.markActive(successor);
+  const background = await reconcileRetiredProductP2PresentationAcks({
+    journal: refreshedPage,
+    replay_operation: async retained => {
+      effects.push(['operation', retained.request_id]);
+      throw { code: 'NOT_FOUND', reason: 'PRODUCT_P2_ROUTE_NOT_FOUND' };
+    },
+    operation_definitive: error => error?.code === 'NOT_FOUND',
+  });
+  assert.deepEqual(background, { kind: 'ready', retained: 0 });
+  assert.deepEqual(effects, [['activate'], ['close'], ['operation', operation.request_id]]);
+  assert.deepEqual(refreshedPage.snapshot().binding, successor);
+  assert.equal(refreshedPage.snapshot().phase, 'active');
 });
 
-test('refresh settles a retained presentation ACK rejected after its Agent response was superseded', async () => {
+test('refresh keeps a successor active when a retired presentation ACK is definitively rejected', async () => {
   const storage = memoryStorage();
   const firstPage = openJournal(storage, 'client-stale-ack-output');
   const binding = firstPage.prepareSuccessor('page-stale-ack-output');
@@ -610,10 +645,6 @@ test('refresh settles a retained presentation ACK rejected after its Agent respo
 
   const recovered = await reconcileProductP2Predecessor({
     journal: refreshedPage,
-    replay_operation: async retained => {
-      effects.push(['operation', retained.request_id]);
-      throw { code: 'STALE', reason: 'UNKNOWN_AGENT_RESPONSE' };
-    },
     activate_exact: async () => {
       effects.push(['activate']);
       return { replayed: true };
@@ -625,10 +656,301 @@ test('refresh settles a retained presentation ACK rejected after its Agent respo
   });
 
   assert.deepEqual(recovered, { kind: 'ready' });
-  assert.deepEqual(effects, [['operation', operation.request_id]]);
+  assert.deepEqual(effects, [['activate'], ['close']]);
   assert.equal(refreshedPage.snapshot().phase, 'closed');
   assert.equal(refreshedPage.snapshot().pending_operation, null);
-  assert.equal(refreshedPage.prepareSuccessor('page-after-stale-output').activation_generation, binding.activation_generation + 1);
+  const successor = refreshedPage.prepareSuccessor('page-after-stale-output');
+  refreshedPage.markActive(successor);
+  const background = await reconcileRetiredProductP2PresentationAcks({
+    journal: refreshedPage,
+    replay_operation: async retained => {
+      effects.push(['operation', retained.request_id]);
+      throw { code: 'STALE', reason: 'UNKNOWN_AGENT_RESPONSE' };
+    },
+    operation_definitive: error => error?.code === 'STALE',
+  });
+  assert.deepEqual(background, { kind: 'ready', retained: 0 });
+  assert.deepEqual(effects, [['activate'], ['close'], ['operation', operation.request_id]]);
+  assert.deepEqual(refreshedPage.snapshot().binding, successor);
+  assert.equal(refreshedPage.snapshot().phase, 'active');
+});
+
+test('retired presentation ACK timeout preserves one durable request without blocking the active successor', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage, 'client-retired-ack-timeout');
+  const predecessor = firstPage.prepareSuccessor('page-retired-ack-timeout');
+  firstPage.markActive(predecessor);
+  const operation = durableOperations(predecessor)[1];
+  firstPage.checkpointOperation(operation);
+  const refreshedPage = openJournal(storage, 'refresh-retired-ack-timeout');
+  assert.deepEqual(
+    await reconcileProductP2Predecessor({
+      journal: refreshedPage,
+      activate_exact: async () => ({ replayed: true }),
+      close_exact: async () => {},
+      error_reason: () => undefined,
+      activation_retryable: () => false,
+    }),
+    { kind: 'ready' },
+  );
+  const successor = refreshedPage.prepareSuccessor('page-retired-ack-successor');
+  refreshedPage.markActive(successor);
+  const requestIds = [];
+
+  const timedOut = await reconcileRetiredProductP2PresentationAcks({
+    journal: refreshedPage,
+    replay_operation: async retained => {
+      requestIds.push(retained.request_id);
+      throw { code: 'REQUEST_TIMEOUT' };
+    },
+    operation_definitive: () => false,
+  });
+
+  assert.deepEqual(timedOut, { kind: 'retry', retained: 1 });
+  assert.deepEqual(refreshedPage.snapshot().binding, successor);
+  assert.equal(refreshedPage.snapshot().phase, 'active');
+  assert.deepEqual(refreshedPage.snapshot().retired_presentation_acks, [operation]);
+
+  const settled = await reconcileRetiredProductP2PresentationAcks({
+    journal: refreshedPage,
+    replay_operation: async retained => {
+      requestIds.push(retained.request_id);
+      return { accepted: true };
+    },
+    operation_definitive: () => false,
+  });
+  assert.deepEqual(settled, { kind: 'ready', retained: 0 });
+  assert.deepEqual(requestIds, [operation.request_id, operation.request_id]);
+  assert.deepEqual(refreshedPage.snapshot().binding, successor);
+  assert.equal(refreshedPage.snapshot().phase, 'active');
+});
+
+test('authoritative accepted-false ACK response settles only the retired predecessor operation', async () => {
+  const storage = memoryStorage();
+  const journal = openJournal(storage, 'client-retired-ack-rejected');
+  const predecessor = journal.prepareSuccessor('page-retired-ack-rejected');
+  journal.markActive(predecessor);
+  const operation = durableOperations(predecessor)[1];
+  journal.checkpointOperation(operation);
+  journal.retirePendingPresentationAck(predecessor);
+  journal.markClosing(predecessor);
+  journal.markClosed(predecessor);
+  const successor = journal.prepareSuccessor('page-after-ack-rejected');
+  journal.markActive(successor);
+  let calls = 0;
+
+  const result = await reconcileRetiredProductP2PresentationAcks({
+    journal,
+    replay_operation: retained =>
+      replayProductP2DurableOperation({
+        operation: retained,
+        request: async (method, params, requestId) => {
+          calls += 1;
+          assert.equal(method, operation.method);
+          assert.equal(requestId, operation.request_id);
+          assert.deepEqual(params, operation.params);
+          return {
+            request_id: operation.request_id,
+            ok: true,
+            error: null,
+            result: {
+              status: 'presentation_acknowledged',
+              ...operation.params,
+              accepted: false,
+              replayed: false,
+              history_records_written: 0,
+              history_pending: false,
+            },
+          };
+        },
+      }),
+    operation_definitive: () => false,
+  });
+
+  assert.deepEqual(result, { kind: 'ready', retained: 0 });
+  assert.equal(calls, 1);
+  assert.deepEqual(journal.snapshot().binding, successor);
+  assert.equal(journal.snapshot().phase, 'active');
+  assert.deepEqual(journal.snapshot().retired_presentation_acks, []);
+});
+
+test('late predecessor ACK settlement preserves a successor ACK checkpoint byte-for-byte', () => {
+  const storage = memoryStorage();
+  const journal = openJournal(storage, 'client-overlapping-ack-settlement');
+  const predecessor = journal.prepareSuccessor('page-overlapping-ack-predecessor');
+  journal.markActive(predecessor);
+  const predecessorAck = durableOperations(predecessor)[1];
+  journal.checkpointOperation(predecessorAck);
+  journal.retirePendingPresentationAck(predecessor);
+  journal.markClosing(predecessor);
+  journal.markClosed(predecessor);
+
+  const successor = journal.prepareSuccessor('page-overlapping-ack-successor');
+  journal.markActive(successor);
+  const successorAck = {
+    ...durableOperations(successor)[1],
+    request_id: 'request-successor-ack',
+    params: {
+      ...durableOperations(successor)[1].params,
+      response_id: 'response-successor',
+      unit_id: 'unit-successor',
+    },
+  };
+  journal.checkpointOperation(successorAck);
+  const before = journal.snapshot();
+
+  journal.settleOperation(predecessorAck);
+
+  const after = journal.snapshot();
+  assert.deepEqual(after.binding, before.binding);
+  assert.equal(after.phase, 'operation_result_unknown');
+  assert.deepEqual(after.pending_operation, successorAck);
+  assert.deepEqual(after.retired_presentation_acks, []);
+  journal.settleOperation(successorAck);
+  assert.equal(journal.snapshot().phase, 'active');
+});
+
+test('retired presentation ACK settlement is isolated from a same-tab Session switch', async () => {
+  const storage = memoryStorage();
+  const oldSession = ProductP2ActivationJournal.open({
+    session_id: 'session-old',
+    client_instance_id: 'same-tab-client',
+    storage,
+  });
+  const oldBinding = oldSession.prepareSuccessor('page-old');
+  oldSession.markActive(oldBinding);
+  const oldOperation = durableOperations({ ...oldBinding, session_id: 'session-old' })[1];
+  oldSession.checkpointOperation(oldOperation);
+  oldSession.retirePendingPresentationAck(oldBinding);
+  oldSession.markClosing(oldBinding);
+  oldSession.markClosed(oldBinding);
+
+  const newSession = ProductP2ActivationJournal.open({
+    session_id: 'session-new',
+    client_instance_id: 'same-tab-client',
+    storage,
+  });
+  const newBinding = newSession.prepareSuccessor('page-new');
+  newSession.markActive(newBinding);
+  let releaseOldAck;
+  const oldSettlement = reconcileRetiredProductP2PresentationAcks({
+    journal: oldSession,
+    replay_operation: () =>
+      new Promise(resolve => {
+        releaseOldAck = resolve;
+      }),
+    operation_definitive: () => false,
+  });
+  await Promise.resolve();
+  assert.equal(typeof releaseOldAck, 'function');
+  assert.deepEqual(newSession.snapshot().binding, newBinding);
+  assert.equal(newSession.snapshot().phase, 'active');
+
+  releaseOldAck({ accepted: true });
+  assert.deepEqual(await oldSettlement, { kind: 'ready', retained: 0 });
+  assert.deepEqual(newSession.snapshot().binding, newBinding);
+  assert.equal(newSession.snapshot().phase, 'active');
+  assert.deepEqual(oldSession.snapshot().retired_presentation_acks, []);
+});
+
+test('retired presentation ACK storage is bounded and never evicts an unresolved predecessor', () => {
+  const storage = memoryStorage();
+  const journal = openJournal(storage, 'client-retired-ack-bound');
+  for (let index = 0; index < 16; index += 1) {
+    const binding = journal.prepareSuccessor(`page-retired-${index}`);
+    journal.markActive(binding);
+    const operation = {
+      ...durableOperations(binding)[1],
+      request_id: `request-retired-${index}`,
+      params: {
+        ...durableOperations(binding)[1].params,
+        response_id: `response-retired-${index}`,
+        unit_id: `unit-retired-${index}`,
+      },
+    };
+    journal.checkpointOperation(operation);
+    journal.retirePendingPresentationAck(binding);
+    journal.markClosing(binding);
+    journal.markClosed(binding);
+  }
+  const overflowBinding = journal.prepareSuccessor('page-retired-overflow');
+  journal.markActive(overflowBinding);
+  const overflowOperation = {
+    ...durableOperations(overflowBinding)[1],
+    request_id: 'request-retired-overflow',
+  };
+  journal.checkpointOperation(overflowOperation);
+  const before = journal.snapshot();
+
+  assert.throws(() => journal.retirePendingPresentationAck(overflowBinding), /bounded retired presentation ACK ledger is full/);
+  assert.deepEqual(journal.snapshot(), before);
+  assert.equal(journal.snapshot().retired_presentation_acks.length, 16);
+});
+
+test('retired presentation ACK parser rejects duplicate and future-generation durable authority', () => {
+  const storage = memoryStorage();
+  const journal = openJournal(storage, 'client-retired-ack-corrupt');
+  const binding = journal.prepareSuccessor('page-retired-ack-corrupt');
+  journal.markActive(binding);
+  const operation = durableOperations(binding)[1];
+  journal.checkpointOperation(operation);
+  journal.retirePendingPresentationAck(binding);
+  assert.throws(
+    () => journal.checkpointOperation({ ...operation, request_id: 'request-duplicate-retired-ack' }),
+    /presentation ACK is already retired/,
+  );
+  const [key] = storage.values.keys();
+  const valid = JSON.parse(storage.values.get(key));
+
+  const duplicateStorage = memoryStorage(new Map(storage.values));
+  duplicateStorage.values.set(
+    key,
+    JSON.stringify({
+      ...valid,
+      retired_presentation_acks: [
+        ...valid.retired_presentation_acks,
+        { ...operation, request_id: 'request-corrupt-duplicate' },
+      ],
+    }),
+  );
+  assert.throws(() => openJournal(duplicateStorage, 'duplicate-reader'), /retired presentation ACKs are inconsistent/);
+
+  const reusedRequestStorage = memoryStorage(new Map(storage.values));
+  reusedRequestStorage.values.set(
+    key,
+    JSON.stringify({
+      ...valid,
+      retired_presentation_acks: [
+        ...valid.retired_presentation_acks,
+        {
+          ...operation,
+          params: {
+            ...operation.params,
+            response_id: 'response-corrupt-reused-request',
+            unit_id: 'unit-corrupt-reused-request',
+          },
+        },
+      ],
+    }),
+  );
+  assert.throws(() => openJournal(reusedRequestStorage, 'reused-request-reader'), /retired presentation ACKs are inconsistent/);
+
+  const futureStorage = memoryStorage(new Map(storage.values));
+  futureStorage.values.set(
+    key,
+    JSON.stringify({
+      ...valid,
+      retired_presentation_acks: valid.retired_presentation_acks.map(retired => ({
+        ...retired,
+        params: {
+          ...retired.params,
+          activation_generation: valid.last_generation + 1,
+          activation_id: 'future-retired-activation',
+        },
+      })),
+    }),
+  );
+  assert.throws(() => openJournal(futureStorage, 'future-reader'), /retired presentation ACKs are inconsistent/);
 });
 
 test('foreign retained result keeps the journal pending and later recovery effects at zero', async () => {

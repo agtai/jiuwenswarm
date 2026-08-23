@@ -1646,6 +1646,31 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   );
 });
 
+test('foreground presentation fence keeps exact activation and response identity without superseded generation residue', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const fence = source.match(
+    /type PendingForegroundPresentationFence = Readonly<\{(?<fields>[\s\S]*?)\}>;/,
+  )?.groups?.fields;
+
+  assert.ok(fence);
+  for (const field of [
+    'session_id',
+    'correlation_id',
+    'interaction_id',
+    'activation_id',
+    'activation_generation',
+    'response_id',
+    'response_generation',
+  ]) {
+    assert.match(fence, new RegExp(`\\b${field}:`));
+  }
+  assert.doesNotMatch(fence, /\bturn_id:|\bcommit_id:|\borigin_voice_loop_generation:/);
+  assert.doesNotMatch(source, /\bcrossesExitedVoiceLoopGeneration\b/);
+  assert.match(source, /voiceLoopCaptureTimerRef/);
+  assert.match(source, /pendingForegroundPresentationRef\.current = null/);
+  assert.match(source, /retirePendingPresentationAck/);
+});
+
 test('ChatPanel mounts the production browser-ownership lifecycle used by the timing oracle', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
   const lifecycleSource = await readFile(

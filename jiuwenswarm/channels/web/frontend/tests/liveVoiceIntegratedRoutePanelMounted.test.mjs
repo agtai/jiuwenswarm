@@ -388,7 +388,12 @@ function pendingP2Journal(binding, operation) {
   };
 }
 
-function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUserMediaOverride = null, holdDownlinkDetach = false } = {}) {
+function installP1BrowserEnvironment({
+  mediaBinding = null,
+  getUserMedia: getUserMediaOverride = null,
+  holdDownlinkDetach = false,
+  closeAudioContext: closeAudioContextOverride = null,
+} = {}) {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
@@ -478,6 +483,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
     }
 
     async close() {
+      if (closeAudioContextOverride !== null) await closeAudioContextOverride();
       if (this.state !== 'closed') counts.closedAudioContexts += 1;
       this.state = 'closed';
     }
@@ -6210,7 +6216,7 @@ test('mounted P1 retains failed exact authority and blocks two user Start attemp
   }
 });
 
-test('mounted pending operation is checkpointed before replay and unmount performs zero close', async () => {
+test('mounted refresh retires a presentation ACK, opens a successor, and unmount closes only owned routes', async () => {
   const i18n = await createI18n();
   const values = new Map();
   const storage = {
@@ -6247,31 +6253,61 @@ test('mounted pending operation is checkpointed before replay and unmount perfor
       effects.push([method, params, options]);
       if (method === operation.method) {
         const checkpoint = JSON.parse(values.get(key));
-        assert.equal(checkpoint.phase, 'operation_reconciling');
-        assert.deepEqual(checkpoint.pending_operation, operation);
+        assert.deepEqual(checkpoint.retired_presentation_acks, [operation]);
         assert.equal(options.requestId, operation.request_id);
         return new Promise(() => {});
       }
-      throw new Error(`pending unmount must not call ${method}`);
+      if (method === 'live_voice.composition.p2.activate') {
+        return {
+          ok: true,
+          result: {
+            status: 'active',
+            ...params,
+            replayed: params.activation_generation === binding.activation_generation,
+          },
+        };
+      }
+      if (method === 'live_voice.composition.p2.close') {
+        return { ok: true, result: { status: 'closed', ...params } };
+      }
+      if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+        return new Promise(() => {});
+      }
+      throw new Error(`pending refresh must not call ${method}`);
     };
     await act(async () => {
       renderer = create(mountedP3Element(i18n, binding.session_id, request));
     });
     await act(async () => {
-      await waitForMounted(() => effects.filter(([method]) => method === operation.method).length === 1, 'pending operation did not begin exact replay');
+      await waitForMounted(
+        () => effects.some(([method, params]) => method === 'live_voice.composition.p2.activate' && params.activation_generation === 2),
+        'retired ACK blocked the refreshed successor activation',
+      );
+      await waitForMounted(() => effects.filter(([method]) => method === operation.method).length === 1, 'retired ACK did not begin exact background replay');
     });
     await act(async () => {
       renderer.unmount();
       renderer = null;
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await waitForMounted(
+        () => effects.some(([method, params]) => method === 'live_voice.composition.p2.close' && params.activation_generation === 2),
+        'unmount did not close the exact successor route',
+      );
     });
 
     assert.equal(effects.filter(([method]) => method === operation.method).length, 1);
-    assert.equal(
-      effects.some(([method]) => method === 'live_voice.composition.p2.activate' || method === 'live_voice.composition.p2.close'),
-      false,
+    assert.deepEqual(
+      effects.filter(([method]) => method === 'live_voice.composition.p2.activate').map(([, params]) => params.activation_generation),
+      [1, 2],
     );
-    assert.equal(JSON.parse(values.get(key)).pending_operation.request_id, operation.request_id);
+    assert.deepEqual(
+      effects.filter(([method]) => method === 'live_voice.composition.p2.close').map(([, params]) => params.activation_generation),
+      [1, 2],
+    );
+    const checkpoint = JSON.parse(values.get(key));
+    assert.equal(checkpoint.phase, 'closed');
+    assert.equal(checkpoint.pending_operation, null);
+    assert.deepEqual(checkpoint.retired_presentation_acks, [operation]);
+    assert.equal(checkpoint.binding.activation_generation, 2);
   } finally {
     if (renderer) renderer.unmount();
     restore();
@@ -8783,18 +8819,45 @@ test('mounted Exit fences a blocked start and immediate re-enable starts only th
   }
 });
 
-test('mounted Exit during a retained presentation ACK settles once before opening one P2 successor', async () => {
+test('mounted Exit preserves the wake for a cleanup-window ACK retired behind an active drainer', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-exit-pending-ack-session';
   const controlRef = { current: null };
   const states = [];
   const calls = [];
+  const projectedMessages = [];
   const notificationWaiters = [];
   const activateP2 = createMountedP2ActivationResponder();
   let activeMediaBinding = null;
   let releaseAck = null;
+  let releaseRetiredAck = null;
+  let releaseSuccessorAck = null;
+  let predecessorAckAttempts = 0;
+  let successorAckAttempts = 0;
+  let recognitionIndex = 0;
+  let firstAudioContextCloseStarted = false;
+  let releaseFirstAudioContextClose = null;
+  let secondAudioContextCloseStarted = false;
+  let releaseSecondAudioContextClose = null;
+  let audioContextCloseAttempts = 0;
   let renderer;
-  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const browser = installP1BrowserEnvironment({
+    mediaBinding: () => activeMediaBinding,
+    closeAudioContext: async () => {
+      audioContextCloseAttempts += 1;
+      if (audioContextCloseAttempts === 1) {
+        firstAudioContextCloseStarted = true;
+        await new Promise(resolve => {
+          releaseFirstAudioContextClose = resolve;
+        });
+      } else if (audioContextCloseAttempts === 2) {
+        secondAudioContextCloseStarted = true;
+        await new Promise(resolve => {
+          releaseSecondAudioContextClose = resolve;
+        });
+      }
+    },
+  });
 
   const request = async (method, params, options) => {
     calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
@@ -8806,8 +8869,18 @@ test('mounted Exit during a retained presentation ACK settles once before openin
       return new Promise(resolve => notificationWaiters.push({ params: { ...params }, resolve }));
     }
     if (method === 'live_voice.composition.p2.presentation.ack') {
-      return new Promise(resolve => {
-        releaseAck = () => resolve({
+      if (params.activation_generation === 2) {
+        successorAckAttempts += 1;
+        if (successorAckAttempts === 1) {
+          return new Promise((_resolve, reject) => {
+            releaseSuccessorAck = () => reject(Object.assign(new Error('successor presentation ACK result is unknown'), {
+              code: 'REQUEST_TIMEOUT',
+              reason: 'REQUEST_TIMEOUT',
+              retriable: true,
+            }));
+          });
+        }
+        return {
           request_id: options.requestId,
           ok: true,
           error: null,
@@ -8819,7 +8892,32 @@ test('mounted Exit during a retained presentation ACK settles once before openin
             history_records_written: 1,
             history_pending: false,
           },
+        };
+      }
+      predecessorAckAttempts += 1;
+      if (predecessorAckAttempts > 1) {
+        return new Promise(resolve => {
+          releaseRetiredAck = () => resolve({
+            request_id: options.requestId,
+            ok: true,
+            error: null,
+            result: {
+              status: 'presentation_acknowledged',
+              ...params,
+              accepted: true,
+              replayed: false,
+              history_records_written: 1,
+              history_pending: false,
+            },
+          });
         });
+      }
+      return new Promise((_resolve, reject) => {
+        releaseAck = () => reject(Object.assign(new Error('presentation ACK result is unknown'), {
+          code: 'REQUEST_TIMEOUT',
+          reason: 'REQUEST_TIMEOUT',
+          retriable: true,
+        }));
       });
     }
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
@@ -8858,9 +8956,11 @@ test('mounted Exit during a retained presentation ACK settles once before openin
       };
     }
     if (method === 'live_voice.speech.recognize_batch') {
-      return mountedRecognition(params, '请回答这条 ACK 期间退出的问题。', 1);
+      recognitionIndex += 1;
+      return mountedRecognition(params, `请回答第 ${recognitionIndex} 条 ACK 生命周期问题。`, recognitionIndex);
     }
     if (method === 'live_voice.composition.unified.submit') {
+      const successor = params.activation_generation === 2;
       return {
         request_id: options.requestId,
         ok: true,
@@ -8874,11 +8974,11 @@ test('mounted Exit during a retained presentation ACK settles once before openin
           activation_generation: params.activation_generation,
           turn_id: params.turn_id,
           commit_id: params.commit_id,
-          request_id: 'mounted-exit-pending-ack-agent-request',
-          round_id: 'mounted-exit-pending-ack-round',
+          request_id: successor ? 'mounted-exit-successor-agent-request' : 'mounted-exit-pending-ack-agent-request',
+          round_id: successor ? 'mounted-exit-successor-round' : 'mounted-exit-pending-ack-round',
           response: {
             interaction_id: params.interaction_id,
-            response_id: 'mounted-exit-pending-ack-response',
+            response_id: successor ? 'mounted-exit-successor-response' : 'mounted-exit-pending-ack-response',
             response_generation: 1,
           },
         },
@@ -8921,6 +9021,7 @@ test('mounted Exit during a retained presentation ACK settles once before openin
         mountedFullyEnabledElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef,
           onProductVoiceStateChange: state => states.push(state),
+          onProductVoiceMessage: entry => projectedMessages.push(entry),
         }),
       );
       await waitForMounted(() => controlRef.current !== null && states.at(-1)?.available === true, 'pending-ACK route unavailable');
@@ -8960,36 +9061,205 @@ test('mounted Exit during a retained presentation ACK settles once before openin
       await waitForMounted(() => typeof releaseAck === 'function', 'presentation ACK did not enter retained transport');
     });
 
+    let exitAndReenable = null;
     await act(async () => {
-      await controlRef.current.close();
-      await controlRef.current.start();
-      await new Promise(resolve => setTimeout(resolve, 25));
-    });
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.close').length, 0);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 1);
-
-    await act(async () => {
+      exitAndReenable = (async () => {
+        await controlRef.current.close();
+        await controlRef.current.start();
+      })();
+      await waitForMounted(
+        () => firstAudioContextCloseStarted && typeof releaseFirstAudioContextClose === 'function',
+        'Exit did not enter the deterministic AudioContext cleanup gate',
+      );
       releaseAck();
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.close').length === 1,
-        'retained ACK settlement did not continue exact predecessor close',
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 1).length,
+        1,
+        'an exited predecessor ACK must not retry in the foreground before durable retirement',
       );
+      assert.equal(states.at(-1)?.text_status, 'idle', 'the exited predecessor ACK timeout polluted the closed UI state');
+      assert.equal(states.at(-1)?.text_reason, null, 'the exited predecessor ACK timeout published a stale recovery reason');
+      releaseFirstAudioContextClose();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      await exitAndReenable;
       await waitForMounted(
-        () => calls.some(call => call.method === 'live_voice.composition.p2.activate' && call.params.activation_generation === 2),
-        'retained ACK settlement did not open the P2 successor',
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 1).length === 2,
+        'cleanup-window timeout was not replayed from the durable retired-ACK ledger',
       );
+      assert.equal(typeof releaseRetiredAck, 'function', 'durable retired-ACK replay did not remain independently in flight');
+      try {
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.composition.p2.activate' && call.params.activation_generation === 2),
+          'retained predecessor ACK blocked generation-2 activation',
+        );
+      } catch (error) {
+        const journal = globalThis.window?.sessionStorage?.getItem(
+          `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(sessionId)}`,
+        );
+        assert.fail(
+          `${error.message}; methods=${calls.map(call => `${call.method}:${call.params.activation_generation ?? '-'}`).join(',')}; states=${states.slice(-12).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? '-'}`).join(',')}; journal=${journal}`,
+        );
+      }
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
-        'P2 successor did not resume one capture',
+        'retained predecessor ACK blocked generation-2 media activation',
       );
       await browser.emitFirstFrame();
-      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'pending-ACK successor did not reach capture');
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'capturing',
+        'retained predecessor ACK blocked generation-2 capture',
+      );
+      const mediaActivationCountBeforeOldAck = calls.filter(call => call.method === 'live_voice.media.activate').length;
+      assert.equal(predecessorAckAttempts, 2, 'successor journal updates duplicated the in-flight durable ACK replay');
+      assert.equal(states.at(-1)?.p1_status, 'capturing', 'old ACK settlement changed successor capture state');
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.close').length,
+        1,
+        'retained ACK settlement closed a successor generation',
+      );
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.media.activate').length,
+        mediaActivationCountBeforeOldAck,
+        'retained ACK settlement allocated another media authority',
+      );
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 2,
+        'generation-2 capture did not submit its own committed final',
+      );
+      await waitForMounted(
+        () => notificationWaiters.some(waiter => waiter.params.activation_generation === 2),
+        'generation-2 response poll was not retained',
+      );
+      const successorWaiter = notificationWaiters.find(waiter => waiter.params.activation_generation === 2);
+      successorWaiter.resolve({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...successorWaiter.params,
+          kind: 'agent.output',
+          response: {
+            interaction_id: successorWaiter.params.interaction_id,
+            response_id: 'mounted-exit-successor-response',
+            response_generation: 1,
+          },
+          agent_event: { event_type: 'chat.final', text: '这是 generation 2 自己的回答。' },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-exit-successor-unit',
+            seq: 0,
+            content_ref: `sha256:${'b'.repeat(64)}`,
+          },
+        },
+      });
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'generation-2 response did not enter playout');
+      await waitForMounted(() => browser.counts.sourceStarts === 2, 'generation-2 response did not reach the browser');
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.close').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 2);
+    assert.equal(states.at(-1)?.p1_status, 'playing', 'old ACK settlement changed successor playout state');
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 2);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 2);
+    assert.equal(browser.counts.sourceStarts, 2);
+    browser.endLatestSource();
+    await waitForMounted(
+      () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 2).length === 1,
+      'generation-2 presentation ACK did not enter its original transport',
+    );
+    assert.equal(typeof releaseSuccessorAck, 'function', 'generation-2 ACK transport was not held for the overlapping retirement');
+
+    let secondExitAndReenable = null;
+    await act(async () => {
+      secondExitAndReenable = (async () => {
+        await controlRef.current.close();
+        await controlRef.current.start();
+      })();
+      await waitForMounted(
+        () => secondAudioContextCloseStarted && typeof releaseSecondAudioContextClose === 'function',
+        'second Exit did not enter the deterministic AudioContext cleanup gate',
+      );
+      releaseSuccessorAck();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 2).length,
+        1,
+        'the newly exited ACK retried in the foreground before its overlapping retirement',
+      );
+      assert.equal(states.at(-1)?.text_status, 'idle', 'the second exited ACK timeout polluted the closed UI state');
+      assert.equal(states.at(-1)?.text_reason, null, 'the second exited ACK timeout published a stale recovery reason');
+      releaseSecondAudioContextClose();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      await secondExitAndReenable;
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.activate' && call.params.activation_generation === 3),
+        'the overlapping retirement blocked generation-3 activation',
+      );
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 3,
+        'the overlapping retirement blocked generation-3 media activation',
+      );
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'generation-3 capture did not start');
+      assert.equal(predecessorAckAttempts, 2, 'the held generation-1 drainer replayed in parallel');
+      assert.equal(successorAckAttempts, 1, 'generation-2 replay began while generation-1 still held the retired-ACK lock');
+    });
+    await act(async () => {
+      releaseRetiredAck();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      try {
+        await waitForMounted(
+          () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 2).length === 2,
+          'the held drainer lost the wake for an ACK retired after its initial snapshot',
+        );
+      } catch (error) {
+        const journal = globalThis.window.sessionStorage.getItem(
+          `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(sessionId)}`,
+        );
+        assert.fail(
+          `${error.message}; predecessorAckAttempts=${predecessorAckAttempts}; successorAckAttempts=${successorAckAttempts}; methods=${calls.slice(-24).map(call => `${call.method}:${call.params.activation_generation ?? '-'}`).join(',')}; journal=${journal}`,
+        );
+      }
+      await waitForMounted(() => {
+        const journal = JSON.parse(
+          globalThis.window.sessionStorage.getItem(
+            `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(sessionId)}`,
+          ),
+        );
+        return journal.retired_presentation_acks.length === 0;
+      }, 'overlapping retired ACKs did not drain to zero');
     });
 
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
-    assert.equal(browser.counts.sourceStarts, 1);
+    const predecessorAckCalls = calls.filter(
+      call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 1,
+    );
+    const successorAckCalls = calls.filter(
+      call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.activation_generation === 2,
+    );
+    assert.equal(predecessorAckCalls.length, 2);
+    assert.equal(successorAckCalls.length, 2);
+    assert.equal(
+      predecessorAckCalls[1].requestId,
+      predecessorAckCalls[0].requestId,
+      'generation-1 durable ACK replay must preserve the exact original request id',
+    );
+    assert.equal(
+      successorAckCalls[1].requestId,
+      successorAckCalls[0].requestId,
+      'generation-2 durable ACK replay must preserve the exact original request id',
+    );
+    assert.equal(states.at(-1)?.p1_status, 'capturing', 'old ACK recovery changed generation-3 capture state');
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.close').length, 2);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 3);
+    assert.equal(projectedMessages.filter(entry => entry.message.role === 'user').length, 2);
+    assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 2);
+    assert.equal(new Set(projectedMessages.map(entry => entry.message.id)).size, projectedMessages.length);
     assert.equal(
       new Set(
         calls
@@ -8999,6 +9269,18 @@ test('mounted Exit during a retained presentation ACK settles once before openin
       1,
       'ACK settlement must open only one exact successor identity',
     );
+    await act(async () => controlRef.current.close());
+    await waitForMounted(() => states.at(-1)?.p1_status === 'closed', 'final Exit did not close generation-3 resources');
+    assert.equal(browser.counts.stoppedTracks, browser.counts.getUserMedia, 'final Exit leaked a microphone track');
+    assert.equal(browser.counts.closedAudioContexts, browser.counts.audioContexts, 'final Exit leaked an AudioContext');
+    assert.equal(browser.counts.closedWorkletPorts, browser.counts.workletPorts, 'final Exit leaked an AudioWorklet port');
+    assert.equal(browser.counts.socketCloses, browser.counts.socketOpens, 'final Exit leaked a dedicated media socket');
+    const journal = JSON.parse(
+      globalThis.window.sessionStorage.getItem(
+        `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(sessionId)}`,
+      ),
+    );
+    assert.deepEqual(journal.retired_presentation_acks, [], 'settled old ACK retained a durable resource');
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
@@ -9019,8 +9301,21 @@ test('mounted Exit during Agent generation immediately captures on the successor
   let recognitionIndex = 0;
   let unifiedAttempt = 0;
   const notificationWaiters = [];
+  let firstAudioContextCloseStarted = false;
+  let releaseFirstAudioContextClose = null;
+  let audioContextCloseAttempts = 0;
   let renderer;
-  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const browser = installP1BrowserEnvironment({
+    mediaBinding: () => activeMediaBinding,
+    closeAudioContext: async () => {
+      audioContextCloseAttempts += 1;
+      if (audioContextCloseAttempts !== 1) return;
+      firstAudioContextCloseStarted = true;
+      await new Promise(resolve => {
+        releaseFirstAudioContextClose = resolve;
+      });
+    },
+  });
   const hasPendingNotificationForGeneration = generation => notificationWaiters.some(
     waiter => !waiter.settled && waiter.params.activation_generation === generation,
   );
@@ -9215,19 +9510,69 @@ test('mounted Exit during Agent generation immediately captures on the successor
         () => typeof releaseUnified === 'function',
         'authoritative final did not enter the retained unified request',
       );
+      await waitForMounted(
+        () => hasPendingNotificationForGeneration(unifiedParams.activation_generation),
+        'predecessor notification poll was not active before Exit',
+      );
     });
 
-    await act(async () => {
-      await controlRef.current.close();
-      await controlRef.current.start();
-      await new Promise(resolve => setImmediate(resolve));
-    });
-    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 1);
     const predecessorGeneration = unifiedParams.activation_generation;
     const successorGeneration = predecessorGeneration + 1;
-
+    const cleanupWindowPresentation = {
+      ok: true,
+      result: {
+        status: 'notification',
+        session_id: sessionId,
+        correlation_id: unifiedParams.correlation_id,
+        interaction_id: unifiedParams.interaction_id,
+        activation_id: unifiedParams.activation_id,
+        activation_generation: unifiedParams.activation_generation,
+        kind: 'agent.output',
+        response: {
+          interaction_id: unifiedParams.interaction_id,
+          response_id: 'mounted-exit-pending-response-1',
+          response_generation: 1,
+        },
+        agent_event: { event_type: 'chat.final', text: '这是退出清理窗口内到达的旧回答。' },
+        presentation_unit: {
+          surface: 'text',
+          unit_id: 'mounted-exit-pending-unit',
+          seq: 0,
+          content_ref: `sha256:${'1'.repeat(64)}`,
+        },
+      },
+    };
+    let exitAndReenable = null;
     await act(async () => {
+      exitAndReenable = (async () => {
+        await controlRef.current.close();
+        await controlRef.current.start();
+      })();
       releaseUnified();
+      publishNotificationForGeneration(predecessorGeneration, cleanupWindowPresentation);
+      await waitForMounted(
+        () => firstAudioContextCloseStarted && typeof releaseFirstAudioContextClose === 'function',
+        'Exit did not enter the deterministic AudioContext cleanup gate',
+      );
+      await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length,
+        0,
+        'the cleanup-window predecessor notification must have zero ACK effect',
+      );
+      assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
+      assert.equal(browser.counts.sourceStarts, 0);
+      assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 0);
+      assert.equal(
+        JSON.stringify(renderer.toJSON()).includes('这是退出清理窗口内到达的旧回答。'),
+        false,
+        'the cleanup-window predecessor notification must not enter rendered UI',
+      );
+      releaseFirstAudioContextClose();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      await exitAndReenable;
       await waitForMounted(
         () => calls.some(call =>
           call.method === 'live_voice.composition.p2.activate'
@@ -9247,40 +9592,6 @@ test('mounted Exit during Agent generation immediately captures on the successor
         () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
         'successor capture remained blocked by the old accepted response',
       );
-      const latePresentation = {
-        ok: true,
-        result: {
-          status: 'notification',
-          session_id: sessionId,
-          correlation_id: unifiedParams.correlation_id,
-          interaction_id: unifiedParams.interaction_id,
-          activation_id: unifiedParams.activation_id,
-          activation_generation: unifiedParams.activation_generation,
-          kind: 'agent.output',
-          response: {
-            interaction_id: unifiedParams.interaction_id,
-            response_id: 'mounted-exit-pending-response-1',
-            response_generation: 1,
-          },
-          agent_event: { event_type: 'chat.final', text: '这是退出前请求的迟到回答。' },
-          presentation_unit: {
-            surface: 'text',
-            unit_id: 'mounted-exit-pending-unit',
-            seq: 0,
-            content_ref: `sha256:${'1'.repeat(64)}`,
-          },
-        },
-      };
-      publishNotificationForGeneration(predecessorGeneration, latePresentation);
-      await new Promise(resolve => setTimeout(resolve, 25));
-      assert.equal(
-        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length,
-        0,
-        'the predecessor notification callback must have zero ACK effect after successor activation',
-      );
-      assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
-      assert.equal(browser.counts.sourceStarts, 0);
-      assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 0);
       await browser.emitFirstFrame();
       await waitForMounted(
         () => states.at(-1)?.p1_status === 'capturing',
@@ -9735,6 +10046,7 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-dialogue-session';
   const taskId = 'mounted-terminal-dialogue-task';
+  const statusResponse = 'mounted-terminal-dialogue-status';
   const controlRef = { current: null };
   const states = [];
   const calls = [];
@@ -9754,6 +10066,8 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   let activeMediaBinding = null;
   let recognitionIndex = 0;
   let keepaliveAfterTaskStart = false;
+  let releaseStatusAck = null;
+  let statusAckAttempts = 0;
   let renderer;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
   const activateP2 = createMountedP2ActivationResponder();
@@ -9818,6 +10132,18 @@ test('mounted foreground status query restarts an idle P2 poll after background 
       return new Promise(resolve => notificationWaiters.push(resolve));
     }
     if (method === 'live_voice.composition.p2.presentation.ack') {
+      if (params.response_id === statusResponse) {
+        statusAckAttempts += 1;
+        if (statusAckAttempts === 1) {
+          return new Promise((_resolve, reject) => {
+            releaseStatusAck = () => reject(Object.assign(new Error('visible-text ACK result is unknown'), {
+              code: 'REQUEST_TIMEOUT',
+              reason: 'REQUEST_TIMEOUT',
+              retriable: true,
+            }));
+          });
+        }
+      }
       return {
         request_id: options.requestId,
         ok: true,
@@ -10148,15 +10474,15 @@ test('mounted foreground status query restarts an idle P2 poll after background 
       await waitForMounted(() => browser.counts.sourceStarts === 4, 'post-terminal status audio did not reach the browser');
     });
 
-    const statusResponse = 'mounted-terminal-dialogue-status';
     const currentStatusResponse = calls
       .filter(call => call.method === 'live_voice.speech.synthesize_batch')
       .at(-1)?.params.response;
     assert.equal(currentStatusResponse?.response_id, statusResponse);
     const predecessorGeneration = p2Binding.activation_generation;
     await act(async () => {
-      await controlRef.current.close();
       browser.endLatestSource();
+      await waitForMounted(() => typeof releaseStatusAck === 'function', 'visible-text ACK did not enter its original transport');
+      await controlRef.current.close();
       await controlRef.current.start();
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.composition.p2.close' && call.params.activation_generation === predecessorGeneration),
@@ -10169,6 +10495,24 @@ test('mounted foreground status query restarts an idle P2 poll after background 
       await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'TTS Exit successor did not restart listening');
       await browser.emitFirstFrame(0);
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'TTS Exit successor capture unavailable');
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === statusResponse).length,
+        1,
+        'the retired visible-text ACK replayed while its original transport remained in flight',
+      );
+      releaseStatusAck();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === statusResponse).length === 2,
+        'the original visible-text ACK timeout did not wake same-id durable recovery',
+      );
+      await waitForMounted(() => {
+        const journal = JSON.parse(
+          globalThis.window.sessionStorage.getItem(
+            `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(sessionId)}`,
+          ),
+        );
+        return journal.retired_presentation_acks.length === 0;
+      }, 'the visible-text ACK durable ledger did not return to zero');
     });
 
     assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 3);
@@ -10192,11 +10536,13 @@ test('mounted foreground status query restarts an idle P2 poll after background 
     );
     assert.equal(states.at(-1)?.terminal_announcement_state, 'idle');
     assert.equal(states.at(-1)?.recovery_diagnostic, null);
-    assert.equal(
-      calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === statusResponse).length,
-      1,
-      'TTS Exit must retain one text ACK without replaying the response',
+    const statusAckCalls = calls.filter(
+      call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === statusResponse,
     );
+    assert.equal(statusAckCalls.length, 2, 'TTS Exit must settle the exact durable text ACK after its original timeout');
+    assert.equal(statusAckCalls[1].requestId, statusAckCalls[0].requestId, 'visible-text ACK recovery changed request identity');
+    assert.equal(states.at(-1)?.text_status, 'idle', 'the exited visible-text ACK success polluted successor text status');
+    assert.equal(states.at(-1)?.text_reason, null, 'the exited visible-text ACK success published a stale reason');
     assert.equal(
       calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === statusResponse).length,
       1,

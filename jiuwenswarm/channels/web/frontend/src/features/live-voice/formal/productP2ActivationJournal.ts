@@ -9,11 +9,12 @@ const P2_SUBMIT_METHOD: ProductP2DurableOperationMethod = 'live_voice.compositio
 const P2_PRESENTATION_ACK_METHOD: ProductP2DurableOperationMethod = 'live_voice.composition.p2.presentation.ack';
 const P2_BARGE_IN_METHOD: ProductP2DurableOperationMethod = 'live_voice.composition.p2.barge_in';
 
-export const PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA = 'live-voice.product-p2-activation-journal.v2' as const;
+export const PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA = 'live-voice.product-p2-activation-journal.v3' as const;
 export const PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED = 'P2_REFRESH_RECONCILIATION_REQUIRED' as const;
 export const PRODUCT_P2_REFRESH_SERVER_STATE_LOST = 'P2_REFRESH_SERVER_STATE_LOST' as const;
 
 const LEGACY_JOURNAL_SCHEMA = 'live-voice.product-p2-activation-journal.v1' as const;
+const PREDECESSOR_JOURNAL_SCHEMA = 'live-voice.product-p2-activation-journal.v2' as const;
 
 export type ProductP2ActivationJournalPhase =
   | 'activating'
@@ -57,6 +58,7 @@ export type ProductP2ActivationJournalSnapshot = Readonly<{
   phase: ProductP2ActivationJournalPhase;
   last_generation: number;
   pending_operation: ProductP2DurableOperation | null;
+  retired_presentation_acks: readonly ProductP2DurableOperation[];
   recovery_owner_id: string | null;
   recovery_token: string | null;
   recovery_epoch: number;
@@ -73,6 +75,7 @@ type StoredJournal = {
   phase: ProductP2ActivationJournalPhase;
   last_generation: number;
   pending_operation: ProductP2DurableOperation | null;
+  retired_presentation_acks: readonly ProductP2DurableOperation[];
   recovery_owner_id: string | null;
   recovery_token: string | null;
   recovery_epoch: number;
@@ -96,6 +99,7 @@ const OPERATION_PHASES = new Set<ProductP2ActivationJournalPhase>(['operation_re
 const MAX_ID_LENGTH = 512;
 const MAX_CONTENT_LENGTH = 100_000;
 const MAX_DURABLE_OPERATION_BYTES = 131_072;
+const MAX_RETIRED_PRESENTATION_ACKS = 16;
 let recoveryTokenSequence = 0;
 let routeIdentitySequence = 0;
 
@@ -254,6 +258,136 @@ function sameOperation(left: Readonly<ProductP2DurableOperation>, right: Readonl
   return canonical(left) === canonical(right);
 }
 
+function sameOperationParams(left: Readonly<ProductP2DurableOperation>, right: Readonly<ProductP2DurableOperation>): boolean {
+  const canonical = (operation: Readonly<ProductP2DurableOperation>) =>
+    JSON.stringify({
+      method: operation.method,
+      params: Object.fromEntries(Object.entries(operation.params).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))),
+    });
+  return canonical(left) === canonical(right);
+}
+
+function parseRetiredPresentationAck(
+  value: unknown,
+  sessionId: string,
+  correlationId: string,
+  interactionId: string,
+): ProductP2DurableOperation {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('retired presentation ACK is invalid');
+  }
+  const operationRecord = value as Record<string, unknown>;
+  const paramsRecord = operationRecord.params;
+  if (paramsRecord === null || typeof paramsRecord !== 'object' || Array.isArray(paramsRecord)) {
+    throw new Error('retired presentation ACK params are invalid');
+  }
+  const params = paramsRecord as Record<string, unknown>;
+  const binding = parseBinding(
+    {
+      session_id: params.session_id,
+      correlation_id: params.correlation_id,
+      interaction_id: params.interaction_id,
+      activation_id: params.activation_id,
+      activation_generation: params.activation_generation,
+    },
+    sessionId,
+    correlationId,
+    interactionId,
+  );
+  const operation = parseOperation(value, binding);
+  if (operation === null || operation.method !== P2_PRESENTATION_ACK_METHOD) {
+    throw new Error('retired operation is not a presentation ACK');
+  }
+  return operation;
+}
+
+function parseV3Journal(decoded: unknown, expectedSessionId: string): StoredJournal {
+  const record = exactObject(
+    decoded,
+    [
+      'schema',
+      'revision',
+      'client_instance_id',
+      'session_id',
+      'correlation_id',
+      'interaction_id',
+      'binding',
+      'phase',
+      'last_generation',
+      'pending_operation',
+      'retired_presentation_acks',
+      'recovery_owner_id',
+      'recovery_token',
+      'recovery_epoch',
+    ],
+    'product P2 activation journal'
+  );
+  if (record.schema !== PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA) {
+    throw new Error('product P2 activation journal schema is unsupported');
+  }
+  const sessionId = requiredText(record.session_id, 'journal.session_id');
+  if (sessionId !== expectedSessionId) throw new Error('product P2 activation journal session mismatch');
+  const correlationId = requiredText(record.correlation_id, 'journal.correlation_id');
+  const interactionId = requiredText(record.interaction_id, 'journal.interaction_id');
+  if (typeof record.phase !== 'string' || !JOURNAL_PHASES.has(record.phase as ProductP2ActivationJournalPhase)) {
+    throw new Error('product P2 activation journal phase is invalid');
+  }
+  const phase = record.phase as ProductP2ActivationJournalPhase;
+  const lastGeneration = safeGeneration(record.last_generation, 'journal.last_generation', true);
+  const binding = parseBinding(record.binding, sessionId, correlationId, interactionId);
+  const pendingOperation = parseOperation(record.pending_operation, binding);
+  if (!Array.isArray(record.retired_presentation_acks) || record.retired_presentation_acks.length > MAX_RETIRED_PRESENTATION_ACKS) {
+    throw new Error('retired presentation ACKs are invalid');
+  }
+  const retiredPresentationAcks = record.retired_presentation_acks.map(value =>
+    parseRetiredPresentationAck(value, sessionId, correlationId, interactionId),
+  );
+  if (
+    retiredPresentationAcks.some((operation, index) =>
+      retiredPresentationAcks.some(
+        (candidate, candidateIndex) =>
+          candidateIndex !== index &&
+          (candidate.request_id === operation.request_id || sameOperationParams(operation, candidate)),
+      ),
+    ) ||
+    retiredPresentationAcks.some(operation => (operation.params.activation_generation as number) > lastGeneration) ||
+    (pendingOperation?.method === P2_PRESENTATION_ACK_METHOD &&
+      retiredPresentationAcks.some(
+        operation =>
+          operation.request_id === pendingOperation.request_id || sameOperationParams(operation, pendingOperation),
+      ))
+  ) {
+    throw new Error('retired presentation ACKs are inconsistent');
+  }
+  const recoveryOwner = optionalText(record.recovery_owner_id, 'journal.recovery_owner_id');
+  const recoveryToken = optionalText(record.recovery_token, 'journal.recovery_token');
+  if (
+    (binding === null && lastGeneration !== 0) ||
+    (binding !== null && binding.activation_generation !== lastGeneration) ||
+    (binding === null && phase !== 'closed') ||
+    OPERATION_PHASES.has(phase) !== (pendingOperation !== null) ||
+    (recoveryOwner === null) !== (recoveryToken === null)
+  ) {
+    throw new Error('product P2 activation journal state is inconsistent');
+  }
+  return {
+    schema: PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA,
+    revision: safeGeneration(record.revision, 'journal.revision', true),
+    client_instance_id: requiredText(record.client_instance_id, 'journal.client_instance_id'),
+    session_id: sessionId,
+    correlation_id: correlationId,
+    interaction_id: interactionId,
+    binding,
+    phase,
+    last_generation: lastGeneration,
+    pending_operation: pendingOperation,
+    retired_presentation_acks: Object.freeze(retiredPresentationAcks),
+    recovery_owner_id: recoveryOwner,
+    recovery_token: recoveryToken,
+    recovery_epoch: safeGeneration(record.recovery_epoch, 'journal.recovery_epoch', true),
+  };
+}
+
 function parseV2Journal(decoded: unknown, expectedSessionId: string): StoredJournal {
   const record = exactObject(
     decoded,
@@ -272,9 +406,9 @@ function parseV2Journal(decoded: unknown, expectedSessionId: string): StoredJour
       'recovery_token',
       'recovery_epoch',
     ],
-    'product P2 activation journal'
+    'product P2 activation journal',
   );
-  if (record.schema !== PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA) {
+  if (record.schema !== PREDECESSOR_JOURNAL_SCHEMA) {
     throw new Error('product P2 activation journal schema is unsupported');
   }
   const sessionId = requiredText(record.session_id, 'journal.session_id');
@@ -310,6 +444,7 @@ function parseV2Journal(decoded: unknown, expectedSessionId: string): StoredJour
     phase,
     last_generation: lastGeneration,
     pending_operation: pendingOperation,
+    retired_presentation_acks: Object.freeze([]),
     recovery_owner_id: recoveryOwner,
     recovery_token: recoveryToken,
     recovery_epoch: safeGeneration(record.recovery_epoch, 'journal.recovery_epoch', true),
@@ -358,6 +493,7 @@ function parseLegacyJournal(decoded: unknown, expectedSessionId: string): Stored
     phase: record.phase as ProductP2ActivationJournalPhase,
     last_generation: lastGeneration,
     pending_operation: null,
+    retired_presentation_acks: Object.freeze([]),
     recovery_owner_id: null,
     recovery_token: null,
     recovery_epoch: 0,
@@ -373,7 +509,8 @@ function decodeJournal(value: string, expectedSessionId: string): { record: Stor
   }
   const schema = decoded !== null && typeof decoded === 'object' && !Array.isArray(decoded) ? (decoded as Record<string, unknown>).schema : null;
   if (schema === LEGACY_JOURNAL_SCHEMA) return { record: parseLegacyJournal(decoded, expectedSessionId), legacy: true };
-  return { record: parseV2Journal(decoded, expectedSessionId), legacy: false };
+  if (schema === PREDECESSOR_JOURNAL_SCHEMA) return { record: parseV2Journal(decoded, expectedSessionId), legacy: true };
+  return { record: parseV3Journal(decoded, expectedSessionId), legacy: false };
 }
 
 function storageKey(sessionId: string): string {
@@ -398,6 +535,7 @@ function frozenSnapshot(record: StoredJournal): ProductP2ActivationJournalSnapsh
     ...record,
     binding: record.binding === null ? null : Object.freeze({ ...record.binding }),
     pending_operation: frozenOperation(record.pending_operation),
+    retired_presentation_acks: Object.freeze(record.retired_presentation_acks.map(operation => frozenOperation(operation)!)),
   });
 }
 
@@ -499,6 +637,7 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
       phase: 'closed',
       last_generation: 0,
       pending_operation: null,
+      retired_presentation_acks: Object.freeze([]),
       recovery_owner_id: null,
       recovery_token: null,
       recovery_epoch: 0,
@@ -536,6 +675,10 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
 
   recoveryLockName(): string {
     return `jiuwenswarm.liveVoice.productP2Recovery:${encodeURIComponent(this.#record.session_id)}`;
+  }
+
+  retiredPresentationAckLockName(): string {
+    return `jiuwenswarm.liveVoice.productP2RetiredPresentationAck:${encodeURIComponent(this.#record.session_id)}`;
   }
 
   beginRecovery(): ProductP2RecoveryClaim {
@@ -663,6 +806,12 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
     if (this.#record.pending_operation !== null && !sameOperation(this.#record.pending_operation, parsed)) {
       throw new Error('a different product P2 operation is already unresolved');
     }
+    if (
+      parsed.method === P2_PRESENTATION_ACK_METHOD &&
+      this.#record.retired_presentation_acks.some(operation => sameOperationParams(operation, parsed))
+    ) {
+      throw new Error('presentation ACK is already retired');
+    }
     if (this.#record.phase !== 'active' && !OPERATION_PHASES.has(this.#record.phase)) {
       throw new Error('product P2 operation cannot be checkpointed in this phase');
     }
@@ -675,8 +824,36 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
   }
 
   settleOperation(operation: Readonly<ProductP2DurableOperation>): void {
-    this.#requireNoRecoveryOwner();
     this.#settleOperation(operation);
+  }
+
+  retirePendingPresentationAck(
+    binding: Readonly<ProductWebP2ActivationBinding>,
+    recovery?: Readonly<ProductP2RecoveryClaim>,
+  ): ProductP2DurableOperation {
+    if (recovery) this.#requireRecovery(recovery);
+    else this.#requireNoRecoveryOwner();
+    if (this.#record.binding === null || !sameBinding(this.#record.binding, binding)) {
+      throw new Error('retired presentation ACK binding changed');
+    }
+    const pending = this.#record.pending_operation;
+    if (pending === null || pending.method !== P2_PRESENTATION_ACK_METHOD || !OPERATION_PHASES.has(this.#record.phase)) {
+      throw new Error('retired presentation ACK is unavailable');
+    }
+    if (this.#record.retired_presentation_acks.length >= MAX_RETIRED_PRESENTATION_ACKS) {
+      throw new Error('bounded retired presentation ACK ledger is full');
+    }
+    if (this.#record.retired_presentation_acks.some(operation => sameOperationParams(operation, pending))) {
+      throw new Error('retired presentation ACK is duplicated');
+    }
+    this.#write({
+      ...this.#record,
+      revision: this.#record.revision + 1,
+      phase: 'active',
+      pending_operation: null,
+      retired_presentation_acks: Object.freeze([...this.#record.retired_presentation_acks, pending]),
+    });
+    return frozenOperation(pending)!;
   }
 
   markOperationReconciling(operation: Readonly<ProductP2DurableOperation>, recovery: Readonly<ProductP2RecoveryClaim>): void {
@@ -689,11 +866,38 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
 
   settleRecoveredOperation(operation: Readonly<ProductP2DurableOperation>, recovery: Readonly<ProductP2RecoveryClaim>): void {
     this.#requireRecovery(recovery);
-    this.#settleOperation(operation);
+    this.#settleOperation(operation, true);
   }
 
-  #settleOperation(operation: Readonly<ProductP2DurableOperation>): void {
-    const parsed = parseOperation(operation, this.#record.binding);
+  #settleOperation(operation: Readonly<ProductP2DurableOperation>, recoveryOwned = false): void {
+    let parsed: ProductP2DurableOperation | null = null;
+    try {
+      parsed = parseRetiredPresentationAck(
+        operation,
+        this.#record.session_id,
+        this.#record.correlation_id,
+        this.#record.interaction_id,
+      );
+    } catch {
+      parsed = parseOperation(operation, this.#record.binding);
+    }
+    if (parsed !== null && parsed.method === P2_PRESENTATION_ACK_METHOD) {
+      let retiredIndex = this.#record.retired_presentation_acks.findIndex(candidate => sameOperation(candidate, parsed!));
+      if (retiredIndex < 0 && this.#record.pending_operation === null) {
+        this.refresh();
+        retiredIndex = this.#record.retired_presentation_acks.findIndex(candidate => sameOperation(candidate, parsed!));
+      }
+      if (retiredIndex >= 0) {
+        this.#write({
+          ...this.#record,
+          revision: this.#record.revision + 1,
+          retired_presentation_acks: Object.freeze(this.#record.retired_presentation_acks.filter((_, index) => index !== retiredIndex)),
+        });
+        return;
+      }
+    }
+    if (!recoveryOwned) this.#requireNoRecoveryOwner();
+    parsed = parseOperation(operation, this.#record.binding);
     if (parsed === null || this.#record.pending_operation === null || !sameOperation(this.#record.pending_operation, parsed)) {
       throw new Error('pending product P2 operation changed');
     }
@@ -825,82 +1029,78 @@ export async function reconcileProductP2Predecessor(
       };
       try {
         let snapshot = input.journal.assertRecovery(claim);
+        let retiredPresentationAck = false;
         if (snapshot.phase === 'result_unknown') {
           outcome = blocked();
           return outcome;
         }
         if (OPERATION_PHASES.has(snapshot.phase)) {
           const pending = snapshot.pending_operation;
-          if (pending === null || input.replay_operation === undefined) {
+          if (pending === null) {
             outcome = blocked();
             return outcome;
           }
-          try {
-            input.journal.markOperationReconciling(pending, claim);
-          } catch (error) {
-            outcome = snapshot.binding === null ? blocked() : resolveCheckpointFailure(error, snapshot.binding);
-            return outcome;
-          }
-          if (!checkpoint()) {
-            outcome = superseded();
-            return outcome;
-          }
-          let operationResult: unknown;
-          try {
-            operationResult = await input.replay_operation(pending);
-          } catch (error) {
+          if (pending.method === P2_PRESENTATION_ACK_METHOD) {
+            if (snapshot.binding === null) {
+              outcome = blocked();
+              return outcome;
+            }
+            const pendingBinding = snapshot.binding;
+            try {
+              input.journal.retirePendingPresentationAck(pendingBinding, claim);
+              retiredPresentationAck = true;
+              snapshot = input.journal.assertRecovery(claim);
+            } catch (error) {
+              outcome = resolveCheckpointFailure(error, pendingBinding);
+              return outcome;
+            }
+          } else {
+            if (input.replay_operation === undefined) {
+              outcome = blocked();
+              return outcome;
+            }
+            try {
+              input.journal.markOperationReconciling(pending, claim);
+            } catch (error) {
+              outcome = snapshot.binding === null ? blocked() : resolveCheckpointFailure(error, snapshot.binding);
+              return outcome;
+            }
             if (!checkpoint()) {
               outcome = superseded();
               return outcome;
             }
-            // An exact presentation ACK can outlive its P2 route when the page
-            // refreshes across an AgentServer restart.  The authoritative
-            // route-not-found result proves that neither the ACK nor the old
-            // activation can still complete, so retaining either checkpoint
-            // would only replay the same impossible ACK on every remount.
-            if (
-              pending.method === P2_PRESENTATION_ACK_METHOD &&
-              ['PRODUCT_P2_ROUTE_NOT_FOUND', 'STALE_RESPONSE_OUTPUT', 'UNKNOWN_AGENT_RESPONSE'].includes(
-                input.error_reason(error) ?? '',
-              )
-            ) {
-              try {
-                input.journal.settleRecoveredOperation(pending, claim);
-                snapshot = input.journal.assertRecovery(claim);
-                if (snapshot.binding === null) {
-                  outcome = blocked();
-                  return outcome;
-                }
-                input.journal.markClosed(snapshot.binding, claim);
-                outcome = ready();
-              } catch (checkpointError) {
-                outcome = snapshot.binding === null ? blocked() : resolveCheckpointFailure(checkpointError, snapshot.binding);
+            let operationResult: unknown;
+            try {
+              operationResult = await input.replay_operation(pending);
+            } catch (error) {
+              if (!checkpoint()) {
+                outcome = superseded();
+                return outcome;
               }
+              outcome = input.operation_retryable?.(error) === true ? retry() : blocked();
               return outcome;
             }
-            outcome = input.operation_retryable?.(error) === true ? retry() : blocked();
-            return outcome;
-          }
-          if (!checkpoint()) {
-            outcome = superseded();
-            return outcome;
-          }
-          try {
-            input.on_operation_recovered?.(pending, operationResult);
-          } catch {
-            outcome = blocked();
-            return outcome;
-          }
-          if (!checkpoint()) {
-            outcome = superseded();
-            return outcome;
-          }
-          try {
-            input.journal.settleRecoveredOperation(pending, claim);
-            snapshot = input.journal.assertRecovery(claim);
-          } catch (error) {
-            outcome = snapshot.binding === null ? blocked() : resolveCheckpointFailure(error, snapshot.binding);
-            return outcome;
+            if (!checkpoint()) {
+              outcome = superseded();
+              return outcome;
+            }
+            try {
+              input.on_operation_recovered?.(pending, operationResult);
+            } catch {
+              outcome = blocked();
+              return outcome;
+            }
+            if (!checkpoint()) {
+              outcome = superseded();
+              return outcome;
+            }
+            try {
+              input.journal.settleRecoveredOperation(pending, claim);
+              snapshot = input.journal.assertRecovery(claim);
+            } catch (error) {
+              outcome = snapshot.binding === null ? blocked() : resolveCheckpointFailure(error, snapshot.binding);
+              return outcome;
+            }
           }
         }
 
@@ -987,6 +1187,7 @@ export async function reconcileProductP2Predecessor(
         }
         if (!activation.replayed) {
           if (
+            retiredPresentationAck ||
             predecessorPhase === 'activating' ||
             predecessorPhase === 'activation_result_unknown' ||
             predecessorPhase === 'reconciling_unconfirmed' ||
@@ -1028,4 +1229,82 @@ export async function reconcileProductP2Predecessor(
     return blocked();
   }
   return leased ?? superseded();
+}
+
+export type ProductP2RetiredPresentationAckRecoveryResult = Readonly<{
+  kind: 'ready' | 'pending' | 'retry' | 'superseded';
+  retained: number;
+}>;
+
+/**
+ * Settle predecessor-owned presentation ACKs independently of the current P2
+ * binding. The exact request identity remains durable, while success or a
+ * definitive rejection removes only that retired operation and never changes
+ * the active generation, phase, or binding.
+ */
+export async function reconcileRetiredProductP2PresentationAcks(
+  input: Readonly<{
+    journal: ProductP2ActivationJournal;
+    replay_operation: (operation: Readonly<ProductP2DurableOperation>) => Promise<unknown>;
+    operation_definitive: (error: unknown) => boolean;
+    operation_in_flight?: (operation: Readonly<ProductP2DurableOperation>) => boolean;
+    is_current?: () => boolean;
+    recovery_lease?: ProductP2RecoveryLease;
+  }>,
+): Promise<ProductP2RetiredPresentationAckRecoveryResult> {
+  const isCurrent = input.is_current ?? (() => true);
+  const lease = input.recovery_lease ?? defaultRecoveryLease;
+  let leased: ProductP2RetiredPresentationAckRecoveryResult | null;
+  try {
+    leased = await lease.runExclusive(input.journal.retiredPresentationAckLockName(), async () => {
+      let retryRequired = false;
+      let inFlight = false;
+      let snapshot: ProductP2ActivationJournalSnapshot;
+      try {
+        snapshot = input.journal.refresh();
+      } catch {
+        return Object.freeze({ kind: 'retry' as const, retained: 0 });
+      }
+      for (const operation of snapshot.retired_presentation_acks) {
+        if (!isCurrent()) {
+          return Object.freeze({ kind: 'superseded' as const, retained: input.journal.snapshot().retired_presentation_acks.length });
+        }
+        if (input.operation_in_flight?.(operation) === true) {
+          inFlight = true;
+          continue;
+        }
+        try {
+          await input.replay_operation(operation);
+        } catch (error) {
+          if (!isCurrent()) {
+            return Object.freeze({ kind: 'superseded' as const, retained: input.journal.snapshot().retired_presentation_acks.length });
+          }
+          if (!input.operation_definitive(error)) {
+            retryRequired = true;
+            continue;
+          }
+        }
+        if (!isCurrent()) {
+          return Object.freeze({ kind: 'superseded' as const, retained: input.journal.snapshot().retired_presentation_acks.length });
+        }
+        try {
+          input.journal.settleOperation(operation);
+        } catch {
+          retryRequired = true;
+        }
+      }
+      let retained: number;
+      try {
+        retained = input.journal.refresh().retired_presentation_acks.length;
+      } catch {
+        return Object.freeze({ kind: 'retry' as const, retained: 0 });
+      }
+      if (retained === 0) return Object.freeze({ kind: 'ready' as const, retained });
+      if (retryRequired) return Object.freeze({ kind: 'retry' as const, retained });
+      return Object.freeze({ kind: inFlight ? ('pending' as const) : ('retry' as const), retained });
+    });
+  } catch {
+    return Object.freeze({ kind: 'retry', retained: 0 });
+  }
+  return leased ?? Object.freeze({ kind: 'superseded', retained: 0 });
 }
