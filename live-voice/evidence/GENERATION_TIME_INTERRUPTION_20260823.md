@@ -127,7 +127,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
 | Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing on `c31e85ade` + 8 new) |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3884 passed, 11 failed — all 11 pre-existing (see §5); measured on the pre-rebase tree and unchanged in scope by the rebase |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3893 passed, 11 failed — all 11 pre-existing (see §6) |
 
 ### 3.1 Mutation checks
 
@@ -144,6 +144,7 @@ Backend (`test_generation_time_interruption.py`, baseline green):
 | Open-interaction (Exit) guard removed | KILLED |
 | `supersedes` ignored | KILLED |
 | Response cancellation not requested | KILLED |
+| Settled/stale target still cancels its round | KILLED |
 
 A self-review after the first implementation found the CR-B interruption replay
 ledger unbounded. Unlike barge-in, which a user triggers by control action, an
@@ -166,6 +167,12 @@ Frontend (mounted panel suite, baseline green):
 | Replacement carries no `supersedes` | KILLED |
 | Released listening drops its uplink receipt | KILLED |
 | Generation speech-start delivered while playing | **SURVIVED** |
+| Interruption outcome admitted on `mountedRef` alone | KILLED |
+
+The interruption-admission mutant is killed through the rejection path. The
+success path is guarded by the same `ownsInterruptionOutcome()` predicate the
+mutant removes, so it is covered by that mutant rather than by a second case;
+no separate success-path oracle was written.
 
 The surviving mutant is a defence-in-depth guard: with it removed, a playout-time
 speech-start would additionally invoke the generation handler, which then returns
@@ -206,7 +213,7 @@ flag must not be turned on until this is repaired.**
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
 * The 11 failures in the full backend sweep are pre-existing on the base commit
-  `67381193a` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  `c31e85ade` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
   six in `test_product_composition_registry`, `test_task_progress_return`) and
   three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
   `test_upload_storage`). Each was reproduced by running the same files in a
