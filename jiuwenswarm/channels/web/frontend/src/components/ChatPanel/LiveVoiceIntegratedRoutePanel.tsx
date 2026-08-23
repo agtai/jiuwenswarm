@@ -5244,7 +5244,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setProductTextStatus('failed');
       }
     } finally {
-      if (pendingGenerationInterruptRef.current === pending) pendingGenerationInterruptRef.current = null;
+      // A retriable transport failure leaves the request unresolved inside the
+      // owner. Clearing the ref here would strand it: only this ref lets
+      // settleRetainedP2Operations replay it through the exact owner that
+      // issued it, and cleanup refuses to retire an owner that still has one.
+      if (
+        pendingGenerationInterruptRef.current === pending &&
+        !p2Owner.hasPendingGenerationInterrupt()
+      ) {
+        pendingGenerationInterruptRef.current = null;
+      }
     }
   };
   interruptProductGenerationHandlerRef.current = interruptProductGeneration;
@@ -6392,6 +6401,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     // execution may finish under retained server teardown, but its unpresented
     // response cannot block, text-present, ACK or play in the next loop.
     pendingForegroundPresentationRef.current = null;
+    // The listening window belongs to the response Exit just fenced. Leaving it
+    // behind is not merely untidy: the next loop refuses to open a new window
+    // while one is retained, so generation-time interruption would be silently
+    // dead for the rest of the session.
+    generationCaptureRef.current = null;
     setProductOutput(null);
     setProductTextReason(null);
     setProductTextStatus('idle');

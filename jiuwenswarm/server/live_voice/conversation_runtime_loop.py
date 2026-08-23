@@ -943,17 +943,26 @@ class ConversationRuntimeLoop:
 
         Every turn can carry one interruption, so this ledger grows with the
         conversation rather than with a user control action.  Eviction is
-        oldest-first and never touches an action whose future is still pending.
+        oldest-first and never touches an action whose future is still pending:
+        a pending action is skipped and kept in its original position rather
+        than ending the sweep, so one unresolved oldest entry cannot let every
+        settled entry behind it accumulate past the bound.
         """
 
-        while len(self._generation_interrupt_order) > _MAX_RETAINED_GENERATION_INTERRUPTS:
-            evicted = self._generation_interrupt_order.popleft()
-            if evicted in self._pending_generation_interrupt:
-                self._generation_interrupt_order.append(evicted)
-                return
-            self._generation_interrupt_fingerprints.pop(evicted, None)
-            self._generation_interrupt_results.pop(evicted, None)
-            self._generation_interrupt_errors.pop(evicted, None)
+        if len(self._generation_interrupt_order) <= _MAX_RETAINED_GENERATION_INTERRUPTS:
+            return
+        retained: deque[str] = deque()
+        evictable = len(self._generation_interrupt_order) - _MAX_RETAINED_GENERATION_INTERRUPTS
+        while self._generation_interrupt_order:
+            candidate = self._generation_interrupt_order.popleft()
+            if evictable > 0 and candidate not in self._pending_generation_interrupt:
+                self._generation_interrupt_fingerprints.pop(candidate, None)
+                self._generation_interrupt_results.pop(candidate, None)
+                self._generation_interrupt_errors.pop(candidate, None)
+                evictable -= 1
+                continue
+            retained.append(candidate)
+        self._generation_interrupt_order = retained
 
     def _apply_new_generation_interrupt(
         self, action_id: str, ref: ResponseRef

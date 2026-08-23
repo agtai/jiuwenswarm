@@ -36,6 +36,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     _MAX_RETAINED_GENERATION_INTERRUPTS,
     ConversationRuntimeLoop,
     ConversationRuntimeLoopViolation,
+    GenerationInterruptionResult,
 )
 from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessRoundHandle,
@@ -880,3 +881,101 @@ async def test_interruption_replay_ledger_stays_bounded() -> None:
             ResponseRef("interaction-1", f"response-{attempts - 1}", attempts - 1),
         )
     await loop.close()
+
+
+@pytest.mark.asyncio
+async def test_bounded_ledger_skips_a_pending_action_without_exceeding_its_bound() -> None:
+    """An unresolved oldest action must not let settled ones grow past the bound.
+
+    Eviction has two obligations that have to hold together: never destroy an
+    action whose future is still pending, and never exceed the bound. Stopping
+    the sweep at the first pending entry satisfies only the first, so the
+    ledger is asserted here on both at once.
+    """
+
+    loop = ConversationRuntimeLoop(scope())
+    running = asyncio.get_running_loop()
+    ref = ResponseRef("interaction-1", "response-pending", 0)
+    pending_future: asyncio.Future[GenerationInterruptionResult] = running.create_future()
+    loop._pending_generation_interrupt["pending-oldest"] = (ref, pending_future)
+    loop._generation_interrupt_order.append("pending-oldest")
+    loop._generation_interrupt_fingerprints["pending-oldest"] = ref
+    for index in range(_MAX_RETAINED_GENERATION_INTERRUPTS + 8):
+        action_id = f"settled-{index}"
+        settled_ref = ResponseRef("interaction-1", f"response-{index}", index + 1)
+        loop._generation_interrupt_order.append(action_id)
+        loop._generation_interrupt_fingerprints[action_id] = settled_ref
+        loop._generation_interrupt_results[action_id] = GenerationInterruptionResult(
+            action_id=action_id,
+            ref=settled_ref,
+            applied=True,
+            replayed=False,
+            interrupted_state=ResponseState.GENERATING,
+            cancel_requested=True,
+            effect_ids=(),
+        )
+
+    loop._evict_retained_generation_interrupts()
+
+    assert pending_future.done() is False
+    assert "pending-oldest" in loop._generation_interrupt_fingerprints
+    assert "pending-oldest" in loop._generation_interrupt_order
+    assert len(loop._generation_interrupt_order) <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    assert (
+        len(loop._generation_interrupt_fingerprints)
+        <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    )
+    assert len(loop._generation_interrupt_results) <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    # The retained order keeps its oldest-first shape around the skipped entry.
+    assert loop._generation_interrupt_order[0] == "pending-oldest"
+    pending_future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_after_barge_in_still_stops_the_running_round() -> None:
+    """A target already fenced by barge-in still needs its round cancelled.
+
+    Barge-in closes AUDIO and cancels the response, but it never touches the
+    Harness: the Agent round keeps generating. When speech then arrives, CR has
+    no new effect to apply -- the fence reports ``applied=False`` -- yet the
+    round is exactly what the speaker is asking to stop. The cancellation is
+    therefore tied to *having a fenceable live target*, not to this call being
+    the one that produced the fencing effects.
+    """
+
+    lower = SequencedFormalAdapter(rounds=1, hold_final=True)
+    history = RecordingHistoryWriter()
+    current, harness = build_runtime(lower, history)
+    await open_runtime(current)
+
+    handle = await submit_turn(current, index=1)
+    await asyncio.wait_for(lower.entered[0].wait(), timeout=1)
+    await drain_until_generating(current, handle.response_ref)
+
+    barge = await current.barge_in(
+        "barge-1", handle.response_ref, cancel_response=True
+    )
+    assert barge.applied is True
+    assert harness.cancel_commands == [], "barge-in must not cancel the round"
+    assert current.snapshot().harness.cancel_effects == 0
+
+    interruption = await current.interrupt_generation(
+        action_id="interrupt-after-barge", ref=handle.response_ref
+    )
+    # The target is still the latest live response, so this is a real fence
+    # application even though barge-in already produced its effects.
+    assert interruption.fence_status is GenerationInterruptionFenceStatus.FENCED
+    assert interruption.fence is not None
+    assert interruption.fence.applied is False
+    assert interruption.fence.cancel_requested is False
+    # The round the speaker asked to stop is stopped exactly once.
+    assert interruption.round_cancel is not None
+    assert interruption.round_cancel.accepted is True
+    assert interruption.cancel_scope == CancelScope.ROUND_CANCEL.value
+    assert len(harness.cancel_commands) == 1
+    assert harness.cancel_commands[0].command_type == CancelScope.ROUND_CANCEL.value
+    assert current.snapshot().harness.cancel_effects == 1
+
+    lower.gates[0].set()
+    lower.tails[0].set()
+    await shutdown(current)

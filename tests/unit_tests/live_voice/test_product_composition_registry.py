@@ -12631,6 +12631,95 @@ async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
 
 
 @pytest.mark.asyncio
+async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
+    tmp_path: Path,
+) -> None:
+    """Drive the production Registry -> P2 lease -> Agent Runtime wiring.
+
+    The focused suites exercise the Runtime directly, so a broken or missing
+    lease/registry hop would not fail them. This case owns that seam: it
+    asserts the effects and the round cancellation the real handler must have
+    produced.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-generation-interrupt",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-generation-interrupt",
+            turn_id="turn-generation-interrupt",
+            response_id="response-generation-interrupt",
+            committed_at=NOW,
+            text="keep generating while the user speaks",
+            dispatch_target="agent",
+        ),
+        request_id="request-submit-generation-interrupt",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+
+    params = _p2_params(
+        action_id="generation-interrupt-action-1",
+        response_id="response-generation-interrupt",
+        response_generation=0,
+    )
+    interrupted = await registry.handle_p2_interrupt_generation(
+        params=params,
+        request_id="request-generation-interrupt-1",
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p2_interrupt_generation(
+        params=params,
+        request_id="request-generation-interrupt-1",
+        session_id="session-product",
+    )
+    conflict = await registry.handle_p2_interrupt_generation(
+        params={**params, "action_id": "generation-interrupt-action-2"},
+        request_id="request-generation-interrupt-1",
+        session_id="session-product",
+    )
+
+    assert interrupted.ok is True
+    result = cast(dict, interrupted.payload["result"])
+    assert result["status"] == "generation_interrupted"
+    assert result["fence_status"] == "fenced"
+    assert result["applied"] is True
+    assert result["cancel_scope"] == "round.cancel"
+    assert result["round_cancel_accepted"] is True
+    assert result["response_id"] == "response-generation-interrupt"
+    assert "cancel_response" not in result
+    assert replayed.payload == interrupted.payload
+    assert conflict.ok is False
+    assert cast(dict, conflict.payload["error"])["reason"] == (
+        "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+
+    # The Runtime really applied the fence and cancelled exactly the round.
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    runtime_effects = [
+        record.effect.effect_type for record in runtime._cr.snapshot().effects
+    ]
+    assert runtime_effects.count("playback.stop") == 1
+    assert runtime_effects.count("response.cancel") == 1
+    assert not {"round.cancel", "task.cancel"} & set(runtime_effects)
+    assert runtime.snapshot().harness.cancel_effects == 1
+
+    blocking.release.set()
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
 async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

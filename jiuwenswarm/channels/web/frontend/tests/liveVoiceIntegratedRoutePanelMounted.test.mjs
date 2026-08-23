@@ -11176,6 +11176,13 @@ function generationInterruptResponder(options) {
     if (method === 'live_voice.composition.p2.interrupt_generation') {
       state.interruptCalls.push({ ...params });
       if (state.interruptGate) await state.interruptGate;
+      if (state.interruptRetriableOnce) {
+        state.interruptRetriableOnce = false;
+        throw Object.assign(new Error('generation interruption transport timed out'), {
+          code: 'REQUEST_TIMEOUT',
+          retriable: true,
+        });
+      }
       if (state.interruptRejection) {
         throw Object.assign(new Error('generation interruption was rejected'), {
           code: 'CONFLICT',
@@ -11869,6 +11876,69 @@ test('mounted in-flight interruption that succeeds late cannot reset its success
   }
 });
 
+test('mounted unsettled interruption keeps guarding capture after a retriable failure', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-retriable-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '算了，先告诉我现在几点。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '现在是下午三点。',
+  });
+  // Result-unknown, not a definitive rejection: the owner keeps the request
+  // unresolved, so the panel must keep its exact handle on it too.
+  responder.interruptRetriableOnce = true;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+
+    // The utterance completes and is submitted, but the unresolved interruption
+    // still holds the capture authority barrier, so no new listening window may
+    // open while that request is in flight. The barrier is supplied by the
+    // owner itself; the panel additionally keeps its exact handle so the
+    // request can still be replayed through that owner, which this case does
+    // not exercise (see the evidence record).
+    await act(async () => {
+      await browser.emitSpeechEndOfTurnOnly();
+      await waitForMounted(() => responder.submits.length === 2, 'the replacement utterance was not submitted');
+      await new Promise(resolve => setTimeout(resolve, 60));
+    });
+    const replacementSubmitIndex = states.map(state => state.text_status).lastIndexOf('submitting');
+    assert.ok(replacementSubmitIndex >= 0, 'the replacement turn never reached submitting');
+    const listenedWhileUnsettled = states
+      .slice(replacementSubmitIndex)
+      .some(state => state.text_status === 'waiting' && ['starting', 'capturing'].includes(state.p1_status));
+    assert.equal(
+      listenedWhileUnsettled,
+      false,
+      `an unsettled interruption stopped guarding capture; states=${states
+        .slice(-10)
+        .map(state => `${state.p1_status}/${state.text_status}`)
+        .join(' | ')}`,
+    );
+    assert.equal(responder.interruptCalls.length, 1, 'the retriable failure must not be replayed on its own');
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted Session switch during generation-time listening abandons it without interruption or submit', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-switch-session';
@@ -12155,6 +12225,76 @@ test('mounted browser takeover during generation-time listening surrenders the p
         .join(' | ')}`,
     );
     assert.equal(responder.interruptCalls.length, 0);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted Exit during generation-time listening leaves the next turn able to listen again', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-exit-reenable-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '再讲一个短的。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+
+    // Exit while the first answer is still outstanding.
+    await act(async () => {
+      await controlRef.current.close();
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    assert.equal(states.at(-1)?.p1_status, 'closed');
+
+    // Re-enable the same Session and complete a second turn. A listening window
+    // left behind by Exit would make this turn wait for its answer with the
+    // microphone shut, silently disabling the feature for the rest of the
+    // session.
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(
+        () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status ?? ''),
+        `the re-enabled loop did not capture; states=${states
+          .slice(-8)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+      );
+      if (states.at(-1)?.p1_status === 'starting') await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the re-enabled capture did not listen');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(() => responder.submits.length === 2, 'the second turn was not submitted');
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'starting' && states.at(-1)?.text_status === 'waiting',
+        `the second turn opened no generation-time listening after Exit; states=${states
+          .slice(-10)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+      );
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the second listening window did not reach capturing');
+    });
+    assert.equal(
+      states.some(state => state.text_status === 'waiting' && state.p1_status === 'capturing'),
+      true,
+    );
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
