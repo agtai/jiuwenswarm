@@ -24,6 +24,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
 )
 from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     CapabilityProvenance,
+    DEFAULT_REALTIME_MODEL,
     DEFAULT_STT_MODEL,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_VOICE,
@@ -37,6 +38,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     SpeechDegradationFact,
     SpeechDegradationReason,
     SpeechRouteTier,
+    SPEECH_REALTIME_MODEL_ENV,
     STREAMING_SPEECH_FLAG,
     _LOGGER,
     _DegradationSinkTaskOwner,
@@ -44,6 +46,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     _TransportCleanupOwner,
     _default_socket_factory,
     _degradation_fact,
+    _native_response_metadata,
     _reason_for_exception,
     select_environment_streaming_speech,
 )
@@ -265,6 +268,17 @@ def config() -> OpenAIStreamingSpeechConfig:
     )
 
 
+def native_config() -> OpenAIStreamingSpeechConfig:
+    return OpenAIStreamingSpeechConfig(
+        api_base="https://api.openai.com/v1",
+        api_key="private-test-key",
+        stt_model="gpt-4o-mini-transcribe",
+        tts_model="unused-in-native-mode",
+        tts_voice="marin",
+        realtime_model="gpt-realtime-1.5",
+    )
+
+
 def session_updated_event(
     turn_detection: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -280,6 +294,55 @@ def session_updated_event(
                 }
             },
         },
+    }
+
+
+def native_session_updated_event(
+    turn_detection: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "type": "session.updated",
+        "session": {
+            "type": "realtime",
+            "model": "gpt-realtime-1.5",
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24_000},
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": turn_detection,
+                },
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": 24_000},
+                    "voice": "marin",
+                },
+            },
+            "tools": [],
+            "tool_choice": "none",
+        },
+    }
+
+
+def native_synthesis_session_updated_event() -> dict[str, object]:
+    event = native_session_updated_event()
+    session = event["session"]
+    assert isinstance(session, dict)
+    audio = session["audio"]
+    assert isinstance(audio, dict)
+    del audio["input"]
+    return event
+
+
+def native_audio_event(
+    kind: str, response_id: str, **payload: object
+) -> dict[str, object]:
+    return {
+        "type": kind,
+        "response_id": response_id,
+        "item_id": "native-output-item",
+        "output_index": 0,
+        "content_index": 0,
+        **payload,
     }
 
 
@@ -2564,3 +2627,633 @@ async def test_default_socket_close_timeout_fits_cleanup_attempt_budget(
     assert (
         REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS < TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
     )
+
+
+@pytest.mark.asyncio
+async def test_selector_explicitly_enables_native_realtime_without_changing_legacy() -> (
+    None
+):
+    assert DEFAULT_REALTIME_MODEL == "gpt-realtime-1.5"
+    common = {
+        STREAMING_SPEECH_FLAG: "true",
+        SPEECH_API_BASE_ENV: "https://api.openai.com/v1",
+        SPEECH_API_KEY_ENV: "server-only-key",
+        SPEECH_STT_MODEL_ENV: "gpt-4o-mini-transcribe",
+        SPEECH_TTS_VOICE_ENV: "marin",
+    }
+    native = await select_environment_streaming_speech(
+        environ={**common, SPEECH_PROVIDER_ENV: "openai-realtime"},
+        batch_available=True,
+    )
+    assert native.tier is SpeechRouteTier.STREAMING
+    assert native.provider is not None
+    assert native.provider.native_realtime is True
+    assert native.provider.synthesis_model == DEFAULT_REALTIME_MODEL
+    assert native.provider.capability.provider.provider_id == (
+        "openai-realtime-native-speech"
+    )
+    assert "server-only-key" not in repr(native.provider)
+
+    legacy = await select_environment_streaming_speech(
+        environ={**common, SPEECH_PROVIDER_ENV: "openai"},
+        batch_available=True,
+    )
+    assert legacy.provider is not None
+    assert legacy.provider.native_realtime is False
+    assert legacy.provider.synthesis_model == DEFAULT_TTS_MODEL
+    assert legacy.provider.capability.provider.provider_id == "openai-streaming-speech"
+
+    await native.provider.close()
+    await legacy.provider.close()
+
+
+@pytest.mark.asyncio
+async def test_selector_rejects_non_realtime_model_for_native_route() -> None:
+    for rejected_model in ("gpt-4o", "gpt-realtime-translate"):
+        selected = await select_environment_streaming_speech(
+            environ={
+                STREAMING_SPEECH_FLAG: "true",
+                SPEECH_PROVIDER_ENV: "openai-realtime",
+                SPEECH_API_BASE_ENV: "https://api.openai.com/v1",
+                SPEECH_API_KEY_ENV: "server-only-key",
+                SPEECH_REALTIME_MODEL_ENV: rejected_model,
+            },
+            batch_available=True,
+        )
+        assert selected.tier is SpeechRouteTier.BATCH
+        assert selected.provider is None
+        assert selected.fact is not None
+        assert selected.fact.reason is SpeechDegradationReason.CONFIGURATION_UNAVAILABLE
+        assert selected.fact.provider_id == "openai-realtime-native-speech"
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_recognition_negotiates_no_response_or_tools() -> None:
+    socket = FakeSocket((native_session_updated_event(server_vad_wire()),))
+    captured: dict[str, object] = {}
+
+    async def socket_factory(
+        url: str, headers: Mapping[str, str], timeout_seconds: float
+    ) -> FakeSocket:
+        captured.update(url=url, headers=dict(headers), timeout=timeout_seconds)
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory
+    )
+    ref = recognition_ref()
+    await provider.open_recognition(
+        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        timeout_seconds=1,
+    )
+    assert captured["url"] == (
+        "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
+    )
+    assert captured["headers"] == {"Authorization": "Bearer private-test-key"}
+    update = socket.sent[0]
+    assert update["type"] == "session.update"
+    session = update["session"]
+    assert isinstance(session, dict)
+    assert session["type"] == "realtime"
+    assert "model" not in session
+    assert session["output_modalities"] == ["audio"]
+    assert session["tools"] == []
+    assert session["tool_choice"] == "none"
+    audio = session["audio"]
+    assert isinstance(audio, dict)
+    input_audio = audio["input"]
+    assert isinstance(input_audio, dict)
+    assert input_audio["turn_detection"] == server_vad_wire()
+
+    await provider.send_recognition_audio(recognition_frame(ref))
+    socket.push(
+        {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "item-native",
+            "audio_start_ms": 10,
+        }
+    )
+    socket.push(
+        {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "item-native",
+            "audio_end_ms": 240,
+        }
+    )
+    socket.push({"type": "input_audio_buffer.committed", "item_id": "item-native"})
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "item-native",
+            "transcript": "调用真实智能体",
+        }
+    )
+    observed = [
+        await provider.next_recognition_event(ref, timeout_seconds=1) for _ in range(4)
+    ]
+    assert [event.kind for event in observed[:3]] == [
+        RecognitionTurnBoundaryKind.SPEECH_STARTED,
+        RecognitionTurnBoundaryKind.SPEECH_STOPPED,
+        RecognitionTurnBoundaryKind.COMMITTED,
+    ]
+    final = observed[-1]
+    assert final.kind is RecognitionEventKind.FINAL
+    assert final.provider.provider_id == "openai-realtime-native-speech"
+    assert final.hypothesis is not None
+    assert final.hypothesis.selected.display_text == "调用真实智能体"
+    assert socket.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_recognition_rejects_session_tool_downgrade() -> None:
+    updated = native_session_updated_event()
+    session = updated["session"]
+    assert isinstance(session, dict)
+    session["tools"] = [{"type": "function", "name": "forbidden"}]
+    socket = FakeSocket((updated,))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory
+    )
+    with pytest.raises(OpenAIStreamingSpeechError) as mismatch:
+        await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+    assert mismatch.value.reason == "SPEECH_PROVIDER_SESSION_MISMATCH"
+    assert socket.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_releases_only_exact_transcribed_agent_text() -> (
+    None
+):
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    assert started.provider.provider_id == "openai-realtime-native-speech"
+
+    synthesis_update = socket.sent[0]
+    assert synthesis_update["type"] == "session.update"
+    synthesis_session = synthesis_update["session"]
+    assert isinstance(synthesis_session, dict)
+    assert "model" not in synthesis_session
+    response_create = socket.sent[1]
+    assert response_create["type"] == "response.create"
+    response = response_create["response"]
+    assert isinstance(response, dict)
+    assert response["conversation"] == "none"
+    assert response["input"] == []
+    assert response["output_modalities"] == ["audio"]
+    assert response["metadata"] == _native_response_metadata(request)
+    assert all(isinstance(value, str) for value in response["metadata"].values())
+    assert request.spoken_text in str(response["instructions"])
+
+    response_id = "provider-response-native"
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "metadata": _native_response_metadata(request),
+            },
+        }
+    )
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta",
+            response_id,
+            delta=base64.b64encode(pcm).decode("ascii"),
+        )
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+
+    socket.push(native_audio_event("response.output_audio.done", response_id))
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.delta",
+            response_id,
+            delta=request.spoken_text,
+        )
+    )
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.done",
+            response_id,
+            transcript=request.spoken_text,
+        )
+    )
+    socket.push(
+        {
+            "type": "response.done",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "metadata": _native_response_metadata(request),
+                "conversation_id": None,
+                "output_modalities": ["audio"],
+                "audio": {
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24_000},
+                        "voice": "marin",
+                    }
+                },
+                "output": [
+                    {
+                        "id": "native-output-item",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_audio",
+                                "transcript": request.spoken_text,
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    chunks = []
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        if event.kind is SynthesisEventKind.CHUNK:
+            chunks.append(event)
+        if event.kind is SynthesisEventKind.COMPLETED:
+            break
+    assert chunks
+    assert all(chunk.pcm_s16le for chunk in chunks)
+    assert all(
+        chunk.provider.provider_id == "openai-realtime-native-speech"
+        for chunk in chunks
+    )
+    assert socket.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_rejects_changed_text_before_audio_release() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    response_id = "provider-response-mismatch"
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "metadata": _native_response_metadata(request),
+            },
+        }
+    )
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta",
+            response_id,
+            delta=base64.b64encode(struct.pack("<hh", 1, -1)).decode("ascii"),
+        )
+    )
+    socket.push(native_audio_event("response.output_audio.done", response_id))
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.done",
+            response_id,
+            transcript="not the agent text",
+        )
+    )
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_rejects_terminal_non_audio_output() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    response_id = "provider-response-tool-output"
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "metadata": _native_response_metadata(request),
+            },
+        }
+    )
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta",
+            response_id,
+            delta=base64.b64encode(struct.pack("<hh", 1, -1)).decode("ascii"),
+        )
+    )
+    socket.push(native_audio_event("response.output_audio.done", response_id))
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.done",
+            response_id,
+            transcript=request.spoken_text,
+        )
+    )
+    socket.push(
+        {
+            "type": "response.done",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "metadata": _native_response_metadata(request),
+                "conversation_id": None,
+                "output_modalities": ["audio"],
+                "audio": {
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24_000},
+                        "voice": "marin",
+                    }
+                },
+                "output": [
+                    {
+                        "id": "native-tool-item",
+                        "type": "function_call",
+                        "status": "completed",
+                        "name": "forbidden_tool",
+                    }
+                ],
+            },
+        }
+    )
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_rejects_cross_response_audio() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {
+                "id": "expected-response",
+                "metadata": _native_response_metadata(request),
+            },
+        }
+    )
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta",
+            "stale-response",
+            delta=base64.b64encode(struct.pack("<hh", 1, -1)).decode("ascii"),
+        )
+    )
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_rejects_invalid_audio_before_release() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    response_id = "provider-response-invalid-audio"
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "metadata": _native_response_metadata(request),
+            },
+        }
+    )
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta", response_id, delta="not-base64%"
+        )
+    )
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_session_downgrade_fails_closed() -> None:
+    facts: list[SpeechDegradationFact] = []
+    updated = native_synthesis_session_updated_event()
+    session = updated["session"]
+    assert isinstance(session, dict)
+    session["tool_choice"] = "auto"
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            updated,
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_event_timeout_is_bounded_and_visible() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request(event_timeout_seconds=0.05)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+    assert facts[-1].to_tier is SpeechRouteTier.TEXT
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_cancel_binds_exact_provider_response() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            {"type": "session.created", "session": {"id": "session-native"}},
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    response_id = "provider-response-cancel"
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "metadata": _native_response_metadata(request),
+            },
+        }
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        session = provider._synthesis.get(
+            (request.ref.stream_id, request.ref.stream_generation)
+        )
+        if session is not None and session.provider_response_id == response_id:
+            break
+    await provider.cancel_synthesis(request.ref)
+    assert socket.sent[-1] == {
+        "type": "response.cancel",
+        "response_id": response_id,
+    }
+    assert socket.closed is True
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert_zero_business_effects(provider)
+    await provider.close()

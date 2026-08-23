@@ -93,6 +93,27 @@ class _FakeSseStream:
         self.closed = True
 
 
+class _FakeRealtimeSocket:
+    def __init__(self, initial: tuple[dict[str, object], ...]) -> None:
+        self.sent: list[dict[str, object]] = []
+        self.incoming: asyncio.Queue[str] = asyncio.Queue()
+        self.closed = False
+        for event in initial:
+            self.push(event)
+
+    def push(self, event: dict[str, object]) -> None:
+        self.incoming.put_nowait(json.dumps(event))
+
+    async def send(self, message: str) -> None:
+        self.sent.append(json.loads(message))
+
+    async def recv(self) -> str:
+        return await self.incoming.get()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class _FakeProvider(NativeStreamingSpeechProvider):
     def __init__(self, capability: StreamingProviderCapability = _CAPABILITY) -> None:
         self._capability = capability
@@ -461,6 +482,150 @@ async def test_real_openai_adapter_streams_through_route_without_batch_materiali
     assert provider.conformance.snapshot().task_mutations == 0
     assert provider.conformance.snapshot().chat_mutations == 0
     assert provider.conformance.snapshot().turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None:
+    socket = _FakeRealtimeSocket(
+        (
+            {"type": "session.created", "session": {"id": "native-session"}},
+            {
+                "type": "session.updated",
+                "session": {
+                    "type": "realtime",
+                    "model": "gpt-realtime-1.5",
+                    "output_modalities": ["audio"],
+                    "audio": {
+                        "output": {
+                            "format": {"type": "audio/pcm", "rate": 24_000},
+                            "voice": "marin",
+                        }
+                    },
+                    "tools": [],
+                    "tool_choice": "none",
+                },
+            },
+        )
+    )
+
+    async def socket_factory(*_args) -> _FakeRealtimeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base="https://api.openai.com/v1",
+            api_key="private-test-key",
+            realtime_model="gpt-realtime-1.5",
+        ),
+        socket_factory=socket_factory,
+    )
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    request = _request()
+    handle, begin_outcome = await owner.begin(request)
+    assert handle is not None and begin_outcome is None
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if len(socket.sent) == 2:
+            break
+    created = socket.sent[1]
+    response = created["response"]
+    assert isinstance(response, dict)
+    assert response["conversation"] == "none"
+    assert response["input"] == []
+    metadata = response["metadata"]
+    response_id = "native-response"
+    socket.push(
+        {
+            "type": "response.created",
+            "response": {"id": response_id, "metadata": metadata},
+        }
+    )
+    pcm = struct.pack("<480h", *((1000,) * 480))
+    socket.push(
+        {
+            "type": "response.output_audio.delta",
+            "response_id": response_id,
+            "item_id": "native-output-item",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    socket.push(
+        {
+            "type": "response.output_audio.done",
+            "response_id": response_id,
+            "item_id": "native-output-item",
+            "output_index": 0,
+            "content_index": 0,
+        }
+    )
+    socket.push(
+        {
+            "type": "response.output_audio_transcript.done",
+            "response_id": response_id,
+            "item_id": "native-output-item",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": request.spoken_text,
+        }
+    )
+    socket.push(
+        {
+            "type": "response.done",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "metadata": metadata,
+                "conversation_id": None,
+                "output_modalities": ["audio"],
+                "audio": {
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24_000},
+                        "voice": "marin",
+                    }
+                },
+                "output": [
+                    {
+                        "id": "native-output-item",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_audio",
+                                "transcript": request.spoken_text,
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    first = await owner.next_chunk(handle)
+    terminal = await owner.next_chunk(handle)
+    assert first.chunk is not None
+    assert first.chunk.frame.seq == 0
+    assert first.chunk.frame.sample_cursor == 0
+    assert len(first.chunk.frame.samples) == 480
+    assert first.chunk.capability.provider.provider_id == (
+        "openai-realtime-native-speech"
+    )
+    assert terminal.outcome is not None and terminal.outcome.completed is True
+    assert terminal.outcome.first_audio_emitted is True
+    assert socket.closed is True
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
     await owner.close()
 
 

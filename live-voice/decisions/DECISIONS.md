@@ -1068,3 +1068,16 @@
 - 回滚：默认切换验收完成后，回滚窗口不再依赖长期部署开关；若当前实现发生已证实回归，使用有边界的代码回退/修复并保留旧客户端单条兼容。该决定不授权 remote ref update。
 - 证据：[P2 default-on evidence](../evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md)。
 - 重新评估条件：显式 `2..16` 无法保持严格绑定/顺序/authoritative barrier；旧客户端缺省单条路径失败；生产 `16` 在真实负载下产生有证据的 backpressure、丢序或错误授权；或固定语料证明另一有界值需要成为新产品默认。重新评估不自动恢复环境开关。
+
+## D-095 OpenAI Realtime 原生语音以可选 Speech Adapter 接入现有 Agent 真相链
+
+- 日期：2026-08-23
+- 状态：Accepted implementation-scope decision（用户明确要求以 OpenAI Realtime 语音模型为目标，在新分支和独立 worktree 中打通 Live Voice 支持；本决定将 D-039/D-084 的可选 Native Audio Engine 实现提前，不自动改变 feature-complete 或产品验收结论）。
+- 选择与凭据：现有 `LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED` 仍是总开关；只有显式 `LIVE_VOICE_SPEECH_PROVIDER=openai-realtime` 才选中新 Adapter。API key 仅存在于 Gateway 进程私有环境，Gateway 按 OpenAI 官方的 server-to-server WebSocket 方式连接；浏览器不获取 key 或 ephemeral token。目标模型使用可配置的 `gpt-realtime` family；因旧 `gpt-realtime` 已被官方模型目录标为 Deprecated，默认 alias 选择当前面向 voice agents 的旗舰音频模型 `gpt-realtime-1.5`，voice 默认沿用 `marin`。显式配置可选择兼容的 `gpt-realtime-2/2.1` 等成员，但拒绝用途不同的 translate/whisper 变体；模型可用性、价格、区域、snapshot 和真实音质必须另由最短真实探针/物理证据确认，不从配置标签推导 PASS。
+- 输入权威：Realtime session 可直接消费原生音频，但其 optional input transcription 仍是独立 ASR 结果。Adapter 必须设置 `create_response=false` 与 `interrupt_response=false`，不允许 Provider 自动产生产品回答。只有经既有 Recognition/committed-input fence 接受的 final transcript 才能进入真实 JiuwenSwarm Agent/Tool 路径；partial、迟到、错 item/generation 或失败输入的 Agent/Tool/Task/history 副作用必须为零。
+- 输出权威：只有真实 JiuwenSwarm Agent 已完成、经 Runtime 绑定的 authoritative response text 才能触发 Realtime 音频响应。Adapter 使用无默认会话上下文的 out-of-band `response.create`、空 `input` 和 exact-speech instruction，并将 Provider response ID/item/output/content/音频 cursor 继续绑定既有 response/generation/unit fence。官方明确 instructions 不是权威保证，因此完整 Provider 音频先受有界缓冲；只有 completed output transcript 与 Agent `spoken_text` 逐字相等才向下游释放，任何改写、错 identity、不完整或超限响应释放零音频并显式降级。Provider 不注册或调用 JiuwenSwarm tools，不写 Session History/Task 真相，不以连接关闭冒充 cancel ACK 或人已听见；本批也不声明该缓冲路径已获得 streaming first-audio latency credit。
+- 兼容与降级：现有 `LIVE_VOICE_SPEECH_PROVIDER=openai` 继续表示已实现的 Realtime transcription + streaming TTS 级联；新选择不静默改变它。总开关关闭、无效/缺失配置、Provider 协议失败仍按既有有界选择退回 Batch 或 text，且必须发布真实 degradation fact。
+- Tier-3 验收：完整适用 `P/N/B/S/T/C/R/I/F/K/X` 场景，聚焦 session negotiation、audio bounds、item/response identity、顺序、超时、cancel/close、队列背压、Provider 错误/降级、旧 `openai` 路径回归及零禁止副作用；模块闭合需要独立 review。未有凭据/网络/真实设备时可闭合 source/automation，但不授予真实 Provider、物理听感、延迟或产品验收 credit。
+- 排除：本批不实现 browser WebRTC/直连 OpenAI、Provider-native tool calling、OpenAI 直接产生产品回答、绕过 Agent Bridge/Voice–Task Bridge/确认、Agent 生成期打断、跨回合单一持久 Native session、默认开启、编辑账户/billing/key、公开部署、物理 PASS 或 remote ref update。
+- 官方协议依据：[Realtime WebSocket](https://developers.openai.com/api/docs/guides/realtime-websocket)、[Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)、[`gpt-realtime-1.5`](https://developers.openai.com/api/docs/models/gpt-realtime-1.5) 与 [Realtime 模型目录](https://developers.openai.com/api/docs/models)。
+- 重新评估条件：需要单一持久 Native session 跨输入/输出保留语韵上下文；Realtime transcript 无法满足可审计 committed-text 契约；原生音频输出无法保持 authoritative Agent 语义；需要新 InteractionAction/shared schema；或固定语料证明 native/cascade 在安全、延迟、质量、隐私、成本上的产品选择应改变。

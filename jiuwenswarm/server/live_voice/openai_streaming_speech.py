@@ -75,9 +75,11 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 
 
 STREAMING_SPEECH_FLAG = "LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED"
+SPEECH_REALTIME_MODEL_ENV = "LIVE_VOICE_SPEECH_REALTIME_MODEL"
 DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe-2025-12-15"
 DEFAULT_TTS_MODEL = "gpt-4o-mini-tts-2025-12-15"
 DEFAULT_TTS_VOICE = "marin"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
 OPENAI_PCM_RATE_HZ = 24_000
 MAX_WIRE_MESSAGE_BYTES = 1_048_576
 MAX_SSE_LINE_BYTES = 262_144
@@ -112,6 +114,7 @@ REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS = TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
 MAX_INCOMPLETE_TRANSPORT_CLEANUPS = 32
 
 _PROVIDER = ProviderRef("openai-streaming-speech", "formal")
+_NATIVE_REALTIME_PROVIDER = ProviderRef("openai-realtime-native-speech", "formal")
 _LOGGER = logging.getLogger(__name__)
 _QueueValue = TypeVar("_QueueValue")
 
@@ -198,6 +201,7 @@ class OpenAIStreamingSpeechConfig:
     stt_model: str = DEFAULT_STT_MODEL
     tts_model: str = DEFAULT_TTS_MODEL
     tts_voice: str = DEFAULT_TTS_VOICE
+    realtime_model: str | None = None
     connect_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
@@ -206,6 +210,12 @@ class OpenAIStreamingSpeechConfig:
         _safe_label(self.stt_model, "stt_model")
         _safe_label(self.tts_model, "tts_model")
         _safe_label(self.tts_voice, "tts_voice")
+        if self.realtime_model is not None:
+            model = _safe_label(self.realtime_model, "realtime_model")
+            if not model.startswith("gpt-realtime") or model.startswith(
+                ("gpt-realtime-translate", "gpt-realtime-whisper")
+            ):
+                raise ValueError("native Realtime mode requires a gpt-realtime model")
         if (
             isinstance(self.connect_timeout_seconds, bool)
             or not isinstance(self.connect_timeout_seconds, (int, float))
@@ -674,6 +684,13 @@ class _SynthesisSession:
     resampler: _StreamingLinearResampler
     task: asyncio.Task[None] | None = field(default=None, repr=False)
     stream: SpeechSseStream | None = field(default=None, repr=False)
+    socket: RealtimeSocket | None = field(default=None, repr=False)
+    provider_response_id: str | None = None
+    provider_item_id: str | None = None
+    provider_audio_done: bool = False
+    provider_transcript_done: bool = False
+    provider_transcript: str = field(default="", repr=False)
+    pending_native_audio: bytearray = field(default_factory=bytearray, repr=False)
     event_seq: int = 0
     audio_cursor: int = 0
     wire_audio_bytes: int = 0
@@ -853,11 +870,16 @@ class OpenAIStreamingSpeechProvider:
                 "runtime fallback must be text; product wiring owns batch eligibility"
             )
         self._fallback_tier = fallback_tier
+        self._provider_ref = (
+            _NATIVE_REALTIME_PROVIDER
+            if config.realtime_model is not None
+            else _PROVIDER
+        )
         self._degradation_sink_tasks = _DegradationSinkTaskOwner()
         self._transport_cleanup_tasks = _TransportCleanupOwner()
         self._monotonic = monotonic
         self._capability = StreamingProviderCapability(
-            provider=_PROVIDER,
+            provider=self._provider_ref,
             recognition=RecognitionProviderSupport(
                 modes=frozenset({SpeechMode.STREAM}),
                 transport=ProviderTransport.NATIVE_STREAM,
@@ -897,7 +919,7 @@ class OpenAIStreamingSpeechProvider:
 
     @property
     def synthesis_model(self) -> str:
-        return self._config.tts_model
+        return self._config.realtime_model or self._config.tts_model
 
     @property
     def synthesis_voice(self) -> str | None:
@@ -906,6 +928,10 @@ class OpenAIStreamingSpeechProvider:
     @property
     def fallback_tier(self) -> SpeechRouteTier:
         return self._fallback_tier
+
+    @property
+    def native_realtime(self) -> bool:
+        return self._config.realtime_model is not None
 
     @property
     def degradation_facts(self) -> tuple[SpeechDegradationFact, ...]:
@@ -946,7 +972,9 @@ class OpenAIStreamingSpeechProvider:
             )
             conformance_started = True
             deadline = started_at + float(timeout_seconds)
-            url = _realtime_url(self._config.api_base)
+            url = _realtime_url(
+                self._config.api_base, model=self._config.realtime_model
+            )
             remaining = deadline - self._monotonic()
             if remaining <= 0:
                 raise TimeoutError("recognition stream timed out before connect")
@@ -979,24 +1007,7 @@ class OpenAIStreamingSpeechProvider:
             )
             await self._send_recognition_wire(
                 session,
-                _wire_json(
-                    {
-                        "type": "session.update",
-                        "session": {
-                            "type": "transcription",
-                            "audio": {
-                                "input": {
-                                    "format": {
-                                        "type": "audio/pcm",
-                                        "rate": OPENAI_PCM_RATE_HZ,
-                                    },
-                                    "transcription": {"model": self._config.stt_model},
-                                    "turn_detection": _turn_detection_wire(request),
-                                }
-                            },
-                        },
-                    }
-                ),
+                _wire_json(_recognition_session_update(self._config, request)),
             )
             remaining = deadline - self._monotonic()
             if remaining <= 0:
@@ -1239,8 +1250,24 @@ class OpenAIStreamingSpeechProvider:
         session = self._require_synthesis(ref)
         self._conformance.request_synthesis_cancel(ref, reason=reason)
         session.closing = True
+        session.pending_native_audio.clear()
         if session.stream is not None:
             await self._close_stream(session.stream)
+        if session.socket is not None:
+            if session.provider_response_id is not None:
+                with suppress(Exception):
+                    async with asyncio.timeout(
+                        TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
+                    ):
+                        await session.socket.send(
+                            _wire_json(
+                                {
+                                    "type": "response.cancel",
+                                    "response_id": session.provider_response_id,
+                                }
+                            )
+                        )
+            await self._close_socket(session.socket)
         if session.task is not None:
             await self._transport_cleanup_tasks.cancel_task(
                 session.task, kind="synthesis-worker"
@@ -1307,6 +1334,11 @@ class OpenAIStreamingSpeechProvider:
                 for synthesis_session in synthesis
                 if synthesis_session.stream is not None
             ),
+            *(
+                _settle_close_action(self._close_socket(synthesis_session.socket))
+                for synthesis_session in synthesis
+                if synthesis_session.socket is not None
+            ),
             return_exceptions=True,
         )
         process_control = _first_process_control(process_control, results)
@@ -1339,6 +1371,7 @@ class OpenAIStreamingSpeechProvider:
                 self._conformance.provider_closed_recognition(recognition_session.ref)
             recognition_session.terminal = True
         for synthesis_session in synthesis:
+            synthesis_session.pending_native_audio.clear()
             with suppress(StreamingSpeechViolation):
                 self._conformance.provider_closed_synthesis(
                     synthesis_session.request.ref
@@ -1443,6 +1476,12 @@ class OpenAIStreamingSpeechProvider:
                 event,
                 expected_model=self._config.stt_model,
                 expected_turn_detection=session.request.turn_detection,
+                expected_realtime_model=self._config.realtime_model,
+                expected_voice=(
+                    self._config.tts_voice
+                    if self._config.realtime_model is not None
+                    else None
+                ),
             )
             if not session.ready.done():
                 session.ready.set_result(None)
@@ -1593,7 +1632,7 @@ class OpenAIStreamingSpeechProvider:
         )
         event = StreamingRecognitionEvent(
             ref=session.ref,
-            provider=_PROVIDER,
+            provider=self._provider_ref,
             seq=session.event_seq,
             audio_cursor=self._recognition_event_cursor(session, kind),
             kind=kind,
@@ -1626,7 +1665,7 @@ class OpenAIStreamingSpeechProvider:
             return
         event = RecognitionTurnBoundaryEvent(
             ref=session.ref,
-            provider=_PROVIDER,
+            provider=self._provider_ref,
             seq=session.event_seq,
             kind=kind,
             provider_item_id=provider_item_id,
@@ -1642,10 +1681,13 @@ class OpenAIStreamingSpeechProvider:
         failure: BaseException | None = None
         tail: bytes | None = None
         try:
-            async with asyncio.timeout(session.request.event_timeout_seconds):
-                session.stream = await self._open_synthesis_stream(session)
-            await self._publish_synthesis(session, SynthesisEventKind.STARTED)
-            done = await self._consume_synthesis_stream(session)
+            if self._config.realtime_model is None:
+                async with asyncio.timeout(session.request.event_timeout_seconds):
+                    session.stream = await self._open_synthesis_stream(session)
+                await self._publish_synthesis(session, SynthesisEventKind.STARTED)
+                done = await self._consume_synthesis_stream(session)
+            else:
+                done = await self._run_native_realtime_synthesis(session)
             if not done:
                 raise OpenAIStreamingSpeechError(
                     "SPEECH_PROVIDER_TTS_INCOMPLETE",
@@ -1658,6 +1700,8 @@ class OpenAIStreamingSpeechProvider:
                 )
             if session.stream is not None:
                 await self._close_stream(session.stream)
+            if session.socket is not None:
+                await self._close_socket(session.socket)
             await self._publish_synthesis(session, SynthesisEventKind.COMPLETED)
             session.terminal = True
         except BaseException as exc:
@@ -1666,10 +1710,16 @@ class OpenAIStreamingSpeechProvider:
         if isinstance(failure, asyncio.CancelledError):
             if session.stream is not None:
                 await self._close_stream(session.stream)
+            if session.socket is not None:
+                await self._close_socket(session.socket)
+            session.pending_native_audio.clear()
             raise failure
         if failure is not None and _is_process_control(failure):
             if session.stream is not None:
                 await self._close_stream(session.stream)
+            if session.socket is not None:
+                await self._close_socket(session.socket)
+            session.pending_native_audio.clear()
             if not session.terminal:
                 with suppress(StreamingSpeechViolation):
                     self._conformance.provider_closed_synthesis(session.request.ref)
@@ -1693,6 +1743,323 @@ class OpenAIStreamingSpeechProvider:
             )
             if session.stream is not None:
                 await self._close_stream(session.stream)
+            if session.socket is not None:
+                await self._close_socket(session.socket)
+            session.pending_native_audio.clear()
+
+    async def _run_native_realtime_synthesis(self, session: _SynthesisSession) -> bool:
+        model = self._config.realtime_model
+        if model is None:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_CONFIGURATION_UNAVAILABLE",
+                "native Realtime synthesis model is unavailable",
+            )
+        headers: Mapping[str, str] = {
+            "Authorization": f"Bearer {self._config.api_key}",
+        }
+        async with asyncio.timeout(session.request.event_timeout_seconds):
+            session.socket = await self._socket_factory(
+                _realtime_url(self._config.api_base, model=model),
+                headers,
+                self._config.connect_timeout_seconds,
+            )
+        headers = {}
+        await self._send_native_synthesis(
+            session,
+            _wire_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "output_modalities": ["audio"],
+                        "audio": {
+                            "output": {
+                                "format": {
+                                    "type": "audio/pcm",
+                                    "rate": OPENAI_PCM_RATE_HZ,
+                                },
+                                "voice": self._config.tts_voice,
+                            }
+                        },
+                        "tools": [],
+                        "tool_choice": "none",
+                    },
+                }
+            ),
+        )
+        while True:
+            raw = await self._recv_native_synthesis(session)
+            event = _json_object(raw)
+            kind = event.get("type")
+            if kind == "session.created":
+                continue
+            if kind != "session.updated":
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TURN_ORDER",
+                    "native Realtime synthesis was not negotiated before output",
+                )
+            _validate_realtime_synthesis_session(
+                event,
+                expected_model=model,
+                expected_voice=self._config.tts_voice,
+            )
+            break
+        metadata = _native_response_metadata(session.request)
+        spoken_text = session.request.spoken_text
+        await self._send_native_synthesis(
+            session,
+            _wire_json(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "conversation": "none",
+                        "metadata": metadata,
+                        "output_modalities": ["audio"],
+                        "input": [],
+                        "instructions": (
+                            "Say exactly the following text. Do not add, remove, "
+                            "translate, summarize, or paraphrase anything.\n\n"
+                            f"{spoken_text}"
+                        ),
+                    },
+                }
+            ),
+        )
+        metadata = {}
+        spoken_text = ""
+        await self._publish_synthesis(session, SynthesisEventKind.STARTED)
+        while True:
+            raw = await self._recv_native_synthesis(session)
+            if await self._consume_native_synthesis_message(session, raw):
+                return True
+
+    async def _recv_native_synthesis(self, session: _SynthesisSession) -> str:
+        if session.socket is None:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                "native Realtime synthesis transport is unavailable",
+            )
+        async with asyncio.timeout(session.request.event_timeout_seconds):
+            raw = await session.socket.recv()
+        if type(raw) is not str:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_BINARY_CONTROL",
+                "native Realtime synthesis returned a binary control message",
+            )
+        if len(raw.encode("utf-8")) > MAX_WIRE_MESSAGE_BYTES:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_MESSAGE_LIMIT",
+                "native Realtime synthesis message exceeds the limit",
+            )
+        return raw
+
+    async def _send_native_synthesis(
+        self, session: _SynthesisSession, message: str
+    ) -> None:
+        if session.socket is None:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                "native Realtime synthesis transport is unavailable",
+            )
+        async with asyncio.timeout(session.request.event_timeout_seconds):
+            await session.socket.send(message)
+
+    async def _consume_native_synthesis_message(
+        self, session: _SynthesisSession, raw: str
+    ) -> bool:
+        event = _json_object(raw)
+        kind = event.get("type")
+        if kind == "response.created":
+            response = event.get("response")
+            if type(response) is not dict:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_RESPONSE_MISMATCH",
+                    "native Realtime synthesis omitted its response",
+                )
+            response_id = _safe_label(response.get("id"), "response_id")
+            if session.provider_response_id is not None or response.get(
+                "metadata"
+            ) != _native_response_metadata(session.request):
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_RESPONSE_MISMATCH",
+                    "native Realtime synthesis response lost its exact binding",
+                )
+            session.provider_response_id = response_id
+            return False
+        if kind == "response.output_audio.delta":
+            self._require_native_audio_binding(session, event)
+            if session.provider_audio_done:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TURN_ORDER",
+                    "native Realtime synthesis audio changed after completion",
+                )
+            encoded = event.get("delta")
+            if not isinstance(encoded, str) or not encoded:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_INVALID_AUDIO",
+                    "native Realtime synthesis returned invalid audio",
+                )
+            try:
+                pcm = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_INVALID_AUDIO",
+                    "native Realtime synthesis returned invalid audio",
+                ) from exc
+            if (
+                not pcm
+                or len(pcm) % 2
+                or len(pcm) > MAX_PROVIDER_AUDIO_DELTA_BYTES
+                or len(session.pending_native_audio) + len(pcm) > MAX_STREAM_AUDIO_BYTES
+            ):
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_AUDIO_LIMIT",
+                    "native Realtime synthesis audio is invalid or exceeds the limit",
+                )
+            session.pending_native_audio.extend(pcm)
+            session.wire_audio_bytes += len(pcm)
+            return False
+        if kind == "response.output_audio.done":
+            self._require_native_audio_binding(session, event)
+            if session.provider_audio_done:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TURN_ORDER",
+                    "native Realtime synthesis duplicated audio completion",
+                )
+            session.provider_audio_done = True
+            return False
+        if kind == "response.output_audio_transcript.delta":
+            self._require_native_audio_binding(session, event)
+            if session.provider_transcript_done:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TURN_ORDER",
+                    "native Realtime synthesis transcript changed after completion",
+                )
+            delta = _provider_text(event.get("delta"), "transcript delta")
+            if len(session.provider_transcript) + len(delta) > 16_000:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_INVALID_TEXT",
+                    "native Realtime synthesis transcript exceeds the limit",
+                )
+            session.provider_transcript += delta
+            return False
+        if kind == "response.output_audio_transcript.done":
+            self._require_native_audio_binding(session, event)
+            transcript = _provider_text(event.get("transcript"), "transcript")
+            if (
+                session.provider_transcript_done
+                or (
+                    session.provider_transcript
+                    and session.provider_transcript != transcript
+                )
+                or transcript != session.request.spoken_text
+            ):
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TEXT_MISMATCH",
+                    "native Realtime synthesis changed authoritative Agent text",
+                )
+            session.provider_transcript = transcript
+            session.provider_transcript_done = True
+            return False
+        if kind == "response.done":
+            response = event.get("response")
+            if type(response) is not dict:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_RESPONSE_MISMATCH",
+                    "native Realtime synthesis omitted terminal response truth",
+                )
+            self._require_native_response_binding(session, response)
+            if (
+                response.get("status") != "completed"
+                or response.get("metadata")
+                != _native_response_metadata(session.request)
+                or not session.provider_audio_done
+                or not session.provider_transcript_done
+                or not session.pending_native_audio
+                or not _native_terminal_output_matches(
+                    response,
+                    expected_item_id=session.provider_item_id,
+                    expected_text=session.request.spoken_text,
+                    expected_voice=self._config.tts_voice,
+                )
+            ):
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TTS_INCOMPLETE",
+                    "native Realtime synthesis did not complete exact audio output",
+                )
+            await self._publish_native_audio_buffer(session)
+            return True
+        if kind == "error":
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_SYNTHESIS_FAILED",
+                "native Realtime synthesis Provider reported a failure",
+            )
+        if kind in {
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.output_item.done",
+        }:
+            self._require_native_response_binding(session, event)
+            return False
+        if kind == "rate_limits.updated":
+            return False
+        raise OpenAIStreamingSpeechError(
+            "SPEECH_PROVIDER_UNKNOWN_EVENT",
+            "native Realtime synthesis returned an unknown event",
+        )
+
+    def _require_native_response_binding(
+        self, session: _SynthesisSession, event: Mapping[str, object]
+    ) -> None:
+        if (
+            session.provider_response_id is None
+            or event.get("response_id", event.get("id")) != session.provider_response_id
+        ):
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_RESPONSE_MISMATCH",
+                "native Realtime synthesis event belongs to another response",
+            )
+
+    def _require_native_audio_binding(
+        self, session: _SynthesisSession, event: Mapping[str, object]
+    ) -> None:
+        self._require_native_response_binding(session, event)
+        item_id = _safe_label(event.get("item_id"), "item_id")
+        if (
+            event.get("output_index") != 0
+            or event.get("content_index") != 0
+            or (
+                session.provider_item_id is not None
+                and item_id != session.provider_item_id
+            )
+        ):
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_CONTENT_MISMATCH",
+                "native Realtime synthesis changed its primary audio identity",
+            )
+        session.provider_item_id = item_id
+
+    async def _publish_native_audio_buffer(self, session: _SynthesisSession) -> None:
+        pcm = bytes(session.pending_native_audio)
+        session.pending_native_audio.clear()
+        frame_bytes = MAX_AUDIO_SAMPLES_PER_FRAME * 2
+        for input_offset in range(0, len(pcm), MAX_PROVIDER_AUDIO_DELTA_BYTES):
+            provider_chunk = pcm[
+                input_offset : input_offset + MAX_PROVIDER_AUDIO_DELTA_BYTES
+            ]
+            output = _encode_s16le(
+                session.resampler.feed(_decode_s16le(provider_chunk))
+            )
+            provider_chunk = b""
+            for output_offset in range(0, len(output), frame_bytes):
+                await self._publish_synthesis(
+                    session,
+                    SynthesisEventKind.CHUNK,
+                    pcm=output[output_offset : output_offset + frame_bytes],
+                )
+            output = b""
+        pcm = b""
 
     async def _open_synthesis_stream(
         self, session: _SynthesisSession
@@ -1847,7 +2214,7 @@ class OpenAIStreamingSpeechProvider:
         sample_count = 0 if pcm is None else len(pcm) // 2
         event = StreamingSynthesisEvent(
             ref=session.request.ref,
-            provider=_PROVIDER,
+            provider=self._provider_ref,
             seq=session.event_seq,
             sample_cursor=session.audio_cursor,
             kind=kind,
@@ -2075,7 +2442,7 @@ class OpenAIStreamingSpeechProvider:
             reason=reason,
             from_tier=SpeechRouteTier.STREAMING,
             to_tier=SpeechRouteTier.TEXT,
-            provider_id=_PROVIDER.provider_id,
+            provider_id=self._provider_ref.provider_id,
             latency_ms=latency_ms,
             identity=identity,
         )
@@ -2172,8 +2539,16 @@ async def select_environment_streaming_speech(
     provider_name = str(env.get(SPEECH_PROVIDER_ENV) or "").strip().lower()
     api_base = str(env.get(SPEECH_API_BASE_ENV) or "").strip()
     api_key = str(env.get(SPEECH_API_KEY_ENV) or "").strip()
-    if provider_name != "openai" or not api_base or not api_key:
-        return await _configuration_fallback(target, degradation_sink)
+    native_realtime = provider_name == "openai-realtime"
+    selected_provider = _NATIVE_REALTIME_PROVIDER if native_realtime else _PROVIDER
+    if (
+        provider_name not in {"openai", "openai-realtime"}
+        or not api_base
+        or not api_key
+    ):
+        return await _configuration_fallback(
+            target, degradation_sink, provider_id=selected_provider.provider_id
+        )
     try:
         config = OpenAIStreamingSpeechConfig(
             api_base=api_base,
@@ -2187,9 +2562,17 @@ async def select_environment_streaming_speech(
             tts_voice=(
                 str(env.get(SPEECH_TTS_VOICE_ENV) or "").strip() or DEFAULT_TTS_VOICE
             ),
+            realtime_model=(
+                str(env.get(SPEECH_REALTIME_MODEL_ENV) or "").strip()
+                or DEFAULT_REALTIME_MODEL
+                if native_realtime
+                else None
+            ),
         )
     except (OpenAIStreamingSpeechError, TypeError, ValueError):
-        return await _configuration_fallback(target, degradation_sink)
+        return await _configuration_fallback(
+            target, degradation_sink, provider_id=selected_provider.provider_id
+        )
     provider = OpenAIStreamingSpeechProvider(
         config,
         socket_factory=socket_factory,
@@ -2200,14 +2583,17 @@ async def select_environment_streaming_speech(
 
 
 async def _configuration_fallback(
-    target: SpeechRouteTier, sink: DegradationSink | None
+    target: SpeechRouteTier,
+    sink: DegradationSink | None,
+    *,
+    provider_id: str = _PROVIDER.provider_id,
 ) -> StreamingSpeechSelection:
     fact = _degradation_fact(
         operation="speech.route.select",
         reason=SpeechDegradationReason.CONFIGURATION_UNAVAILABLE,
         from_tier=SpeechRouteTier.STREAMING,
         to_tier=target,
-        provider_id=_PROVIDER.provider_id,
+        provider_id=provider_id,
         latency_ms=None,
         identity="configuration-unavailable",
     )
@@ -2455,21 +2841,22 @@ def _validate_api_base(value: object) -> str:
     return "https://api.openai.com/v1"
 
 
-def _realtime_url(api_base: str) -> str:
-    """Build the realtime transcription session URL.
+def _realtime_url(api_base: str, *, model: str | None = None) -> str:
+    """Build an official Realtime transcription or native-model URL.
 
-    The session is opened with ``intent=transcription`` rather than a ``model``
-    parameter. A realtime session's ``model`` must be a realtime model; passing
-    the transcription snapshot there makes the server reject the session with
-    ``invalid_model`` before any audio is sent. The transcription snapshot is
-    carried by the ``session.update`` payload as
+    The legacy cascade opens with ``intent=transcription``; the native Adapter
+    selects its Realtime model in the URL. In both modes the transcription
+    snapshot is carried by the ``session.update`` payload as
     ``session.audio.input.transcription.model`` instead.
     """
     parsed = urlparse(api_base)
     path = f"{parsed.path.rstrip('/')}/realtime"
-    return urlunparse(
-        ("wss", parsed.netloc, path, "", urlencode({"intent": "transcription"}), "")
+    query = (
+        {"intent": "transcription"}
+        if model is None
+        else {"model": _safe_label(model, "realtime_model")}
     )
+    return urlunparse(("wss", parsed.netloc, path, "", urlencode(query), ""))
 
 
 def _required_secret(value: object) -> None:
@@ -2551,11 +2938,130 @@ def _turn_detection_wire(request: RecognitionStreamRequest) -> dict[str, object]
     return _turn_detection_value(request.turn_detection)
 
 
+def _recognition_session_update(
+    config: OpenAIStreamingSpeechConfig,
+    request: RecognitionStreamRequest,
+) -> dict[str, object]:
+    input_config: dict[str, object] = {
+        "format": {"type": "audio/pcm", "rate": OPENAI_PCM_RATE_HZ},
+        "transcription": {"model": config.stt_model},
+        "turn_detection": _turn_detection_wire(request),
+    }
+    if config.realtime_model is None:
+        session: dict[str, object] = {
+            "type": "transcription",
+            "audio": {"input": input_config},
+        }
+    else:
+        session = {
+            "type": "realtime",
+            "output_modalities": ["audio"],
+            "instructions": (
+                "Do not answer the user. This session only transcribes committed "
+                "input for an external authoritative agent."
+            ),
+            "audio": {
+                "input": input_config,
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": OPENAI_PCM_RATE_HZ},
+                    "voice": config.tts_voice,
+                },
+            },
+            "tools": [],
+            "tool_choice": "none",
+        }
+    return {"type": "session.update", "session": session}
+
+
+def _native_response_metadata(
+    request: SynthesisStreamRequest,
+) -> dict[str, object]:
+    response = request.ref.response
+    return {
+        "live_voice_interaction_id": response.interaction_id,
+        "live_voice_response_id": response.response_id,
+        "live_voice_response_generation": str(response.response_generation),
+        "live_voice_unit_id": request.ref.unit_id,
+        "live_voice_unit_seq": str(request.ref.unit_seq),
+        "live_voice_stream_id": request.ref.stream_id,
+        "live_voice_stream_generation": str(request.ref.stream_generation),
+    }
+
+
+def _native_terminal_output_matches(
+    response: Mapping[str, object],
+    *,
+    expected_item_id: str | None,
+    expected_text: str,
+    expected_voice: str,
+) -> bool:
+    output = response.get("output")
+    if type(output) is not list or len(output) != 1 or expected_item_id is None:
+        return False
+    item = output[0]
+    if type(item) is not dict:
+        return False
+    content = item.get("content")
+    if type(content) is not list or len(content) != 1:
+        return False
+    part = content[0]
+    audio = response.get("audio")
+    audio_output = audio.get("output") if type(audio) is dict else None
+    audio_format = audio_output.get("format") if type(audio_output) is dict else None
+    return (
+        response.get("conversation_id") is None
+        and response.get("output_modalities") == ["audio"]
+        and type(audio_output) is dict
+        and type(audio_format) is dict
+        and audio_format.get("type") == "audio/pcm"
+        and audio_format.get("rate") == OPENAI_PCM_RATE_HZ
+        and audio_output.get("voice") == expected_voice
+        and item.get("id") == expected_item_id
+        and item.get("type") == "message"
+        and item.get("status") == "completed"
+        and item.get("role") == "assistant"
+        and type(part) is dict
+        and part.get("type") == "output_audio"
+        and part.get("transcript") == expected_text
+    )
+
+
+def _validate_realtime_synthesis_session(
+    event: Mapping[str, object],
+    *,
+    expected_model: str,
+    expected_voice: str,
+) -> None:
+    session = event.get("session")
+    audio = session.get("audio") if type(session) is dict else None
+    output = audio.get("output") if type(audio) is dict else None
+    output_format = output.get("format") if type(output) is dict else None
+    if (
+        type(session) is not dict
+        or session.get("type") != "realtime"
+        or not _realtime_model_echo_accepted(session.get("model"), expected_model)
+        or session.get("output_modalities") != ["audio"]
+        or session.get("tools") != []
+        or session.get("tool_choice") != "none"
+        or type(output) is not dict
+        or type(output_format) is not dict
+        or output_format.get("type") != "audio/pcm"
+        or output_format.get("rate") != OPENAI_PCM_RATE_HZ
+        or output.get("voice") != expected_voice
+    ):
+        raise OpenAIStreamingSpeechError(
+            "SPEECH_PROVIDER_SESSION_MISMATCH",
+            "speech Provider changed the requested native Realtime synthesis contract",
+        )
+
+
 def _validate_transcription_session(
     event: Mapping[str, object],
     *,
     expected_model: str,
     expected_turn_detection: RecognitionTurnDetection,
+    expected_realtime_model: str | None,
+    expected_voice: str | None,
 ) -> None:
     session = event.get("session")
     if type(session) is not dict:
@@ -2574,8 +3080,9 @@ def _validate_transcription_session(
             )
         audio_format = input_config.get("format")
         transcription = input_config.get("transcription")
+        native_realtime = expected_realtime_model is not None
         if (
-            session.get("type") != "transcription"
+            session.get("type") != ("realtime" if native_realtime else "transcription")
             or type(audio_format) is not dict
             or audio_format.get("type") != "audio/pcm"
             or audio_format.get("rate") != OPENAI_PCM_RATE_HZ
@@ -2590,7 +3097,35 @@ def _validate_transcription_session(
                 "SPEECH_PROVIDER_SESSION_MISMATCH",
                 "speech Provider changed the requested transcription contract",
             )
+        if native_realtime:
+            assert expected_realtime_model is not None
+            output_config = audio.get("output")
+            output_format = (
+                output_config.get("format") if type(output_config) is dict else None
+            )
+            if (
+                not _realtime_model_echo_accepted(
+                    session.get("model"), expected_realtime_model
+                )
+                or session.get("output_modalities") != ["audio"]
+                or session.get("tools") != []
+                or session.get("tool_choice") != "none"
+                or type(output_config) is not dict
+                or type(output_format) is not dict
+                or output_format.get("type") != "audio/pcm"
+                or output_format.get("rate") != OPENAI_PCM_RATE_HZ
+                or output_config.get("voice") != expected_voice
+            ):
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_SESSION_MISMATCH",
+                    "speech Provider changed the requested native Realtime contract",
+                )
         return
+    if expected_realtime_model is not None:
+        raise OpenAIStreamingSpeechError(
+            "SPEECH_PROVIDER_SESSION_MISMATCH",
+            "native Realtime speech requires the current session contract",
+        )
     # Earlier transcription-session shape retained only at the Adapter edge.
     transcription = session.get("input_audio_transcription")
     if (
@@ -2606,6 +3141,16 @@ def _validate_transcription_session(
             "SPEECH_PROVIDER_SESSION_MISMATCH",
             "speech Provider changed the requested transcription contract",
         )
+
+
+def _realtime_model_echo_accepted(value: object, expected: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        model = _safe_label(value, "realtime_model")
+    except OpenAIStreamingSpeechError:
+        return False
+    return model == expected or model.startswith(f"{expected}-")
 
 
 def _turn_detection_value(
@@ -2722,6 +3267,7 @@ def _synthesis_key(ref: SynthesisStreamRef) -> tuple[str, int]:
 
 __all__ = [
     "CapabilityProvenance",
+    "DEFAULT_REALTIME_MODEL",
     "DEFAULT_STT_MODEL",
     "DEFAULT_TTS_MODEL",
     "DEFAULT_TTS_VOICE",
@@ -2732,6 +3278,7 @@ __all__ = [
     "SpeechDegradationFact",
     "SpeechDegradationReason",
     "SpeechRouteTier",
+    "SPEECH_REALTIME_MODEL_ENV",
     "STREAMING_SPEECH_FLAG",
     "StreamingSpeechSelection",
     "select_environment_streaming_speech",
