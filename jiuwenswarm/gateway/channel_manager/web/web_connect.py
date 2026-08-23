@@ -41,6 +41,9 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe_registration import (
+    LATENCY_PROBE_BATCH_METHOD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,7 @@ _LOCAL_HANDLER_ONLY_METHODS = frozenset(
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset(
     {ReqMethod.CHAT_SEND.value, *_LOCAL_HANDLER_ONLY_METHODS}
 )
+_DIAGNOSTIC_LOCAL_ONLY_METHODS = frozenset({LATENCY_PROBE_BATCH_METHOD})
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
@@ -326,6 +330,24 @@ class WebChannel(BaseWsChannel):
 
         self._on_message_cb = wrapped
 
+    def _registered_session_for_websocket(
+        self,
+        ws: Any,
+        claimed_session_id: object,
+    ) -> str:
+        """Resolve a diagnostic session only from the existing routing registry."""
+
+        if not isinstance(claimed_session_id, str) or not claimed_session_id:
+            return ""
+        for routing_key, registered_clients in self._clients_by_key.items():
+            if (
+                routing_key.channel_id == self.channel_id
+                and routing_key.session_id == claimed_session_id
+                and ws in registered_clients
+            ):
+                return routing_key.session_id
+        return ""
+
     # ── 帧发送 API（公开给处理器使用）─────────────────────
 
     async def send_response(
@@ -337,7 +359,7 @@ class WebChannel(BaseWsChannel):
         payload: dict[str, Any] | None = None,
         error: str | None = None,
         code: str | None = None,
-    ) -> None:
+    ) -> bool:
         """向指定客户端发送 ``res`` 帧."""
         frame: dict[str, Any] = {
             "type": "res",
@@ -350,7 +372,7 @@ class WebChannel(BaseWsChannel):
             if code:
                 frame["code"] = code
         try:
-            self._enqueue_send(ws, frame)
+            return self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -361,7 +383,7 @@ class WebChannel(BaseWsChannel):
                         describe_ws_exception(e),
                     ),
                 )
-                return
+                return False
             raise
 
     async def send_event(
@@ -780,6 +802,24 @@ class WebChannel(BaseWsChannel):
                 retain_failure(error, "WebChannel server wait-closed failed")
             if server_close_complete:
                 self._server = None
+        latency_runtime = getattr(self, "live_voice_latency_probe_runtime", None)
+        if latency_runtime is not None:
+            try:
+                latency_cleanup_complete = await asyncio.to_thread(
+                    latency_runtime.close,
+                    5.0,
+                )
+                if latency_cleanup_complete is not True:
+                    logger.warning(
+                        "WebChannel live voice latency export drain incomplete"
+                    )
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice latency export cleanup failed",
+                )
+            finally:
+                self.live_voice_latency_probe_runtime = None
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
         try:
             await self._shutdown_all_writers()
@@ -1545,6 +1585,36 @@ class WebChannel(BaseWsChannel):
         session_id = (
             _explicit_session_id if has_explicit_session else self._make_session_id()
         )
+
+        # Diagnostic batches are isolated before websocket/session tracking,
+        # file processing, routing-key registration, Message construction, or
+        # the Agent callback. Feature-off still fails locally at this seam.
+        if method in _DIAGNOSTIC_LOCAL_ONLY_METHODS:
+            handler = self._method_handlers.get(method)
+            if handler is None:
+                await self.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=f"unknown method: {method}",
+                    code="METHOD_NOT_FOUND",
+                )
+                return
+            dispatcher_session_id = self._registered_session_for_websocket(
+                ws,
+                _explicit_session_id,
+            )
+            await self._invoke_method_handler(
+                _MethodHandlerInvocation(
+                    ws,
+                    method,
+                    req_id,
+                    params,
+                    dispatcher_session_id,
+                    handler,
+                ),
+            )
+            return
 
         # 追踪 ws → 真实 session_id，用于断连清理/日志。
         # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。

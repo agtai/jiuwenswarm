@@ -17,6 +17,7 @@ from jiuwenswarm.gateway.live_voice import streaming_synthesis_route as route_mo
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
     ProductStreamingSynthesisSource,
+    start_product_streaming_synthesis,
 )
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisFallbackAction,
@@ -32,6 +33,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     SpeechRouteTier,
     StreamingSpeechSelection,
 )
+from jiuwenswarm.server.live_voice.latency_probe import LatencyProbeContext
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
     SpeechMode,
@@ -306,6 +308,51 @@ def _event(
     )
 
 
+class _LatencyRecorderSpy:
+    def __init__(self) -> None:
+        self.marks: list[tuple[str, dict[str, object]]] = []
+        self.terminal: str | None = None
+
+    def mark(self, point: str, **identity: object) -> bool:
+        self.marks.append((point, identity))
+        return True
+
+    def finish(self, terminal: str):
+        self.terminal = terminal
+        return self
+
+
+class _LatencyRuntimeSpy:
+    component = "gateway"
+
+    def __init__(self) -> None:
+        self.recorders: list[_LatencyRecorderSpy] = []
+        self.writes: list[_LatencyRecorderSpy] = []
+        self.writer = self
+
+    def create_recorder(self, **_kwargs: object) -> _LatencyRecorderSpy:
+        recorder = _LatencyRecorderSpy()
+        self.recorders.append(recorder)
+        return recorder
+
+    def submit(self, batch: _LatencyRecorderSpy) -> object:
+        self.writes.append(batch)
+        return object()
+
+    def write(self, _batch: _LatencyRecorderSpy) -> object:
+        raise AssertionError("product path must not call the durable writer")
+
+
+def _latency_context() -> LatencyProbeContext:
+    return LatencyProbeContext(
+        "live-voice.latency-context.v0",
+        "run-1",
+        "dialogue_no_tool",
+        "short-greeting-v1",
+        0,
+    )
+
+
 async def _begin(
     provider: _FakeProvider,
     request: SynthesisStreamRequest,
@@ -401,6 +448,97 @@ async def test_streams_ordered_20ms_frames_with_exact_content_hidden_binding() -
         first.chunk.capability.provider_cancel_ack is CapabilityProvenance.UNAVAILABLE
     )
     assert terminal.outcome.capability == first.chunk.capability
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_product_streaming_source_emits_one_content_free_tts_probe_batch() -> None:
+    provider = _FakeProvider()
+    request = _request()
+    runtime = _LatencyRuntimeSpy()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector, latency_probe_runtime=runtime
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+
+    start = await start_product_streaming_synthesis(
+        owner,
+        request,
+        scope_identity=("session-1", "subject-1", "correlation-1"),
+        latency_probe_context=_latency_context(),
+    )
+    assert start.source is not None
+    frame = await start.source.__anext__()
+    assert frame.seq == 0
+    assert [point for point, _identity in runtime.recorders[0].marks] == [
+        "gateway.tts_request_received",
+        "gateway.tts_provider_transport_open",
+        "gateway.tts_provider_first_audio",
+    ]
+    start.source.observe_ticket_ready()
+    start.source.observe_first_frame_sent()
+    with pytest.raises(StopAsyncIteration):
+        await start.source.__anext__()
+
+    assert [point for point, _identity in runtime.recorders[0].marks] == [
+        "gateway.tts_request_received",
+        "gateway.tts_provider_transport_open",
+        "gateway.tts_provider_first_audio",
+        "gateway.downlink_ticket_ready",
+        "gateway.downlink_first_frame_sent",
+    ]
+    assert runtime.recorders[0].terminal == "completed"
+    assert runtime.writes == [runtime.recorders[0]]
+    assert "private" not in repr(runtime.recorders[0].marks)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_tts_probe_open_failure_finishes_failed_without_private_error() -> None:
+    provider = _FakeProvider()
+    provider.open_error = OSError("PRIVATE-TTS-OPEN")
+    request = _request()
+    runtime = _LatencyRuntimeSpy()
+
+    async def selector() -> StreamingSpeechSelection:
+        return _selection(provider)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector, latency_probe_runtime=runtime
+    )
+    start = await start_product_streaming_synthesis(
+        owner,
+        request,
+        scope_identity=("session-1", "subject-1", "correlation-1"),
+        latency_probe_context=_latency_context(),
+    )
+
+    assert start.source is None
+    assert start.outcome is not None and start.outcome.completed is False
+    assert [point for point, _identity in runtime.recorders[0].marks] == [
+        "gateway.tts_request_received"
+    ]
+    assert runtime.recorders[0].terminal == "failed"
+    assert runtime.writes == [runtime.recorders[0]]
+    assert "PRIVATE-TTS-OPEN" not in repr(runtime.recorders[0].marks)
     await owner.close()
 
 

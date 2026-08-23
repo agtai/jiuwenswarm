@@ -49,6 +49,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechAuthorizationBinding,
     SpeechRpcContext,
 )
+from jiuwenswarm.server.live_voice.latency_probe import LatencyProbeContext
 
 
 ORIGIN = "https://voice.example.test"
@@ -199,6 +200,55 @@ def test_feature_off_and_provider_off_create_no_route() -> None:
         "status": "unavailable",
         "reason_id": "MEDIA_PROVIDER_UNAVAILABLE",
     }
+
+
+def test_activation_retains_only_its_exact_valid_latency_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object()
+    valid = LatencyProbeContext(
+        "live-voice.latency-context.v0",
+        "run-1",
+        "dialogue_no_tool",
+        "short-greeting-v1",
+        0,
+    )
+    monkeypatch.setattr(
+        dedicated_media_registration,
+        "parse_gateway_latency_probe_context",
+        lambda observed_runtime, value: (
+            valid if observed_runtime is runtime and value == valid.to_dict() else None
+        ),
+    )
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        latency_probe_runtime=runtime,  # type: ignore[arg-type]
+    )
+    registry.set_provider_available(True)
+
+    first_params = _params(latency_probe_context=valid.to_dict())
+    first = _activate(
+        registry,
+        params=first_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    second_params = _params(
+        interaction_id="interaction-2",
+        correlation_id="correlation-2",
+        activation_id="activation-2",
+        capture_id="capture-2",
+        latency_probe_context={**valid.to_dict(), "run_id": "foreign"},
+    )
+    second = _activate(
+        registry,
+        params=second_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+
+    assert _pending_record(registry, _media_ticket(first)).latency_probe_context is valid
+    assert _pending_record(registry, _media_ticket(second)).latency_probe_context is None
 
 
 def test_websocket_transport_debug_cannot_persist_binary_media(
@@ -885,6 +935,13 @@ async def test_exceptional_media_socket_exit_clears_every_raw_audio_byte(
 async def test_completed_media_socket_retains_recognition_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    messages: list[str] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _CaptureHandler()
     registry = _active_registry()
     activation = _activate(
         registry,
@@ -911,10 +968,21 @@ async def test_completed_media_socket_retains_recognition_content(
     )
     ws = _AuthOnlySocket(activation)
 
-    assert await handle_registered_media_socket(registry, ws, endpoint_path)
+    dedicated_media_registration._LOGGER.addHandler(handler)
+    try:
+        assert await handle_registered_media_socket(registry, ws, endpoint_path)
+    finally:
+        dedicated_media_registration._LOGGER.removeHandler(handler)
 
     assert record.route_completed is True
     assert record.recognition_content_sha256 is not None
+    safe_logs = "\n".join(messages)
+    assert "phase=authenticated" in safe_logs
+    assert "phase=uplink_leaf_enter" in safe_logs
+    assert "phase=first_frame_accepted" in safe_logs
+    assert "phase=route_complete" in safe_logs
+    assert "accepted_frames=1" in safe_logs
+    assert "0.25" not in safe_logs
 
 
 @pytest.mark.asyncio

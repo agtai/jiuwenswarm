@@ -61,6 +61,14 @@ function roundAccepted(requestId, input = finalInput()) {
   };
 }
 
+const latencyProbeContext = Object.freeze({
+  schema_version: 'live-voice.latency-context.v0',
+  run_id: 'run-latency-1',
+  profile_id: 'no_tool',
+  input_case_id: 'case-latency-1',
+  round_index: 7,
+});
+
 test('submits only the closed authoritative-final shape', async () => {
   const calls = [];
   const owner = new ProductUnifiedCommittedInputOwner(async (method, params, requestId) => {
@@ -84,6 +92,29 @@ test('submits only the closed authoritative-final shape', async () => {
   });
   assert.equal('dispatch_target' in calls[0].params, false);
   assert.equal('critical_confirmation' in calls[0].params, false);
+});
+
+test('threads an active latency context without changing the business replay identity', async () => {
+  const calls = [];
+  const owner = new ProductUnifiedCommittedInputOwner(async (method, params, requestId) => {
+    calls.push({ method, params, requestId });
+    return accepted(requestId);
+  });
+  const input = finalInput({ request_id: 'request-latency-first' });
+
+  const first = await owner.submit(binding, input, latencyProbeContext);
+  const replay = await owner.submit(
+    binding,
+    { ...input, request_id: 'request-latency-replay' },
+    { ...latencyProbeContext, round_index: 99 },
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].params.latency_probe_context, latencyProbeContext);
+  assert.equal(first.request_id, 'request-latency-first');
+  assert.equal(replay.request_id, 'request-latency-replay');
+  assert.equal(JSON.stringify(first).includes('run-latency-1'), false);
+  assert.equal(JSON.stringify(replay).includes('run-latency-1'), false);
 });
 
 test('duplicate rendering shares one request and one completed replay', async () => {

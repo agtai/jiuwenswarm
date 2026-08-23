@@ -134,10 +134,12 @@ class FakePermissions {
 
 class FakeNode {
   connected = [];
+  connectThrows = false;
   disconnectCount = 0;
   disconnectThrows = false;
 
   connect(destination) {
+    if (this.connectThrows) throw new Error('node connect failed');
     this.connected.push(destination);
     return destination;
   }
@@ -218,6 +220,7 @@ class FakeAudioContext {
   bufferSourceStartThrows = false;
   bufferSourceStopThrows = false;
   bufferSourceDisconnectThrows = false;
+  onBufferSourceStart = null;
   addModulePromise = null;
   resumePromise = null;
 
@@ -265,10 +268,189 @@ class FakeAudioContext {
     source.startThrows = this.bufferSourceStartThrows;
     source.stopThrows = this.bufferSourceStopThrows;
     source.disconnectThrows = this.bufferSourceDisconnectThrows;
+    const start = source.start.bind(source);
+    source.start = when => {
+      start(when);
+      this.onBufferSourceStart?.(when);
+    };
     this.bufferSources.push(source);
     return source;
   }
 }
+
+test('first accepted WebAudio schedule emits one content-free diagnostic estimate', async () => {
+  const fake = fakeEnvironment();
+  const timings = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    monotonicNowMs: () => 100,
+    observer: { onPlayoutTiming: event => timings.push(event) },
+  });
+  await adapter.unlockPlayout();
+  const context = fake.contexts[0];
+  context.getOutputTimestamp = () => ({ contextTime: 10, performanceTime: 500 });
+  context.outputLatency = 0.02;
+  adapter.beginPlayout(firstResponse);
+
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+
+  assert.deepEqual(timings, [{
+    response: firstResponse,
+    unit_id: 'unit-1',
+    seq: 0,
+    scheduled_at_monotonic_ms: 100,
+    estimated_start_monotonic_ms: 1_500,
+    uncertainty_ms: 20,
+  }]);
+});
+
+test('first schedule timing falls back without touching diagnostic clocks when no observer exists', async () => {
+  const observedFake = fakeEnvironment();
+  const timings = [];
+  const observed = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: observedFake.environment,
+    monotonicNowMs: () => 100,
+    observer: { onPlayoutTiming: event => timings.push(event) },
+  });
+  await observed.unlockPlayout();
+  observedFake.contexts[0].baseLatency = 0.005;
+  observed.beginPlayout(firstResponse);
+  assert.equal(observed.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(timings[0].estimated_start_monotonic_ms, 1_100);
+  assert.equal(timings[0].uncertainty_ms, 5);
+
+  const inertFake = fakeEnvironment();
+  const inert = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: inertFake.environment,
+    monotonicNowMs: () => { throw new Error('diagnostic clock accessed'); },
+  });
+  await inert.unlockPlayout();
+  Object.defineProperties(inertFake.contexts[0], {
+    getOutputTimestamp: { get() { throw new Error('timestamp accessed'); } },
+    outputLatency: { get() { throw new Error('latency accessed'); } },
+    baseLatency: { get() { throw new Error('base latency accessed'); } },
+  });
+  inert.beginPlayout(firstResponse);
+  assert.equal(inert.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+});
+
+test('first schedule fallback never estimates before scheduling when currentTime advances past startAt', async () => {
+  for (const timestampThrows of [false, true]) {
+    const fake = fakeEnvironment();
+    const timings = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      monotonicNowMs: () => 100,
+      observer: { onPlayoutTiming: event => timings.push(event) },
+    });
+    await adapter.unlockPlayout();
+    const context = fake.contexts[0];
+    if (timestampThrows) {
+      context.getOutputTimestamp = () => { throw new Error('timestamp unavailable'); };
+      context.baseLatency = 0.025;
+    }
+    context.onBufferSourceStart = startAt => {
+      context.currentTime = startAt + 1;
+    };
+    adapter.beginPlayout(firstResponse);
+
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    assert.equal(timings[0].scheduled_at_monotonic_ms, 100);
+    assert.equal(timings[0].estimated_start_monotonic_ms, 100);
+    assert.equal(timings[0].uncertainty_ms, timestampThrows ? 25 : 128_000 / 48_000);
+  }
+});
+
+test('throwing timestamp fallback isolates timestamp and latency getters while retaining valid latency', async () => {
+  for (const accessorThrows of [false, true]) {
+    const fake = fakeEnvironment();
+    const timings = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      monotonicNowMs: () => 100,
+      observer: { onPlayoutTiming: event => timings.push(event) },
+    });
+    await adapter.unlockPlayout();
+    const context = fake.contexts[0];
+    context.getOutputTimestamp = accessorThrows
+      ? () => Object.defineProperties({}, {
+          contextTime: { get() { throw new Error('timestamp context unavailable'); } },
+          performanceTime: { get() { throw new Error('timestamp performance unavailable'); } },
+        })
+      : () => { throw new Error('timestamp unavailable'); };
+    Object.defineProperty(context, 'outputLatency', {
+      get() { throw new Error('output latency unavailable'); },
+    });
+    context.baseLatency = 0.03;
+    adapter.beginPlayout(firstResponse);
+
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    assert.equal(timings[0].estimated_start_monotonic_ms, 1_100);
+    assert.equal(timings[0].uncertainty_ms, 30);
+  }
+});
+
+test('first schedule uncertainty prefers valid output latency and falls back to valid base latency', async () => {
+  for (const scenario of [
+    { outputLatency: 0.01, baseLatency: 0.1, expected: 10 },
+    { outputLatency: Number.NaN, baseLatency: 0.03, expected: 30 },
+  ]) {
+    const fake = fakeEnvironment();
+    const timings = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      monotonicNowMs: () => 100,
+      observer: { onPlayoutTiming: event => timings.push(event) },
+    });
+    await adapter.unlockPlayout();
+    const context = fake.contexts[0];
+    context.outputLatency = scenario.outputLatency;
+    context.baseLatency = scenario.baseLatency;
+    adapter.beginPlayout(firstResponse);
+
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    assert.equal(timings[0].uncertainty_ms, scenario.expected);
+  }
+});
+
+test('first-schedule observer throw and reentrant enqueue cannot duplicate or fail playout', async () => {
+  const throwingFake = fakeEnvironment();
+  const throwing = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: throwingFake.environment,
+    observer: { onPlayoutTiming() { throw new Error('PRIVATE diagnostic failure'); } },
+  });
+  await throwing.unlockPlayout();
+  throwing.beginPlayout(firstResponse);
+  assert.equal(throwing.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(throwingFake.contexts[0].bufferSources.length, 1);
+
+  const reentrantFake = fakeEnvironment();
+  const timings = [];
+  let reentrant;
+  reentrant = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: reentrantFake.environment,
+    observer: {
+      onPlayoutTiming(event) {
+        timings.push(event);
+        assert.equal(reentrant.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+      },
+    },
+  });
+  await reentrant.unlockPlayout();
+  reentrant.beginPlayout(firstResponse);
+  assert.equal(reentrant.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(timings.length, 1);
+  assert.equal(reentrantFake.contexts[0].bufferSources.length, 2);
+});
 
 function fakeEnvironment(overrides = {}) {
   const document = new FakeDocument();
@@ -286,8 +468,9 @@ function fakeEnvironment(overrides = {}) {
       contexts.push(context);
       return context;
     },
-    createAudioWorkletNode(_context, _name, _options) {
+    createAudioWorkletNode(context, name, options) {
       const worklet = new FakeWorkletNode();
+      worklet.creation = { context, name, options };
       worklets.push(worklet);
       return worklet;
     },
@@ -562,6 +745,12 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(fake.mediaDevices.constraints[0].audio.deviceId.exact, 'mic-1');
   assert.equal(fake.mediaDevices.constraints[0].audio.echoCancellation.ideal, true);
   assert.equal(fake.contexts[0].addModuleUrls[0], 'capture-worklet.js');
+  assert.equal(fake.worklets[0].creation.name, 'jiuwenswarm-live-voice-capture-v1');
+  assert.equal(fake.worklets[0].creation.options.numberOfInputs, 1);
+  assert.equal(fake.worklets[0].creation.options.numberOfOutputs, 1);
+  assert.deepEqual(fake.worklets[0].creation.options.outputChannelCount, [1]);
+  assert.deepEqual(fake.worklets[0].connected, [fake.contexts[0].destination]);
+  assert.deepEqual(fake.contexts[0].sourceNode.connected, [fake.worklets[0]]);
 
   const samples = new Float32Array(960).fill(0.25);
   fake.worklets[0].port.emit({
@@ -584,6 +773,26 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(fake.contexts[0].state, 'closed');
   assert.equal(fake.document.listenerCount('visibilitychange'), 0);
   assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('capture fails closed and releases all resources when the silent keep-alive graph cannot connect', async () => {
+  const worklet = new FakeWorkletNode();
+  worklet.connectThrows = true;
+  const fake = fakeEnvironment({ createAudioWorkletNode: () => worklet });
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'CAPTURE_START_FAILED'
+  );
+
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].sourceNode.connected.length, 0);
+  assert.equal(fake.contexts[0].sourceNode.disconnectCount, 1);
+  assert.equal(worklet.disconnectCount, 1);
+  assert.equal(worklet.port.closeCount, 1);
+  assert.equal(fake.contexts[0].state, 'closed');
+  assert.equal(fake.document.listenerCount('visibilitychange'), 0);
 });
 
 test('capture handoff rejects an input track that is already muted and releases every resource', async () => {
@@ -1334,7 +1543,8 @@ test('sequence gaps, hidden page, and stale worklet callbacks never revive captu
 });
 
 test('AudioWorklet failures retain exact bounded-gap reasons and fence stale callbacks', async () => {
-  const fake = fakeEnvironment();
+  const diagnostics = [];
+  const fake = fakeEnvironment({ reportCaptureDiagnostic: diagnostic => diagnostics.push(diagnostic) });
   const states = [];
   const frames = [];
   const adapter = new BrowserAudioIOAdapter({
@@ -1348,13 +1558,65 @@ test('AudioWorklet failures retain exact bounded-gap reasons and fence stale cal
   const metadata = await adapter.startCapture();
   const staleCallback = fake.worklets[0].port.onmessage;
 
-  fake.worklets[0].port.emit({ kind: 'error', reason: 'input_gap_exceeded' });
+  fake.worklets[0].port.emit({
+    kind: 'error',
+    reason: 'input_gap_exceeded',
+    diagnostic: {
+      trigger: 'rolling_budget',
+      single_gap_exceeded: false,
+      rolling_budget_exceeded: true,
+      missing_samples: 128,
+      recent_gap_samples: 2816,
+      rolling_gap_candidate_samples: 2944,
+      max_transient_gap_samples: 720,
+      max_rolling_gap_samples: 2880,
+      render_frame: 48000,
+      expected_render_frame: 47872,
+      render_delta_samples: 256,
+      input_quantum_samples: 128,
+      previous_input_quantum_samples: 128,
+      input_empty: false,
+      context_sample_rate_hz: 48000,
+      ignored_private_value: 'must-not-propagate',
+    },
+  });
   await nextTask();
 
   assert.equal(adapter.captureState(), 'stopped');
   assert.ok(states.some(([state, reason]) => state === 'stopping' && reason === 'audio_input_gap_exceeded'));
   assert.ok(states.some(([state, reason]) => state === 'stopped' && reason === 'audio_input_gap_exceeded'));
   assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.deepEqual(diagnostics, [
+    {
+      event: 'audio_input_gap_exceeded',
+      trigger: 'rolling_budget',
+      single_gap_exceeded: false,
+      rolling_budget_exceeded: true,
+      missing_samples: 128,
+      recent_gap_samples: 2816,
+      rolling_gap_candidate_samples: 2944,
+      max_transient_gap_samples: 720,
+      max_rolling_gap_samples: 2880,
+      render_frame: 48000,
+      expected_render_frame: 47872,
+      render_delta_samples: 256,
+      input_quantum_samples: 128,
+      previous_input_quantum_samples: 128,
+      input_empty: false,
+      context_sample_rate_hz: 48000,
+      track_sample_rate_hz: 48000,
+      capture_generation: metadata.capture_generation,
+      process_call_count: null,
+      initial_render_frame: null,
+      emitted_frame_count: null,
+      sample_cursor: null,
+      output_count: null,
+      output_channel_count: null,
+      output_quantum_samples: null,
+      context_state: 'running',
+      playout_active: false,
+    },
+  ]);
   staleCallback?.({
     data: {
       kind: 'frame',
@@ -1367,6 +1629,22 @@ test('AudioWorklet failures retain exact bounded-gap reasons and fence stale cal
     },
   });
   assert.equal(frames.length, 0);
+});
+
+test('capture diagnostics cannot weaken exact input-gap cleanup', async () => {
+  const fake = fakeEnvironment({
+    reportCaptureDiagnostic() {
+      throw new Error('diagnostic sink unavailable');
+    },
+  });
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+  await adapter.startCapture();
+
+  fake.worklets[0].port.emit({ kind: 'error', reason: 'input_gap_exceeded', diagnostic: { trigger: 'single_gap' } });
+  await nextTask();
+
+  assert.equal(adapter.captureState(), 'stopped');
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
 });
 
 test('unknown AudioWorklet errors retain the generic stable gap reason', async () => {

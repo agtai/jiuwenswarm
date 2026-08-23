@@ -28,7 +28,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe import (
+    GatewayLatencyProbeOperation,
+)
 from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    OpenAIStreamingSpeechProvider,
     SpeechDegradationFact,
     SpeechRouteTier,
     StreamingSpeechSelection,
@@ -502,6 +506,9 @@ class StreamingSynthesisHandle:
     cleanup_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     terminal_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     process_control: BaseException | None = field(default=None, repr=False)
+    latency_probe: GatewayLatencyProbeOperation | None = field(
+        default=None, repr=False
+    )
 
 
 StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
@@ -520,6 +527,7 @@ class StreamingSynthesisRouteOwner:
         event_timeout_seconds: float = _DEFAULT_EVENT_TIMEOUT_SECONDS,
         queue_wait_seconds: float = _DEFAULT_QUEUE_WAIT_SECONDS,
         max_retained_tasks: int = _DEFAULT_MAX_RETAINED_TASKS,
+        latency_probe_runtime: object | None = None,
     ) -> None:
         if not callable(selector):
             raise TypeError("streaming Speech selector must be callable")
@@ -536,6 +544,7 @@ class StreamingSynthesisRouteOwner:
             max_retained_tasks, "max_retained_tasks", _DEFAULT_MAX_RETAINED_TASKS
         )
         self._selector = selector
+        self._latency_probe_runtime = latency_probe_runtime
         self._max_active_streams = max_active_streams
         self._max_pending_frames = max_pending_frames
         self._open_timeout_seconds = float(open_timeout_seconds)
@@ -613,6 +622,7 @@ class StreamingSynthesisRouteOwner:
         request: SynthesisStreamRequest,
         *,
         scope_identity: StreamingSynthesisScopeIdentity | None = None,
+        latency_probe_context: object | None = None,
     ) -> tuple[StreamingSynthesisHandle | None, StreamingSynthesisOutcome | None]:
         scope = _synthesis_scope_identity(scope_identity)
         prepared, validation_failure = _prepare_synthesis_request(request)
@@ -620,12 +630,39 @@ class StreamingSynthesisRouteOwner:
         if prepared is None:
             assert validation_failure is not None
             raise StreamingSynthesisRouteViolation(*validation_failure) from None
-        return await self._begin_prepared(prepared, scope)
+        probe = GatewayLatencyProbeOperation.create(
+            self._latency_probe_runtime,
+            latency_probe_context,
+            phase="gateway_tts",
+            correlation_id=scope[2],
+            interaction_id=prepared.ref.response.interaction_id,
+            response_id=prepared.ref.response.response_id,
+            response_generation=prepared.ref.response.response_generation,
+        )
+        if probe is not None:
+            probe.mark("gateway.tts_request_received")
+        try:
+            handle, outcome = await self._begin_prepared(
+                prepared, scope, latency_probe=probe
+            )
+        except asyncio.CancelledError:
+            if probe is not None:
+                probe.finish("cancelled")
+            raise
+        except BaseException:
+            if probe is not None:
+                probe.finish("failed")
+            raise
+        if handle is None and probe is not None:
+            probe.finish("failed")
+        return handle, outcome
 
     async def _begin_prepared(
         self,
         prepared: _PreparedSynthesisRequest,
         scope_identity: StreamingSynthesisScopeIdentity,
+        *,
+        latency_probe: GatewayLatencyProbeOperation | None,
     ) -> tuple[StreamingSynthesisHandle | None, StreamingSynthesisOutcome | None]:
         binding_ref = prepared.binding_ref
         ref = prepared.ref
@@ -779,12 +816,20 @@ class StreamingSynthesisRouteOwner:
             try:
                 await self._task_owner.run(
                     self._open_provider_guarded(
-                        provider, prepared, key=key, owner_task=current_task
+                        provider,
+                        prepared,
+                        key=key,
+                        owner_task=current_task,
+                        latency_probe=latency_probe,
                     ),
                     timeout_seconds=self._open_timeout_seconds,
                     operation="provider-open",
                     reservation=open_reservation,
                 )
+                if latency_probe is not None and not isinstance(
+                    provider, OpenAIStreamingSpeechProvider
+                ):
+                    latency_probe.mark("gateway.tts_provider_transport_open")
             except asyncio.CancelledError as caller_cancel:
                 if prepared.open_attempted:
                     try:
@@ -856,6 +901,7 @@ class StreamingSynthesisRouteOwner:
                 capability=capability,
                 provider=provider,
                 queue=asyncio.Queue(self._max_pending_frames),
+                latency_probe=latency_probe,
             )
             async with self._lifecycle_lock:
                 closed_after_open = self._closed
@@ -1009,6 +1055,9 @@ class StreamingSynthesisRouteOwner:
                 if not item.outcome.completed:
                     _drain_queue(handle.queue)
             await self._retire(handle)
+            self._finish_latency_probe(
+                handle, "completed" if item.outcome.completed else "failed"
+            )
             return StreamingSynthesisPull(None, item.outcome)
 
         async with handle.state_lock:
@@ -1580,6 +1629,7 @@ class StreamingSynthesisRouteOwner:
                     "SYNTHESIS_OUTPUT_FENCED",
                     "fenced synthesis cannot queue another audio frame",
                 )
+            first_provider_audio = handle.next_frame_seq == 0
             frame = MediaAudioFrame(
                 seq=handle.next_frame_seq,
                 sample_cursor=handle.next_frame_cursor,
@@ -1596,6 +1646,8 @@ class StreamingSynthesisRouteOwner:
             )
             handle.next_frame_seq += 1
             handle.next_frame_cursor += len(samples)
+        if first_provider_audio and handle.latency_probe is not None:
+            handle.latency_probe.mark("gateway.tts_provider_first_audio")
         try:
             await self._task_owner.run(
                 self._queue_put_guarded(handle, chunk),
@@ -1686,12 +1738,14 @@ class StreamingSynthesisRouteOwner:
             if handle.outcome is not None and not handle.outcome.completed:
                 outcome = handle.outcome
                 if handle.cleanup_complete:
+                    self._finish_latency_probe(handle, self._failure_terminal(reason))
                     return outcome
             elif (
                 handle.outcome is not None
                 and handle.outcome.completed
                 and handle.terminal_delivered
             ):
+                self._finish_latency_probe(handle, "completed")
                 return handle.outcome
             else:
                 first_audio = handle.first_audio_emitted
@@ -1780,7 +1834,40 @@ class StreamingSynthesisRouteOwner:
             handle.queue.put_nowait(_TerminalSignal(outcome))
         if process_control is not None:
             raise process_control
+        self._finish_latency_probe(handle, self._failure_terminal(reason))
         return outcome
+
+    def observe_downlink_ticket_ready(self, handle: StreamingSynthesisHandle) -> None:
+        self._require_handle(handle)
+        if handle.latency_probe is not None:
+            handle.latency_probe.mark("gateway.downlink_ticket_ready")
+
+    def observe_downlink_first_frame_sent(
+        self, handle: StreamingSynthesisHandle
+    ) -> None:
+        self._require_handle(handle)
+        if handle.latency_probe is not None:
+            handle.latency_probe.mark("gateway.downlink_first_frame_sent")
+
+    @staticmethod
+    def _failure_terminal(reason: StreamingSynthesisReason) -> str:
+        return (
+            "cancelled"
+            if reason
+            in {
+                StreamingSynthesisReason.ROUTE_ABORTED,
+                StreamingSynthesisReason.RESPONSE_SUPERSEDED,
+                StreamingSynthesisReason.OWNER_CLOSED,
+            }
+            else "failed"
+        )
+
+    @staticmethod
+    def _finish_latency_probe(
+        handle: StreamingSynthesisHandle, terminal_outcome: str
+    ) -> None:
+        if handle.latency_probe is not None:
+            handle.latency_probe.finish(terminal_outcome)
 
     async def _cancel_provider(
         self,
@@ -1825,10 +1912,23 @@ class StreamingSynthesisRouteOwner:
         *,
         key: _ScopedStreamKey,
         owner_task: asyncio.Task[object],
+        latency_probe: GatewayLatencyProbeOperation | None,
     ) -> None:
         async with self._provider_open_lock:
             prepared.open_attempted = True
-            await provider.open_synthesis(prepared._payload)
+            if isinstance(provider, OpenAIStreamingSpeechProvider):
+                await provider.open_synthesis(
+                    prepared._payload,
+                    on_transport_open=(
+                        None
+                        if latency_probe is None
+                        else lambda: latency_probe.mark(
+                            "gateway.tts_provider_transport_open"
+                        )
+                    ),
+                )
+            else:
+                await provider.open_synthesis(prepared._payload)
         if self._closed or self._opening.get(key) is not owner_task:
             await self._cancel_provider(
                 provider, prepared.ref, reason="late_open_fenced"

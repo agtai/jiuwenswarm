@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+    AgentConversationNotification,
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
     AuthoritativePresentationHandle,
@@ -132,6 +133,8 @@ class FakeRuntime:
         self.open_calls: list[str] = []
         self.close_calls = 0
         self.closed = False
+        self.notification_lease = object()
+        self.notifications: list[AgentConversationNotification] = []
 
     async def accept_task_progress_notification(
         self, intent: TaskProgressNotificationIntent, *, response_ref: ResponseRef
@@ -196,7 +199,24 @@ class FakeRuntime:
         del consumer_id, connection_epoch
         if self.attach_failure is not None:
             raise self.attach_failure
-        return None
+        return self.notification_lease
+
+    def detach_notification_consumer(self, lease: object) -> bool:
+        return lease is self.notification_lease
+
+    async def next_notification_for(
+        self, lease: object
+    ) -> AgentConversationNotification:
+        assert lease is self.notification_lease
+        return self.notifications.pop(0)
+
+    async def drain_notifications_for(
+        self, lease: object, *, limit: int
+    ) -> tuple[AgentConversationNotification, ...]:
+        assert lease is self.notification_lease
+        drained = tuple(self.notifications[:limit])
+        del self.notifications[:limit]
+        return drained
 
     async def start(self) -> bool:
         self.start_calls += 1
@@ -403,6 +423,43 @@ async def test_authority_succeeds_before_any_factory_or_runtime_effect() -> None
     assert result.evidence.evidence_scope == "package_only"
     assert result.evidence.formal_route_ready is False
     assert result.evidence.real_runtime_path_observed is False
+
+
+@pytest.mark.asyncio
+async def test_activation_lease_reads_one_then_drains_a_bounded_notification_batch() -> None:
+    runtime = FakeRuntime()
+    response = ResponseRef("interaction-1", "response-batch", 0)
+    runtime.notifications = [
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id=f"request-{index}",
+            round_id="round-batch",
+            response_ref=response,
+            publish_seq=index,
+        )
+        for index in range(4)
+    ]
+    result = await adapter_for(
+        RecordingResolver((candidate(),)),
+        lambda _context, _binding: runtime,
+    ).activate(request())
+    assert result.lease is not None
+    binding = result.lease.binding
+
+    for invalid in (False, 0, 17):
+        with pytest.raises(ProductP2AdapterViolation) as rejected:
+            await result.lease.next_notifications(binding, limit=invalid)
+        assert rejected.value.reason == "INVALID_NOTIFICATION_BATCH_LIMIT"
+        assert len(runtime.notifications) == 4
+
+    batch = await result.lease.next_notifications(binding, limit=3)
+    assert [item.request_id for item in batch] == [
+        "request-0",
+        "request-1",
+        "request-2",
+    ]
+    assert [item.request_id for item in runtime.notifications] == ["request-3"]
+    await result.lease.close(binding, timeout_seconds=1)
 
 
 @pytest.mark.asyncio

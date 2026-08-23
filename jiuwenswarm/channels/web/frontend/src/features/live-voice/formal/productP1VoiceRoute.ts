@@ -5,6 +5,7 @@ import {
   type BrowserAudioPcmChunk,
   type BrowserAudioPlayoutEvent,
   type BrowserAudioPlayoutMetadata,
+  type BrowserAudioPlayoutTimingEvent,
 } from './adapters/browserAudioIOAdapter.js';
 import {
   createBrowserDedicatedMediaRoute,
@@ -29,6 +30,14 @@ import {
   type FormalSynthesisDownlink,
   type GatewaySpeechProvider,
 } from './gatewayBatchSpeechClient.js';
+import type {
+  BrowserLatencyProbe,
+  BrowserLatencyRound,
+  LatencyIdentityPatch,
+  LatencyObservation,
+  LatencyProbeContext,
+  LatencyTerminalOutcome,
+} from './latencyProbe.js';
 
 export const PRODUCT_P1_MEDIA_ACTIVATE_METHOD = 'live_voice.media.activate';
 export const PRODUCT_P1_MEDIA_CLOSE_METHOD = 'live_voice.media.close';
@@ -103,6 +112,46 @@ interface PendingProductPlayout {
   readonly observed: Map<string, number>;
   readonly resolve: () => void;
   readonly reject: (error: Error) => void;
+  readonly latencyRound: OwnedLatencyRound | null;
+}
+
+interface OwnedLatencyRound {
+  readonly round: BrowserLatencyRound;
+  readonly context: Readonly<LatencyProbeContext>;
+  readonly sessionId: string;
+  readonly baseIdentity: Readonly<LatencyIdentityPatch>;
+  turnId: string | null;
+  response: Readonly<AudioResponseRef> | null;
+  taskId: string | null;
+  successorRequested: boolean;
+  successorRound: OwnedLatencyRound | null;
+  readonly completionJoin: ProductLatencyCompletionJoin;
+  admitted: boolean;
+  finished: boolean;
+}
+
+export class ProductLatencyCompletionJoin {
+  #successorReady = false;
+  #playoutAckReceived = false;
+  #settled = false;
+
+  observeSuccessorReady(): boolean {
+    if (this.#settled) return false;
+    this.#successorReady = true;
+    return this.#settleIfComplete();
+  }
+
+  observePlayoutAck(): boolean {
+    if (this.#settled) return false;
+    this.#playoutAckReceived = true;
+    return this.#settleIfComplete();
+  }
+
+  #settleIfComplete(): boolean {
+    if (!this.#successorReady || !this.#playoutAckReceived) return false;
+    this.#settled = true;
+    return true;
+  }
 }
 
 interface ProductP1MediaCloseBinding {
@@ -322,6 +371,8 @@ export class ProductP1VoiceRouteOwner {
   readonly #onConcurrentCaptureStarted?: () => void;
   readonly #onBargeInSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
+  readonly #latencyProbe: BrowserLatencyProbe | null;
+  readonly #latencyMonotonicMs: (() => number) | null;
   readonly #audio: BrowserAudioIOAdapter;
   #status: ProductP1VoiceStatus;
   #reason: string | null = null;
@@ -333,6 +384,9 @@ export class ProductP1VoiceRouteOwner {
   #lastCaptureRotation: Readonly<ProductP1CaptureRotationDiagnostics> | null = null;
   #captureActualProcessing: Readonly<ProductP1CaptureProcessingDiagnostics> | null = null;
   #mediaSentFrames = 0;
+  #captureLastFrameSentMonotonicMs: number | null = null;
+  #captureSendClockInvalid = false;
+  #captureLastFrameMarked = false;
   #captureFramesAcked = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
   #speech: GatewayBatchSpeechClient | null = null;
@@ -379,6 +433,8 @@ export class ProductP1VoiceRouteOwner {
   #captureRotationSourceId: string | null = null;
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
   #captureStopExpected = false;
+  #captureLatencyRound: OwnedLatencyRound | null = null;
+  #responseLatencyRound: OwnedLatencyRound | null = null;
 
   constructor(
     input: Readonly<{
@@ -391,6 +447,8 @@ export class ProductP1VoiceRouteOwner {
       on_concurrent_capture_started?: () => void;
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
       on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
+      latency_probe?: BrowserLatencyProbe | null;
+      latency_monotonic_ms?: () => number;
     }>
   ) {
     this.#enabled = input.enabled === true;
@@ -401,6 +459,10 @@ export class ProductP1VoiceRouteOwner {
     this.#onConcurrentCaptureStarted = input.on_concurrent_capture_started;
     this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
+    this.#latencyProbe = input.latency_probe ?? null;
+    this.#latencyMonotonicMs = this.#latencyProbe === null || typeof input.latency_monotonic_ms !== 'function'
+      ? null
+      : input.latency_monotonic_ms;
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
@@ -440,6 +502,9 @@ export class ProductP1VoiceRouteOwner {
           }
         },
         onPlayoutState: event => this.#observePlayout(event),
+        ...(this.#latencyProbe === null
+          ? {}
+          : { onPlayoutTiming: (event: Readonly<BrowserAudioPlayoutTimingEvent>) => this.#observePlayoutTiming(event) }),
       },
     });
     this.#publish();
@@ -467,6 +532,76 @@ export class ProductP1VoiceRouteOwner {
 
   status(): Readonly<{ status: ProductP1VoiceStatus; reason: string | null }> {
     return Object.freeze({ status: this.#status, reason: this.#reason });
+  }
+
+  prepareUnifiedSubmitLatency(turnId: string): Readonly<LatencyProbeContext> | null {
+    const owned = this.#responseLatencyRound;
+    if (owned === null || owned.finished) return null;
+    try {
+      const turn_id = requiredText(turnId, 'turn_id');
+      if (owned.turnId !== null && owned.turnId !== turn_id) return null;
+      this.#markLatency(owned, 'browser.commit_submit_started', { turn_id });
+      owned.turnId = turn_id;
+      return owned.context;
+    } catch {
+      return null;
+    }
+  }
+
+  bindUnifiedSubmitLatency(response: Readonly<AudioResponseRef>, taskId: string | null = null): boolean {
+    const owned = this.#responseLatencyRound;
+    if (owned === null || owned.finished) return false;
+    try {
+      const normalized = Object.freeze({
+        interaction_id: requiredText(response.interaction_id, 'response.interaction_id'),
+        response_id: requiredText(response.response_id, 'response.response_id'),
+        response_generation: response.response_generation,
+      });
+      if (!Number.isSafeInteger(normalized.response_generation) || normalized.response_generation < 0) return false;
+      if (normalized.interaction_id !== this.#interactionId) return false;
+      const normalizedTaskId = taskId === null ? null : requiredText(taskId, 'task_id');
+      if (owned.response !== null) {
+        return owned.response.interaction_id === normalized.interaction_id
+          && owned.response.response_id === normalized.response_id
+          && owned.response.response_generation === normalized.response_generation
+          && owned.taskId === normalizedTaskId;
+      }
+      owned.response = normalized;
+      owned.taskId = normalizedTaskId;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  observeForegroundPresentationLatency(response: Readonly<AudioResponseRef>, taskId: string | null = null): boolean {
+    const owned = this.#responseLatencyRound;
+    if (owned === null || owned.finished || owned.response === null) return false;
+    try {
+      const normalized = Object.freeze({
+        interaction_id: requiredText(response.interaction_id, 'response.interaction_id'),
+        response_id: requiredText(response.response_id, 'response.response_id'),
+        response_generation: response.response_generation,
+      });
+      if (!Number.isSafeInteger(normalized.response_generation) || normalized.response_generation < 0) return false;
+      if (normalized.interaction_id !== this.#interactionId) return false;
+      const normalizedTaskId = taskId === null ? null : requiredText(taskId, 'task_id');
+      if (
+        owned.response.interaction_id !== normalized.interaction_id
+          || owned.response.response_id !== normalized.response_id
+          || owned.response.response_generation !== normalized.response_generation
+      ) return false;
+      if (owned.taskId !== normalizedTaskId) return false;
+      const marked = this.#markLatency(owned, 'browser.presentation_received', {
+        response_id: normalized.response_id,
+        response_generation: normalized.response_generation,
+        ...(normalizedTaskId === null ? {} : { task_id: normalizedTaskId }),
+      });
+      if (marked) return true;
+    } catch {
+      // Presentation diagnostics never own the product presentation.
+    }
+    return false;
   }
 
   async startCapture(
@@ -534,6 +669,7 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#resetCaptureSendLatency();
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
@@ -551,8 +687,10 @@ export class ProductP1VoiceRouteOwner {
         deviceSelection.output_device_id ? { deviceId: deviceSelection.output_device_id } : {}
       );
       this.#requireCurrent(operationGeneration);
+      const latencyRound = this.#beginCaptureLatencyRound();
       const metadata = await this.#audio.startCapture(deviceSelection.input_device_id ? { deviceId: deviceSelection.input_device_id } : {});
       this.#captureActualProcessing = metadata.actual_processing;
+      this.#markLatency(latencyRound, 'browser.capture_device_started');
       this.#captureStartupAudioReady = true;
       this.#requireHealthyCaptureReadiness(operationGeneration);
       if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
@@ -571,6 +709,7 @@ export class ProductP1VoiceRouteOwner {
           sample_rate_hz: metadata.frame_format.sample_rate_hz,
           locale: this.#locale,
           end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+          ...(latencyRound === null ? {} : { latency_probe_context: latencyRound.context }),
         });
         const activationEnvelope = objectValue(activationValue, 'media_activation');
         if (activationEnvelope.status !== 'active') {
@@ -640,6 +779,7 @@ export class ProductP1VoiceRouteOwner {
           transport_available: typeof WebSocket === 'function',
           socket_factory: this.#socketFactory,
           on_audio_frame: () => undefined,
+          on_attached: () => this.#markCaptureLatencyAttached(latencyRound),
           on_terminal: event => {
             if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
           },
@@ -678,6 +818,7 @@ export class ProductP1VoiceRouteOwner {
         },
       });
       await this.#awaitCaptureReadiness(route, operationGeneration);
+      this.#markCaptureLatencyFirstAck(latencyRound);
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
       this.#mediaTerminalFailure = null;
@@ -734,13 +875,16 @@ export class ProductP1VoiceRouteOwner {
     if (this.#captureSpeechObserved || this.#captureProviderSpeechStartObserved) return 'speech_active';
     const operationGeneration = ++this.#operationGeneration;
     const route = this.#route;
+    const latencyRound = this.#captureLatencyRound;
     try {
+      this.#markLatency(latencyRound, 'browser.capture_stop_requested');
       this.#captureStopExpected = true;
       try {
         await this.#audio.stopCapture('formal_notification_idle_capture_pause');
       } finally {
         this.#captureStopExpected = false;
       }
+      this.#markLatency(latencyRound, 'browser.capture_stopped');
       this.#requireCurrent(operationGeneration);
       this.#drainCaptureFrames();
       const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
@@ -758,6 +902,7 @@ export class ProductP1VoiceRouteOwner {
       }
       this.#captureFramesAcked = this.#mediaSentFrames;
       await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+      this.#markLatency(latencyRound, 'browser.uplink_closed');
       this.#requireCurrent(operationGeneration);
       this.#frames = [];
       this.#captureSpeechObserved = false;
@@ -770,6 +915,7 @@ export class ProductP1VoiceRouteOwner {
       this.#pendingSpeechStart = null;
       this.#pendingEndOfTurn = null;
       this.#setStatus('recognized', null);
+      this.#finishLatencyRound(latencyRound, 'cancelled');
       return 'paused';
     } catch (error) {
       this.#captureStopExpected = false;
@@ -790,24 +936,32 @@ export class ProductP1VoiceRouteOwner {
     const operationGeneration = ++this.#operationGeneration;
     const route = this.#route;
     const speech = this.#speech;
+    const latencyRound = this.#captureLatencyRound;
+    this.#admitLatencyRound(latencyRound);
     this.#setStatus('recognizing', null);
     try {
+      this.#markLatency(latencyRound, 'browser.capture_stop_requested');
       await this.#audio.stopCapture('formal_recognition_requested');
+      this.#markLatency(latencyRound, 'browser.capture_stopped');
       this.#requireCurrent(operationGeneration);
       this.#drainCaptureFrames();
+      this.#markLastCaptureFrameSent(latencyRound);
       const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
       let pending = route.leaf.flush();
       while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
         await waitTurn();
         this.#requireCurrent(operationGeneration);
         this.#drainCaptureFrames();
+        this.#markLastCaptureFrameSent(latencyRound);
         pending = route.leaf.flush();
       }
       if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
         throw new Error('dedicated media route did not acknowledge the complete capture');
       }
       this.#captureFramesAcked = this.#mediaSentFrames;
+      this.#markLatency(latencyRound, 'browser.uplink_last_ack_received');
       await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+      this.#markLatency(latencyRound, 'browser.uplink_closed');
       this.#requireCurrent(operationGeneration);
       // A lease extended by the utterance budget keeps its complete frame set:
       // the Speech client requires batch recognition input to start at the
@@ -862,9 +1016,15 @@ export class ProductP1VoiceRouteOwner {
       this.#captureUtteranceStartFrameIndex = null;
       this.#mediaSentFrames = 0;
       this.#route = null;
+      if (this.#responseLatencyRound !== latencyRound) {
+        this.#finishLatencyRound(latencyRound, 'unknown');
+      } else if (this.#captureLatencyRound === latencyRound) {
+        this.#captureLatencyRound = null;
+      }
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal recognition was fenced');
       this.#setStatus('recognized', degradationReason);
+      this.#markLatency(this.#responseLatencyRound, 'browser.stt_final_received');
       return Object.freeze({
         text: result.final_text,
         voice_commit_receipt: result.voice_commit_receipt,
@@ -884,7 +1044,9 @@ export class ProductP1VoiceRouteOwner {
         this.#captureUtteranceStartFrameIndex = null;
         this.#mediaSentFrames = 0;
         this.#route = null;
+        if (this.#captureLatencyRound === latencyRound) this.#captureLatencyRound = null;
         this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
+        this.#finishLatencyRound(latencyRound, 'unknown');
         throw error;
       }
       await this.#fail(error);
@@ -907,10 +1069,12 @@ export class ProductP1VoiceRouteOwner {
     }
     const operationGeneration = ++this.#operationGeneration;
     const speech = this.#speech;
+    const latencyRound = this.#latencyRoundForResponse(input.response);
     let playoutResponse: Readonly<AudioResponseRef> | null = null;
     let capturePreparation: Promise<Readonly<{ ready: boolean; reason: string | null }>> | null = null;
     try {
       const text = requiredText(input.text, 'agent_text');
+      this.#markLatency(latencyRound, 'browser.tts_request_started');
       const result = await speech.synthesizeAuthoritative({
         response: input.response,
         unitId: requiredText(input.unit_id, 'unit_id'),
@@ -920,6 +1084,7 @@ export class ProductP1VoiceRouteOwner {
         voice: null,
         requiredSampleRateHz: this.#playout.sample_rate_hz,
         correlationId: requiredText(this.#correlationId, 'correlation_id'),
+        ...(latencyRound === null ? {} : { latencyProbeContext: latencyRound.context }),
       });
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal synthesis was fenced');
@@ -947,10 +1112,13 @@ export class ProductP1VoiceRouteOwner {
           this.#successorCaptureReadinessReason = null;
           this.#successorCaptureReadinessStartedAtMs = monotonicNowMs();
           this.#successorCaptureReadinessElapsedMs = null;
+          this.#markLatency(latencyRound, 'browser.successor_capture_requested');
+          if (latencyRound !== null) latencyRound.successorRequested = true;
           capturePreparation = this.#prepareConcurrentCapture(
             operationGeneration,
             receiptAuthority,
             speech,
+            latencyRound,
           );
           // The authoritative downlink must start independently. Retain a
           // rejection handler immediately, then join the bounded preparation
@@ -963,6 +1131,7 @@ export class ProductP1VoiceRouteOwner {
           result.provider,
           result.response,
           result.unit_id,
+          latencyRound,
           frame => {
             if (pendingRef === null) throw new Error('downlink arrived before playout ownership');
             this.#acceptDownlinkFrame(pendingRef, frame, result.provider);
@@ -1004,6 +1173,7 @@ export class ProductP1VoiceRouteOwner {
         observed: new Map(),
         resolve: resolvePlayout,
         reject: rejectPlayout,
+        latencyRound,
       };
       pendingRef = pendingPlayout;
       this.#pendingPlayout = pendingPlayout;
@@ -1046,6 +1216,7 @@ export class ProductP1VoiceRouteOwner {
           this.#setStatus('recognized', captureReadiness?.reason ?? 'AUDIO_CAPTURE_FAILED');
         }
       } else {
+        this.#finishLatencyFallback(latencyRound);
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
         this.#setStatus('recognized', null);
       }
@@ -1096,6 +1267,7 @@ export class ProductP1VoiceRouteOwner {
       return false;
     }
     pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    this.#finishLatencyRound(pending.latencyRound, 'cancelled');
     pending.reject(
       Object.assign(new Error('formal playout was interrupted'), {
         reason: 'FORMAL_PLAYOUT_BARGED',
@@ -1109,6 +1281,7 @@ export class ProductP1VoiceRouteOwner {
     if (this.#closePromise !== null) return this.#closePromise;
     this.#closeRequested = true;
     this.#operationGeneration += 1;
+    this.#finishAllLatencyRounds('cancelled');
     this.#status = 'cleanup_pending';
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
     this.#publish();
@@ -1154,9 +1327,10 @@ export class ProductP1VoiceRouteOwner {
     operationGeneration: number,
     priorAuthority: Readonly<ProductP1MediaCloseBinding>,
     priorSpeech: GatewayBatchSpeechClient,
+    requestedBy: OwnedLatencyRound | null = null,
   ): Promise<Readonly<{ ready: boolean; reason: string | null }>> {
     try {
-      await this.#startConcurrentCapture(operationGeneration);
+      await this.#startConcurrentCapture(operationGeneration, requestedBy);
       this.#requireCurrent(operationGeneration);
       this.#successorCaptureReadiness = 'ready';
       this.#successorCaptureReadinessReason = null;
@@ -1236,19 +1410,23 @@ export class ProductP1VoiceRouteOwner {
     this.#reason = reason;
   }
 
-  async #startConcurrentCapture(operationGeneration: number): Promise<void> {
+  async #startConcurrentCapture(
+    operationGeneration: number,
+    requestedBy: OwnedLatencyRound | null = null,
+  ): Promise<OwnedLatencyRound | null> {
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
     this.#mediaTerminalFailure = null;
     this.#captureReadinessPending = true;
     this.#captureReadinessPurpose = 'successor';
     try {
-      await this.#startConcurrentCaptureOwned(operationGeneration);
+      const latencyRound = await this.#startConcurrentCaptureOwned(operationGeneration, requestedBy);
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
       this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
       this.#captureReadinessPurpose = null;
+      return latencyRound;
     } catch (error) {
       const failure = this.#captureStartupFailure ?? this.#mediaTerminalFailure ?? error;
       this.#captureStartupAudioReady = false;
@@ -1260,7 +1438,10 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async #startConcurrentCaptureOwned(operationGeneration: number): Promise<void> {
+  async #startConcurrentCaptureOwned(
+    operationGeneration: number,
+    requestedBy: OwnedLatencyRound | null,
+  ): Promise<OwnedLatencyRound | null> {
     const sessionId = requiredText(this.#sessionId, 'session_id');
     const interactionId = requiredText(this.#interactionId, 'interaction_id');
     const correlationId = requiredText(this.#correlationId, 'correlation_id');
@@ -1276,6 +1457,7 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#resetCaptureSendLatency();
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
@@ -1286,10 +1468,20 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
+    const latencyRound = this.#beginCaptureLatencyRound();
+    if (
+      requestedBy !== null
+      && !requestedBy.finished
+      && requestedBy.successorRequested
+      && requestedBy.successorRound === null
+    ) {
+      requestedBy.successorRound = latencyRound;
+    }
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
     );
     this.#captureActualProcessing = metadata.actual_processing;
+    this.#markLatency(latencyRound, 'browser.capture_device_started');
     this.#captureStartupAudioReady = true;
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
@@ -1308,6 +1500,7 @@ export class ProductP1VoiceRouteOwner {
         sample_rate_hz: metadata.frame_format.sample_rate_hz,
         locale: this.#locale,
         end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+        ...(latencyRound === null ? {} : { latency_probe_context: latencyRound.context }),
       });
       const activation = exactMediaActivation(activationValue);
       if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
@@ -1372,6 +1565,7 @@ export class ProductP1VoiceRouteOwner {
         transport_available: true,
         socket_factory: this.#socketFactory,
         on_audio_frame: () => undefined,
+        on_attached: () => this.#markCaptureLatencyAttached(latencyRound),
         on_terminal: event => {
           if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
         },
@@ -1411,7 +1605,9 @@ export class ProductP1VoiceRouteOwner {
     });
     await this.#awaitCaptureReadiness(route, operationGeneration);
     this.#requireCurrent(operationGeneration);
+    this.#markCaptureLatencyFirstAck(latencyRound);
     this.#onConcurrentCaptureStarted?.();
+    return latencyRound;
   }
 
   async #rotateConcurrentCapture(operationGeneration: number): Promise<void> {
@@ -1549,6 +1745,7 @@ export class ProductP1VoiceRouteOwner {
     provider: Readonly<GatewaySpeechProvider>,
     response: Readonly<AudioResponseRef>,
     unitId: string,
+    latencyRound: OwnedLatencyRound | null,
     onFrame: (frame: Readonly<MediaAudioFrame>) => void,
     onTerminal: (event: Readonly<DedicatedMediaTerminalEvent>) => void
   ): ActiveBrowserDedicatedMediaRoute {
@@ -1579,6 +1776,7 @@ export class ProductP1VoiceRouteOwner {
     // Provider is checked by the Speech client and carried into every browser
     // audio chunk; reading it here keeps the downlink composition explicit.
     requiredText(provider.provider_id, 'provider.provider_id');
+    this.#markLatency(latencyRound, 'browser.downlink_attach_started');
     const route = createBrowserDedicatedMediaRoute({
       enabled: true,
       expected_origin: this.#origin,
@@ -1589,6 +1787,7 @@ export class ProductP1VoiceRouteOwner {
       transport_available: true,
       socket_factory: this.#socketFactory,
       on_audio_frame: onFrame,
+      on_attached: () => this.#markLatency(latencyRound, 'browser.downlink_attached'),
       on_terminal: onTerminal,
       max_pending_frames: downlink.max_pending_frames,
       max_pending_bytes: downlink.max_pending_bytes,
@@ -1606,6 +1805,7 @@ export class ProductP1VoiceRouteOwner {
       frame.seq >= (pending.frameCount ?? MAX_STREAMING_PLAYOUT_FRAMES)
     )
       throw new Error('dedicated media downlink frame is stale or non-contiguous');
+    if (frame.seq === 0) this.#markLatency(pending.latencyRound, 'browser.downlink_first_frame_received');
     pending.chunks.push(
       Object.freeze({
         response: pending.response,
@@ -1723,6 +1923,10 @@ export class ProductP1VoiceRouteOwner {
       typeof receipt.duplex_media_observed !== 'boolean'
     )
       throw new Error('media playout receipt binding mismatch');
+    this.#markLatency(pending.latencyRound, 'browser.playout_ack_received');
+    if (pending.latencyRound?.completionJoin.observePlayoutAck() === true) {
+      this.#settleCompletedLatencyRound(pending.latencyRound);
+    }
   }
 
   #scheduleDownlinkAck(pending: PendingProductPlayout, throughSeq: number): void {
@@ -1753,6 +1957,17 @@ export class ProductP1VoiceRouteOwner {
 
   #observePlayout(event: Readonly<BrowserAudioPlayoutEvent>): void {
     const pending = this.#pendingPlayout;
+    if (pending !== null && event.reason === 'playout_underrun') {
+      this.#markLatency(pending.latencyRound, 'browser.playout_underrun', {}, {
+        outcome: 'observed',
+        reason_code: 'UNDERRUN',
+      });
+    } else if (pending !== null && event.reason === 'playout_rebuffer') {
+      this.#markLatency(pending.latencyRound, 'browser.playout_rebuffer', {}, {
+        outcome: 'observed',
+        reason_code: 'REBUFFER',
+      });
+    }
     const deviceFailure =
       event.state === 'failed' && ['audio_output_selection_lost', 'audio_output_selection_unverified'].includes(event.reason)
         ? stableCaptureStopReason(event.reason)
@@ -1817,10 +2032,39 @@ export class ProductP1VoiceRouteOwner {
       return;
     }
     if (pending.expected.size === 1 && [...pending.expected].every(([unitId, seq]) => (pending.observed.get(unitId) ?? -1) >= seq) && pending.nextChunkIndex === pending.chunks.length) {
+      this.#markLatency(pending.latencyRound, 'browser.playout_completed');
       this.#pendingPlayout = null;
       this.#settlingPlayout = pending;
       pending.resolve();
     }
+  }
+
+  #observePlayoutTiming(event: Readonly<BrowserAudioPlayoutTimingEvent>): void {
+    const pending = this.#pendingPlayout;
+    if (
+      pending === null
+      || event.response.interaction_id !== pending.response.interaction_id
+      || event.response.response_id !== pending.response.response_id
+      || event.response.response_generation !== pending.response.response_generation
+      || event.unit_id !== pending.unitId
+      || event.seq !== 0
+    ) return;
+    this.#markLatency(
+      pending.latencyRound,
+      'browser.playout_first_frame_scheduled',
+      {},
+      { monotonic_ms: event.scheduled_at_monotonic_ms },
+    );
+    if (event.estimated_start_monotonic_ms === null || event.uncertainty_ms === null) return;
+    this.#markLatency(
+      pending.latencyRound,
+      'browser.playout_first_frame_started_estimate',
+      {},
+      {
+        monotonic_ms: event.estimated_start_monotonic_ms,
+        uncertainty_ms: event.uncertainty_ms,
+      },
+    );
   }
 
   #observeMediaTerminal(route: ActiveBrowserDedicatedMediaRoute, event: Readonly<DedicatedMediaTerminalEvent>): void {
@@ -1843,6 +2087,7 @@ export class ProductP1VoiceRouteOwner {
           && (pending.observed.get(pending.unitId) ?? -1) >= finalSeq
         ) {
           if (this.#pendingPlayout === pending) {
+            this.#markLatency(pending.latencyRound, 'browser.playout_completed');
             this.#pendingPlayout = null;
             this.#settlingPlayout = pending;
             pending.resolve();
@@ -2038,8 +2283,14 @@ export class ProductP1VoiceRouteOwner {
     this.#drainCaptureFrames();
     const firstFrameDeadline = Date.now() + CAPTURE_FIRST_FRAME_TIMEOUT_MS;
     let pending = route.leaf.flush();
+    // Capture is continuous, so a healthy sender can always have a rolling
+    // frame in flight. Windows Chrome talking to a Gateway in WSL made that
+    // latency visible: ACKs advanced and backpressure stayed bounded, but the
+    // queue never became momentarily empty. Readiness therefore proves the
+    // first Gateway ACK instead of requiring quiescence from a live stream.
+    let acknowledgedFrames = this.#mediaSentFrames - pending.pending_frames;
     while (
-      (this.#frames.length === 0 || this.#mediaSentFrames === 0 || pending.pending_frames !== 0) &&
+      (this.#frames.length === 0 || this.#mediaSentFrames === 0 || acknowledgedFrames === 0) &&
       !route.leaf.closed &&
       Date.now() < firstFrameDeadline
     ) {
@@ -2047,6 +2298,7 @@ export class ProductP1VoiceRouteOwner {
       this.#requireHealthyCaptureReadiness(operationGeneration);
       this.#drainCaptureFrames();
       pending = route.leaf.flush();
+      acknowledgedFrames = this.#mediaSentFrames - pending.pending_frames;
     }
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#audio.captureState() !== 'active') {
@@ -2064,7 +2316,7 @@ export class ProductP1VoiceRouteOwner {
         reason: 'AUDIO_CAPTURE_NO_FRAMES',
       });
     }
-    if (pending.pending_frames !== 0) {
+    if (acknowledgedFrames === 0) {
       throw Object.assign(new Error('formal media route did not acknowledge capture readiness'), {
         reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
       });
@@ -2083,6 +2335,52 @@ export class ProductP1VoiceRouteOwner {
         });
       }
       this.#mediaSentFrames += 1;
+      this.#observeCaptureFrameSentLatency();
+      if (this.#mediaSentFrames === 1) this.#markLatency(this.#captureLatencyRound, 'browser.capture_first_frame_sent');
+    }
+  }
+
+  #resetCaptureSendLatency(): void {
+    this.#captureLastFrameSentMonotonicMs = null;
+    this.#captureSendClockInvalid = false;
+    this.#captureLastFrameMarked = false;
+  }
+
+  #observeCaptureFrameSentLatency(): void {
+    if (this.#captureLatencyRound === null || this.#captureLastFrameMarked) return;
+    const clock = this.#latencyMonotonicMs;
+    if (clock === null) {
+      this.#captureSendClockInvalid = true;
+      return;
+    }
+    try {
+      const monotonicMs = clock();
+      if (!Number.isFinite(monotonicMs) || monotonicMs < 0) {
+        this.#captureSendClockInvalid = true;
+        return;
+      }
+      this.#captureLastFrameSentMonotonicMs = monotonicMs;
+    } catch {
+      this.#captureSendClockInvalid = true;
+    }
+  }
+
+  #markLastCaptureFrameSent(owned: OwnedLatencyRound | null): void {
+    if (
+      owned === null
+      || owned.finished
+      || this.#captureLastFrameMarked
+      || this.#frames.length === 0
+      || this.#mediaSentFrames !== this.#frames.length
+    ) return;
+    this.#captureLastFrameMarked = true;
+    const monotonicMs = this.#captureLastFrameSentMonotonicMs;
+    if (this.#captureSendClockInvalid || monotonicMs === null) {
+      this.#finishLatencyRound(owned, 'unknown');
+      return;
+    }
+    if (!this.#markLatency(owned, 'browser.uplink_last_frame_sent', {}, { monotonic_ms: monotonicMs })) {
+      this.#finishLatencyRound(owned, 'unknown');
     }
   }
 
@@ -2096,6 +2394,7 @@ export class ProductP1VoiceRouteOwner {
     // failure cannot start a second cleanup or replace its exact stable reason.
     if (this.#failureCleanupReason !== null && ['cleanup_pending', 'failed'].includes(this.#status) && this.#failureCleanupPromise === null) return;
     const failureReason = stableFailureReason(error);
+    this.#finishAllLatencyRounds('failed');
     if (this.#failureCleanupPromise === null) {
       this.#failureCleanupReason = failureReason;
       this.#operationGeneration += 1;
@@ -2328,6 +2627,7 @@ export class ProductP1VoiceRouteOwner {
       // active utterance.
       this.#captureUtteranceStartFrameIndex = this.#frames.length;
     }
+    this.#admitLatencyRound(this.#captureLatencyRound);
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
   }
@@ -2371,6 +2671,13 @@ export class ProductP1VoiceRouteOwner {
     ) {
       throw new Error('end-of-turn control escaped its media authority');
     }
+    this.#admitLatencyRound(this.#captureLatencyRound);
+    if (this.#responseLatencyRound === null) {
+      const latencyRound = this.#captureLatencyRound;
+      if (latencyRound !== null && this.#markLatency(latencyRound, 'browser.eot_received')) {
+        this.#responseLatencyRound = latencyRound;
+      }
+    }
     this.#pendingEndOfTurn = event;
     this.#deliverBargeInEndOfTurn(operationGeneration, route);
     this.#deliverEndOfTurn(operationGeneration, route);
@@ -2406,6 +2713,181 @@ export class ProductP1VoiceRouteOwner {
         callback(event);
       }
     });
+  }
+
+  #latencyIdentity(patch: Partial<LatencyIdentityPatch> = {}): LatencyIdentityPatch | null {
+    if (this.#correlationId === null || this.#interactionId === null) return null;
+    return Object.freeze({
+      correlation_id: this.#correlationId,
+      interaction_id: this.#interactionId,
+      activation_id: this.#activationId,
+      activation_generation: this.#activationGeneration,
+      ...patch,
+    });
+  }
+
+  #beginCaptureLatencyRound(): OwnedLatencyRound | null {
+    const identity = this.#latencyIdentity();
+    if (this.#latencyProbe === null || identity === null || this.#sessionId === null) return null;
+    try {
+      const priorCapture = this.#captureLatencyRound;
+      if (priorCapture !== null && priorCapture !== this.#responseLatencyRound) {
+        if (this.#responseLatencyRound?.successorRound === priorCapture) {
+          this.#finishLatencyRound(this.#responseLatencyRound, 'unknown');
+        }
+        this.#finishLatencyRound(priorCapture, 'cancelled');
+      }
+      const round = this.#latencyProbe.beginRound(identity);
+      const context = round.context;
+      if (!round.mark('browser.capture_start_requested', identity)) {
+        round.abandon();
+        return null;
+      }
+      const owned: OwnedLatencyRound = {
+        round,
+        context,
+        sessionId: this.#sessionId,
+        baseIdentity: identity,
+        turnId: null,
+        response: null,
+        taskId: null,
+        successorRequested: false,
+        successorRound: null,
+        completionJoin: new ProductLatencyCompletionJoin(),
+        admitted: false,
+        finished: false,
+      };
+      this.#captureLatencyRound = owned;
+      return owned;
+    } catch {
+      return null;
+    }
+  }
+
+  #markLatency(
+    owned: OwnedLatencyRound | null,
+    point: string,
+    patch: Partial<LatencyIdentityPatch> = {},
+    observation?: LatencyObservation,
+  ): boolean {
+    if (
+      owned === null
+      || owned.finished
+      || (owned !== this.#captureLatencyRound && owned !== this.#responseLatencyRound)
+    ) return false;
+    const identity = Object.freeze({
+      ...owned.baseIdentity,
+      ...(owned.turnId === null ? {} : { turn_id: owned.turnId }),
+      ...(owned.response === null
+        ? {}
+        : {
+            response_id: owned.response.response_id,
+            response_generation: owned.response.response_generation,
+          }),
+      ...(owned.taskId === null ? {} : { task_id: owned.taskId }),
+      ...patch,
+    });
+    try {
+      return owned.round.mark(point, identity, observation);
+    } catch {
+      return false;
+    }
+  }
+
+  #admitLatencyRound(owned: OwnedLatencyRound | null): boolean {
+    if (owned === null || owned.finished) return false;
+    if (owned.admitted) return true;
+    try {
+      if (!owned.round.commit()) {
+        owned.finished = true;
+        if (this.#captureLatencyRound === owned) this.#captureLatencyRound = null;
+        if (this.#responseLatencyRound === owned) this.#responseLatencyRound = null;
+        return false;
+      }
+      owned.admitted = true;
+      return true;
+    } catch {
+      owned.finished = true;
+      if (this.#captureLatencyRound === owned) this.#captureLatencyRound = null;
+      if (this.#responseLatencyRound === owned) this.#responseLatencyRound = null;
+      return false;
+    }
+  }
+
+  #markCaptureLatencyAttached(owned: OwnedLatencyRound | null): void {
+    if (owned === null || owned !== this.#captureLatencyRound) return;
+    this.#markLatency(owned, 'browser.media_socket_attached');
+  }
+
+  #markCaptureLatencyFirstAck(owned: OwnedLatencyRound | null): void {
+    if (owned === null || owned !== this.#captureLatencyRound) return;
+    this.#markLatency(owned, 'browser.capture_first_ack_received');
+    const response = this.#responseLatencyRound;
+    if (
+      response !== null
+      && response !== owned
+      && !response.finished
+      && response.successorRequested
+      && response.successorRound === owned
+    ) {
+      this.#markLatency(response, 'browser.successor_capture_ready');
+      if (response.completionJoin.observeSuccessorReady()) this.#settleCompletedLatencyRound(response);
+    }
+  }
+
+  #latencyRoundForResponse(response: Readonly<AudioResponseRef>): OwnedLatencyRound | null {
+    const owned = this.#responseLatencyRound;
+    if (owned === null || owned.finished || owned.response === null) return null;
+    return owned.response.interaction_id === response.interaction_id
+      && owned.response.response_id === response.response_id
+      && owned.response.response_generation === response.response_generation
+      ? owned
+      : null;
+  }
+
+  #settleCompletedLatencyRound(owned: OwnedLatencyRound | null): void {
+    if (owned === null || owned.finished) return;
+    this.#markLatency(owned, 'browser.next_turn_capture_activated');
+    this.#finishLatencyRound(owned, 'completed');
+  }
+
+  #finishLatencyFallback(owned: OwnedLatencyRound | null): void {
+    if (owned === null || owned.finished) return;
+    this.#markLatency(owned, 'browser.next_turn_capture_activated', {}, {
+      outcome: 'fallback',
+      reason_code: 'FALLBACK',
+    });
+    this.#finishLatencyRound(owned, 'unknown');
+  }
+
+  #finishLatencyRound(owned: OwnedLatencyRound | null, outcome: LatencyTerminalOutcome): void {
+    if (owned === null || owned.finished) return;
+    owned.finished = true;
+    if (this.#captureLatencyRound === owned) this.#captureLatencyRound = null;
+    if (this.#responseLatencyRound === owned) this.#responseLatencyRound = null;
+    if (!owned.admitted) {
+      try {
+        owned.round.abandon();
+      } catch {
+        // Diagnostic abandonment never changes product cleanup.
+      }
+      return;
+    }
+    let batch: ReturnType<BrowserLatencyRound['finish']> = null;
+    try {
+      batch = owned.round.finish(outcome);
+    } catch {
+      return;
+    }
+    if (batch === null || this.#latencyProbe === null) return;
+    Promise.resolve()
+      .then(() => this.#latencyProbe?.exportBatch(owned.sessionId, batch!))
+      .catch(() => undefined);
+  }
+
+  #finishAllLatencyRounds(outcome: LatencyTerminalOutcome): void {
+    const rounds = new Set([this.#captureLatencyRound, this.#responseLatencyRound]);
+    for (const owned of rounds) this.#finishLatencyRound(owned, outcome);
   }
 
   #publish(): void {

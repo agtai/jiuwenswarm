@@ -67,6 +67,10 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     ValidatedExecutorConfiguration,
     ValidatedLiveVoiceConfiguration,
 )
+from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
+from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+    AgentConversationNotification,
+)
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice.batch_speech import (
@@ -111,11 +115,16 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     PRODUCT_CRITICAL_INPUT_ENABLE_ENV,
     PRODUCT_DEMO_POLICY_BYPASS_ENV,
     PRODUCT_P2_ENABLE_ENV,
+    PRODUCT_P2_NOTIFICATION_BATCH_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
     _ProgressDelivery,
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
+)
+from jiuwenswarm.server.live_voice.presentation_ledger import (
+    PresentationSurface,
+    PresentationUnit,
 )
 from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
     ProductP3AuthorizedQuery,
@@ -392,6 +401,32 @@ class _AgentManager:
     def unpin_agent(self, agent) -> None:
         assert agent in (self.agent, self.code_agent)
         self.unpins += 1
+
+
+class _ForegroundLatencyProbeSpy:
+    def __init__(self, owner_events: list[str] | None = None) -> None:
+        self.marks: list[tuple[str, object | None, str | None]] = []
+        self.terminals: list[str] = []
+        self.abandoned = False
+        self.owner_events = owner_events
+
+    def mark(
+        self,
+        point: str,
+        *,
+        response_ref: object | None = None,
+        task_id: str | None = None,
+    ) -> bool:
+        self.marks.append((point, response_ref, task_id))
+        if self.owner_events is not None:
+            self.owner_events.append(point)
+        return True
+
+    def finish(self, terminal_outcome: str) -> None:
+        self.terminals.append(terminal_outcome)
+
+    def abandon(self) -> None:
+        self.abandoned = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1435,6 +1470,7 @@ def _registry(
     commit_ledger: TurnCommitLedger | None = None,
     critical_input: bool = False,
     unified: bool = False,
+    notification_batch: bool = False,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -1449,6 +1485,7 @@ def _registry(
             p2_enabled=p2,
             p3_text_enabled=p3,
             critical_input_enabled=critical_input,
+            p2_notification_batch_enabled=notification_batch,
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
@@ -1461,6 +1498,14 @@ def _registry(
         ),
     )
     return registry, p3_composition, manager, pushed
+
+
+async def _wait_for_p2_notifications(route, minimum: int) -> None:
+    for _ in range(100):
+        if route.activation_lease._runtime.snapshot().queued_notifications >= minimum:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("P2 notifications did not reach the deterministic queue")
 
 
 def _unified_registry(
@@ -1830,6 +1875,21 @@ def test_demo_policy_bypass_is_backend_configured_and_default_off(
     )
 
 
+def test_p2_notification_batch_is_backend_configured_and_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_P2_NOTIFICATION_BATCH_ENABLE_ENV, raising=False)
+    assert (
+        ProductCompositionSettings.from_environment().p2_notification_batch_enabled
+        is False
+    )
+    monkeypatch.setenv(PRODUCT_P2_NOTIFICATION_BATCH_ENABLE_ENV, "1")
+    assert (
+        ProductCompositionSettings.from_environment().p2_notification_batch_enabled
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_identity(
     tmp_path: Path,
@@ -2190,6 +2250,89 @@ async def test_dialogue_task_claim_remains_untrusted_and_has_zero_task_effect(
     assert not hasattr(persisted_intent, "outcome")
     assert not hasattr(persisted_intent, "task_result")
     await _close_unified_route(registry, stem="dialogue-task-claim")
+
+
+@pytest.mark.asyncio
+async def test_unified_latency_probe_tracks_new_execution_and_abandons_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-latency-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    params = _unified_final_params(stem="latency-dialogue", text="PRIVATE INPUT")
+    owner_events: list[str] = []
+    bridge = registry._task_intent_bridge
+    journal = registry._unified_journal
+    assert bridge is not None and journal is not None
+    real_resolve = bridge.resolve_unified
+    real_admit = journal.admit
+
+    def traced_resolve(*args, **kwargs):
+        owner_events.append("owner.semantic_resolver")
+        return real_resolve(*args, **kwargs)
+
+    def traced_admit(*args, **kwargs):
+        owner_events.append("owner.journal_admit")
+        return real_admit(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, "resolve_unified", traced_resolve)
+    monkeypatch.setattr(journal, "admit", traced_admit)
+    first_probe = _ForegroundLatencyProbeSpy(owner_events)
+    first_probe.mark("agent.commit_submit_received")
+
+    first = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-latency-first",
+        session_id="session-product",
+        channel_id="web",
+        latency_probe=first_probe,
+    )
+    await manager.agent.wait_for_calls(1)
+    for _ in range(40):
+        if first_probe.terminals:
+            break
+        await asyncio.sleep(0)
+
+    assert first.ok
+    assert [point for point, _response, _task in first_probe.marks] == [
+        "agent.commit_submit_received",
+        "agent.commit_accepted",
+        "agent.route_resolved",
+        "agent.agent_started",
+        "agent.agent_final",
+        "agent.presentation_produced",
+        "agent.presentation_dispatched",
+    ]
+    assert first_probe.terminals == ["completed"]
+    assert "PRIVATE INPUT" not in repr(first_probe.marks)
+    assert owner_events.index("agent.commit_accepted") < owner_events.index(
+        "owner.semantic_resolver"
+    )
+    assert owner_events.index("owner.journal_admit") < owner_events.index(
+        "agent.route_resolved"
+    )
+
+    replay_probe = _ForegroundLatencyProbeSpy()
+    replay_probe.mark("agent.commit_submit_received")
+    replay = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-latency-replay",
+        session_id="session-product",
+        channel_id="web",
+        latency_probe=replay_probe,
+    )
+    assert replay.ok
+    assert replay_probe.abandoned is True
+    assert replay_probe.terminals == []
+    assert manager.agent.calls == 1
+    await _close_unified_route(registry, stem="p3-off-create")
 
 
 @pytest.mark.asyncio
@@ -3277,6 +3420,7 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
         )
     ).ok
     _install_unified_history_writer(default_registry)
+    denied_probe = _ForegroundLatencyProbeSpy()
     default_result = await default_registry.handle_unified_submit(
         params=_unified_final_params(
             stem="default-create",
@@ -3285,12 +3429,18 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
         request_id="request-default-create",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=denied_probe,
     )
     assert default_result.ok
     assert default_p3.current is None
     assert default_p3.handle_calls[0][0] == "task.create"
     assert default_p3.handle_calls[0][2]["trusted_demo_policy_bypass"] is False
     assert default_manager.agent.calls == 0
+    assert all(
+        point != "agent.task_command_accepted"
+        for point, _response, _task in denied_probe.marks
+    )
+    assert denied_probe.terminals == ["completed"]
     await _ack_unified_presentation(default_registry, sequence=0, stem="default-create")
     await _close_unified_route(default_registry, stem="default-create")
 
@@ -3380,6 +3530,7 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
         )
     ).ok
     _install_unified_history_writer(registry)
+    probe = _ForegroundLatencyProbeSpy()
     created = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="unified-origin-create",
@@ -3388,6 +3539,7 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
         request_id="request-unified-origin-create",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=probe,
     )
     assert created.ok
     result = cast(dict[str, object], created.payload["result"])
@@ -3401,7 +3553,14 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
     assert origin.activation_id == "activation-1"
     assert origin.activation_generation == 1
     assert origin.correlation_id == "correlation-p2"
-    await _ack_unified_presentation(registry, sequence=0, stem="unified-origin-create")
+    assert (
+        "agent.task_command_accepted",
+        None,
+        "task-current-1",
+    ) in probe.marks
+    await _ack_unified_presentation(
+        registry, sequence=0, stem="unified-origin-create"
+    )
     await _close_unified_route(registry, stem="unified-origin-create")
 
 
@@ -4335,6 +4494,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         )
     ).ok
     history = _install_unified_history_writer(registry)
+    status_probe = _ForegroundLatencyProbeSpy()
 
     running_params = _unified_final_params(
         stem="status-current",
@@ -4345,11 +4505,18 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         request_id="request-status-current",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=status_probe,
     )
 
     assert status.ok
+    assert cast(dict[str, object], status.payload["result"])["task_id"] == composition.current.task_id
     assert manager.agent.calls == 0
     assert [call[0] for call in composition.handle_calls] == ["task.status"]
+    assert (
+        "agent.task_command_accepted",
+        None,
+        composition.current.task_id,
+    ) in status_probe.marks
     presentation_sequence = await _ack_unified_presentation(
         registry, sequence=0, stem="status-current"
     )
@@ -4415,6 +4582,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         channel_id="web",
     )
     assert terminal_status.ok
+    assert cast(dict[str, object], terminal_status.payload["result"])["task_id"] == composition.current.task_id
     await _ack_unified_presentation(
         registry, sequence=presentation_sequence, stem="status-cancelled"
     )
@@ -4564,6 +4732,7 @@ async def test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutat
     )
 
     assert result.ok
+    assert cast(dict[str, object], result.payload["result"])["task_id"] == original.task_id
     assert composition.current == original
     assert manager.agent.calls == 0
     assert len(composition.handle_calls) == 1
@@ -4592,6 +4761,7 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
         )
     ).ok
     _install_unified_history_writer(registry)
+    probe = _ForegroundLatencyProbeSpy()
     result = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="cancel-current",
@@ -4600,15 +4770,22 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
         request_id="request-cancel-current",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=probe,
     )
 
     assert result.ok
+    assert cast(dict[str, object], result.payload["result"])["task_id"] == composition.current.task_id
     assert manager.agent.calls == 0
     assert len(composition.handle_calls) == 1
     operation, params, policy = composition.handle_calls[0]
     assert operation == "task.cancel"
     assert params["task_id"] == composition.current.task_id
     assert policy["trusted_demo_policy_bypass"] is True
+    assert (
+        "agent.task_command_accepted",
+        None,
+        composition.current.task_id,
+    ) in probe.marks
     await _ack_unified_presentation(registry, sequence=0, stem="cancel-current")
     await _close_unified_route(registry, stem="cancel-current")
 
@@ -4699,6 +4876,7 @@ async def test_unified_cancel_recovery_keeps_its_durable_original_task_target(
     )
 
     assert recovered.ok
+    assert cast(dict[str, object], recovered.payload["result"])["task_id"] == original.task_id
     cancel_calls = [
         call for call in composition.handle_calls if call[0] == "task.cancel"
     ]
@@ -10179,6 +10357,251 @@ async def test_segment_flags_fail_before_authority_or_downstream(
     assert p3.subscription_calls == []
     assert manager.get_calls == []
     assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_p2_notification_batch_drains_observers_through_first_authoritative_barrier_and_replays(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path, notification_batch=True)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-batch-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    response = ResponseRef("interaction-1", "response-batch-1", 0)
+
+    def event(
+        seq: int, event_type: str, *, error_reason: str | None = None
+    ) -> AgentEvent:
+        return AgentEvent(
+            request_id="request-p2-batch-submit",
+            interaction_id="interaction-1",
+            turn_id="turn-batch-1",
+            commit_id="commit-batch-1",
+            seq=seq,
+            event_type=event_type,
+            source_provenance="formal",
+            text=f"chunk-{seq}",
+            error_reason=error_reason,
+        )
+
+    for seq in range(2):
+        runtime._publish(
+            AgentConversationNotification(
+                kind="agent.output",
+                request_id="request-p2-batch-submit",
+                round_id="round-batch-1",
+                response_ref=response,
+                agent_event=event(
+                    seq,
+                    "chat.delta",
+                    error_reason=("AGENT_STREAM_FAILED" if seq == 1 else None),
+                ),
+            )
+        )
+    unit = PresentationUnit(
+        ref=response,
+        surface=PresentationSurface.TEXT,
+        unit_id="unit-batch-1",
+        seq=0,
+        source_start_utf8=0,
+        source_end_utf8=7,
+        content_ref="sha256:fixture",
+    )
+    runtime._publish(
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id="request-p2-batch-submit",
+            round_id="round-batch-1",
+            response_ref=response,
+            agent_event=event(2, "chat.final"),
+            presentation_unit=unit,
+        ),
+        critical_key=("presentation", "request-p2-batch-submit"),
+    )
+    runtime._publish(
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id="request-p2-successor",
+            round_id="round-batch-2",
+            response_ref=ResponseRef("interaction-1", "response-batch-2", 1),
+            agent_event=event(3, "chat.delta"),
+        )
+    )
+    before = route.activation_lease._runtime.snapshot()
+
+    params = _p2_params(notification_sequence=1, max_notifications=16)
+    batched = await registry.handle_p2_notification_next(
+        params=params,
+        request_id="request-p2-batch-next-1",
+        session_id="session-product",
+    )
+    assert batched.ok is True
+    result = cast(dict[str, object], batched.payload["result"])
+    assert result["status"] == "notification_batch"
+    notifications = cast(list[dict[str, object]], result["notifications"])
+    assert len(notifications) == 2
+    assert notifications[-1]["presentation_unit"] is None
+    assert cast(dict[str, object], notifications[-1]["agent_event"])[
+        "error_reason"
+    ] == "AGENT_STREAM_FAILED"
+    assert [item["publish_seq"] for item in notifications] == sorted(
+        cast(int, item["publish_seq"]) for item in notifications
+    )
+    for item in notifications:
+        assert item["status"] == "notification"
+        assert item["session_id"] == "session-product"
+        assert item["interaction_id"] == "interaction-1"
+        assert item["activation_generation"] == 1
+    after = route.activation_lease._runtime.snapshot()
+    assert after.queued_notifications >= 1
+    assert after.delivered_notifications == before.delivered_notifications + len(
+        notifications
+    )
+
+    replay = await registry.handle_p2_notification_next(
+        params=params,
+        request_id="request-p2-batch-next-1",
+        session_id="session-product",
+    )
+    assert replay.payload == batched.payload
+    assert (
+        route.activation_lease._runtime.snapshot().delivered_notifications
+        == after.delivered_notifications
+    )
+    conflict = await registry.handle_p2_notification_next(
+        params={**params, "max_notifications": 15},
+        request_id="request-p2-batch-next-1",
+        session_id="session-product",
+    )
+    assert conflict.ok is False
+    assert cast(dict[str, object], conflict.payload["error"])["reason"] == (
+        "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+    assert (
+        route.activation_lease._runtime.snapshot().delivered_notifications
+        == after.delivered_notifications
+    )
+    assert route.activation_lease._runtime.snapshot().harness.cancel_effects == 0
+
+    next_batch = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=2, max_notifications=16),
+        request_id="request-p2-batch-next-2",
+        session_id="session-product",
+    )
+    assert next_batch.ok is True
+    next_notifications = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], next_batch.payload["result"])["notifications"],
+    )
+    assert len(next_notifications) == 1
+    assert next_notifications[0]["presentation_unit"] is not None
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_notification_batch_flag_and_bounds_reject_before_dequeue(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-legacy-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    assert (
+        await registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-legacy-1",
+                turn_id="turn-legacy-1",
+                response_id="response-legacy-1",
+                committed_at=NOW,
+                text="legacy notification pull",
+            ),
+            request_id="request-p2-legacy-submit",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    await manager.agent.wait_for_calls(1)
+    await _wait_for_p2_notifications(route, 4)
+    before = route.activation_lease._runtime.snapshot()
+
+    disabled = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1, max_notifications=16),
+        request_id="request-p2-disabled-batch",
+        session_id="session-product",
+    )
+    assert disabled.ok is False
+    assert (
+        route.activation_lease._runtime.snapshot().delivered_notifications
+        == before.delivered_notifications
+    )
+
+    enabled_registry, _p3, enabled_manager, _pushed = _registry(
+        tmp_path / "enabled", notification_batch=True
+    )
+    assert (
+        await enabled_registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-enabled-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    assert (
+        await enabled_registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-enabled-1",
+                turn_id="turn-enabled-1",
+                response_id="response-enabled-1",
+                committed_at=NOW,
+                text="enabled notification pull",
+            ),
+            request_id="request-p2-enabled-submit",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    enabled_route = enabled_registry._p2_routes[("session-product", "interaction-1")]
+    await enabled_manager.agent.wait_for_calls(1)
+    await _wait_for_p2_notifications(enabled_route, 4)
+    enabled_before = enabled_route.activation_lease._runtime.snapshot()
+    for index, invalid in enumerate((False, 1, 17)):
+        rejected = await enabled_registry.handle_p2_notification_next(
+            params=_p2_params(
+                notification_sequence=1,
+                max_notifications=invalid,
+            ),
+            request_id=f"request-p2-invalid-batch-{index}",
+            session_id="session-product",
+        )
+        assert rejected.ok is False
+        assert (
+            enabled_route.activation_lease._runtime.snapshot().delivered_notifications
+            == enabled_before.delivered_notifications
+        )
+
+    legacy = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1),
+        request_id="request-p2-legacy-next",
+        session_id="session-product",
+    )
+    assert legacy.ok is True
+    assert cast(dict[str, object], legacy.payload["result"])["status"] == (
+        "notification"
+    )
+    await registry.close_active_routes()
+    await enabled_registry.close_active_routes()
 
 
 @pytest.mark.asyncio

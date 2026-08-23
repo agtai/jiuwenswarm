@@ -15,6 +15,9 @@ import {
   bindProductVoiceTaskOrigin,
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
+  createProductLatencyProbe,
+  createProductP2ActivationOwner,
+  selectProductPostCaptureBenchmark,
   extractWebErrorReason,
   formalTaskIntentResultSummary,
   inspectProductP3RetryCandidate,
@@ -22,6 +25,7 @@ import {
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
   productP2NotificationRepollDelayMs,
+  productLatencyForegroundPresentation,
   productP3RetryInspectionFailureReason,
   productP3ProgressReconciliationRetryDelayMs,
   productP3ProgressFailureIsQuarantinable,
@@ -38,6 +42,280 @@ import {
   terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
+test('Panel P2 owner factory omits legacy batch input and passes exact feature-on size', async () => {
+  const binding = {
+    session_id: 'session-batch-panel',
+    correlation_id: 'correlation-batch-panel',
+    interaction_id: 'interaction-batch-panel',
+    activation_id: 'activation-batch-panel',
+    activation_generation: 1,
+  };
+  for (const enabled of [false, true]) {
+    const notificationParams = [];
+    const owner = createProductP2ActivationOwner({
+      enabled: true,
+      notification_batch_enabled: enabled,
+      request: async (method, params) => {
+        if (method === 'live_voice.composition.p2.activate') {
+          return { ok: true, result: { status: 'active', ...binding } };
+        }
+        notificationParams.push(params);
+        throw new Error('stop after request observation');
+      },
+    });
+    await owner.start(binding);
+    await assert.rejects(owner.nextNotification(), /stop after request observation/);
+    assert.equal(notificationParams.length, 1);
+    assert.equal('max_notifications' in notificationParams[0], enabled);
+    if (enabled) assert.equal(notificationParams[0].max_notifications, 16);
+  }
+});
+
+test('panel latency factory is side-effect free off and invalid query never reaches storage or clocks', () => {
+  let browserReads = 0;
+  const browser = {};
+  for (const key of ['location', 'sessionStorage', 'performance', 'crypto']) {
+    Object.defineProperty(browser, key, {
+      enumerable: true,
+      get() {
+        browserReads += 1;
+        throw new Error(`PRIVATE ${key}`);
+      },
+    });
+  }
+  assert.equal(createProductLatencyProbe({ enabled: false, browser, request() { throw new Error('PRIVATE request'); } }), null);
+  assert.equal(browserReads, 0);
+
+  let storageReads = 0;
+  const invalidBrowser = {
+    location: { search: '?unrelated=1' },
+    get sessionStorage() {
+      storageReads += 1;
+      throw new Error('PRIVATE storage');
+    },
+    performance: { now: () => { throw new Error('PRIVATE clock'); } },
+    crypto: { randomUUID: () => { throw new Error('PRIVATE random'); } },
+  };
+  assert.equal(createProductLatencyProbe({ enabled: true, browser: invalidBrowser, request() {} }), null);
+  assert.equal(storageReads, 0);
+});
+
+test('post-capture benchmark selection requires opt-in, exact Session, and a visible page', () => {
+  const location = {
+    search: '?live_voice_post_capture_benchmark=1&run_id=run-20260820-a&profile_id=dialogue_no_tool&input_case_id=dialogue-paris-en-v1&round_index=0&session_id=web_benchmark_session&fixture_url=http%3A%2F%2F127.0.0.1%3A41731%2Ffixture%2Fdialogue-paris-en-v1.wav&result_url=http%3A%2F%2F127.0.0.1%3A41731%2Fresult&start_delay_ms=1000',
+    origin: 'http://localhost:5173',
+    pathname: '/chat/web_benchmark_session',
+  };
+  assert.equal(selectProductPostCaptureBenchmark(false, location, 'web_benchmark_session', 'visible'), null);
+  assert.equal(selectProductPostCaptureBenchmark(true, location, 'web_foreign', 'visible'), null);
+  assert.equal(selectProductPostCaptureBenchmark(true, location, 'web_benchmark_session', 'hidden'), null);
+  assert.deepEqual(selectProductPostCaptureBenchmark(true, location, 'web_benchmark_session', 'visible'), {
+    run_id: 'run-20260820-a',
+    profile_id: 'dialogue_no_tool',
+    input_case_id: 'dialogue-paris-en-v1',
+    round_index: 0,
+    session_id: 'web_benchmark_session',
+    fixture_url: 'http://127.0.0.1:41731/fixture/dialogue-paris-en-v1.wav',
+    result_url: 'http://127.0.0.1:41731/result',
+    start_delay_ms: 1000,
+  });
+});
+
+test('panel latency factory forwards only a settled Browser batch to its diagnostic observer', async () => {
+  const storage = new Map();
+  const settled = [];
+  let identifier = 0;
+  const probe = createProductLatencyProbe({
+    enabled: true,
+    browser: {
+      location: { search: '?lv_latency_run=run-panel&lv_latency_profile=dialogue_no_tool&lv_latency_case=fixture' },
+      sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
+      performance: { now: () => 1 },
+      crypto: { randomUUID: () => `panel-${++identifier}` },
+    },
+    request: async () => ({ status: 'written' }),
+    onBatchSettled(batch, receipt) { settled.push([batch, receipt]); },
+  });
+  const identity = { correlation_id: 'correlation-1', interaction_id: 'interaction-1' };
+  const round = probe.beginRound(identity);
+  assert.equal(round.mark('browser.eot_received', identity), true);
+  const batch = round.finish('completed');
+  await probe.exportBatch('web-panel-session', batch);
+  assert.deepEqual(settled.map(([, receipt]) => receipt), [{ disposition: 'written' }]);
+});
+
+test('only a fresh foreground PresentationUnit can donate B3 response identity', () => {
+  const foreground = {
+    kind: 'presentation',
+    response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 1 },
+    replayed: false,
+    task_notification: false,
+    adjustment_notification: false,
+  };
+  assert.deepEqual(productLatencyForegroundPresentation(foreground), {
+    response: foreground.response,
+    task_id: null,
+  });
+  for (const ignored of [
+    { ...foreground, replayed: true },
+    { ...foreground, task_notification: true },
+    { ...foreground, adjustment_notification: true },
+    { kind: 'continue' },
+    { kind: 'failed', reason: 'PRIVATE' },
+  ]) {
+    assert.equal(productLatencyForegroundPresentation(ignored), null);
+  }
+});
+
+test('panel real latency seams bind unified response before B3 and cross B3 before local effects', async () => {
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  assert.equal(typeof panelModule.bindProductLatencyUnifiedResult, 'function');
+  assert.equal(typeof panelModule.runProductLatencyPresentationBoundary, 'function');
+  const expected = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-expected', response_generation: 2 });
+  const events = [];
+  let bound = null;
+  const owner = {
+    bindUnifiedSubmitLatency(response, taskId) {
+      events.push('bind');
+      bound = { response, taskId };
+      return true;
+    },
+    observeForegroundPresentationLatency(response, taskId) {
+      const matches = bound !== null
+        && response.interaction_id === bound.response.interaction_id
+        && response.response_id === bound.response.response_id
+        && response.response_generation === bound.response.response_generation
+        && taskId === bound.taskId;
+      if (matches) events.push('B3');
+      return matches;
+    },
+  };
+  const submitResult = Object.freeze({
+    request_id: 'unified-request-1',
+    ok: true,
+    error: null,
+    result: Object.freeze({ status: 'authoritative_presentation_accepted', response: expected, task_id: 'task-1' }),
+  });
+  assert.equal(panelModule.bindProductLatencyUnifiedResult(owner, submitResult), true);
+  const foreground = Object.freeze({
+    kind: 'presentation',
+    response: expected,
+    replayed: false,
+    task_notification: false,
+    adjustment_notification: false,
+  });
+  const concurrent = Object.freeze({ ...foreground, response: Object.freeze({ ...expected, response_id: 'response-foreign' }) });
+  let retainedTaskId = 'task-1';
+  const foreignAccepted = panelModule.runProductLatencyPresentationBoundary(
+    owner,
+    concurrent,
+    retainedTaskId,
+    () => events.push('foreign-effect'),
+  );
+  if (foreignAccepted) retainedTaskId = null;
+  assert.equal(foreignAccepted, false);
+  assert.equal(retainedTaskId, 'task-1');
+  const recovered = panelModule.runProductLatencyPresentationBoundary(
+    owner,
+    foreground,
+    retainedTaskId,
+    () => events.push('recovered-effect'),
+  );
+  if (recovered) retainedTaskId = null;
+  assert.equal(recovered, true);
+  assert.equal(retainedTaskId, null);
+  assert.deepEqual(events, ['bind', 'foreign-effect', 'B3', 'recovered-effect']);
+});
+
+test('unified latency submit binding retains the first exact P1 owner across retry and ref replacement', async () => {
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  assert.equal(typeof panelModule.createProductLatencyUnifiedSubmitBinding, 'function');
+  const events = [];
+  const context = Object.freeze({ schema_version: 'live-voice.latency-context.v0', round_index: 0 });
+  const oldOwner = {
+    prepareUnifiedSubmitLatency(turnId) {
+      events.push(`old:prepare:${turnId}`);
+      return context;
+    },
+    bindUnifiedSubmitLatency(response, taskId) {
+      events.push(`old:bind:${response.response_id}:${taskId}`);
+      return true;
+    },
+  };
+  const replacementOwner = {
+    prepareUnifiedSubmitLatency() {
+      events.push('replacement:prepare');
+      return null;
+    },
+    bindUnifiedSubmitLatency() {
+      events.push('replacement:bind');
+      return true;
+    },
+  };
+  const binding = panelModule.createProductLatencyUnifiedSubmitBinding('turn-owner-race');
+  assert.equal(binding.prepare(oldOwner), context);
+  assert.equal(binding.prepare(replacementOwner), context);
+  assert.equal(binding.bind({
+    ok: true,
+    error: null,
+    result: {
+      status: 'authoritative_presentation_accepted',
+      response: { interaction_id: 'interaction-1', response_id: 'response-owner-race', response_generation: 1 },
+      task_id: 'task-owner-race',
+    },
+  }), true);
+  assert.deepEqual(events, [
+    'old:prepare:turn-owner-race',
+    'old:bind:response-owner-race:task-owner-race',
+  ]);
+});
+
+test('panel latency profiles retain dialogue and foreground Task create/status/cancel without notification donation', async () => {
+  for (const profile of ['dialogue_no_tool', 'task_create', 'task_status', 'task_cancel']) {
+    const storage = new Map();
+    let random = 0;
+    const probe = createProductLatencyProbe({
+      enabled: true,
+      browser: {
+        location: { search: `?lv_latency_run=run-panel&lv_latency_profile=${profile}&lv_latency_case=foreground` },
+        sessionStorage: {
+          getItem: key => storage.get(key) ?? null,
+          setItem: (key, value) => storage.set(key, value),
+        },
+        performance: { now: () => 1 },
+        crypto: { randomUUID: () => `panel-id-${++random}` },
+      },
+      request() {},
+    });
+    assert.notEqual(probe, null);
+    const round = probe.beginRound({ correlation_id: 'correlation-1', interaction_id: 'interaction-1' });
+    assert.equal(round.context.profile_id, profile);
+  }
+
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  let observations = 0;
+  const owner = {
+    observeForegroundPresentationLatency() {
+      observations += 1;
+      return true;
+    },
+  };
+  const response = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 1 });
+  const foreground = Object.freeze({ kind: 'presentation', response, replayed: false, task_notification: false, adjustment_notification: false });
+  for (const taskId of [null, 'task-create-1', 'task-status-1', 'task-cancel-1']) {
+    panelModule.runProductLatencyPresentationBoundary(owner, foreground, taskId, () => undefined);
+  }
+  for (const ignored of [
+    Object.freeze({ ...foreground, replayed: true }),
+    Object.freeze({ ...foreground, task_notification: true }),
+    Object.freeze({ ...foreground, adjustment_notification: true }),
+    Object.freeze({ kind: 'continue' }),
+  ]) {
+    panelModule.runProductLatencyPresentationBoundary(owner, ignored, 'task-ignored', () => undefined);
+  }
+  assert.equal(observations, 4);
+});
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,

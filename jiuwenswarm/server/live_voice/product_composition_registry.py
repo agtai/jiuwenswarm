@@ -219,6 +219,9 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
+PRODUCT_P2_NOTIFICATION_BATCH_ENABLE_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_P2_NOTIFICATION_BATCH_ENABLED"
+)
 PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
 PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED"
 PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED"
@@ -244,6 +247,7 @@ _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
 # ahead of a new microphone capture.  This closes the race where a terminal
 # TaskEvent allocates a response generation during an in-flight ASR final.
 _P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS = 1.0
+_P2_NOTIFICATION_BATCH_MAX = 16
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -298,6 +302,7 @@ class ProductCompositionSettings:
     p3_mutation_enabled: bool = False
     critical_input_enabled: bool = False
     demo_policy_bypass_enabled: bool = False
+    p2_notification_batch_enabled: bool = False
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
@@ -310,6 +315,9 @@ class ProductCompositionSettings:
             ),
             demo_policy_bypass_enabled=_is_enabled(
                 os.getenv(PRODUCT_DEMO_POLICY_BYPASS_ENV)
+            ),
+            p2_notification_batch_enabled=_is_enabled(
+                os.getenv(PRODUCT_P2_NOTIFICATION_BATCH_ENABLE_ENV)
             ),
         )
 
@@ -811,6 +819,47 @@ def _bind_unified_response_request(
     return bound
 
 
+def _mark_foreground_latency(
+    probe: object | None,
+    point: str,
+    *,
+    response_ref: ResponseRef | None = None,
+    task_id: str | None = None,
+) -> None:
+    if probe is None:
+        return
+    try:
+        marker = getattr(probe, "mark", None)
+        if callable(marker):
+            marker(point, response_ref=response_ref, task_id=task_id)
+    except BaseException:
+        return
+
+
+def _finish_foreground_latency(
+    probe: object | None, terminal_outcome: str
+) -> None:
+    if probe is None:
+        return
+    try:
+        finish = getattr(probe, "finish", None)
+        if callable(finish):
+            finish(terminal_outcome)
+    except BaseException:
+        return
+
+
+def _abandon_foreground_latency(probe: object | None) -> None:
+    if probe is None:
+        return
+    try:
+        abandon = getattr(probe, "abandon", None)
+        if callable(abandon):
+            abandon()
+    except BaseException:
+        return
+
+
 def _formal_live_voice_capable(agent: object) -> bool:
     """Report whether one Agent facade actually owns the formal Live Voice seam.
 
@@ -931,6 +980,7 @@ class AgentServerProductCompositionRegistry:
         ] = {}
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
+        self._foreground_latency_probes: dict[str, object] = {}
         self._unified_settlement_tasks: set[asyncio.Task[None]] = set()
         # Durable truth remains the terminal TaskEvent.  This bounded map only
         # retains which source facts still need a current P2 activation; it is
@@ -4482,6 +4532,7 @@ class AgentServerProductCompositionRegistry:
         | None = None,
         after_agent_dispatch: Callable[[Any], None] | None = None,
         allow_agent_tools: bool = True,
+        latency_probe: object | None = None,
     ) -> P3RouteResult:
         result_unknown = False
         try:
@@ -4577,6 +4628,7 @@ class AgentServerProductCompositionRegistry:
                 before_dispatch=before_agent_dispatch,
                 after_dispatch=after_agent_dispatch,
                 allow_tools=allow_agent_tools,
+                latency_probe=latency_probe,
             )
             return _success_result(
                 request_id,
@@ -4959,6 +5011,7 @@ class AgentServerProductCompositionRegistry:
                 if not retained.task.done():
                     return
                 self._unified_operations.pop(voice_identity, None)
+            self._foreground_latency_probes.pop(voice_identity, None)
             self._critical_input_commit_generations.pop(commit_id, None)
             self._critical_input_guarded_commits.discard(commit_id)
             self._critical_token_gate.release_commit(commit_id)
@@ -5596,6 +5649,7 @@ class AgentServerProductCompositionRegistry:
         task_id: str | None = None,
     ) -> P3RouteResult:
         journal = self._unified_journal
+        latency_probe = self._foreground_latency_probes.get(voice_identity)
         if journal is None:
             raise FormalTaskViolation(
                 "UNIFIED_INPUT_UNAVAILABLE",
@@ -5647,6 +5701,7 @@ class AgentServerProductCompositionRegistry:
                 text=text,
                 channel_id=channel_id,
                 before_publish=checkpoint,
+                latency_probe=latency_probe,
                 source_provenance=source_provenance,
             )
             if task_id is not None:
@@ -5860,6 +5915,7 @@ class AgentServerProductCompositionRegistry:
         allow_tools: bool,
     ) -> P3RouteResult:
         request_id = f"unified-agent-{voice_identity[:40]}"
+        latency_probe = self._foreground_latency_probes.get(voice_identity)
         journal = self._unified_journal
         if journal is None:
             raise FormalTaskViolation(
@@ -5934,6 +5990,7 @@ class AgentServerProductCompositionRegistry:
                 before_agent_dispatch=checkpoint,
                 after_agent_dispatch=checkpoint_accepted,
                 allow_agent_tools=allow_tools,
+                latency_probe=latency_probe,
             )
 
         return await self._run_unified_foreground_effect(
@@ -6127,6 +6184,11 @@ class AgentServerProductCompositionRegistry:
                 )
                 if canonical_accepted_receipt:
                     created_task_id = candidate_task_id
+                    _mark_foreground_latency(
+                        self._foreground_latency_probes.get(voice_identity),
+                        "agent.task_command_accepted",
+                        task_id=created_task_id,
+                    )
                 speech = (
                     "后台任务已受理，正在等待执行。开始执行后会显示正在执行。"
                     if canonical_accepted_receipt and chinese
@@ -6384,6 +6446,12 @@ class AgentServerProductCompositionRegistry:
                 request_id=f"unified-status-{voice_identity[:48]}",
                 session_id=retained.binding.session_id,
             )
+            if status.ok:
+                _mark_foreground_latency(
+                    self._foreground_latency_probes.get(voice_identity),
+                    "agent.task_command_accepted",
+                    task_id=current.task_id,
+                )
             status_result = status.payload.get("result")
             task_status = (
                 status_result.get("task")
@@ -6463,6 +6531,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                task_id=current.task_id,
             )
 
         if route is UnifiedCommittedInputRoute.BACKGROUND_CANCEL:
@@ -6503,6 +6572,12 @@ class AgentServerProductCompositionRegistry:
                     commit.scope,
                 )
             cancel_result = cancelled.payload.get("result")
+            if cancelled.ok:
+                _mark_foreground_latency(
+                    self._foreground_latency_probes.get(voice_identity),
+                    "agent.task_command_accepted",
+                    task_id=current.task_id,
+                )
             cancelled_terminal = (
                 cancelled.ok
                 and isinstance(cancel_result, Mapping)
@@ -6532,6 +6607,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                task_id=current.task_id,
             )
 
         assert route is UnifiedCommittedInputRoute.BACKGROUND_QUERY
@@ -6639,6 +6715,7 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
         session_id: str | None,
         channel_id: str,
+        latency_probe: object | None = None,
     ) -> P3RouteResult:
         """Admit exactly one Gateway-claimed ASR final into semantic routing."""
 
@@ -6653,8 +6730,10 @@ class AgentServerProductCompositionRegistry:
         operation_task: asyncio.Task[P3RouteResult] | None = None
         journal_completion_pending = False
         if not self._settings.p2_enabled:
+            _finish_foreground_latency(latency_probe, "failed")
             return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
         if journal is None or bridge is None:
+            _finish_foreground_latency(latency_probe, "failed")
             return _error_result(request_id, reason="UNIFIED_INPUT_UNAVAILABLE")
         try:
             _require_exact_params(
@@ -6767,6 +6846,7 @@ class AgentServerProductCompositionRegistry:
                     "committed_at": committed_at,
                 }
             )
+            _mark_foreground_latency(latency_probe, "agent.commit_accepted")
             preliminary = bridge.resolve_unified(commit, commit.scope, None)
             preliminary = self._bind_frozen_one_current_task_status(
                 preliminary,
@@ -6812,6 +6892,7 @@ class AgentServerProductCompositionRegistry:
                 semantic_binding=proposed_semantic_binding,
             )
             if admission.replay_result is not None:
+                _abandon_foreground_latency(latency_probe)
                 payload = _bind_unified_response_request(
                     admission.replay_result,
                     request_id,
@@ -6860,6 +6941,7 @@ class AgentServerProductCompositionRegistry:
                         current = None
                         background_authority_unavailable = True
             if not admission.execute:
+                _abandon_foreground_latency(latency_probe)
                 payload = await asyncio.to_thread(
                     journal.wait_for_completion,
                     voice_identity_sha256=voice_identity,
@@ -6880,6 +6962,7 @@ class AgentServerProductCompositionRegistry:
                     commit_id=commit.commit_id,
                 )
                 return P3RouteResult(bool(payload.get("ok")), payload)
+            _mark_foreground_latency(latency_probe, "agent.route_resolved")
             admitted_execution = True
             may_seal_failure = True
             async with self._lock:
@@ -6902,9 +6985,12 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.UNAVAILABLE,
                         )
 
-                    def allocate() -> asyncio.Task[P3RouteResult]:
-                        return asyncio.create_task(
-                            self._run_unified_submit(
+                    if latency_probe is not None:
+                        self._foreground_latency_probes[voice_identity] = latency_probe
+
+                    async def run() -> P3RouteResult:
+                        try:
+                            outcome = await self._run_unified_submit(
                                 retained=retained,
                                 request_id=request_id,
                                 voice_identity=voice_identity,
@@ -6918,7 +7004,20 @@ class AgentServerProductCompositionRegistry:
                                 ),
                                 auth_token=params.get("auth_token"),
                                 channel_id=channel_id,
-                            ),
+                            )
+                        except asyncio.CancelledError:
+                            _finish_foreground_latency(latency_probe, "cancelled")
+                            raise
+                        except BaseException:
+                            _finish_foreground_latency(latency_probe, "failed")
+                            raise
+                        if not outcome.ok:
+                            _finish_foreground_latency(latency_probe, "failed")
+                        return outcome
+
+                    def allocate() -> asyncio.Task[P3RouteResult]:
+                        return asyncio.create_task(
+                            run(),
                             name=f"live-voice-unified-submit:{voice_identity[:16]}",
                         )
 
@@ -7004,8 +7103,12 @@ class AgentServerProductCompositionRegistry:
                     voice_identity=voice_identity,
                     commit_id=retained_commit_id,
                 )
+                _finish_foreground_latency(latency_probe, "cancelled")
+            elif not admitted_execution:
+                _finish_foreground_latency(latency_probe, "cancelled")
             raise
         except FormalTaskViolation as exc:
+            _finish_foreground_latency(latency_probe, "failed")
             rejected = _error_result(
                 request_id,
                 reason=exc.reason,
@@ -7053,6 +7156,7 @@ class AgentServerProductCompositionRegistry:
             return rejected
 
         except Exception as exc:  # noqa: BLE001 -- unified route fails closed
+            _finish_foreground_latency(latency_probe, "failed")
             raw_reason = getattr(exc, "reason", None)
             safe_reason = (
                 raw_reason
@@ -7239,10 +7343,54 @@ class AgentServerProductCompositionRegistry:
             "publish_seq": notification.publish_seq,
         }
 
+    @staticmethod
+    def _p2_notification_can_precede_another(notification: Any) -> bool:
+        agent_event = notification.agent_event
+        return (
+            agent_event is not None
+            and agent_event.event_type in {"chat.delta", "chat.reasoning"}
+            and agent_event.error_reason is None
+            and notification.source_event is None
+            and notification.progress_event is None
+            and notification.presentation_unit is None
+            and notification.error_reason is None
+        )
+
+    @staticmethod
+    def _bind_p2_notification(
+        notification: Mapping[str, object], binding: P2InteractionBinding
+    ) -> dict[str, object]:
+        return {
+            **notification,
+            "session_id": binding.session_id,
+            "correlation_id": binding.correlation_id,
+            "interaction_id": binding.interaction_id,
+            "activation_id": binding.activation_id,
+            "activation_generation": binding.activation_generation,
+        }
+
+    @staticmethod
+    def _p2_keepalive(request_id: str) -> dict[str, object]:
+        return {
+            "status": "notification",
+            "kind": "transport.keepalive",
+            "request_id": request_id,
+            "round_id": None,
+            "response": None,
+            "agent_event": None,
+            "source_event": None,
+            "progress_event": None,
+            "presentation_unit": None,
+            "error_reason": None,
+            "publish_seq": None,
+        }
+
     async def _next_p2_notification(
         self,
         retained: _P2Route,
         request_id: str,
+        *,
+        max_notifications: int,
     ) -> P3RouteResult:
         try:
             pending_terminal = next(
@@ -7261,43 +7409,66 @@ class AgentServerProductCompositionRegistry:
                 await self._deliver_terminal_notification(
                     pending_terminal, retained=retained
                 )
-            notification = await asyncio.wait_for(
-                retained.activation_lease.next_notification(retained.binding),
-                timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
+            if max_notifications == 1:
+                notifications = (
+                    await asyncio.wait_for(
+                        retained.activation_lease.next_notification(retained.binding),
+                        timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
+                    ),
+                )
+            else:
+                notifications = await asyncio.wait_for(
+                    retained.activation_lease.next_notifications(
+                        retained.binding,
+                        limit=max_notifications,
+                        continue_after=self._p2_notification_can_precede_another,
+                    ),
+                    timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
+                )
+            serialized = tuple(
+                self._bind_p2_notification(
+                    self._serialize_p2_notification(notification), retained.binding
+                )
+                for notification in notifications
             )
-            return _success_result(
-                request_id,
-                {
-                    **self._serialize_p2_notification(notification),
-                    "session_id": retained.binding.session_id,
-                    "correlation_id": retained.binding.correlation_id,
-                    "interaction_id": retained.binding.interaction_id,
-                    "activation_id": retained.binding.activation_id,
-                    "activation_generation": (retained.binding.activation_generation),
-                },
-                retained.manifest,
-            )
-        except TimeoutError:
-            return _success_result(
-                request_id,
-                {
-                    "status": "notification",
-                    "kind": "transport.keepalive",
-                    "request_id": request_id,
-                    "round_id": None,
-                    "response": None,
-                    "agent_event": None,
-                    "source_event": None,
-                    "progress_event": None,
-                    "presentation_unit": None,
-                    "error_reason": None,
-                    "publish_seq": None,
+            if max_notifications > 1:
+                payload: dict[str, object] = {
+                    "status": "notification_batch",
+                    "notifications": list(serialized),
                     "session_id": retained.binding.session_id,
                     "correlation_id": retained.binding.correlation_id,
                     "interaction_id": retained.binding.interaction_id,
                     "activation_id": retained.binding.activation_id,
                     "activation_generation": retained.binding.activation_generation,
-                },
+                }
+            else:
+                payload = serialized[0]
+            return _success_result(
+                request_id,
+                payload,
+                retained.manifest,
+            )
+        except TimeoutError:
+            keepalive = self._bind_p2_notification(
+                self._p2_keepalive(request_id), retained.binding
+            )
+            return _success_result(
+                request_id,
+                (
+                    {
+                        "status": "notification_batch",
+                        "notifications": [keepalive],
+                        "session_id": retained.binding.session_id,
+                        "correlation_id": retained.binding.correlation_id,
+                        "interaction_id": retained.binding.interaction_id,
+                        "activation_id": retained.binding.activation_id,
+                        "activation_generation": (
+                            retained.binding.activation_generation
+                        ),
+                    }
+                    if max_notifications > 1
+                    else keepalive
+                ),
                 retained.manifest,
             )
         except Exception as exc:  # noqa: BLE001 - retained stable outcome
@@ -7319,21 +7490,22 @@ class AgentServerProductCompositionRegistry:
         if not self._settings.p2_enabled:
             return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
         try:
+            allowed_params = {
+                "auth_token",
+                "session_id",
+                "correlation_id",
+                "interaction_id",
+                "activation_id",
+                "activation_generation",
+                "claimed_user_id",
+                "claimed_project_id",
+                "notification_sequence",
+            }
+            if self._settings.p2_notification_batch_enabled:
+                allowed_params.add("max_notifications")
             _require_exact_params(
                 params,
-                frozenset(
-                    {
-                        "auth_token",
-                        "session_id",
-                        "correlation_id",
-                        "interaction_id",
-                        "activation_id",
-                        "activation_generation",
-                        "claimed_user_id",
-                        "claimed_project_id",
-                        "notification_sequence",
-                    }
-                ),
+                frozenset(allowed_params),
             )
             self._ensure_running()
             parsed = self._parse_p2_route_binding(params, session_id=session_id)
@@ -7346,6 +7518,23 @@ class AgentServerProductCompositionRegistry:
                 raise FormalTaskViolation(
                     "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
                     "notification_sequence must be a positive safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            max_notifications = params.get("max_notifications", 1)
+            if (
+                type(max_notifications) is not int
+                or (
+                    "max_notifications" in params
+                    and not 2 <= max_notifications <= _P2_NOTIFICATION_BATCH_MAX
+                )
+                or (
+                    "max_notifications" not in params
+                    and max_notifications != 1
+                )
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "max_notifications must be a canonical integer from 2 to 16",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             fingerprint = canonical_json_bytes(
@@ -7432,7 +7621,11 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.CONFLICT,
                         )
                     task = asyncio.create_task(
-                        self._next_p2_notification(retained, request_id),
+                        self._next_p2_notification(
+                            retained,
+                            request_id,
+                            max_notifications=max_notifications,
+                        ),
                         name=f"live-voice-product-p2-notification:{request_id}",
                     )
                     entry = _RetainedProductOperation(
@@ -13616,6 +13809,7 @@ __all__ = [
     "PRODUCT_DEMO_POLICY_BYPASS_ENV",
     "PRODUCT_COMPOSITION_METHODS",
     "PRODUCT_P2_ENABLE_ENV",
+    "PRODUCT_P2_NOTIFICATION_BATCH_ENABLE_ENV",
     "PRODUCT_P3_QUERY_OPERATIONS",
     "PRODUCT_P3_MUTATION_ENABLE_ENV",
     "PRODUCT_P3_TEXT_ENABLE_ENV",

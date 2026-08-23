@@ -29,3 +29,12 @@ export const FEATURE_LIVE_VOICE_INTEGRATED_WEB = import.meta.env.VITE_FEATURE_LI
 
 /** Destructive formal task control stays separately default-off. */
 export const FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = import.meta.env.VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION === 'true';
+
+/** Development-only latency measurement; disabled unless the build opts in. */
+export const FEATURE_LIVE_VOICE_LATENCY_PROBE = import.meta.env.VITE_FEATURE_LIVE_VOICE_LATENCY_PROBE === 'true';
+
+/** Bounded P2 notification pull; the legacy one-notification wire stays default-off. */
+export const FEATURE_LIVE_VOICE_P2_NOTIFICATION_BATCH = import.meta.env.VITE_FEATURE_LIVE_VOICE_P2_NOTIFICATION_BATCH === 'true';
+
+/** Development-only controlled WAV benchmark. It must never enable a product path by default. */
+export const FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK = import.meta.env.VITE_FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK === 'true';

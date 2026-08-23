@@ -25,6 +25,14 @@ const scope = Object.freeze({
   assurance: 'request_asserted',
 });
 
+const latencyProbeContext = Object.freeze({
+  schema_version: 'live-voice.latency-context.v0',
+  run_id: 'run-latency-1',
+  profile_id: 'no_tool',
+  input_case_id: 'case-latency-1',
+  round_index: 7,
+});
+
 function ids() {
   let value = 0;
   return () => `generated-${++value}`;
@@ -783,6 +791,37 @@ test('mismatched Provider rate and malformed capture fail closed before AIO appl
   );
   assert.throws(() => capturedFramesToPcm16Wav([frame(0, 1)]), /first AIO-B frame/);
   assert.equal(calls, 1);
+});
+
+test('synthesis carries latency context only when active and never returns it as product data', async () => {
+  const calls = [];
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    scope,
+    createId: ids(),
+    transport: {
+      async request(method, params) {
+        calls.push({ method, params });
+        return synthesisEnvelope(params);
+      },
+    },
+  });
+
+  const result = await client.synthesizeAuthoritative({
+    response: { interaction_id: 'interaction-1', response_id: 'response-latency', response_generation: 0 },
+    unitId: 'unit-latency',
+    renderPlan: { display_text: 'Hello', spoken_text: 'Hello', transforms: [] },
+    authoritativeAgentText: true,
+    locale: 'en-US',
+    requiredSampleRateHz: 16000,
+    correlationId: 'correlation-latency',
+    latencyProbeContext,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, SPEECH_SYNTHESIZE_BATCH_METHOD);
+  assert.deepEqual(calls[0].params.latency_probe_context, latencyProbeContext);
+  assert.equal(JSON.stringify(result).includes('run-latency-1'), false);
 });
 
 test('malformed authoritative render plans fail before Provider transport', async () => {

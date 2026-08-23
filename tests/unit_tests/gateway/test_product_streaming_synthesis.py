@@ -522,6 +522,33 @@ async def test_exact_agent_final_opens_real_streaming_product_downlink() -> None
 
 
 @pytest.mark.asyncio
+async def test_untrusted_probe_context_is_stripped_before_synthesis_contract() -> None:
+    provider = _Provider()
+    registry, owner, context, params = _authorized_registry(provider)
+    params = {
+        **params,
+        "latency_probe_context": {
+            "schema_version": "private-invalid",
+            "text": "PRIVATE-DIAGNOSTIC-CONTENT",
+        },
+    }
+    batch = _Batch()
+
+    result = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        params,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+
+    assert result is not None and result["ok"] is True
+    assert len(provider.requests) == 1
+    assert "PRIVATE-DIAGNOSTIC-CONTENT" not in repr(provider.requests)
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_delayed_first_audio_conflict_closes_source_without_ticket_or_batch() -> (
     None
 ):

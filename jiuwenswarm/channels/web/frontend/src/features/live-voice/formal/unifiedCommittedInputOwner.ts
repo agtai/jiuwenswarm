@@ -1,5 +1,7 @@
 export const PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD = 'live_voice.composition.unified.submit' as const;
 
+import type { LatencyProbeContext } from './latencyProbe.js';
+
 type JsonObject = Readonly<Record<string, unknown>>;
 
 export type UnifiedCommittedInputRequest = (
@@ -199,7 +201,11 @@ export class ProductUnifiedCommittedInputOwner {
     return this.#pending !== null;
   }
 
-  submit(binding: UnifiedCommittedInputBinding, input: UnifiedAuthoritativeFinal): Promise<JsonObject> {
+  submit(
+    binding: UnifiedCommittedInputBinding,
+    input: UnifiedAuthoritativeFinal,
+    latencyProbeContext?: Readonly<LatencyProbeContext> | null,
+  ): Promise<JsonObject> {
     const requestId = requiredText(input.request_id, 'request_id', 256);
     const params = {
       session_id: requiredText(binding.session_id, 'session_id', 256),
@@ -223,7 +229,10 @@ export class ProductUnifiedCommittedInputOwner {
       }
       return this.#pending.promise.then(result => bindCachedResult(cacheBusinessResult(result), requestId));
     }
-    const promise = this.#request(PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD, params, requestId)
+    const requestParams = latencyProbeContext === undefined || latencyProbeContext === null
+      ? params
+      : { ...params, latency_probe_context: latencyProbeContext };
+    const promise = this.#request(PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD, requestParams, requestId)
       .then(value => {
         const result = exactControlResult(value, requestId, binding, input);
         if (this.#completed.size >= 128) this.#completed.delete(this.#completed.keys().next().value as string);

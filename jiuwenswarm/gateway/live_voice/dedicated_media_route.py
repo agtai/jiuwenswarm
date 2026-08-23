@@ -700,6 +700,7 @@ async def run_dedicated_media_socket_leaf(
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
     next_speech_start: Callable[[], Awaitable[MediaSpeechStart]] | None = None,
     next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
+    on_end_of_turn_sent: Callable[[], None] | None = None,
     cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
 ) -> DedicatedMediaSocketLeafResult:
     """Run one injected uplink WebSocket after the central handshake.
@@ -735,6 +736,10 @@ async def run_dedicated_media_socket_leaf(
     if next_speech_start is not None and not callable(next_speech_start):
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "speech-start source must be callable"
+        )
+    if on_end_of_turn_sent is not None and not callable(on_end_of_turn_sent):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "end-of-turn observer must be callable"
         )
     if (
         next_speech_start is not None or next_end_of_turn is not None
@@ -1114,6 +1119,11 @@ async def run_dedicated_media_socket_leaf(
                                     )
                                     return await terminate(closed)
                                 end_of_turn_sent = True
+                                if on_end_of_turn_sent is not None:
+                                    try:
+                                        on_end_of_turn_sent()
+                                    except BaseException:
+                                        pass
                         message = await asyncio.shield(receive_task)
                 receive_task = None
         except asyncio.CancelledError:
@@ -1180,6 +1190,7 @@ async def run_dedicated_media_downlink_socket_leaf(
     frames: Iterable[MediaAudioFrame] | AsyncIterable[MediaAudioFrame],
     on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    on_first_frame_sent: Callable[[], None] | None = None,
     max_pending_frames: int = 8,
     max_pending_bytes: int = 131_072,
 ) -> DedicatedMediaSocketLeafResult:
@@ -1226,6 +1237,10 @@ async def run_dedicated_media_downlink_socket_leaf(
     if on_complete is not None and not callable(on_complete):
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "downlink completion consumer must be callable"
+        )
+    if on_first_frame_sent is not None and not callable(on_first_frame_sent):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "downlink send observer must be callable"
         )
     if (
         type(max_pending_frames) is not int
@@ -1431,6 +1446,11 @@ async def run_dedicated_media_downlink_socket_leaf(
                         send_detach=False,
                     )
                 sent_frames += 1
+                if sent_frames == 1 and on_first_frame_sent is not None:
+                    try:
+                        on_first_frame_sent()
+                    except BaseException:
+                        pass
 
             if source_exhausted and sender.pending_frames == 0:
                 return await terminate(MediaDetachReason.LOCAL_CLOSE)

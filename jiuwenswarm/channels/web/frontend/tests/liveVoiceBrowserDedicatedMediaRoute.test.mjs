@@ -162,6 +162,7 @@ function active({
   highWater,
   deferDownlinkAck,
   onTerminal,
+  onAttached,
   drainRetryDelayMs,
   maxDrainStallRetries,
   drainScheduler,
@@ -191,6 +192,7 @@ function active({
     socket_high_water_bytes: highWater,
     defer_downlink_ack: deferDownlinkAck,
     on_terminal: onTerminal,
+    on_attached: onAttached,
     drain_retry_delay_ms: drainRetryDelayMs,
     max_drain_stall_retries: maxDrainStallRetries,
     schedule_drain_retry: drainScheduler?.schedule,
@@ -202,6 +204,35 @@ function active({
   assert.equal(activation.active, true);
   return { activation, socket, effects: counters, factoryCalls };
 }
+
+test('diagnostic attach observer fires only after accepted control attach and cannot alter transport', () => {
+  const events = [];
+  const route = active({
+    onAttached() {
+      events.push('attached');
+      throw new Error('PRIVATE diagnostic attach failure');
+    },
+  });
+
+  assert.deepEqual(events, []);
+  route.socket.open();
+  assert.deepEqual(events, []);
+  route.socket.sent.shift();
+  route.socket.message(serializeMediaControl({ type: 'media.attach', binding: route.activation.binding }));
+
+  assert.deepEqual(events, ['attached']);
+  assert.equal(route.activation.leaf.attached, true);
+  assert.equal(route.activation.leaf.closed, false);
+  assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame()).accepted, true);
+});
+
+test('diagnostic attach observer is closed and omitted observer leaves attach unchanged', () => {
+  assert.throws(() => active({ onAttached: 'invalid' }), /on_attached must be a function/);
+  const route = active();
+  attach(route);
+  assert.equal(route.activation.leaf.attached, true);
+  assert.equal(route.activation.leaf.closed, false);
+});
 
 function attach(route) {
   route.socket.open();

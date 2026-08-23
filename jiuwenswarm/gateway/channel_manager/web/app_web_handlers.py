@@ -108,10 +108,16 @@ from jiuwenswarm.gateway.document_attachments import (
     forbidden_formats,
     persist_and_parse_documents,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe_registration import (
+    register_latency_probe_rpc_handler,
+)
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
     root_categories_to_text,
+)
+from jiuwenswarm.server.live_voice.latency_probe import (
+    create_latency_probe_runtime_from_environment,
 )
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
@@ -1596,6 +1602,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     cron_controller = bind.cron_controller
     updater_service = bind.updater_service
 
+    latency_probe_runtime = create_latency_probe_runtime_from_environment("gateway")
+    channel.live_voice_latency_probe_runtime = latency_probe_runtime
+    register_latency_probe_rpc_handler(channel, latency_probe_runtime)
+
     from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
         DedicatedMediaProductRegistry,
         register_dedicated_media_rpc_handlers,
@@ -1618,7 +1628,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.server.live_voice.observability import (
         LiveVoiceObservabilityCollector,
     )
-    media_registry = DedicatedMediaProductRegistry.from_environment()
+    media_registry = DedicatedMediaProductRegistry.from_environment(
+        latency_probe_runtime=latency_probe_runtime
+    )
     speech_service = bind.speech_service
     media_registry_owns_speech_authority = speech_service is None
     if speech_service is None:
@@ -1638,7 +1650,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         StreamingRecognitionRouteOwner(
             lambda: select_environment_streaming_speech(
                 batch_available=batch_available
-            )
+            ),
+            latency_probe_runtime=latency_probe_runtime,
         )
         if media_registry_owns_speech_authority
         else None
@@ -1661,7 +1674,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
 
         streaming_synthesis_owner = StreamingSynthesisRouteOwner(
-            select_streaming_speech
+            select_streaming_speech,
+            latency_probe_runtime=latency_probe_runtime,
         )
         media_registry.configure_streaming_synthesis(
             streaming_synthesis_owner,
@@ -1700,11 +1714,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if media_registry_owns_speech_authority
             else None
         ),
-        operation_override=(
-            override_speech_operation
-            if streaming_synthesis_owner is not None
-            else None
-        ),
+        operation_override=override_speech_operation,
+        params_transform=media_registry.speech_business_params,
     )
     register_dedicated_media_rpc_handlers(channel, registry=media_registry)
 

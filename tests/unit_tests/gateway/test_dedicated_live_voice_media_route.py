@@ -921,6 +921,12 @@ async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach(
             return serialize_media_control(peer_detach)
 
     socket = _EotSocket()
+    eot_sent = 0
+
+    def observe_eot_sent() -> None:
+        nonlocal eot_sent
+        eot_sent += 1
+        raise OSError("PRIVATE-EOT-OBSERVER")
 
     async def next_speech_start() -> MediaSpeechStart:
         await socket.waiting_after_audio.wait()
@@ -946,6 +952,7 @@ async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach(
             on_audio_frame=lambda _frame: None,
             next_speech_start=next_speech_start,
             next_end_of_turn=next_end_of_turn,
+            on_end_of_turn_sent=observe_eot_sent,
             cleanup_owner=DedicatedMediaLeafCleanupOwner(),
         )
     )
@@ -964,6 +971,7 @@ async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach(
     result = await asyncio.wait_for(route_task, timeout=1)
     assert result.reason_id is MediaDetachReason.PEER_CLOSE
     assert result.business_cancel_count_delta == 0
+    assert eot_sent == 1
 
 
 @pytest.mark.asyncio
@@ -1768,6 +1776,7 @@ async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exac
         "task": 0,
         "history": 0,
         "persistence": 0,
+        "first_frame_sent": 0,
     }
 
     result = await run_dedicated_media_downlink_socket_leaf(
@@ -1776,6 +1785,12 @@ async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exac
         frames=[_frame(), _frame(1, 160)],
         on_playback_stop=lambda _receipt: effects.__setitem__(
             "playback_stop", effects["playback_stop"] + 1
+        ),
+        on_first_frame_sent=lambda: (
+            effects.__setitem__(
+                "first_frame_sent", effects["first_frame_sent"] + 1
+            ),
+            (_ for _ in ()).throw(OSError("PRIVATE-DOWNLINK-OBSERVER")),
         ),
         max_pending_frames=1,
         max_pending_bytes=2048,
@@ -1802,6 +1817,7 @@ async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exac
         "task": 0,
         "history": 0,
         "persistence": 0,
+        "first_frame_sent": 1,
     }
 
 

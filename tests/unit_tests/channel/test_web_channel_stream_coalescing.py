@@ -170,3 +170,71 @@ async def test_tui_writer_sends_all_frames_before_sentinel() -> None:
     await asyncio.wait_for(channel._writer_loop(ws, "ws-1"), timeout=0.2)
 
     assert ws.sent == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_web_response_receipt_is_true_only_for_a_queued_frame() -> None:
+    channel = _channel()
+
+    closed_ws = _FakeWebSocket()
+    closed_ws.closed = True
+    closed_ws._jiuwen_ws_id = "closed"
+    channel._send_queues["closed"] = asyncio.Queue()
+    assert (
+        await channel.send_response(
+            closed_ws,
+            "closed",
+            ok=True,
+            payload={"status": "written"},
+        )
+        is False
+    )
+    assert channel._send_queues["closed"].empty()
+
+    missing_queue_ws = _FakeWebSocket()
+    missing_queue_ws._jiuwen_ws_id = "missing"
+    assert (
+        await channel.send_response(
+            missing_queue_ws,
+            "missing",
+            ok=True,
+            payload={"status": "written"},
+        )
+        is False
+    )
+
+    full_queue_ws = _FakeWebSocket()
+    full_queue_ws._jiuwen_ws_id = "full"
+    full_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=1)
+    full_queue.put_nowait({"existing": True})
+    channel._send_queues["full"] = full_queue
+    assert (
+        await channel.send_response(
+            full_queue_ws,
+            "full",
+            ok=True,
+            payload={"status": "written"},
+        )
+        is False
+    )
+    assert full_queue.get_nowait() == {"existing": True}
+
+    queued_ws = _FakeWebSocket()
+    queued_ws._jiuwen_ws_id = "queued"
+    queued: asyncio.Queue[object] = asyncio.Queue()
+    channel._send_queues["queued"] = queued
+    assert (
+        await channel.send_response(
+            queued_ws,
+            "queued",
+            ok=True,
+            payload={"status": "written"},
+        )
+        is True
+    )
+    assert queued.get_nowait() == {
+        "type": "res",
+        "id": "queued",
+        "ok": True,
+        "payload": {"status": "written"},
+    }

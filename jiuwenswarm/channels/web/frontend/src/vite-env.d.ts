@@ -9,6 +9,9 @@ interface ImportMetaEnv {
   readonly VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1?: string;
   readonly VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB?: string;
   readonly VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_LATENCY_PROBE?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_P2_NOTIFICATION_BATCH?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK?: string;
 }
 
 interface ImportMeta {

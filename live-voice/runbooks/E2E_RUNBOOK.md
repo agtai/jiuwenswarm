@@ -489,6 +489,352 @@ Remove-Item Env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED -ErrorAction Sile
 Remove-Item Env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED -ErrorAction SilentlyContinue
 ```
 
+### 7.6 Minimal latency probe v0：真实 baseline 的可执行步骤
+
+本节只建立开发诊断 baseline，不是产品验收、SLO 或 Production 证据。探针默认
+关闭；启用失败只能丢失诊断数据，不能重试或改变 Speech、Agent、Tool、Task、
+Presentation、ACK、history、cancel 或下一轮 capture。当前源码只有在 warm/cold
+两组真实运行都满足本节条件后才能取得 baseline credit。
+
+#### 7.6.1 固定源码、私有目录和 `run.json`
+
+每个 smoke、warm baseline 和 cold baseline 使用不同的 `run_id`、不同的
+`run.json` 和不同的输出目录。目录必须位于仓库外；原始 JSONL、完整报告和任何
+机器路径都保持私有，不提交 Git。运行前记录：
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+```
+
+可接受的正式 baseline 要求 product/build 输入为 clean；`product_code_dirty` 只能
+探索，不能成为 baseline。`docs_only_dirty` 只有在没有 runtime/build 输入变化时才
+可比较。当前 commit、Provider/model、Windows Chrome、WSL Gateway/Agent runtime、
+音频格式、VAD、playout 和 route flags 都要写成不含路径、URL、hostname、设备 ID、
+凭据或其他私有值的有限描述。
+
+创建正式 run config 前还要对最终探针 commit 完成一次独立 Tier-3 累积审查，覆盖
+Python/TypeScript contract、feature-off、negative/fault/privacy、replay/idempotency 和
+零禁止业务副作用；仅有实现者自审不能满足这个接受条件。任何审查修复都会产生新
+commit，因此旧 config 和旧 smoke 必须丢弃并重新绑定。
+
+在仓库外创建 `<output-root>/<run-id>/run.json`。下面是 baseline 模板；`git_commit`
+必须替换为刚才输出的完整 40 位 commit，warm/cold 分别替换 `run_id` 和
+`cold_or_warm`。正式运行对每个 profile 必须执行声明的全部 30 个 attempt，并要求
+至少 20 个 success；不能达到的 round 仍由 reducer 记为 missing/unknown。五轮 smoke 使用一个
+独立 warm run，把 `intended_attempts` 和 `required_successes` 都改为 `5`。
+
+```json
+{
+  "schema_version": "live-voice.latency-run.v0",
+  "run_id": "lv-baseline-warm-YYYYMMDD-a",
+  "git_commit": "REPLACE_WITH_40_LOWERCASE_HEX_COMMIT",
+  "source_state": "clean",
+  "environment_profile": "Windows Chrome with WSL2 backends",
+  "browser_family_and_version": "Chrome REPLACE_VERSION",
+  "browser_os_class": "Windows 11",
+  "gateway_runtime_class": "WSL2 Python REPLACE_VERSION",
+  "agent_runtime_class": "WSL2 Python REPLACE_VERSION",
+  "stt_provider_and_model": "OpenAI gpt-4o-mini-transcribe",
+  "tts_provider_and_model": "OpenAI gpt-4o-mini-tts marin",
+  "audio_format": "PCM16 24000 Hz mono 20 ms",
+  "vad_configuration": "OpenAI server VAD silence 1200 ms",
+  "playout_configuration": "WebAudio startup lead 1000 ms",
+  "allowlisted_feature_flags": {
+    "formal_integrated_web": true,
+    "formal_integrated_p1": true,
+    "product_p3_mutation": true,
+    "dedicated_media": true,
+    "server_end_of_turn": true,
+    "demo_policy_bypass": true,
+    "latency_probe": true
+  },
+  "cold_or_warm": "warm",
+  "input_case_ids": [
+    "dialogue-hangzhou-v1",
+    "tool-git-status-v1",
+    "task-create-itinerary-v1",
+    "task-status-current-v1",
+    "task-cancel-current-v1"
+  ],
+  "profile_ids": [
+    "dialogue_no_tool",
+    "dialogue_with_tool",
+    "task_create",
+    "task_status",
+    "task_cancel"
+  ],
+  "intended_attempts": 30,
+  "required_successes": 20,
+  "experiment": null
+}
+```
+
+先验证配置；exit code 必须为 `0`：
+
+```bash
+uv run python -m jiuwenswarm.server.live_voice.latency_probe_report \
+  validate-run --run-json '<output-root>/<run-id>/run.json'
+```
+
+#### 7.6.2 三个后端变量、前端 flag 和 URL 选择器
+
+在启动 AgentServer、Gateway 和 WebChannel 的每个 WSL 终端中，在第 7.5 节的
+正式产品开关和同一 `JIUWENSWARM_DATA_DIR` 之外，设置完全相同的三个变量：
+
+```bash
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_ENABLED=1
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_RUN_CONFIG='<output-root>/<run-id>/run.json'
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_OUTPUT_ROOT='<output-root>'
+```
+
+`OUTPUT_ROOT` 是 `run-id` 目录的父目录；writer 会写入
+`<output-root>/<run-id>/browser.jsonl`、`gateway.jsonl` 和 `agent.jsonl`。
+不要把同一个 `run_id` 指向另一个 config 或复用已有输出。
+
+在启动 Vite **之前**设置前端开关，同时保留第 7.5 节三个正式前端开关：
+
+```bash
+export VITE_FEATURE_LIVE_VOICE_LATENCY_PROBE=true
+```
+
+Windows Chrome 打开 localhost URL 时必须且只能各提供一次这三个 query key：
+
+```text
+http://localhost:5173/?lv_latency_run=<run-id>&lv_latency_profile=<profile-id>&lv_latency_case=<input-case-id>
+```
+
+`lv_latency_run` 必须等于 `run.json.run_id`；profile 和 case 必须是本节表中的
+声明值。重复、缺失、未知或格式错误的 key 会让 Browser probe 静默关闭，不能靠
+观察 UI 猜测探针已启用。保持同一个 Chrome tab；同 tab reload 会保留
+`sessionStorage` 中每个 run/profile/case 的连续 `round_index`，关闭 tab 或清除
+storage 后不得继续同一个 run。
+
+#### 7.6.3 五个公开输入和有状态执行顺序
+
+每次 attempt 使用固定音频文件的扬声器回放或同一位说话者按固定距离/音量朗读；
+不要混用临时改写。probe 永远不保存这些文本，但 runbook 固定公开 corpus：
+
+| Profile | `input_case_id` | 固定话术 |
+|---|---|---|
+| `dialogue_no_tool` | `dialogue-hangzhou-v1` | “请帮我介绍杭州。” |
+| `dialogue_with_tool` | `tool-git-status-v1` | “必须调用终端执行 git status --short --branch，不要根据上下文猜测。” |
+| `task_create` | `task-create-itinerary-v1` | “帮我在后台制定一份三天杭州行程。” |
+| `task_status` | `task-status-current-v1` | “后台现在做到哪了？” |
+| `task_cancel` | `task-cancel-current-v1` | “停止刚才的行程规划。” |
+
+Task 三项有真实副作用，只能使用第 7.5 节新建的可丢弃 Git fixture、隔离数据目录
+和明确 Demo policy。一个 cycle 的顺序固定为 no-tool → Tool → create → status →
+cancel；status/cancel 必须绑定本 cycle 创建的同一 current Task。cancel 后等待权威
+Task 状态允许下一次 create，再开始新 cycle。不得为了凑样本把冲突、失败、fallback、
+cancelled、underrun 或 rebuffer attempt 删除；它们必须留在 denominator。
+
+每次切换 profile 时修改 URL 的 `lv_latency_profile` 和 `lv_latency_case` 后在同一 tab
+reload；`lv_latency_run` 不变。一次 Browser round 只有在 playout ACK 与 successor
+capture ready 都完成，或进入稳定 failed/cancelled terminal 后才导出。页面没有
+“probe complete”产品状态；用私有输出文件新增的合法 JSONL batch 和最终 report
+核对，而不是在 console 打印内容。
+
+successor capture 在真实 `speech_started`、服务端 EOT 或显式 stop-and-recognize 前只是
+provisional context。profile 切换/reload 会放弃这个尚未说话的 successor，不导出
+cancelled batch，也不推进该 profile 的 `round_index`。因此每个 profile 的 30 个
+attempt 必须对应 30 次真实输入且索引恰为 `0..29`；若出现由空 successor 造成的跳号、
+额外 cancelled batch 或 phantom denominator，立即判定 probe/run 无效，不得继续采集。
+
+#### 7.6.4 Warm、cold、报告和接受边界
+
+先运行独立 warm smoke：每个 profile 恰好五个 attempted round。只修 probe 缺陷；
+任何 instrumentation 或 fixed-segment 定义变化都会使本 run 作废，并要求新
+`run_id`。然后用新 run 分别收集至少 20 个成功 warm 和至少 20 个成功 cold sample/
+profile：
+
+- warm：服务、Provider 配置和同一 Chrome tab 保持运行；只在独立 smoke run 完成
+  后开始计入正式 warm run；
+- cold：每个**被计数的 profile round**之前都重启 AgentServer/Gateway/WebChannel，
+  并 reload 同一 Chrome tab，以免 cycle 前面的 profile 把后面的 Provider/runtime
+  预热；Task current state 通过同一隔离 Store 保留，因此仍按 create → status →
+  cancel 顺序执行。reload 保留该 tab 的连续 round index；cold 与 warm 绝不共用
+  `run_id`、目录或 report。
+
+每轮前确认麦克风/耳机、Chrome permission、Provider/model、项目注册和网络仍可用。
+这些都是机器私有 runtime state，Git 不会恢复。每个 profile 必须执行全部 30 个
+attempt；若其中没有 20 个成功 sample，该 run 不取得 baseline credit。提前达到 20
+个 success 不能停止该 profile，因为剩余 attempt 属于固定 denominator。
+
+通过正常 shutdown 停止 AgentServer、Gateway 和 WebChannel，让两个 Python producer
+执行最长 5 秒的 bounded export drain。只有 shutdown 完成且日志中没有
+`latency export drain incomplete`/`latency export cleanup failed` 后，才在私有目录生成报告；
+直接 kill 进程可能丢失最后一个 queued shard，使对应 attempt 保持 `unknown`：
+
+```bash
+uv run python -m jiuwenswarm.server.live_voice.latency_probe_report \
+  report --run-dir '<output-root>/<run-id>'
+
+uv run python -m jiuwenswarm.server.live_voice.latency_probe_report \
+  compare \
+  --baseline '<baseline-run-dir>/report.json' \
+  --candidate '<candidate-run-dir>/report.json'
+```
+
+`report.json`、`report.csv` 和 `report.md` 必须保持在仓库外。接受前核对五个 profile
+的 attempt/success/failure/fallback/cancel/underrun/rebuffer 数量、所有 Browser fixed
+segment、`response_total`、`round_total`、Gateway/Agent drill-down 和显式 `unknown`；
+禁止跨 clock domain 做数值相减。只有通过后才创建脱敏的 repository evidence，并
+更新 latency plan/STATUS。没有真实 warm/cold 运行时，保持 STATUS 不变，也不得把
+Hongxing 的历史五轮、推算的约 11.5 秒或 PDF 的项目结果写成本 branch baseline。
+
+运行结束后，在所有终端删除四个 probe 开关并停止旧 Vite 后再恢复普通开发：
+
+```bash
+unset JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_ENABLED
+unset JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_RUN_CONFIG
+unset JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_OUTPUT_ROOT
+unset VITE_FEATURE_LIVE_VOICE_LATENCY_PROBE
+```
+
+### 7.7 Controlled post-capture WAV runner (no microphone)
+
+This route measures `browser.eot_received` through authoritative playout/ACK on
+the real saved-chat product path. It does not measure or accept microphone,
+capture quality, physical first-audible latency, a Production SLO, or a product
+journey. The methodology and decision boundary remain owned by the
+[fixed-audio benchmark draft](../roadmap/FIXED_AUDIO_LATENCY_BENCHMARK_DRAFT_2026-08-19.md).
+
+Use one clean implementation commit, a saved disposable Code Session, isolated
+`JIUWENSWARM_DATA_DIR`, and paths outside the repository. A dirty source may be
+used only to debug the harness; the runner refuses artifact credit unless
+`source_state` is `clean`. Keep WAV files, manifests, JSONL and reports private.
+
+Create a closed fixture manifest beside the WAV. `wav_path` is relative to the
+manifest directory; SHA-256 is lowercase hex. The runner accepts only PCM16,
+48 kHz, mono WAV files up to 4 MiB and rechecks the hash immediately before
+serving. `expected_transcript_sha256` is the SHA-256 of the expected English
+transcript after NFKC normalization, lowercase conversion, replacement of each
+non-letter/non-number run with one space, and trimming. The Browser compares
+that digest in memory before `unified.submit`; neither transcript is added to
+the query, result, probe, report or log. The loopback server releases only the
+digest in `X-Live-Voice-Transcript-Sha256` after the fixture GET wins the
+single-attempt claim:
+
+```json
+{
+  "schema_version": "live-voice.fixed-audio-fixture.v0",
+  "fixture_profile_id": "en-v1-fixed-wav",
+  "cases": [
+    {
+      "profile_id": "dialogue_no_tool",
+      "input_case_id": "dialogue-paris-en-v1",
+      "wav_path": "dialogue-paris-en-v1.wav",
+      "sha256": "REPLACE_WITH_64_LOWERCASE_HEX",
+      "sample_rate_hz": 48000,
+      "expected_transcript_sha256": "REPLACE_WITH_64_LOWERCASE_HEX"
+    }
+  ]
+}
+```
+
+Prepare A1 or A2 without an experiment. `RUN_DIR` must be a new absolute
+directory and its basename becomes `run_id`:
+
+```bash
+RUN_DIR=/abs/private/runs/baseline-before
+
+uv run python scripts/live_voice/post_capture_latency_runner.py prepare-run \
+  --output "$RUN_DIR/run.json" \
+  --git-commit "$(git rev-parse HEAD)" \
+  --source-state clean \
+  --fixture-profile-id en-v1-fixed-wav \
+  --profile-id dialogue_no_tool \
+  --input-case-id dialogue-paris-en-v1 \
+  --environment-profile windows-chrome-wsl2 \
+  --browser-profile chrome-151 \
+  --browser-os-class windows-11 \
+  --gateway-profile wsl2-python-3.11 \
+  --agent-profile wsl2-python-3.11 \
+  --stt-profile openai-gpt-4o-mini-transcribe \
+  --tts-profile openai-gpt-4o-mini-tts-marin \
+  --audio-profile pcm16-48000-mono \
+  --vad-profile openai-server-vad-1200ms \
+  --playout-profile webaudio-lead-1000ms \
+  --cold-or-warm warm \
+  --intended-attempts 1 \
+  --required-successes 1
+```
+
+For B, pass one absolute `--experiment-json` whose value is the closed
+`LatencyExperiment` object. The target must belong to the post-capture
+allowlist; capture-startup/first-frame targets are rejected. A1, B and A2 must
+otherwise declare identical environment, provider, playout, flags, ordered
+profiles/cases and attempt counts. A1 and A2 must declare the same exact
+`git_commit`; B must declare a different commit and one named experiment.
+
+Start the normal AgentServer, Gateway/WebChannel and Vite route described in
+the preceding sections. All Python producers receive the same three probe
+variables; the Vite process additionally receives the benchmark flag:
+
+```bash
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_ENABLED=1
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_RUN_CONFIG="$RUN_DIR/run.json"
+export JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_OUTPUT_ROOT=/abs/private/runs
+export VITE_FEATURE_LIVE_VOICE_POST_CAPTURE_BENCHMARK=true
+```
+
+Run one explicit round. `--browser-command-json '[]'` means the operator owns
+the already-running visible Browser: the command prints the one-time
+`/chat/<session>` URL and waits. Open that URL in the exact saved Session. No
+Live Voice button, microphone selection or manual speech is used. Alternatively
+provide a JSON argv containing exactly one `{url}` token; the runner starts and
+terminates only that child and never invokes a shell.
+
+The declared controlled-Browser profile must allow WebAudio autoplay without a
+click, for example through an isolated Chrome profile launched with
+`--autoplay-policy=no-user-gesture-required`. Record the exact policy in the
+private environment label and use it unchanged across A1/B/A2. The fixed-audio
+owner bounded-resumes its private fixture context and requires authoritative
+`state === "running"` before both the WAV source and the silent successor
+stream. Failure remains `FIXED_AUDIO_CONTEXT_NOT_RUNNING` and earns no attempt
+credit; do not bypass it by relabeling silence as the fixture.
+
+```bash
+uv run python scripts/live_voice/post_capture_latency_runner.py run \
+  --run-json "$RUN_DIR/run.json" \
+  --fixture-manifest /abs/private/corpus/en-v1/fixture.json \
+  --profile-id dialogue_no_tool \
+  --round-index 0 \
+  --session-id web_REPLACE_SAVED_SESSION \
+  --web-origin http://localhost:5173 \
+  --browser-command-json '[]' \
+  --timeout-seconds 180 \
+  --start-delay-ms 1000
+```
+
+Exit `0` requires the exact completed result plus one Browser, Gateway STT,
+Gateway TTS and Agent foreground shard for that round, no fallback/failure/
+capacity/underrun/rebuffer, and a numeric `response_total`. Exit `2` is invalid
+configuration; exit `3` is an executed attempt without credit. The runner
+writes `report.json`, `report.csv` and `report.md` only in the private run
+directory after the shard gate passes.
+
+After A1, B and A2 reports exist, compare them without starting any service or
+Browser:
+
+```bash
+uv run python scripts/live_voice/post_capture_latency_runner.py compare \
+  --baseline-before /abs/private/runs/baseline-before/report.json \
+  --candidate /abs/private/runs/candidate/report.json \
+  --baseline-after /abs/private/runs/baseline-after/report.json \
+  --output /abs/private/runs/comparison.json
+```
+
+An `improved` result requires B to improve against both A1 and A2 while
+baseline latency, denominator and failure-rate drift remain smaller than the
+minimum candidate gain. The runner waits a bounded interval for the exact
+Browser/Gateway/Agent shards after the content-free result; a partial append or
+late exporter cannot be treated as immediate failure, while an incomplete set
+at the deadline remains failed. Always perform normal service shutdown/export
+drain, then unset all four variables. Do not update STATUS or create repository
+evidence until one independently reviewed clean-source smoke actually passes.
+
 ## 8. 先做文字工具冒烟，再做语音
 
 先用文字发送一个强制使用真实终端工具、结果可核对的请求：

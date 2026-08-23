@@ -1,7 +1,7 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** APPROACH DEFINED — implementation and current-source
-> measurement are not complete. [STATUS](../STATUS.md) remains the only owner
+> **Plan status:** MINIMAL PROBE IMPLEMENTED — accepted current-source warm/cold
+> measurement is not complete. [STATUS](../STATUS.md) remains the only owner
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
 >
@@ -16,6 +16,38 @@
 >
 > Date: 2026-08-18
 
+> **2026-08-20 measurement note:** the default-off minimal v0 implementation
+> landed through `a1b0435dae6c19f9d4aaa58d5a96af2d2ce9af77`. Its contract and
+> executable implementation packet are
+> [LATENCY_PROBE_SPEC_2026-08-19.md](LATENCY_PROBE_SPEC_2026-08-19.md) and
+> [LATENCY_PROBE_IMPLEMENTATION_PLAN_2026-08-19.md](LATENCY_PROBE_IMPLEMENTATION_PLAN_2026-08-19.md).
+> Automated evidence does not establish physical latency. The real warm/cold
+> baseline remains deliberately unclaimed until the runbook protocol is
+> executed on clean source.
+
+> **2026-08-21 targeted-measurement decision:** Hongxing's source-bound
+> physical run at `e1df8b4529b073beed21affffda952bdb8262fc8` identified a
+> separate P2 one-notification-per-RPC tail: approximately 64 notifications
+> remained after model completion and consumed about 5.44 seconds at an
+> approximately 85 ms Browser/RPC cycle. The immediate P2 optimization loop
+> therefore uses a deterministic, no-Browser causal baseline before changing
+> that transport. This is sufficient for a P2-specific A1/B/A2 decision, but
+> it is not a physical Live Voice or end-to-end baseline and grants no capture,
+> STT, TTS, WebAudio, playout or Production credit. A clean physical Browser
+> validation remains mandatory before claiming a product-path improvement.
+
+> **2026-08-21 P2 causal decision:** bounded pull was accepted at component
+> scope after an exact A1/B/A2 run. The corrected harness/reference commit is
+> `31f9209d66682d19745acd1d2c15a16b59fc75e2`; candidate B is
+> `c1b4a47f51b0b200b12e2e544617577d7f307c69`. For 10/50/100 notifications,
+> total RPCs changed from A1 50/250/500 to B 5/20/35 and returned to A2
+> 50/250/500. B reduced p50 by 90.0–92.9% against both baselines with every
+> forbidden Agent/Tool/Task/history/audio effect at zero. This accepts the P2
+> transport candidate only; physical Browser validation and all other
+> optimization layers below remain open.
+> Full method, result and limitation evidence is recorded in the
+> [P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -23,13 +55,16 @@ responds early without speaking provisional or stale content, while preserving
 the existing response-generation, Task, history and cancel authorities.
 
 Current code has a real streaming media path, but it still serializes several
-waits on the first-audible critical path. The largest is that authoritative TTS
-starts only after `chat.final`; there is also a fixed one-second browser playout
+waits on the first-audible critical path. Newer source-bound physical evidence
+shows that, in the analyzed turn, the largest measured tail was the P2
+one-notification-per-RPC backlog after model completion. Authoritative TTS also
+starts only after `chat.final`; there is a fixed one-second browser playout
 lead, a 1.2-second server-VAD silence threshold, serial end-of-turn cleanup, and
 a successor-capture readiness wait before the TTS downlink is opened. The plan
-therefore has three layers:
+therefore has four layers:
 
-- measure the current physical path so improvements have a trustworthy oracle;
+- establish a current-source causal P2 baseline without making an E2E claim;
+- retain clean physical measurement as the product-path oracle;
 - remove avoidable pipeline waits without changing product truth;
 - overlap Agent generation and TTS at authoritative sentence boundaries.
 
@@ -73,19 +108,51 @@ PASS or an SLO baseline.
 
 ## 3. Measurement contract
 
-The first implementation batch adds one correlated timeline across browser,
-Gateway and Agent runtime. Every observation must carry the applicable
-`correlation_id`, interaction, activation generation and response generation;
-Task observations also carry Task/Attempt identity. Required timestamps are:
+### 3.1 Preliminary-source boundary
+
+The Hongxing materials reviewed before the current baseline are useful as
+hypothesis sources, not as measurements for this branch:
+
+- the PDF *从 30 秒到 2 秒：一套实时语音 Agent，是怎样不再“傻等”的* describes
+  general pipeline overlap, bounded TTS prefetch, one WebSocket writer,
+  generation fencing, backpressure and streaming-ASR fallback from another
+  project narrative; it does not bind a JiuwenSwarm commit, current config or
+  raw run population;
+- the accompanying preliminary notes reuse five D112 rounds from an older VAD
+  and playout boundary, then project later constants to estimate roughly
+  11.5 seconds speech-end-to-first-audible; this is a diagnosis to test, not an
+  observed current-source p50;
+- those notes also describe a manual Send boundary that is stale for the
+  current formal hands-free route, confirming why current code and current
+  probes must outrank prose projections.
+
+The working hypotheses remain sensible: waiting for full `chat.final`, the
+fixed Browser startup lead, VAD tail and serial EOT settlement may dominate
+more than STT final retrieval. The minimal probe must decide their actual
+stage-by-stage and total contribution before any optimization or local-model
+substitution receives credit.
+
+### 3.2 Implemented minimal v0 boundary
+
+The minimal implementation candidate writes one Browser additive timeline and
+separate Gateway/Agent same-clock drill-down batches. The offline reducer joins
+only compatible run/profile/case/round shards and rejects conflicting
+correlation, interaction, activation, response or Task identity; it never
+subtracts clocks across processes. Implemented boundaries include:
 
 - Provider speech-stopped/EOT; browser EOT receipt; capture stopped; last frame
   sent and ACKed; uplink closed; STT final available; unified submit accepted;
-- Agent request start, first delta, first stable speakable sentence and
-  `chat.final`;
+- authoritative commit admission, semantic route resolution, Agent start,
+  first delta, Tool execution, `chat.final`, Task command acceptance and
+  presentation production/dispatch;
 - TTS request, Provider first audio, downlink ticket, successor capture ready,
   browser first frame, WebAudio first frame scheduled and actually started;
-- playout underrun/rebuffer, sentence gap, barge-in, fence/cancel completion,
-  fallback and discarded prefetch work.
+- playout underrun/rebuffer and explicit streaming-STT fallback.
+
+Sentence-level speakable output, prefetch waste, barge-in timing and a dynamic
+cross-process critical path are outside minimal v0. They require a separately
+declared experiment or later instrumentation packet rather than inference from
+missing marks.
 
 Raw audio, transcript content, credentials and private machine configuration
 must not enter metrics. Existing `live_voice.segment_latency_ms` can carry
@@ -107,7 +174,70 @@ This batch is done when the same response can be followed across all owners,
 each missing segment is explicitly `unknown` rather than zero, and a fixed
 current-source baseline can be reproduced without retaining private content.
 
+### 3.3 Two measurement lanes after the P2 physical finding
+
+The latency program now has two deliberately different lanes. They must not be
+pooled or described with the same acceptance label.
+
+The **P2 causal lane** requires no Browser, microphone, Speech Provider, TTS or
+physical playout. A deterministic Agent fixture publishes a total of 10, 50 or
+100 ordered notifications; the final element carries `chat.final` and every
+earlier element is reasoning/delta. The real P2 owner/protocol consumes that
+backlog under a controlled per-RPC delay and records, with a monotonic clock:
+
+- model-complete to final-consumed latency;
+- notification count, RPC count, batch size and remaining queue depth;
+- dequeue, dispatch and final presentation boundaries;
+- final/error/Task ordering, replay and terminal outcome;
+- duplicate Agent, Tool, Task, history and audio effects, all asserted as zero
+  where forbidden.
+
+The first current-source run is P2 A1. One named optimization runs as B in a
+separate worktree. Unchanged source then runs as A2. The environment, fixture,
+controlled delay, populations and result schema must be identical; A1 and A2
+must have the same commit, while B must have one different named source. This
+lane can accept or reject the P2 transport change, but cannot establish
+speech-end-to-first-audible, Browser playout or complete-round latency.
+
+The **physical Browser lane** retains the existing fixed-corpus probe and real
+Chrome validation. It is required after a P2 candidate succeeds causally and
+before any claim that the product, Live Voice journey or perceived latency
+improved. It also remains the only lane that can validate capture, VAD/STT
+quality, WebAudio scheduling, real playout/ACK, barge-in audio fencing and
+first-audible latency.
+
 ## 4. Remove avoidable waits on the existing authoritative path
+
+### Remove the P2 one-notification-per-RPC tail first
+
+Hongxing's 2026-08-20 physical run observed notification sequences 596 through
+685. Model completion was near sequence 621; requests 622 through 685 consumed
+about 5.38 seconds before the final presentation response, with an
+approximately 85 ms median complete cycle. An earlier pre-auto-barge run showed
+the same median and serial pattern. These values are evidence for Hongxing's
+tested source, not a baseline for this branch, but the current source retains
+the same structural one-request/one-notification owner and needs the causal A1
+defined in §3.3.
+
+The first implementation candidate, **bounded batch pull**, passed its causal
+A1/B/A2 gate on 2026-08-21. One
+request may return a closed, ordered batch up to an explicit limit. The client
+processes the batch in order; final, error and Task notifications remain
+reliable and may not be dropped, coalesced behind lower-value deltas or reordered
+across presentation/ACK authority. Replay identity, activation generation,
+bounded ledgers and one in-flight poll remain fail closed.
+
+Server-side coalescing of non-critical reasoning/delta notifications remains a
+possible later complement, but it changes observation semantics and must not
+hide final/error/Task truth. Server push is deferred for the first candidate
+because reconnect, replay, backpressure and single-writer ownership make it a
+larger protocol change than bounded pull.
+
+The P2 candidate receives causal credit only if it reduces final-consumption
+latency and RPC count against both A1 and A2 without moving the wait, changing
+the ordered terminal result, reviving a stale generation or adding duplicate
+Agent, Tool, Task, history or audio effects. Physical Browser confirmation is
+still required for product-path credit.
 
 ### Adaptive playout instead of a fixed one-second lead
 
@@ -245,13 +375,20 @@ project files.
 
 Work should be packetized in this dependency order:
 
-1. correlated physical measurement and a fresh fixed-corpus baseline;
-2. adaptive browser startup, first-downlink/capture decoupling, EOT overlap and
+1. ~~current-source no-Browser P2 A1 with the deterministic 10/50/100
+   backlog;~~ **DONE — causal component evidence only**
+2. ~~one named bounded P2 transport candidate B, followed by unchanged-source
+   A2 and an A1/B/A2 accept/revise/discard decision;~~ **ACCEPTED — causal
+   component evidence only**
+3. clean physical Browser confirmation of an accepted P2 candidate, without
+   retroactively relabelling the causal run as E2E evidence;
+4. physical fixed-corpus baseline for capture/STT/TTS/playout work, then
+   adaptive browser startup, first-downlink/capture decoupling, EOT overlap and
    controlled VAD experiments;
-3. authoritative acknowledgement for genuinely long operations;
-4. Conversation Runtime-owned sentence streaming with bounded semantic
+5. authoritative acknowledgement for genuinely long operations;
+6. Conversation Runtime-owned sentence streaming with bounded semantic
    prefetch;
-5. Agent/model/tool-path changes only where the preceding evidence still shows
+7. Agent/model/tool-path changes only where the preceding evidence still shows
    material delay.
 
 This is an order of proof, not a request for one large patch. Each packet names
@@ -261,6 +398,10 @@ journey and applicable D-032/D-074 negative/review evidence from
 
 Initial targets are deliberately relative to the fresh baseline:
 
+- the P2 candidate reduces final-consumption latency and RPC count against both
+  causal baselines while preserving exact notification order, replay and zero
+  forbidden effects; its numeric threshold is frozen only after A1 records the
+  current-source 10/50/100 curves;
 - the low-risk pipeline batch reduces speech-end-to-first-audible p50 by at
   least 1.0 second, with no p95 false-EOT, underrun, fallback or cancel
   regression;
@@ -331,14 +472,12 @@ from the reference materials:
 
 This plan is queued under the `Observability, benchmark and latency` capability
 and dependency route to feature complete in [STATUS](../STATUS.md). The
-2026-08-21 routing record closes D-089/D-090 Wave 3 and the bounded P1/P2 repair
-integration, but activates no next packet. The `e1df8b452` physical run supplies
-a scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
-fixed-corpus baseline required by this plan. Latency implementation starts only
-when STATUS selects an owner-scoped P1/P2 packet with that diagnosis, a frozen
-corpus, applicable test-oracle migration, risk and acceptance. Its assigned
-batch/push/coalescing implementation must integrate and pass affected evidence
-before P1/P2 closeout validation. Compatible instrumentation may be included
-earlier in another affected packet only when its ownership and acceptance are
+2026-08-23 lifecycle repair packet is closed. Remaining product work includes
+P2 notification latency. The `e1df8b452` physical run supplies a scoped
+diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
+fixed-corpus baseline required by this plan. The
+[latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
+owns the dated causal/deployed evidence. Compatible instrumentation may be
+included in an affected packet only when its ownership and acceptance are
 explicit; this preparatory plan never outranks or activates the current STATUS
 route by itself.
