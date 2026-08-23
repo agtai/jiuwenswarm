@@ -215,8 +215,13 @@ function parseTask(
     throw new Error('formal P3 Task Attempt binding mismatch');
   }
   if (
-    (admission !== null) !== queued
-    || (admission !== null && (admission.task_id !== raw.task_id || admission.attempt_id !== attemptId || admission.queued !== true))
+    (queued && state !== 'accepted')
+    || (admission === null && queued)
+    || (admission !== null && (
+      admission.task_id !== raw.task_id
+      || admission.attempt_id !== attemptId
+      || admission.queued !== queued
+    ))
   ) throw new Error('formal P3 Task admission binding mismatch');
   if (attempt !== null) {
     const expectedAttemptState = state === 'accepted' ? 'accepted' : state === 'terminal' ? 'terminal' : 'running';

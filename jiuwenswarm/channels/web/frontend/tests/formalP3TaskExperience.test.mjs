@@ -33,6 +33,7 @@ function taskRecord({
   revision = 1,
   predecessorTaskId = null,
   queued = false,
+  retainedAdmission = false,
   name = taskId,
 }) {
   return {
@@ -63,11 +64,11 @@ function taskRecord({
     },
     event_head: eventHead,
     queued,
-    admission: queued
+    admission: queued || retainedAdmission
       ? {
           task_id: taskId,
           attempt_id: attemptId,
-          queued: true,
+          queued,
           priority: 'high',
           reason: null,
           attempt_count: 0,
@@ -162,6 +163,7 @@ function authoritativeFixture({
     eventHead: 1,
     revision: 2,
     predecessorTaskId: 'task-a',
+    retainedAdmission: true,
     name: 'Running successor',
   });
   const calls = [];
@@ -291,6 +293,34 @@ test('selection performs an exact fresh status/events/result reread and rejects 
   assert.equal(task.progress, 'checkpoint 1/3');
   assert.equal(task.result_availability, 'not_ready');
   assert.ok(task.available_operations.includes('task.adjust'));
+});
+
+test('retained admission rejects queued truth outside accepted lifecycle or contradicting its Task projection', async () => {
+  const invalidTasks = [
+    taskRecord({ taskId: 'task-running-queued', attemptId: 'attempt-running-queued', state: 'running', eventHead: 1, queued: true }),
+    taskRecord({ taskId: 'task-flag-mismatch', attemptId: 'attempt-flag-mismatch', state: 'accepted', eventHead: 0, queued: true }),
+  ];
+  invalidTasks[1].admission.queued = false;
+  for (const invalidTask of invalidTasks) {
+    const calls = [];
+    const owner = new FormalP3TaskExperienceOwner({
+      enabled: true,
+      store: memoryStorage(),
+      request: async (method, _params, requestId) => {
+        calls.push(method);
+        return envelope(requestId, {
+          tasks: [invalidTask],
+          cursor: null,
+          next_cursor: null,
+          has_more: false,
+          limit: 100,
+          supported_operations: ['task.create'],
+        });
+      },
+    });
+    await assert.rejects(owner.refresh(sessionId), /admission binding mismatch/);
+    assert.deepEqual(calls, [FORMAL_P3_TASK_METHODS.list]);
+  }
 });
 
 test('unsupported controls are stable and produce zero query, mutation, Agent, Tool, audio or history effects', async () => {
