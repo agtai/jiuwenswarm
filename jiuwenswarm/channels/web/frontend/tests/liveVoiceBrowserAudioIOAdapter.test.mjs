@@ -2110,10 +2110,15 @@ test('page hide fences a pending setSinkId completion before ready and removes o
 test('playout schedules exact current response and acknowledges only contiguous render completion', async () => {
   const fake = fakeEnvironment();
   const events = [];
+  const scheduled = [];
   const adapter = new BrowserAudioIOAdapter({
     enabled: true,
     environment: fake.environment,
-    observer: { onPlayoutState: event => events.push(event) },
+    monotonicNowMs: () => 100,
+    observer: {
+      onPlayoutState: event => events.push(event),
+      onPlayoutScheduled: event => scheduled.push(event),
+    },
   });
   await adapter.unlockPlayout();
   adapter.beginPlayout(firstResponse);
@@ -2122,6 +2127,18 @@ test('playout schedules exact current response and acknowledges only contiguous 
   const context = fake.contexts[0];
   assert.equal(context.bufferSources.length, 2);
   assert.deepEqual(context.bufferSources.map(source => source.starts), [[11], [11.02]]);
+  assert.equal(scheduled.length, 2);
+  assert.equal(
+    scheduled[0].scheduled_start_clock.monotonic_ms,
+    100 + scheduled[0].start_delay_ms,
+  );
+  assert.equal(
+    scheduled[1].scheduled_start_clock.monotonic_ms,
+    100 + scheduled[1].start_delay_ms,
+  );
+  assert.equal(Number.isFinite(Date.parse(scheduled[0].scheduled_start_clock.observed_at)), true);
+  assert.equal(scheduled[0].has_started(), false);
+  assert.equal(scheduled[1].has_started(), false);
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
 
   context.bufferSources[1].end();

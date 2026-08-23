@@ -18,6 +18,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
 )
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
+from jiuwenswarm.server.live_voice import agent_bridge_runtime
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentBridgeCompletionStatus,
     AgentBridgeDelivery,
@@ -28,6 +29,14 @@ from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentRoundRequest,
     WorkProgressDelivery,
     project_round_work_progress,
+)
+from jiuwenswarm.server.live_voice.latency_measurement import (
+    L0Milestone,
+    L0RoundBinding,
+    L0RoundClassification,
+)
+from jiuwenswarm.server.live_voice.jiuwenswarm_agent_adapter import (
+    _tool_result_succeeded,
 )
 
 
@@ -340,6 +349,119 @@ async def test_slow_adapter_never_blocks_submit_and_preserves_two_sequence_domai
 
 
 @pytest.mark.asyncio
+async def test_production_agent_bridge_emits_only_exact_bound_l0_milestones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound = L0RoundBinding(
+        correlation_id="correlation-round-1",
+        session_id="session-1",
+        interaction_id="interaction-1",
+        activation_generation=2,
+        response_id="response-round-1",
+        response_generation=0,
+        turn_id="turn-1",
+        round_id="round-1",
+    )
+    resolved: list[dict[str, object]] = []
+    emitted: list[dict[str, object]] = []
+
+    def resolve(**kwargs: object) -> L0RoundBinding:
+        resolved.append(kwargs)
+        return bound
+
+    def emit(**kwargs: object) -> bool:
+        emitted.append(kwargs)
+        return True
+
+    monkeypatch.setattr(agent_bridge_runtime, "resolve_runtime_l0_binding", resolve)
+    monkeypatch.setattr(agent_bridge_runtime, "emit_runtime_l0_milestone", emit)
+
+    def script(request: AgentRoundRequest):
+        common = (
+            request.request_id,
+            request.commit.interaction_id,
+            request.commit.turn_id,
+            request.commit.commit_id,
+        )
+        return (
+            AgentEvent(
+                *common,
+                0,
+                "chat.delta",
+                request.source_provenance,
+                text="private delta",
+            ),
+            AgentEvent(
+                *common,
+                1,
+                "chat.tool_call",
+                request.source_provenance,
+            ),
+            AgentEvent(
+                *common,
+                2,
+                "chat.tool_result",
+                request.source_provenance,
+                tool_result_succeeded=True,
+            ),
+            AgentEvent(
+                *common,
+                3,
+                "chat.final",
+                request.source_provenance,
+                text="private final",
+            ),
+        )
+
+    adapter = ScriptedAdapter(script)
+    runtime = AgentBridgeRuntime(instance_id="bridge-l0-production", output_capacity=4)
+    await runtime.start()
+    submission = submit(runtime, adapter)
+    deliveries = [
+        await asyncio.wait_for(runtime.next_delivery(), timeout=1) for _ in range(4)
+    ]
+    completion = await asyncio.wait_for(submission.completion, timeout=1)
+    assert all(isinstance(item, AgentEventDelivery) for item in deliveries)
+    assert completion.status is AgentBridgeCompletionStatus.STREAM_ENDED_WITHOUT_TERMINAL
+    assert resolved == [
+        {
+            "correlation_id": "correlation-round-1",
+            "interaction_id": "interaction-1",
+            "response_id": "response-round-1",
+            "response_generation": 0,
+        }
+    ]
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.AGENT_REQUEST_START,
+        L0Milestone.FIRST_DELTA,
+        L0Milestone.TOOL_CALL_OBSERVED,
+        L0Milestone.TOOL_RESULT_SUCCEEDED,
+        L0Milestone.FIRST_STABLE_SPEAKABLE_SENTENCE,
+        L0Milestone.CHAT_FINAL,
+    ]
+    assert all(item["binding"] == bound for item in emitted)
+    assert "classification" not in emitted[-1]
+    assert "private delta" not in repr(emitted)
+    assert "private final" not in repr(emitted)
+    await runtime.close()
+
+
+def test_formal_agent_tool_result_status_is_content_free_and_fail_closed() -> None:
+    assert _tool_result_succeeded(
+        {"event_type": "chat.tool_result", "success": True, "result": "private"}
+    ) is True
+    assert _tool_result_succeeded(
+        {"event_type": "chat.tool_result", "is_error": True, "result": "private"}
+    ) is False
+    assert _tool_result_succeeded(
+        {"event_type": "chat.tool_result", "result": "private"}
+    ) is False
+    assert _tool_result_succeeded(
+        {"event_type": "chat.final", "content": "private"}
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_dispatch_backpressure_replay_conflict_and_ledger_are_bounded() -> None:
     release = asyncio.Event()
     first = ScriptedAdapter(lambda _request: (), release=release)
@@ -476,6 +598,57 @@ async def test_output_backpressure_blocks_only_worker_and_never_drops_terminal()
     assert completion.terminal_outcome is TerminalOutcome.FAILED
     await asyncio.wait_for(close_task, timeout=1)
     assert runtime.snapshot().closed is True
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_emits_content_free_l0_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = ScriptedAdapter(
+        lambda request: (
+            round_event(request, seq=0, state="accepted"),
+            round_event(request, seq=1, state="running"),
+            round_event(request, seq=2, state="terminal", outcome="failed"),
+        )
+    )
+    bound = L0RoundBinding(
+        correlation_id="correlation-failed-terminal",
+        session_id="session-failed-terminal",
+        interaction_id="interaction-1",
+        activation_generation=1,
+        response_id="response-1",
+        response_generation=0,
+        turn_id="turn-1",
+        round_id="round-1",
+    )
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        agent_bridge_runtime,
+        "resolve_runtime_l0_binding",
+        lambda **_kwargs: bound,
+    )
+    monkeypatch.setattr(
+        agent_bridge_runtime,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+    runtime = AgentBridgeRuntime(
+        instance_id="bridge-l0-failed-terminal", output_capacity=4
+    )
+    await runtime.start()
+    submission = submit(runtime, adapter)
+    for _ in range(3):
+        await asyncio.wait_for(runtime.next_delivery(), timeout=1)
+    completion = await asyncio.wait_for(submission.completion, timeout=1)
+
+    assert completion.terminal_outcome is TerminalOutcome.FAILED
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.AGENT_REQUEST_START,
+        L0Milestone.FAILURE,
+    ]
+    assert emitted[-1]["classification"] is L0RoundClassification.FAILURE
+    assert emitted[-1]["binding"] == bound
+    await runtime.close()
 
 
 @pytest.mark.asyncio

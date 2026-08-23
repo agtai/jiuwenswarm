@@ -51,6 +51,7 @@ from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservation,
     LiveVoiceObservabilityCollector,
 )
+from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
     RecognitionAlternative,
@@ -1975,7 +1976,9 @@ async def test_streaming_owner_selector_process_control_is_content_free() -> Non
 
 
 @pytest.mark.asyncio
-async def test_registry_returns_streaming_final_without_batch_audio_replay() -> None:
+async def test_registry_returns_streaming_final_without_batch_audio_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _Provider()
     owner = StreamingRecognitionRouteOwner(
         lambda: asyncio.sleep(
@@ -1984,8 +1987,15 @@ async def test_registry_returns_streaming_final_without_batch_audio_replay() -> 
         )
     )
     receipts: list[dict[str, object]] = []
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        dedicated_media_registration,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
 
     async def issue_receipt(**binding: object) -> str:
+        assert emitted[-1]["milestone"] is L0Milestone.STT_FINAL_AVAILABLE
         receipts.append(dict(binding))
         return "streaming-voice-receipt-12345678901234567890"
 
@@ -2053,6 +2063,10 @@ async def test_registry_returns_streaming_final_without_batch_audio_replay() -> 
     )
     assert len(receipts) == 1
     assert receipts[0]["text"] == "hello"
+    assert [item["milestone"] for item in emitted].count(
+        L0Milestone.STT_FINAL_AVAILABLE
+    ) == 1
+    assert "hello" not in repr(emitted)
     assert record.pcm == bytearray()
     assert record.recognition_content_sha256 is not None
     await _wait_for_diagnostics(observations, metrics)

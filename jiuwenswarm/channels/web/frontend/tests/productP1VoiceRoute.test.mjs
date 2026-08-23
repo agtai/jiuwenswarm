@@ -4703,6 +4703,76 @@ test('formal P1 initial and successor Speech adapters forward the exact request 
   );
 });
 
+test('formal P1 L0 success waits for the authoritative playout receipt and retains render time', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /await this\.#acknowledgePlayout\(pendingPlayout\);[\s\S]*?this\.#l0Record\([\s\S]*?'playout_completed'[\s\S]*?'success'[\s\S]*?completed/s,
+  );
+  assert.doesNotMatch(
+    productP1VoiceRouteSource,
+    /#observePlayout\([\s\S]*?this\.#l0Record\('playout_completed'[\s\S]*?#observeBrowserFirstFrame/s,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /#stageL0PlayoutCompletion[\s\S]*?renderClock\?\.observedAt \?\? new Date\(\)\.toISOString\(\)[\s\S]*?monotonicMs[\s\S]*?elapsedMs/s,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /renderMonotonicMs = monotonicNowMs\(\);[\s\S]*?lastRenderedClock = Object\.freeze[\s\S]*?throughSeq: event\.through_seq[\s\S]*?#stageL0PlayoutCompletion\(pending\.response, renderClock\)/s,
+  );
+});
+
+test('formal P1 L0 records the first exact browser route failure before cleanup', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /if \(this\.#failureCleanupPromise === null\) \{[\s\S]*?this\.#l0Record\('browser_failure', failureResponse, undefined, 'failure'\);[\s\S]*?this\.#failureCleanupReason = failureReason;/,
+  );
+});
+
+test('formal P1 L0 records uplink send only after the dedicated socket drains it', () => {
+  assert.equal(
+    [...productP1VoiceRouteSource.matchAll(/on_uplink_frame_sent:/g)].length,
+    2,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /#observeUplinkFrameSent\(.*?route !== this\.#route.*?#l0LastFrameSentClock = l0ClockNow\(\)/s,
+  );
+  assert.doesNotMatch(
+    productP1VoiceRouteSource,
+    /#mediaSentFrames \+= 1;\s*this\.#l0LastFrameSentClock/s,
+  );
+});
+
+test('formal P1 L0 barge-in clocks bracket the exact local playout fence', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /requestedClock = l0ClockNow\(\);.*?stopPlayoutExact\(.*?local_fence_established.*?#l0Record\('barge_in'.*?#l0Record\(.*?'fence_cancel_completion'/s,
+  );
+});
+
+test('formal P1 L0 confirms WebAudio start and retains the scheduled audio clock', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /confirmStarted[\s\S]*?event\.has_started\(\)[\s\S]*?scheduled_start_clock[\s\S]*?'webaudio_actually_started'/s,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /confirmStarted\(L0_WEBAUDIO_START_CONFIRMATION_RETRIES\)/,
+  );
+});
+
+test('formal P1 timestamps successor readiness inside the actual ready transition', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /#successorCaptureReadiness = 'ready';[\s\S]*?#l0Record\('successor_capture_ready', response\);[\s\S]*?return Object\.freeze\(\{ ready: true/s,
+  );
+  assert.doesNotMatch(
+    productP1VoiceRouteSource,
+    /await capturePreparation;[\s\S]{0,240}#l0Record\('successor_capture_ready'/s,
+  );
+});
+
 test('formal P1 dedicated downlink ACKs scheduled audio and receipts only rendered audio', async () => {
   const journey = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });
   const { owner, calls, sockets, activationCount, playError, environment, statusSnapshots } = journey;

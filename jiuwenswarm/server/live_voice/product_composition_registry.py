@@ -17,6 +17,7 @@ import logging
 import os
 import secrets
 import threading
+import time
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -73,6 +74,12 @@ from .formal_task_models import (
 )
 from .task_store import TaskDurabilityDiagnosticSnapshot
 from .interaction_engine import InteractionEnginePort
+from .latency_measurement import (
+    L0Milestone,
+    L0RoundBinding,
+    emit_runtime_l0_milestone,
+    register_runtime_l0_binding,
+)
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
     P3_MUTATIONS,
@@ -427,6 +434,13 @@ class _P2Route:
 
 
 @dataclass(frozen=True, slots=True)
+class _L0CommitAdmissionClock:
+    observed_at: str
+    monotonic_ms: float
+    duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
 class _ClosedP2Route:
     binding: P2InteractionBinding
     manifest: ProductCompositionManifest
@@ -580,6 +594,15 @@ class _VoiceTaskOrigin:
     activation_generation: int
     correlation_id: str
     response_ref: ResponseRef
+
+
+def _best_effort_l0_binding(**values: object) -> L0RoundBinding | None:
+    """Keep diagnostic identity validation outside authoritative product truth."""
+
+    try:
+        return L0RoundBinding(**values)  # type: ignore[arg-type]
+    except Exception:
+        return None
 
 
 def _formal_fact(segment: ProductSegment) -> ProductRouteFact:
@@ -4485,6 +4508,52 @@ class AgentServerProductCompositionRegistry:
         allow_agent_tools: bool = True,
     ) -> P3RouteResult:
         result_unknown = False
+        submission_started = time.monotonic()
+
+        def measurement_binding(
+            response_ref: ResponseRef,
+            *,
+            round_id: str | None = None,
+        ) -> L0RoundBinding | None:
+            return _best_effort_l0_binding(
+                correlation_id=retained.binding.correlation_id,
+                session_id=retained.binding.session_id,
+                interaction_id=retained.binding.interaction_id,
+                activation_generation=retained.binding.activation_generation,
+                response_id=response_ref.response_id,
+                response_generation=response_ref.response_generation,
+                turn_id=commit.turn_id,
+                round_id=round_id,
+            )
+
+        async def before_dispatch_with_measurement(
+            response_ref: ResponseRef,
+            round_id: str,
+        ) -> None:
+            binding = measurement_binding(response_ref, round_id=round_id)
+            if binding is not None:
+                register_runtime_l0_binding(binding)
+            if before_agent_dispatch is not None:
+                await before_agent_dispatch(response_ref, round_id)
+
+        def after_dispatch_with_measurement(handle: Any) -> None:
+            # The caller's checkpoint is part of dispatch acceptance.  Emit only
+            # after it and both Harness/Bridge commits return successfully.
+            if after_agent_dispatch is not None:
+                after_agent_dispatch(handle)
+            binding = measurement_binding(
+                handle.response_ref,
+                round_id=handle.round_id,
+            )
+            if binding is not None:
+                emit_runtime_l0_milestone(
+                    component="runtime",
+                    milestone=L0Milestone.COMMITTED_SUBMIT_ACCEPTED,
+                    binding=binding,
+                    duration_ms=(time.monotonic() - submission_started) * 1_000.0,
+                    event_nonce=request_id,
+                )
+
         try:
             common = {
                 "session_id": retained.binding.session_id,
@@ -4552,6 +4621,16 @@ class AgentServerProductCompositionRegistry:
                 if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
                     self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
                 self._pending_voice_commit_routes.pop(commit.commit_id, None)
+                task_binding = measurement_binding(response_ref)
+                if task_binding is not None:
+                    register_runtime_l0_binding(task_binding)
+                    emit_runtime_l0_milestone(
+                        component="runtime",
+                        milestone=L0Milestone.COMMITTED_SUBMIT_ACCEPTED,
+                        binding=task_binding,
+                        duration_ms=(time.monotonic() - submission_started) * 1_000.0,
+                        event_nonce=request_id,
+                    )
                 return _success_result(
                     request_id,
                     {
@@ -4575,8 +4654,8 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 context=context,
                 channel_id=channel_id,
-                before_dispatch=before_agent_dispatch,
-                after_dispatch=after_agent_dispatch,
+                before_dispatch=before_dispatch_with_measurement,
+                after_dispatch=after_dispatch_with_measurement,
                 allow_tools=allow_agent_tools,
             )
             return _success_result(
@@ -5594,8 +5673,12 @@ class AgentServerProductCompositionRegistry:
         text: str,
         channel_id: str,
         source_provenance: str = "server.authoritative",
-        task_id: str | None = None,
+        business_task_id: str | None = None,
+        l0_task_id: str | None = None,
+        l0_attempt_id: str | None = None,
+        l0_commit_admission: _L0CommitAdmissionClock | None = None,
     ) -> P3RouteResult:
+        presentation_started = time.monotonic()
         journal = self._unified_journal
         if journal is None:
             raise FormalTaskViolation(
@@ -5613,8 +5696,8 @@ class AgentServerProductCompositionRegistry:
                     "response_generation": handle.response_ref.response_generation,
                 },
             }
-            if task_id is not None:
-                result["task_id"] = task_id
+            if business_task_id is not None:
+                result["task_id"] = business_task_id
             return _success_result(
                 request_id,
                 result,
@@ -5624,6 +5707,43 @@ class AgentServerProductCompositionRegistry:
         async def present() -> P3RouteResult:
             async def checkpoint(handle: Any) -> None:
                 outcome = presentation_result(handle)
+                measurement_binding = _best_effort_l0_binding(
+                    correlation_id=retained.binding.correlation_id,
+                    session_id=retained.binding.session_id,
+                    interaction_id=retained.binding.interaction_id,
+                    activation_generation=retained.binding.activation_generation,
+                    response_id=handle.response_ref.response_id,
+                    response_generation=handle.response_ref.response_generation,
+                    turn_id=commit.turn_id,
+                    task_id=l0_task_id,
+                    attempt_id=l0_attempt_id,
+                )
+                if measurement_binding is not None:
+                    register_runtime_l0_binding(measurement_binding)
+                    observed_at = (
+                        l0_commit_admission.observed_at
+                        if l0_commit_admission is not None
+                        else None
+                    )
+                    monotonic_ms = (
+                        l0_commit_admission.monotonic_ms
+                        if l0_commit_admission is not None
+                        else None
+                    )
+                    duration_ms = (
+                        l0_commit_admission.duration_ms
+                        if l0_commit_admission is not None
+                        else (time.monotonic() - presentation_started) * 1_000.0
+                    )
+                    emit_runtime_l0_milestone(
+                        component="runtime",
+                        milestone=L0Milestone.COMMITTED_SUBMIT_ACCEPTED,
+                        binding=measurement_binding,
+                        observed_at=observed_at,
+                        monotonic_ms=monotonic_ms,
+                        duration_ms=duration_ms,
+                        event_nonce=request_id,
+                    )
                 await asyncio.to_thread(
                     journal.checkpoint_foreground_effect,
                     voice_identity_sha256=voice_identity,
@@ -5650,14 +5770,14 @@ class AgentServerProductCompositionRegistry:
                 before_publish=checkpoint,
                 source_provenance=source_provenance,
             )
-            if task_id is not None:
+            if business_task_id is not None:
                 async with self._lock:
                     if (
-                        task_id in self._voice_task_origins
+                        business_task_id in self._voice_task_origins
                         or len(self._voice_task_origins)
                         < self._PRODUCT_OPERATION_CAPACITY
                     ):
-                        self._voice_task_origins[task_id] = _VoiceTaskOrigin(
+                        self._voice_task_origins[business_task_id] = _VoiceTaskOrigin(
                             session_id=retained.binding.session_id,
                             interaction_id=retained.binding.interaction_id,
                             activation_id=retained.binding.activation_id,
@@ -5962,6 +6082,7 @@ class AgentServerProductCompositionRegistry:
         background_authority_unavailable: bool,
         auth_token: object,
         channel_id: str,
+        l0_commit_admission: _L0CommitAdmissionClock,
     ) -> P3RouteResult:
         journal = self._unified_journal
         if journal is None:
@@ -6025,6 +6146,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=unavailable_text,
                 channel_id=channel_id,
+                l0_commit_admission=l0_commit_admission,
             )
         if not self._settings.p3_text_enabled:
             return await self._present_unified_text(
@@ -6036,6 +6158,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=unavailable_text,
                 channel_id=channel_id,
+                l0_commit_admission=l0_commit_admission,
             )
         if (
             route
@@ -6055,6 +6178,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=unavailable_text,
                 channel_id=channel_id,
+                l0_commit_admission=l0_commit_admission,
             )
 
         if route is UnifiedCommittedInputRoute.BACKGROUND_CREATE:
@@ -6098,10 +6222,10 @@ class AgentServerProductCompositionRegistry:
                     commit.scope,
                 )
             created_task_id: str | None = None
+            created_attempt_id: str | None = None
             if result.ok:
                 formal_task_result = result.payload.get("result")
                 created_state: str | None = None
-                created_attempt_id: str | None = None
                 created_outbox_id: str | None = None
                 candidate_task_id: str | None = None
                 if isinstance(formal_task_result, Mapping):
@@ -6175,7 +6299,10 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
-                task_id=created_task_id,
+                business_task_id=created_task_id,
+                l0_task_id=created_task_id,
+                l0_attempt_id=created_attempt_id,
+                l0_commit_admission=l0_commit_admission,
             )
 
         if current is None:
@@ -6192,6 +6319,7 @@ class AgentServerProductCompositionRegistry:
                     else "There is no current background task."
                 ),
                 channel_id=channel_id,
+                l0_commit_admission=l0_commit_admission,
             )
 
         common_params = {
@@ -6214,6 +6342,9 @@ class AgentServerProductCompositionRegistry:
                         else "The current task has ended; explicitly create a revision task to change it."
                     ),
                     channel_id=channel_id,
+                    l0_task_id=current.task_id,
+                    l0_attempt_id=current.attempt_id,
+                    l0_commit_admission=l0_commit_admission,
                 )
             assert resolution.source_span is not None
             accepted_origin = self._commit_ledger.accept(commit)
@@ -6253,6 +6384,43 @@ class AgentServerProductCompositionRegistry:
                     OriginRef("committed_turn", commit.turn_id, commit.commit_id),
                     commit.scope,
                 )
+            adjusted_task_id: str | None = None
+            adjusted_attempt_id: str | None = None
+            adjusted_result = adjusted.payload.get("result")
+            if adjusted.ok and isinstance(adjusted_result, Mapping):
+                candidate_task_id = adjusted_result.get("task_id")
+                candidate_attempt_id = adjusted_result.get("attempt_id")
+                adjustment_id = adjusted_result.get("adjustment_id")
+                adjustment_outbox_id = adjusted_result.get("outbox_id")
+                canonical_adjust_receipt = (
+                    set(adjusted_result)
+                    == {
+                        "task_id",
+                        "attempt_id",
+                        "adjustment_id",
+                        "adjustment_state",
+                        "reason",
+                        "outbox_id",
+                    }
+                    and type(candidate_task_id) is str
+                    and bool(candidate_task_id)
+                    and candidate_task_id == candidate_task_id.strip()
+                    and candidate_task_id == current.task_id
+                    and type(candidate_attempt_id) is str
+                    and bool(candidate_attempt_id)
+                    and candidate_attempt_id == candidate_attempt_id.strip()
+                    and type(adjustment_id) is str
+                    and bool(adjustment_id)
+                    and adjustment_id == adjustment_id.strip()
+                    and adjusted_result.get("adjustment_state") == "pending"
+                    and adjusted_result.get("reason") is None
+                    and type(adjustment_outbox_id) is str
+                    and bool(adjustment_outbox_id)
+                    and adjustment_outbox_id == adjustment_outbox_id.strip()
+                )
+                if canonical_adjust_receipt:
+                    adjusted_task_id = candidate_task_id
+                    adjusted_attempt_id = candidate_attempt_id
             if adjusted.ok:
                 speech = (
                     "已将修改加入后台任务。"
@@ -6290,6 +6458,9 @@ class AgentServerProductCompositionRegistry:
                 text=speech,
                 channel_id=channel_id,
                 source_provenance="server.background.adjustment",
+                l0_task_id=adjusted_task_id,
+                l0_attempt_id=adjusted_attempt_id,
+                l0_commit_admission=l0_commit_admission,
             )
         if route is UnifiedCommittedInputRoute.BACKGROUND_STATUS:
             if resolution.reason == "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED":
@@ -6378,6 +6549,9 @@ class AgentServerProductCompositionRegistry:
                     text=speech,
                     channel_id=channel_id,
                     source_provenance="server.background.adjustment",
+                    l0_task_id=current.task_id,
+                    l0_attempt_id=current.attempt_id,
+                    l0_commit_admission=l0_commit_admission,
                 )
             status = await self._p3_composition.handle(
                 operation="task.status",
@@ -6390,6 +6564,36 @@ class AgentServerProductCompositionRegistry:
                 status_result.get("task")
                 if status.ok and isinstance(status_result, Mapping)
                 else None
+            )
+            status_attempt = (
+                status_result.get("attempt")
+                if status.ok and isinstance(status_result, Mapping)
+                else None
+            )
+            returned_task_id = (
+                task_status.get("task_id")
+                if isinstance(task_status, Mapping)
+                else None
+            )
+            returned_task_attempt_id = (
+                task_status.get("attempt_id")
+                if isinstance(task_status, Mapping)
+                else None
+            )
+            returned_attempt_id = (
+                status_attempt.get("attempt_id")
+                if isinstance(status_attempt, Mapping)
+                else None
+            )
+            canonical_status_identity = (
+                type(returned_task_id) is str
+                and bool(returned_task_id)
+                and returned_task_id == returned_task_id.strip()
+                and returned_task_id == current.task_id
+                and type(returned_task_attempt_id) is str
+                and bool(returned_task_attempt_id)
+                and returned_task_attempt_id == returned_task_attempt_id.strip()
+                and returned_attempt_id == returned_task_attempt_id
             )
             state = (
                 task_status.get("state") if isinstance(task_status, Mapping) else None
@@ -6464,6 +6668,11 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                l0_task_id=(returned_task_id if canonical_status_identity else None),
+                l0_attempt_id=(
+                    returned_task_attempt_id if canonical_status_identity else None
+                ),
+                l0_commit_admission=l0_commit_admission,
             )
 
         if route is UnifiedCommittedInputRoute.BACKGROUND_CANCEL:
@@ -6504,6 +6713,65 @@ class AgentServerProductCompositionRegistry:
                     commit.scope,
                 )
             cancel_result = cancelled.payload.get("result")
+            cancelled_task_id: str | None = None
+            cancelled_attempt_id: str | None = None
+            if cancelled.ok and isinstance(cancel_result, Mapping):
+                candidate_task_id = cancel_result.get("task_id")
+                candidate_attempt_id = cancel_result.get("attempt_id")
+                cancel_state = cancel_result.get("state")
+                cancel_outbox_id = cancel_result.get("outbox_id")
+                receipt_keys = set(cancel_result)
+                canonical_cancel_receipt = (
+                    frozenset(receipt_keys)
+                    in {
+                        frozenset(
+                            {
+                                "task_id",
+                                "attempt_id",
+                                "cancel_acknowledged",
+                                "applied",
+                                "state",
+                            }
+                        ),
+                        frozenset(
+                            {
+                                "task_id",
+                                "attempt_id",
+                                "cancel_acknowledged",
+                                "applied",
+                                "state",
+                                "outbox_id",
+                            }
+                        ),
+                    }
+                    and type(candidate_task_id) is str
+                    and bool(candidate_task_id)
+                    and candidate_task_id == candidate_task_id.strip()
+                    and candidate_task_id == current.task_id
+                    and type(candidate_attempt_id) is str
+                    and bool(candidate_attempt_id)
+                    and candidate_attempt_id == candidate_attempt_id.strip()
+                    and cancel_result.get("cancel_acknowledged") is True
+                    and type(cancel_result.get("applied")) is bool
+                    and cancel_state
+                    in {
+                        FormalTaskState.ACCEPTED.value,
+                        FormalTaskState.RUNNING.value,
+                        FormalTaskState.TERMINAL.value,
+                    }
+                    and (
+                        "outbox_id" not in receipt_keys
+                        or cancel_outbox_id is None
+                        or (
+                            type(cancel_outbox_id) is str
+                            and bool(cancel_outbox_id)
+                            and cancel_outbox_id == cancel_outbox_id.strip()
+                        )
+                    )
+                )
+                if canonical_cancel_receipt:
+                    cancelled_task_id = candidate_task_id
+                    cancelled_attempt_id = candidate_attempt_id
             cancelled_terminal = (
                 cancelled.ok
                 and isinstance(cancel_result, Mapping)
@@ -6533,6 +6801,9 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                l0_task_id=cancelled_task_id,
+                l0_attempt_id=cancelled_attempt_id,
+                l0_commit_admission=l0_commit_admission,
             )
 
         assert route is UnifiedCommittedInputRoute.BACKGROUND_QUERY
@@ -6587,6 +6858,9 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                l0_task_id=current.task_id,
+                l0_attempt_id=current.attempt_id,
+                l0_commit_admission=l0_commit_admission,
             )
         task_result_record = result_payload.get("task_result")
         if not isinstance(task_result_record, Mapping):
@@ -6603,6 +6877,9 @@ class AgentServerProductCompositionRegistry:
                     else "The current task result is unavailable."
                 ),
                 channel_id=channel_id,
+                l0_task_id=current.task_id,
+                l0_attempt_id=current.attempt_id,
+                l0_commit_admission=l0_commit_admission,
             )
         dialogue_entries = self._reserve_task_result_context_slot(context)
         ref, entry = self._bounded_untrusted_result_context(
@@ -6804,6 +7081,7 @@ class AgentServerProductCompositionRegistry:
                 current_task=current_context,
             )
             proposed_semantic_binding = self._unified_semantic_binding(resolution)
+            admission_started = time.monotonic()
             admission = await asyncio.to_thread(
                 journal.admit,
                 request_id=request_id,
@@ -6811,6 +7089,14 @@ class AgentServerProductCompositionRegistry:
                 fingerprint=fingerprint,
                 created_at=committed_at,
                 semantic_binding=proposed_semantic_binding,
+            )
+            admission_monotonic = time.monotonic()
+            l0_commit_admission = _L0CommitAdmissionClock(
+                observed_at=datetime.now(UTC)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z"),
+                monotonic_ms=admission_monotonic * 1_000.0,
+                duration_ms=(admission_monotonic - admission_started) * 1_000.0,
             )
             if admission.replay_result is not None:
                 payload = _bind_unified_response_request(
@@ -6919,6 +7205,7 @@ class AgentServerProductCompositionRegistry:
                                 ),
                                 auth_token=params.get("auth_token"),
                                 channel_id=channel_id,
+                                l0_commit_admission=l0_commit_admission,
                             ),
                             name=f"live-voice-unified-submit:{voice_identity[:16]}",
                         )

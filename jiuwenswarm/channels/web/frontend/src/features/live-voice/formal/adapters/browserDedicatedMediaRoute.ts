@@ -128,6 +128,7 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly transport_available: boolean;
   readonly socket_factory: DedicatedMediaSocketFactory;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
+  readonly on_uplink_frame_sent?: (seq: number) => void;
   readonly on_terminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly end_of_turn_capability?: 'media.end_of_turn.v1';
   readonly on_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
@@ -475,6 +476,9 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   if (request.on_terminal !== undefined && typeof request.on_terminal !== 'function') {
     throw new TypeError('on_terminal must be a function');
   }
+  if (request.on_uplink_frame_sent !== undefined && typeof request.on_uplink_frame_sent !== 'function') {
+    throw new TypeError('on_uplink_frame_sent must be a function');
+  }
   if (
     (request.end_of_turn_capability === undefined) !== (request.on_speech_start === undefined) ||
     (request.end_of_turn_capability === undefined) !== (request.on_end_of_turn === undefined) ||
@@ -546,6 +550,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       request.defer_downlink_ack === true,
       authenticationFrame,
       request.on_terminal,
+      request.on_uplink_frame_sent,
       request.end_of_turn_capability,
       request.on_speech_start,
       request.on_end_of_turn,
@@ -584,6 +589,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #deferDownlinkAck: boolean;
   #pendingAuthenticationFrame: string | null;
   readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
+  readonly #onUplinkFrameSent?: (seq: number) => void;
   readonly #endOfTurnCapability?: 'media.end_of_turn.v1';
   readonly #onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
@@ -615,6 +621,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     deferDownlinkAck: boolean,
     authenticationFrame: string | null,
     onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
+    onUplinkFrameSent?: (seq: number) => void,
     endOfTurnCapability?: 'media.end_of_turn.v1',
     onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void,
     onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void,
@@ -636,6 +643,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#deferDownlinkAck = deferDownlinkAck;
     this.#pendingAuthenticationFrame = authenticationFrame;
     this.#onTerminal = onTerminal;
+    this.#onUplinkFrameSent = onUplinkFrameSent;
     this.#endOfTurnCapability = endOfTurnCapability;
     this.#onSpeechStart = onSpeechStart;
     this.#onEndOfTurn = onEndOfTurn;
@@ -735,16 +743,19 @@ export class BrowserDedicatedMediaSocketLeaf {
         reason_id: this.closed ? (this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED') : 'MEDIA_NOT_ATTACHED',
       };
     }
-    const drained = this.#activation.owner.drain(binary => {
-      if (this.#socket.readyState !== SOCKET_OPEN) {
-        return this.#socket.readyState === SOCKET_CONNECTING ? 'backpressured' : 'closed';
-      }
-      if (this.#socket.bufferedAmount + binary.byteLength > this.#socketHighWaterBytes) {
-        return 'backpressured';
-      }
-      this.#socket.send(binary);
-      return 'sent';
-    });
+    const drained = this.#activation.owner.drain(
+      binary => {
+        if (this.#socket.readyState !== SOCKET_OPEN) {
+          return this.#socket.readyState === SOCKET_CONNECTING ? 'backpressured' : 'closed';
+        }
+        if (this.#socket.bufferedAmount + binary.byteLength > this.#socketHighWaterBytes) {
+          return 'backpressured';
+        }
+        this.#socket.send(binary);
+        return 'sent';
+      },
+      seq => this.#onUplinkFrameSent?.(seq)
+    );
     if (this.#activation.owner.closed) {
       const reasonId = closeReasonFrom({ reasonId: drained.reason_id });
       const source = ['MEDIA_TRANSPORT_CLOSED', 'MEDIA_TRANSPORT_SEND_FAILED'].includes(reasonId) ? 'transport_close' : 'internal_failure';

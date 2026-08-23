@@ -121,6 +121,8 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
 )
+from jiuwenswarm.server.live_voice import product_composition_registry
+from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
@@ -829,6 +831,8 @@ class _UnifiedP3Composition(_P3Composition):
         self.create_receipt_extra: dict[str, object] = {}
         self.create_receipt_omit: set[str] = set()
         self.create_receipt_override: object | None = None
+        self.adjust_receipt_override: object | None = None
+        self.cancel_receipt_override: object | None = None
         self.create_effects = 0
         self.adjust_effects = 0
         self._create_commands: set[str] = set()
@@ -1020,17 +1024,28 @@ class _UnifiedP3Composition(_P3Composition):
             result = {
                 "task_id": self.current.task_id,
                 "attempt_id": self.current.attempt_id,
-                "state": "pending",
-                "command_id": command_id,
-                "accepted": True,
+                "adjustment_id": command_id,
+                "adjustment_state": "pending",
+                "reason": None,
+                "outbox_id": "outbox-adjust-current-1",
             }
+            if self.adjust_receipt_override is not None:
+                result = self.adjust_receipt_override
         elif operation == "task.cancel":
             result = {
                 "task_id": params["task_id"],
+                "attempt_id": (
+                    self.current.attempt_id
+                    if self.current is not None
+                    else "attempt-current-1"
+                ),
                 "state": self.current.state.value if self.current else "running",
                 "cancel_acknowledged": True,
-                "accepted": True,
+                "applied": False,
+                "outbox_id": "outbox-cancel-current-1",
             }
+            if self.cancel_receipt_override is not None:
+                result = self.cancel_receipt_override
         elif operation == "task.status":
             result = {
                 "task": (
@@ -3049,6 +3064,18 @@ async def test_unified_agent_pre_dispatch_checkpoint_never_masks_dispatch_failur
         "commit_round",
         fail_after_checkpoint,
     )
+    registered: list[object] = []
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
+    monkeypatch.setattr(
+        product_composition_registry,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
     params = _unified_final_params(
         stem="agent-dispatch-failure",
         text="请告诉我今天适合喝什么茶。",
@@ -3073,6 +3100,8 @@ async def test_unified_agent_pre_dispatch_checkpoint_never_masks_dispatch_failur
     }
     assert rejected.payload["result"] is None
     assert manager.agent.calls == 0
+    assert len(registered) == 1
+    assert emitted == []
     with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
         effect = connection.execute(
             "SELECT status, result_json FROM unified_foreground_effects"
@@ -3277,6 +3306,117 @@ async def test_agent_checkpoint_failure_rolls_back_then_retries_once_after_resta
 
 
 @pytest.mark.asyncio
+async def test_production_p2_acceptance_registers_exact_l0_response_before_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-l0-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    registered: list[object] = []
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
+    monkeypatch.setattr(
+        product_composition_registry,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="l0-production",
+            text="private committed speech",
+        ),
+        request_id="request-l0-submit",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert result.payload["result"]["status"] == "round_accepted"
+    assert manager.agent.calls == 1
+    assert len(registered) == 1
+    binding = registered[0]
+    assert binding.session_id == "session-product"
+    assert binding.correlation_id == "correlation-p2"
+    assert binding.interaction_id == "interaction-1"
+    assert binding.activation_generation == 1
+    assert binding.response_id is not None
+    assert binding.round_id is not None
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.COMMITTED_SUBMIT_ACCEPTED
+    ]
+    assert emitted[0]["binding"] == binding
+    assert emitted[0]["duration_ms"] >= 0
+    assert "private committed speech" not in repr(emitted)
+    await _close_unified_route(registry, stem="l0-production")
+
+
+@pytest.mark.asyncio
+async def test_l0_identity_rejection_cannot_change_agent_or_task_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-l0-isolation-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+
+    class _RejectingL0Binding:
+        def __init__(self, **_values: object) -> None:
+            raise ValueError("diagnostic identity rejected")
+
+    monkeypatch.setattr(
+        product_composition_registry,
+        "L0RoundBinding",
+        _RejectingL0Binding,
+    )
+    dialogue = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="l0-isolation-dialogue",
+            text="Tell me one short fact about Paris.",
+        ),
+        request_id="request-l0-isolation-dialogue",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    task_origin = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="l0-isolation-task",
+            text="create a task without changing measurement truth",
+        ),
+        request_id="request-l0-isolation-task",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert dialogue.ok
+    assert dialogue.payload["result"]["status"] == "round_accepted"
+    assert task_origin.ok
+    assert task_origin.payload["result"]["status"] == "task_origin_accepted"
+    assert manager.agent.calls == 1
+    assert "commit-l0-isolation-task" in registry._accepted_turn_commits_by_commit
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
 async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
     tmp_path: Path,
 ) -> None:
@@ -3381,6 +3521,7 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
 @pytest.mark.asyncio
 async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origin(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, composition, manager = _unified_registry(
         tmp_path,
@@ -3396,6 +3537,12 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
         )
     ).ok
     _install_unified_history_writer(registry)
+    registered: list[object] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
     created = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="unified-origin-create",
@@ -3417,6 +3564,10 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
     assert origin.activation_id == "activation-1"
     assert origin.activation_generation == 1
     assert origin.correlation_id == "correlation-p2"
+    assert len(registered) == 1
+    assert registered[0].task_id == "task-current-1"
+    assert registered[0].attempt_id == "attempt-current-1"
+    assert registered[0].response_id == origin.response_ref.response_id
     await _ack_unified_presentation(registry, sequence=0, stem="unified-origin-create")
     await _close_unified_route(registry, stem="unified-origin-create")
 
@@ -3738,6 +3889,92 @@ async def test_unified_update_binds_current_nonterminal_and_only_applied_event_c
     assert all(call[0] != "task.cancel" for call in composition.handle_calls)
     assert composition.current is current
     await _close_unified_route(registry, stem="adjust-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_adjust_l0_binding_uses_only_canonical_returned_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    current = _background_task(tmp_path)
+    composition.current = current
+    composition.known_tasks[current.task_id] = current
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-adjust-l0-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    registered: list[object] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
+    returned_attempt = "attempt-retried-before-adjust"
+    composition.adjust_receipt_override = {
+        "task_id": current.task_id,
+        "attempt_id": returned_attempt,
+        "adjustment_id": "unified-adjust-adjust-l0-returned",
+        "adjustment_state": "pending",
+        "reason": None,
+        "outbox_id": "outbox-adjust-returned",
+    }
+    adjustment_receipts: list[P3RouteResult] = []
+    original_handle = composition.handle
+
+    async def capture_adjustment_receipt(**kwargs: object) -> P3RouteResult:
+        receipt = await original_handle(**kwargs)  # type: ignore[arg-type]
+        adjustment_receipts.append(receipt)
+        return receipt
+
+    composition.handle = capture_adjustment_receipt  # type: ignore[method-assign]
+
+    adjusted = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="adjust-l0-returned",
+            text="Please change the current itinerary so day two visits West Lake.",
+        ),
+        request_id="request-adjust-l0-returned",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert adjusted.ok
+    assert adjustment_receipts[-1].payload["result"] == composition.adjust_receipt_override
+    sequence = await _ack_unified_presentation(
+        registry, sequence=0, stem="adjust-l0-returned"
+    )
+    assert registered[-1].task_id == current.task_id
+    assert registered[-1].attempt_id == returned_attempt
+
+    composition.adjust_receipt_override = {
+        "task_id": current.task_id,
+        "attempt_id": "attempt-untrusted",
+        "adjustment_state": "pending",
+    }
+    malformed = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="adjust-l0-malformed",
+            text="Please change the current itinerary so day three visits Lingyin Temple.",
+        ),
+        request_id="request-adjust-l0-malformed",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert malformed.ok
+    await _ack_unified_presentation(
+        registry, sequence=sequence, stem="adjust-l0-malformed"
+    )
+    assert registered[-1].task_id is None
+    assert registered[-1].attempt_id is None
+    await _close_unified_route(registry, stem="adjust-l0")
 
 
 @pytest.mark.asyncio
@@ -4339,6 +4576,7 @@ async def test_unified_query_reserves_task_result_after_latest_three_complete_pa
 @pytest.mark.asyncio
 async def test_unified_status_presents_authoritative_store_progress_shape(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, composition, manager = _unified_registry(tmp_path)
     composition.current = _background_task(tmp_path)
@@ -4351,6 +4589,12 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         )
     ).ok
     history = _install_unified_history_writer(registry)
+    registered: list[object] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
 
     running_params = _unified_final_params(
         stem="status-current",
@@ -4364,6 +4608,8 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
     )
 
     assert status.ok
+    assert "task_id" not in cast(dict[str, object], status.payload["result"])
+    assert registry._voice_task_origins == {}
     assert manager.agent.calls == 0
     assert [call[0] for call in composition.handle_calls] == ["task.status"]
     presentation_sequence = await _ack_unified_presentation(
@@ -4375,6 +4621,8 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         content.content_utf8.decode("utf-8") for content in assistant_intent.contents
     ]
     assert spoken == ["后台任务正在运行，已记录 4 条状态更新。"]
+    assert registered[-1].task_id == composition.current.task_id
+    assert registered[-1].attempt_id == composition.current.attempt_id
 
     task_calls_after_running = tuple(composition.handle_calls)
     assistant_history_after_running = tuple(history.assistants)
@@ -4443,6 +4691,188 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
     assert composition.create_effects == 0
     assert composition.adjust_effects == 0
     await _close_unified_route(registry, stem="status-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_status_l0_binding_uses_only_successful_returned_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _manager = _unified_registry(tmp_path)
+    current = _background_task(tmp_path)
+    composition.current = current
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-status-l0-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    registered: list[object] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
+
+    advanced = _background_task(
+        tmp_path,
+        task_id=current.task_id,
+        attempt_id="attempt-retried-after-status-read",
+    )
+
+    async def advanced_status(
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        **policy: object,
+    ) -> P3RouteResult:
+        assert operation == "task.status"
+        composition.handle_calls.append((operation, dict(params), dict(policy)))
+        return P3RouteResult(
+            True,
+            {
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "task": advanced.to_dict(),
+                    "attempt": {
+                        "attempt_id": advanced.attempt_id,
+                        "state": "running",
+                    },
+                },
+                "error": None,
+            },
+        )
+
+    monkeypatch.setattr(composition, "handle", advanced_status)
+    advanced_result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="status-l0-advanced",
+            text="后台任务怎么样了？",
+        ),
+        request_id="request-status-l0-advanced",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert advanced_result.ok
+    sequence = await _ack_unified_presentation(
+        registry,
+        sequence=0,
+        stem="status-l0-advanced",
+    )
+    assert registered[-1].task_id == current.task_id
+    assert registered[-1].attempt_id == advanced.attempt_id
+
+    async def failed_status(
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        **policy: object,
+    ) -> P3RouteResult:
+        assert operation == "task.status"
+        composition.handle_calls.append((operation, dict(params), dict(policy)))
+        return P3RouteResult(
+            False,
+            {
+                "request_id": request_id,
+                "ok": False,
+                "result": None,
+                "error": {"reason": "FORMAL_TASK_STATUS_UNAVAILABLE"},
+            },
+        )
+
+    monkeypatch.setattr(composition, "handle", failed_status)
+    failed_result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="status-l0-failed",
+            text="当前后台任务什么情况？",
+        ),
+        request_id="request-status-l0-failed",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert failed_result.ok
+    await _ack_unified_presentation(
+        registry,
+        sequence=sequence,
+        stem="status-l0-failed",
+    )
+    assert registered[-1].task_id is None
+    assert registered[-1].attempt_id is None
+    await _close_unified_route(registry, stem="status-l0")
+
+
+@pytest.mark.asyncio
+async def test_unified_task_commit_milestone_keeps_journal_admission_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _manager = _unified_registry(tmp_path)
+    composition.current = _background_task(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-task-clock-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    original_handle = composition.handle
+    task_handler_started_ms: list[float] = []
+    emitted: list[dict[str, object]] = []
+
+    async def delayed_handle(
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        **policy: object,
+    ) -> P3RouteResult:
+        assert operation == "task.status"
+        task_handler_started_ms.append(time.monotonic() * 1_000.0)
+        await asyncio.sleep(0.01)
+        return await original_handle(
+            operation=operation,
+            params=params,
+            request_id=request_id,
+            session_id=session_id,
+            **policy,
+        )
+
+    monkeypatch.setattr(composition, "handle", delayed_handle)
+    monkeypatch.setattr(
+        product_composition_registry,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="task-clock-status",
+            text="后台任务怎么样了？",
+        ),
+        request_id="request-task-clock-status",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert len(emitted) == 1
+    assert emitted[0]["milestone"] is L0Milestone.COMMITTED_SUBMIT_ACCEPTED
+    assert isinstance(emitted[0]["observed_at"], str)
+    assert emitted[0]["monotonic_ms"] <= task_handler_started_ms[0]
+    assert emitted[0]["duration_ms"] >= 0
+    await _ack_unified_presentation(registry, sequence=0, stem="task-clock-status")
+    await _close_unified_route(registry, stem="task-clock-status")
 
 
 @pytest.mark.asyncio
@@ -4594,6 +5024,7 @@ async def test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutat
 @pytest.mark.asyncio
 async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, composition, manager = _unified_registry(
         tmp_path, demo_policy_bypass=True
@@ -4608,6 +5039,12 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
         )
     ).ok
     _install_unified_history_writer(registry)
+    registered: list[object] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
     result = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="cancel-current",
@@ -4619,14 +5056,116 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
     )
 
     assert result.ok
+    assert "task_id" not in cast(dict[str, object], result.payload["result"])
+    assert registry._voice_task_origins == {}
     assert manager.agent.calls == 0
     assert len(composition.handle_calls) == 1
     operation, params, policy = composition.handle_calls[0]
     assert operation == "task.cancel"
     assert params["task_id"] == composition.current.task_id
     assert policy["trusted_demo_policy_bypass"] is True
+    assert registered[-1].task_id == composition.current.task_id
+    assert registered[-1].attempt_id == composition.current.attempt_id
     await _ack_unified_presentation(registry, sequence=0, stem="cancel-current")
     await _close_unified_route(registry, stem="cancel-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_cancel_l0_binding_uses_only_successful_returned_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _manager = _unified_registry(
+        tmp_path, demo_policy_bypass=True
+    )
+    current = _background_task(tmp_path)
+    composition.current = current
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-cancel-l0-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    registered: list[object] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
+    advanced_attempt_id = "attempt-retried-before-cancel"
+    composition.cancel_receipt_override = {
+        "task_id": current.task_id,
+        "attempt_id": advanced_attempt_id,
+        "cancel_acknowledged": True,
+        "applied": False,
+        "state": FormalTaskState.RUNNING.value,
+        "outbox_id": "outbox-cancel-advanced",
+    }
+
+    advanced = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="cancel-l0-advanced",
+            text="停止刚才的行程规划。",
+        ),
+        request_id="request-cancel-l0-advanced",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert advanced.ok
+    sequence = await _ack_unified_presentation(
+        registry, sequence=0, stem="cancel-l0-advanced"
+    )
+    assert registered[-1].task_id == current.task_id
+    assert registered[-1].attempt_id == advanced_attempt_id
+
+    original_handle = composition.handle
+
+    async def failed_cancel(
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        **policy: object,
+    ) -> P3RouteResult:
+        if operation != "task.cancel":
+            return await original_handle(
+                operation=operation,
+                params=params,
+                request_id=request_id,
+                session_id=session_id,
+                **policy,
+            )
+        return P3RouteResult(
+            False,
+            {
+                "request_id": request_id,
+                "ok": False,
+                "result": None,
+                "error": {"reason": "FORMAL_TASK_CANCEL_UNAVAILABLE"},
+            },
+        )
+
+    monkeypatch.setattr(composition, "handle", failed_cancel)
+    failed = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="cancel-l0-failed",
+            text="停止刚才的行程规划。",
+        ),
+        request_id="request-cancel-l0-failed",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert failed.ok
+    await _ack_unified_presentation(
+        registry, sequence=sequence, stem="cancel-l0-failed"
+    )
+    assert registered[-1].task_id is None
+    assert registered[-1].attempt_id is None
+    await _close_unified_route(registry, stem="cancel-l0-advanced")
 
 
 @pytest.mark.asyncio

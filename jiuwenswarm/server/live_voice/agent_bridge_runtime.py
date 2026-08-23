@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Generator
 from dataclasses import dataclass
@@ -33,6 +34,13 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
+
+from .latency_measurement import (
+    L0Milestone,
+    L0RoundClassification,
+    emit_runtime_l0_milestone,
+    resolve_runtime_l0_binding,
+)
 
 
 class AgentBridgeRuntimeViolation(ValueError):
@@ -853,6 +861,40 @@ class AgentBridgeRuntime:
         projection_seq = 0
         terminal_outcome: TerminalOutcome | None = None
         stream: AsyncIterator[AgentEvent | EventEnvelope] | None = None
+        measurement_binding = resolve_runtime_l0_binding(
+            correlation_id=request.correlation_id,
+            interaction_id=request.response_ref.interaction_id,
+            response_id=request.response_ref.response_id,
+            response_generation=request.response_ref.response_generation,
+        )
+        request_started = time.monotonic()
+        measurement_failure_emitted = False
+
+        def emit_measurement_failure() -> None:
+            nonlocal measurement_failure_emitted
+            if measurement_binding is None or measurement_failure_emitted:
+                return
+            measurement_failure_emitted = True
+            emit_runtime_l0_milestone(
+                component="agent",
+                milestone=L0Milestone.FAILURE,
+                binding=measurement_binding,
+                classification=L0RoundClassification.FAILURE,
+                duration_ms=(time.monotonic() - request_started) * 1_000.0,
+                event_nonce=request.request_id,
+            )
+
+        first_delta_observed = False
+        tool_call_observed = False
+        tool_result_succeeded = False
+        stable_sentence_observed = False
+        if measurement_binding is not None:
+            emit_runtime_l0_milestone(
+                component="agent",
+                milestone=L0Milestone.AGENT_REQUEST_START,
+                binding=measurement_binding,
+                event_nonce=request.request_id,
+            )
         try:
             stream = pending.adapter.stream(request)
             async for item in stream:
@@ -862,6 +904,70 @@ class AgentBridgeRuntime:
                     )
                     expected_agent_seq += 1
                     agent_event_count += 1
+                    if (
+                        measurement_binding is not None
+                        and not first_delta_observed
+                        and item.event_type == "chat.delta"
+                    ):
+                        first_delta_observed = True
+                        emit_runtime_l0_milestone(
+                            component="agent",
+                            milestone=L0Milestone.FIRST_DELTA,
+                            binding=measurement_binding,
+                            event_nonce=f"{request.request_id}:{item.seq}",
+                        )
+                    if (
+                        measurement_binding is not None
+                        and not tool_call_observed
+                        and item.event_type == "chat.tool_call"
+                    ):
+                        tool_call_observed = True
+                        emit_runtime_l0_milestone(
+                            component="agent",
+                            milestone=L0Milestone.TOOL_CALL_OBSERVED,
+                            binding=measurement_binding,
+                            event_nonce=f"{request.request_id}:{item.seq}:tool-call",
+                        )
+                    if (
+                        measurement_binding is not None
+                        and tool_call_observed
+                        and not tool_result_succeeded
+                        and item.event_type == "chat.tool_result"
+                        and item.tool_result_succeeded is True
+                    ):
+                        tool_result_succeeded = True
+                        emit_runtime_l0_milestone(
+                            component="agent",
+                            milestone=L0Milestone.TOOL_RESULT_SUCCEEDED,
+                            binding=measurement_binding,
+                            duration_ms=(time.monotonic() - request_started) * 1_000.0,
+                            event_nonce=f"{request.request_id}:{item.seq}:tool-result",
+                        )
+                    if (
+                        measurement_binding is not None
+                        and not stable_sentence_observed
+                        and item.event_type == "chat.final"
+                        and isinstance(item.text, str)
+                        and bool(item.text.strip())
+                    ):
+                        stable_sentence_observed = True
+                        elapsed_ms = (time.monotonic() - request_started) * 1_000.0
+                        emit_runtime_l0_milestone(
+                            component="agent",
+                            milestone=(
+                                L0Milestone.FIRST_STABLE_SPEAKABLE_SENTENCE
+                            ),
+                            binding=measurement_binding,
+                            duration_ms=elapsed_ms,
+                            event_nonce=f"{request.request_id}:{item.seq}:stable",
+                        )
+                        emit_runtime_l0_milestone(
+                            component="agent",
+                            milestone=L0Milestone.CHAT_FINAL,
+                            binding=measurement_binding,
+                            duration_ms=elapsed_ms,
+                            event_nonce=f"{request.request_id}:{item.seq}:final",
+                        )
                     await self._put_output(AgentEventDelivery(request, item))
                     continue
                 if not isinstance(item, EventEnvelope):
@@ -946,6 +1052,8 @@ class AgentBridgeRuntime:
                         WorkProgressDelivery(request, source, progress)
                     )
                     if terminal_outcome is not None:
+                        if terminal_outcome is TerminalOutcome.FAILED:
+                            emit_measurement_failure()
                         if not submission.completion.done():
                             submission.completion._set_result(
                                 AgentBridgeCompletion(
@@ -983,6 +1091,7 @@ class AgentBridgeRuntime:
             stream = None
             await self._best_effort_close_adapter_stream(closing_stream)
         except Exception as error:
+            emit_measurement_failure()
             if not submission.completion.done():
                 submission.completion._set_exception(error)
             if stream is not None:

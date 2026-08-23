@@ -10,6 +10,11 @@ param(
     [switch]$RestartExisting,
     [switch]$AllowDirtyProject,
     [switch]$NoBrowser,
+    [switch]$L0Measurement,
+    [ValidateRange(9222, 9322)]
+    [int]$L0MeasurementPort = 9223,
+    [string]$L0MeasurementDirectory,
+    [string]$L0EnvironmentRef,
     [ValidateRange(30, 300)]
     [int]$ReadyTimeoutSeconds = 120
 )
@@ -84,7 +89,11 @@ function Get-ChromeExecutable {
     Fail '找不到 Google Chrome。请安装桌面版 Google Chrome，或使用 -NoBrowser 仅启动服务。'
 }
 
-function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
+function Start-IsolatedChrome(
+    [string]$ChromeExecutable,
+    [string]$Url,
+    [int]$RemoteDebuggingPort = 0
+) {
     $profileName = 'jiuwenswarm-live-voice-chrome-{0}-{1}' -f (
         Get-Date -Format 'yyyyMMdd-HHmmss'
     ), ([guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -100,9 +109,12 @@ function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-background-mode',
-        '--new-window',
-        $Url
+        '--new-window'
     )
+    if ($RemoteDebuggingPort -gt 0) {
+        $arguments += "--remote-debugging-port=$RemoteDebuggingPort"
+    }
+    $arguments += $Url
     $chrome = Start-Process -FilePath $ChromeExecutable -ArgumentList $arguments -WindowStyle Normal -PassThru
     Start-Sleep -Milliseconds 750
     if ($chrome.HasExited) {
@@ -322,6 +334,66 @@ try {
         }
         Write-Warn "源码工作区存在 $($sourceDirty.Count) 项未提交修改；脚本会按当前源码构建，不会提交或覆盖它们。"
     }
+    $l0RunLabelsPath = $null
+    $l0ConfigurationSha256 = $null
+    if ($L0Measurement) {
+        $l0LogsRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'logs'))
+        if ($RuntimeProfile -ne 'formal-web-validation') {
+            Fail 'L0 物理采集只允许 formal-web-validation profile。'
+        }
+        if ($NoBrowser) {
+            Fail 'L0 物理采集需要隔离 Chrome，不能同时使用 -NoBrowser。'
+        }
+        if (
+            [string]::IsNullOrWhiteSpace($L0EnvironmentRef) -or
+            $L0EnvironmentRef -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$'
+        ) {
+            Fail 'L0 物理采集需要显式、安全的 -L0EnvironmentRef（例如 lab-a-room-1）。'
+        }
+        if ([string]::IsNullOrWhiteSpace($L0MeasurementDirectory)) {
+            $L0MeasurementDirectory = Join-Path $l0LogsRoot (
+                'l0-physical-{0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+            )
+        } elseif (-not [System.IO.Path]::IsPathRooted($L0MeasurementDirectory)) {
+            $L0MeasurementDirectory = Join-Path $l0LogsRoot $L0MeasurementDirectory
+        }
+        $L0MeasurementDirectory = [System.IO.Path]::GetFullPath($L0MeasurementDirectory)
+        $repoPrefix = $RepoRoot.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ) + [System.IO.Path]::DirectorySeparatorChar
+        $logsPrefix = $l0LogsRoot.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ) + [System.IO.Path]::DirectorySeparatorChar
+        $insideRepo = (
+            $L0MeasurementDirectory -ieq $RepoRoot -or
+            $L0MeasurementDirectory.StartsWith(
+                $repoPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        $insideIgnoredLogs = (
+            $L0MeasurementDirectory -ieq $l0LogsRoot -or
+            $L0MeasurementDirectory.StartsWith(
+                $logsPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        if ($insideRepo -and -not $insideIgnoredLogs) {
+            Fail '仓库内的 L0 证据目录必须位于已忽略的 logs 目录；也可使用仓库外的绝对路径。'
+        }
+        if (Test-Path -LiteralPath $L0MeasurementDirectory) {
+            $existingEvidence = @(Get-ChildItem -LiteralPath $L0MeasurementDirectory -Force)
+            if ($existingEvidence.Count -gt 0) {
+                Fail "L0 采集目录必须为空或不存在：$L0MeasurementDirectory"
+            }
+        } else {
+            New-Item -ItemType Directory -Path $L0MeasurementDirectory | Out-Null
+        }
+        $l0RunLabelsPath = Join-Path $L0MeasurementDirectory 'run-labels.json'
+        Write-Pass "L0 内容无关证据目录已隔离：$L0MeasurementDirectory"
+    }
 
     # Keep the machine selection at one stable path so a non-default data
     # directory can still be discovered by the next no-argument launch.
@@ -413,6 +485,15 @@ try {
     } else {
         Write-Pass "$RuntimeProfileLabel Git 项目干净且无 remote"
     }
+    if ($L0Measurement -and $projectStatus.Count -gt 0) {
+        Fail 'L0 物理采集要求项目精确绑定到干净 revision；-AllowDirtyProject 不能放宽该证据边界。'
+    }
+    $projectRevision = (@(
+        Invoke-Git -Arguments @('-C', $ProjectPath, 'rev-parse', 'HEAD')
+    ))[0].Trim().ToLowerInvariant()
+    if ($projectRevision -notmatch '^[0-9a-f]{40}$') {
+        Fail '无法取得项目的精确 Git revision。'
+    }
     Write-Pass "项目注册与 P3 绑定一致（$ProjectId）"
 
     if ($SaveConfiguration) {
@@ -451,6 +532,38 @@ try {
     if ($speechBase.TrimEnd('/') -ne 'https://api.openai.com/v1') { Fail 'Demo 要求 LIVE_VOICE_SPEECH_API_BASE=https://api.openai.com/v1。' }
     if ($sttModel -ne 'gpt-4o-mini-transcribe-2025-12-15') { Fail 'STT 模型不是已验证的 Demo 模型。' }
     if ($ttsModel -ne 'gpt-4o-mini-tts-2025-12-15') { Fail 'TTS 模型不是已验证的 Demo 模型。' }
+    if ($L0Measurement) {
+        $agentConfigurationSha256 = (
+            Get-FileHash -LiteralPath $ConfigYamlPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        $l0ConfigurationFacts = [ordered]@{
+            runtime_profile = $RuntimeProfile
+            executor_profile = $ExecutorProfile
+            agent_configuration_sha256 = $agentConfigurationSha256
+            project = [ordered]@{
+                project_id = $ProjectId
+                revision = $projectRevision
+            }
+            speech = [ordered]@{
+                provider = 'openai'
+                api_base = $speechBase.TrimEnd('/')
+                stt_model = $sttModel
+                tts_model = $ttsModel
+                tts_voice = 'marin'
+            }
+        } | ConvertTo-Json -Compress -Depth 10
+        $l0ConfigurationHasher = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $l0ConfigurationBytes = [System.Text.Encoding]::UTF8.GetBytes(
+                $l0ConfigurationFacts
+            )
+            $l0ConfigurationSha256 = [System.BitConverter]::ToString(
+                $l0ConfigurationHasher.ComputeHash($l0ConfigurationBytes)
+            ).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $l0ConfigurationHasher.Dispose()
+        }
+    }
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_SPEECH_TTS_VOICE', 'marin', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED', '1', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED', '1', 'Process')
@@ -506,6 +619,18 @@ try {
     }
     foreach ($entry in $featureEnvironment.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+    }
+    if ($L0Measurement) {
+        [Environment]::SetEnvironmentVariable(
+            'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_DIR',
+            $L0MeasurementDirectory,
+            'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_RUN_LABELS_FILE',
+            $l0RunLabelsPath,
+            'Process'
+        )
     }
     foreach ($entry in $ExpectedPorts.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
@@ -714,8 +839,38 @@ try {
     $isolatedChromeProfile = $null
     if (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
-        $isolatedChromeProfile = Start-IsolatedChrome -ChromeExecutable $ChromeExecutable -Url "http://localhost:$FrontendPort"
+        $browserUrl = "http://localhost:$FrontendPort"
+        $remoteDebuggingPort = 0
+        if ($L0Measurement) {
+            $browserUrl += '?live_voice_l0_measurement=1'
+            $remoteDebuggingPort = $L0MeasurementPort
+        }
+        $isolatedChromeProfile = Start-IsolatedChrome `
+            -ChromeExecutable $ChromeExecutable `
+            -Url $browserUrl `
+            -RemoteDebuggingPort $remoteDebuggingPort
         Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
+        if ($L0Measurement) {
+            [ordered]@{
+                schema_version      = 'live-voice.l0-browser-session.v4'
+                source_head         = (& git rev-parse HEAD).Trim()
+                runtime_profile     = $RuntimeProfile
+                evidence_directory = $L0MeasurementDirectory
+                run_labels_file    = $l0RunLabelsPath
+                browser_endpoint   = "http://127.0.0.1:$L0MeasurementPort"
+                browser_page_origin = "http://localhost:$FrontendPort"
+                temperature_epoch_id = ([guid]::NewGuid().ToString('N'))
+                cold_sample_available = $true
+                environment_ref     = $L0EnvironmentRef
+                configuration_sha256 = $l0ConfigurationSha256
+                physical_evidence  = 'pending-user-run'
+                raw_audio_retained = $false
+                transcript_retained = $false
+            } | ConvertTo-Json | Set-Content `
+                -LiteralPath (Join-Path $L0MeasurementDirectory 'browser-session.json') `
+                -Encoding UTF8
+            Write-Pass "L0 自动采集端点已就绪：127.0.0.1:$L0MeasurementPort"
+        }
     }
 
     Write-Host "`n============================================================" -ForegroundColor Green
@@ -725,6 +880,12 @@ try {
     Write-Host "  Log: $logPath" -ForegroundColor DarkGray
     if ($null -ne $isolatedChromeProfile) {
         Write-Host "  Isolated Chrome: $isolatedChromeProfile" -ForegroundColor DarkGray
+    }
+    if ($L0Measurement) {
+        Write-Host "  L0 Evidence: $L0MeasurementDirectory" -ForegroundColor DarkGray
+        Write-Host "  Capture: & '$Python' scripts\live_voice\l0_browser_capture.py --session '$L0MeasurementDirectory\browser-session.json'" -ForegroundColor Yellow
+        Write-Host "  Cold shard: add --profile physical-formal-web-cold --temperature cold --successful-rounds 1 --scenario <case-id> --sample-index-start <unique-index>" -ForegroundColor Yellow
+        Write-Host "  Cold aggregate: use --aggregate-cold, repeat --evidence-directory <cold-epoch-dir>, and set --output <report.json>" -ForegroundColor Yellow
     }
     Write-Host '  首次进入页面仍需由浏览器授予麦克风权限并选择该项目。' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green
