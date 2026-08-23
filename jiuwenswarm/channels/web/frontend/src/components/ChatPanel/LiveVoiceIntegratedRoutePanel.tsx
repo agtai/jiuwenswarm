@@ -2034,7 +2034,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingUnifiedFinalRef.current = null;
     pendingForegroundPresentationRef.current = null;
     generationCaptureRef.current = null;
-    pendingGenerationInterruptRef.current = null;
+    // The interruption handle is deliberately kept: it is the only way the
+    // exact owner that issued the request can still settle it. Every consumer
+    // below matches on that owner, so a retired handle cannot bind a successor.
     interruptedProductResponsesRef.current.clear();
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || !hasDurableProductVoiceSession(sessionId)) {
@@ -2297,6 +2299,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           retainAck();
         })
         .catch(error => {
+          if (disposition.task_notification && playoutDeferredToSpeaker(error)) {
+            // Standing down is not a playout failure and must be decided before
+            // anything settles: settling the playout here would let cleanup
+            // acknowledge an announcement that was never spoken. The retained
+            // attempt is the only identity that matters here -- media start
+            // authority is not required to *not* play something.
+            if (pendingPresentationAttemptRef.current !== presentationAttempt) return;
+            // Release the active-response claim: while it stands the route
+            // counts as foreground-busy, and the arbitration that has to replay
+            // this announcement would defer forever.
+            if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+              activeVoiceResponseRef.current = null;
+            }
+            presentationAttempt.deferred_to_speaker = true;
+            terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
+            updateTerminalAnnouncementState('queued');
+            return;
+          }
           presentationAttempt.markPlayoutSettled();
           if (disposition.task_notification && disposition.ack.surface === 'audio') {
             if (!isCurrentPresentationAttempt()) return;
@@ -2333,17 +2353,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             binding: presentationBinding,
             response: disposition.response,
           });
-          if (disposition.task_notification && playoutDeferredToSpeaker(error)) {
-            // The speaker is mid-utterance. Rebuilding P1 to retry would throw
-            // away the words they are still saying, and this is not a playout
-            // failure at all: the announcement was never handed to TTS. Retain
-            // it exactly as delivered and let arbitration replay it once the
-            // speaker settles.
-            presentationAttempt.deferred_to_speaker = true;
-            terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
-            updateTerminalAnnouncementState('queued');
-            return;
-          }
           if (disposition.task_notification) {
             setProductTextReason(reason);
             setProductTextStatus('failed');
@@ -2433,7 +2442,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
     }
     const pendingPresentation = pendingPresentationAttemptRef.current;
-    if (pendingPresentation?.owner === owner) {
+    if (pendingPresentation?.owner === owner && pendingPresentation.deferred_to_speaker === true) {
+      // It stood down for a speaker and was never handed to TTS, so it has no
+      // presentation to acknowledge. Retire it with this activation and let the
+      // server-owned unread/redelivery path own it instead of inventing an ACK.
+      pendingPresentation.markPlayoutSettled();
+      pendingPresentationAttemptRef.current = null;
+      setPendingPresentationAck(null);
+      updateTerminalAnnouncementState('idle');
+    } else if (pendingPresentation?.owner === owner) {
       await pendingPresentation.playoutSettlement;
       // Normal playout settlement and P2 recovery share one exact retained
       // operation. A failed Task AUDIO playout reports failure; it must never
@@ -4161,7 +4178,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingPresentationAck !== null ||
         pendingPresentationAttemptRef.current !== null ||
         pendingBargeInRef.current !== null ||
-        pendingGenerationInterruptRef.current !== null ||
+        pendingGenerationInterruptRef.current?.owner === owner ||
         owner.hasPendingSubmission() ||
         owner.hasPendingPresentationAck() ||
         owner.hasPendingPresentationFailure() ||
@@ -4545,6 +4562,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       Boolean(activationOwnerRef.current?.hasPendingPresentationAck()) ||
       Boolean(activationOwnerRef.current?.hasPendingPresentationFailure()) ||
       Boolean(activationOwnerRef.current?.hasPendingBargeIn()) ||
+      pendingGenerationInterruptRef.current?.owner === activationOwnerRef.current ||
       Boolean(activationOwnerRef.current?.hasPendingGenerationInterrupt());
     const isCurrentBinding = () => {
       const activation = activationOwnerRef.current?.snapshot();
@@ -5218,11 +5236,25 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopEnabledRef.current &&
       voiceLoopGenerationRef.current === loopGeneration;
     pendingGenerationInterruptRef.current = pending;
-    // Recorded before the request leaves, so an answer that crosses it on the
-    // wire is refused by identity even if the fence has not settled yet.
+    // Optimistic: recorded before the request leaves so an answer that crosses
+    // it on the wire is refused by identity. It is only a guess that the server
+    // will fence anything, and it is withdrawn below whenever the server says
+    // it did not -- an answer the server left intact is a legitimate answer.
     retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, input.response_id);
+    const withdrawOptimisticRefusal = () => {
+      interruptedProductResponsesRef.current.delete(input.response_id);
+    };
     try {
-      await p2Owner.interruptGeneration(input);
+      const outcome = await p2Owner.interruptGeneration(input);
+      if (recordValue(outcome)?.fence_status !== 'fenced') {
+        // ALREADY_SETTLED: the target finished or was replaced on its own, so
+        // nothing was fenced and nothing was cancelled. Its presentation is
+        // still valid, so withdraw the optimistic refusal and leave the
+        // foreground exactly as it was -- that answer is still coming and the
+        // route must stay able to receive, speak and acknowledge it.
+        withdrawOptimisticRefusal();
+        return;
+      }
       // The fenced answer can no longer render, speak, be acknowledged or be
       // written to history, so it stops owning the foreground. The utterance
       // still being captured becomes an ordinary next turn at EOT.
@@ -5239,6 +5271,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setProductTextReason(null);
       }
     } catch (error) {
+      if (isDefinitiveProductOperationError(error)) {
+        // The server definitively refused, so it fenced nothing: the answer is
+        // still live and must not be silently dropped by our optimistic guess.
+        withdrawOptimisticRefusal();
+      }
       if (ownsInterruptionOutcome()) {
         setProductTextReason(stableProductTextReason(error, 'PRODUCT_GENERATION_INTERRUPT_RECOVERY_REQUIRED'));
         setProductTextStatus('failed');
@@ -5339,7 +5376,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationBinding === null ||
       pendingProductTurnRef.current !== null ||
       pendingBargeInRef.current !== null ||
-      pendingGenerationInterruptRef.current !== null ||
+      pendingGenerationInterruptRef.current?.owner === owner ||
       owner.hasPendingSubmission() ||
       owner.hasPendingPresentationAck() ||
       owner.hasPendingPresentationFailure() ||
@@ -6213,7 +6250,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     unifiedInputOwnerRef.current?.hasPending() ||
     pendingPresentationAttemptRef.current ||
     pendingBargeInRef.current ||
-    pendingGenerationInterruptRef.current ||
+    pendingGenerationInterruptRef.current?.owner === activationOwnerRef.current ||
     activationOwnerRef.current?.hasPendingSubmission() ||
     activationOwnerRef.current?.hasPendingPresentationAck() ||
     activationOwnerRef.current?.hasPendingPresentationFailure() ||
@@ -6229,7 +6266,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
-      pendingGenerationInterruptRef.current ||
+      pendingGenerationInterruptRef.current?.owner === owner ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
@@ -6251,7 +6288,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
-      pendingGenerationInterruptRef.current ||
+      pendingGenerationInterruptRef.current?.owner === owner ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||

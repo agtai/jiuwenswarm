@@ -979,3 +979,50 @@ async def test_interrupt_after_barge_in_still_stops_the_running_round() -> None:
     lower.gates[0].set()
     lower.tails[0].set()
     await shutdown(current)
+
+
+@pytest.mark.asyncio
+async def test_interruption_seam_exposes_no_cancellation_scope_argument() -> None:
+    """The absence of a scope parameter is the guarantee, so assert it directly.
+
+    Every layer down to the wire refuses a caller-supplied cancellation scope:
+    the runtime takes no such argument, and the product handler rejects the key
+    outright rather than ignoring it.
+    """
+
+    import inspect
+
+    from jiuwenswarm.server.live_voice.product_composition_registry import (
+        AgentServerProductCompositionRegistry,
+    )
+    from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+        P2ActivationLease,
+    )
+
+    for owner in (
+        AgentConversationRuntime.interrupt_generation,
+        P2ActivationLease.interrupt_generation,
+        AgentServerProductCompositionRegistry.handle_p2_interrupt_generation,
+    ):
+        names = set(inspect.signature(owner).parameters)
+        assert not {
+            "scope",
+            "cancel_scope",
+            "cancellation_scope",
+            "cancel_response",
+        } & names, f"{owner.__qualname__} exposes a cancellation scope"
+
+    source = inspect.getsource(
+        AgentConversationRuntime._generation_round_cancel_command
+    )
+    assert "CancelScope.ROUND_CANCEL.value" in source
+    assert "TASK_CANCEL" not in source
+
+    # The product handler declares an exact parameter set; a client-supplied
+    # scope is refused rather than silently dropped.
+    handler_source = inspect.getsource(
+        AgentServerProductCompositionRegistry.handle_p2_interrupt_generation
+    )
+    allowed = handler_source.split("frozenset(", 1)[1].split(")", 1)[0]
+    assert "cancel_scope" not in allowed
+    assert "cancel_response" not in allowed

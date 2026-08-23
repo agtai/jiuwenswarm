@@ -11176,6 +11176,33 @@ function generationInterruptResponder(options) {
     if (method === 'live_voice.composition.p2.interrupt_generation') {
       state.interruptCalls.push({ ...params });
       if (state.interruptGate) await state.interruptGate;
+      if (state.interruptAlreadySettled) {
+        return {
+          request_id: options_.requestId,
+          ok: true,
+          error: null,
+          result: {
+            status: 'generation_interrupted',
+            session_id: params.session_id,
+            correlation_id: params.correlation_id,
+            interaction_id: params.interaction_id,
+            activation_id: params.activation_id,
+            activation_generation: params.activation_generation,
+            action_id: params.action_id,
+            response_id: params.response_id,
+            response_generation: params.response_generation,
+            cancel_scope: 'round.cancel',
+            fence_status: 'already_settled',
+            fence_reason: 'RESPONSE_ALREADY_TERMINAL',
+            round_id: null,
+            round_cancel_accepted: null,
+            round_cancel_reason: 'GENERATION_ALREADY_SETTLED',
+            applied: false,
+            replayed: false,
+            effect_ids: [],
+          },
+        };
+      }
       if (state.interruptRetriableOnce) {
         state.interruptRetriableOnce = false;
         throw Object.assign(new Error('generation interruption transport timed out'), {
@@ -12008,6 +12035,161 @@ test('mounted Session switch during generation-time listening abandons it withou
     // notification poll alive; a retired Session must not keep that privilege.
     assert.equal(retiredPolls(), retiredPollsAfterSwitch, 'a retired Session kept polling notifications');
     assert.equal(responder.heldResponses.size, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted Exit never acknowledges a Task announcement that stood down unspoken', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-exit-deferred-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '算了，先告诉我现在几点。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '现在是下午三点。',
+  });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+    });
+    const taskResponse = {
+      interaction_id: responder.submits[0].params.interaction_id,
+      response_id: 'mounted-generation-exit-deferred-task',
+      response_generation: 92,
+    };
+    await act(async () => {
+      responder.publishAgentAnswer(taskResponse, '后台任务已完成，结果已经准备好。', responder.submits[0].params, 'server.task_notification');
+      await new Promise(resolve => setTimeout(resolve, 120));
+    });
+    const taskAcks = () =>
+      responder.calls.filter(
+        call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === taskResponse.response_id,
+      ).length;
+    // It stood down rather than talking over the speaker.
+    assert.equal(
+      responder.calls.filter(
+        call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === taskResponse.response_id,
+      ).length,
+      0,
+      'the announcement was spoken over a live speaker',
+    );
+    assert.equal(taskAcks(), 0);
+
+    // Exit before the speaker finishes. The announcement was never handed to
+    // TTS, so nothing may acknowledge it on the way out: an ACK would tell the
+    // server it was presented when the user never heard a word of it.
+    const activationsBeforeExit = responder.calls.filter(call => call.method === 'live_voice.composition.p2.activate').length;
+    await act(async () => {
+      await controlRef.current.close();
+      // Exit retires the route through a successor activation, and that
+      // recovery is exactly where retained operations get settled. Wait for it
+      // rather than for a fixed delay, or the settlement never runs.
+      try {
+        await waitForMounted(
+          () =>
+            responder.calls.filter(call => call.method === 'live_voice.composition.p2.activate').length >
+            activationsBeforeExit,
+          'pending',
+          1_500,
+        );
+      } catch {
+        // No successor activation is also an acceptable Exit shape; the ACK
+        // assertion below is what this case owns.
+      }
+      await new Promise(resolve => setTimeout(resolve, 120));
+    });
+    assert.equal(
+      taskAcks(),
+      0,
+      `Exit acknowledged a Task announcement that was deferred and never spoken; calls=${responder.calls
+        .map(call => call.method.replace('live_voice.', ''))
+        .join(',')}`,
+    );
+    assert.equal(
+      responder.calls.filter(
+        call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === taskResponse.response_id,
+      ).length,
+      0,
+      'the deferred announcement was never spoken',
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted already-settled interruption leaves its answer presentable', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-already-settled-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前，有一座山。',
+  });
+  // The server fenced nothing because the answer had already finished. Its
+  // presentation is therefore still legitimate and must not be dropped by the
+  // browser guess that an interruption would land.
+  responder.interruptAlreadySettled = true;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    const settledResponse = responder.submits[0].response;
+    const closures = () =>
+      responder.calls.filter(
+        call =>
+          ['live_voice.composition.p2.presentation.ack', 'live_voice.composition.p2.presentation.failed'].includes(call.method) &&
+          call.params.response_id === settledResponse.response_id,
+      ).length;
+    await act(async () => {
+      responder.releaseHeldAnswer(utterances[0]);
+      // Nothing was fenced, so this answer is still the route's business: it
+      // must reach a definite presentation outcome rather than vanish because
+      // the browser guessed an interruption would land.
+      try {
+        await waitForMounted(() => closures() === 1, 'pending', 1_500);
+      } catch {
+        assert.fail(
+          `an already-settled answer was silently dropped instead of closed; calls=${responder.calls
+            .map(call => call.method.replace('live_voice.', ''))
+            .join(',')}`,
+        );
+      }
+    });
+    assert.equal(closures(), 1);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
