@@ -9,15 +9,18 @@ import {
   ContractViolation,
   EventSequenceTracker,
   IdentityRegistry,
+  MAX_SAFE_INTEGER,
   ResponseFence,
   TurnCommitLedger,
   canonicalJson,
   canonicalJsonBytes,
   classifyContract,
   commandFingerprint,
+  buildTaskUnreadEventsAck,
   defaultBargeInScopes,
   dispatchCancel,
   dispatchCommittedInput,
+  failureResult,
   parseCapabilityDescriptor,
   parseCommandEnvelope,
   parseConnectionEpochRef,
@@ -27,6 +30,7 @@ import {
   parseQueryEnvelope,
   parseResultEnvelope,
   parseScopeRef,
+  parseTaskUnreadEventsResult,
   parseTurnCommit,
   parseV2Envelope,
   parseWorkProgressEventV2,
@@ -42,6 +46,210 @@ function load(name) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+const wave2CommandCases = [
+  {
+    commandType: 'task.update',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      instruction: 'Use the revised plan.',
+      constraints: [],
+    },
+    changedField: 'instruction',
+    changedValue: 'Use the final revised plan.',
+  },
+  {
+    commandType: 'task.provide_input',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      responds_to_event_id: 'event-decision-7',
+      text: 'Choose the safe option.',
+    },
+    changedField: 'text',
+    changedValue: 'Choose the audited option.',
+  },
+  {
+    commandType: 'task.pause',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      reason: 'Wait for review.',
+    },
+    changedField: 'reason',
+    changedValue: 'Wait for approval.',
+  },
+  {
+    commandType: 'task.resume',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      reason: 'Review completed.',
+    },
+    changedField: 'reason',
+    changedValue: 'Approval completed.',
+  },
+  {
+    commandType: 'task.reprioritize',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      priority: 'normal',
+      reason: null,
+    },
+    changedField: 'priority',
+    changedValue: 'urgent',
+  },
+  {
+    commandType: 'task.create_successor',
+    payload: {
+      expected_predecessor_revision_number: 2,
+      expected_predecessor_event_head: 7,
+      predecessor_terminal_event_id: 'event-terminal-7',
+      predecessor_outcome: 'completed',
+      predecessor_result_sha256: 'a'.repeat(64),
+      name: 'Continue inventory check',
+      instruction: 'Verify the remaining inventory.',
+      constraints: ['Do not modify unrelated files.'],
+      executor_id: 'project-code',
+      side_effect_class: 'project_mutation',
+      attributes: {
+        model_config_version: 'v1',
+        model_identity: 'agent-1',
+      },
+    },
+    changedField: 'name',
+    changedValue: 'Continue audited inventory check',
+  },
+  {
+    commandType: 'task.ack_events',
+    payload: {
+      presentation_class: 'text',
+      acked_through_seq: 7,
+      acked_event_id: 'event-7',
+      expected_event_head: 9,
+    },
+    changedField: 'acked_through_seq',
+    changedValue: 8,
+  },
+];
+
+function wave2CommandRaw(commandType, payload) {
+  const fixture = load('critical_kernel.valid.json');
+  const suffix = commandType.replaceAll('.', '-').replaceAll('_', '-');
+  return {
+    ...clone(fixture.command),
+    request_id: `request-${suffix}`,
+    command_id: `command-${suffix}`,
+    command_type: commandType,
+    target_ref: { kind: 'task', id: 'task-1' },
+    required_capabilities: [commandType],
+    payload: clone(payload),
+    extensions: {},
+  };
+}
+
+function wave2QueryRaw(payload) {
+  const fixture = load('critical_kernel.valid.json');
+  return {
+    ...clone(fixture.query),
+    request_id: 'request-unread-events',
+    query_type: 'task.unread_events',
+    target_ref: { kind: 'task', id: 'task-1' },
+    required_capabilities: ['task.unread_events'],
+    payload: clone(payload),
+    extensions: {},
+  };
+}
+
+function taskUnreadEventRaw(owner, options = {}) {
+  const seq = options.seq ?? 0;
+  const state = options.state ?? 'accepted';
+  return {
+    event_id: options.event_id ?? `event-${seq}`,
+    task_id: options.task_id ?? owner.target_ref.id,
+    attempt_id: options.attempt_id ?? 'attempt-1',
+    scope: {
+      ...clone(owner.scope),
+      session_id: options.session_id ?? 'session-at-event-time',
+      ...(options.scope ?? {}),
+    },
+    seq,
+    event_type: options.event_type ?? `task.${state}`,
+    state,
+    outcome: options.outcome ?? (state === 'terminal' ? 'completed' : null),
+    producer: options.producer ?? 'task_core',
+    source_event_id: options.source_event_id ?? null,
+    causation_id: options.causation_id ?? `cause-${seq}`,
+    correlation_id: options.correlation_id ?? 'task-correlation-1',
+    occurred_at: options.occurred_at ?? `2026-08-19T12:00:0${seq}Z`,
+    details: options.details ?? {},
+  };
+}
+
+function taskUnreadPageRaw(owner, options = {}) {
+  const watermark = options.watermark ?? -1;
+  const events = options.events ?? [taskUnreadEventRaw(owner, { seq: watermark + 1 })];
+  const headSeq = options.head_seq ?? events.at(-1)?.seq ?? watermark;
+  const hasMore = options.has_more ?? false;
+  return {
+    task_id: options.task_id ?? owner.target_ref.id,
+    presentation_class: options.presentation_class ?? owner.payload.presentation_class,
+    watermark,
+    acked_event_id: options.acked_event_id ?? (watermark === -1 ? null : `event-${watermark}`),
+    head_seq: headSeq,
+    events,
+    next_after_seq: options.next_after_seq ?? (hasMore ? (events.at(-1)?.seq ?? null) : null),
+    has_more: hasMore,
+  };
+}
+
+function taskUnreadResultRaw(owner, page = taskUnreadPageRaw(owner)) {
+  return {
+    contract_version: owner.contract_version,
+    request_id: owner.request_id,
+    command_id: null,
+    ok: true,
+    result: page,
+    error: null,
+    observed_at: '2026-08-19T12:01:00Z',
+    extensions: {},
+  };
+}
+
+function taskAckSeed(overrides = {}) {
+  return {
+    request_id: 'request-presentation-ack-1',
+    command_id: 'command-presentation-ack-1',
+    issued_at: '2026-08-19T12:01:01Z',
+    correlation_id: 'presentation-correlation-1',
+    causation_id: 'presentation-ack-1',
+    origin: { kind: 'structured', turn_id: null, commit_id: null },
+    ...overrides,
+  };
+}
+
+function resultError(code) {
+  return {
+    code,
+    reason: `TEST_${code}`,
+    message: 'sanitized command result',
+    retriable: code === 'TIMEOUT',
+    correlation_id: 'correlation-1',
+    details: {},
+  };
+}
+
+function commandResultExtension(disposition) {
+  return {
+    'live_voice.command': {
+      disposition,
+      admission_event_id: 'event-admission-1',
+      settlement_event_id: 'event-settlement-1',
+    },
+  };
 }
 
 function registry(fixture) {
@@ -93,6 +301,20 @@ test('shared valid fixture round-trips with immutable snapshots', () => {
   assert.throws(() => {
     command.payload.name = 'forbidden';
   }, TypeError);
+});
+
+test('task.result is an exact core Task query', () => {
+  const raw = clone(load('critical_kernel.valid.json').query);
+  raw.request_id = 'request-result';
+  raw.query_type = 'task.result';
+  raw.required_capabilities = ['task.result'];
+  raw.payload = {};
+
+  const query = parseQueryEnvelope(raw);
+
+  assert.equal(query.query_type, 'task.result');
+  assert.deepEqual(query.target_ref, { kind: 'task', id: raw.target_ref.id });
+  assert.deepEqual(query.required_capabilities, ['task.result']);
 });
 
 test('shared canonical JSON cases have exact bytes', () => {
@@ -881,6 +1103,708 @@ test('task.retry accepts only exact server-derived bounded predecessor facts', (
     { ...retry.payload, context: {} },
   ]) {
     assert.throws(() => parseCommandEnvelope({ ...retry, payload }), ContractViolation);
+  }
+});
+
+test('task.adjust accepts only the exact bounded adjustment payload', () => {
+  const fixture = load('critical_kernel.valid.json');
+  const adjust = clone(fixture.command);
+  adjust.command_type = 'task.adjust';
+  adjust.target_ref = { kind: 'task', id: 'task-1' };
+  adjust.required_capabilities = ['task.adjust'];
+  adjust.payload = { adjustment: 'Keep the introduction to one sentence.' };
+
+  const parsed = parseCommandEnvelope(adjust);
+  assert.deepEqual(parsed.payload, adjust.payload);
+  assert.equal(Object.isFrozen(parsed.payload), true);
+
+  for (const [payload, reason] of [
+    [{}, 'MISSING_REQUIRED_FIELD'],
+    [{ adjustment: '' }, 'INVALID_REQUIRED_TEXT'],
+    [{ adjustment: 'valid', task_id: 'task-other' }, 'UNKNOWN_FIELD'],
+    [{ adjustment: 'invalid\0content' }, 'INVALID_TASK_ADJUSTMENT'],
+    [{ adjustment: 'a'.repeat(4_097) }, 'INVALID_TASK_ADJUSTMENT'],
+  ]) {
+    assert.throws(
+      () => parseCommandEnvelope({ ...adjust, payload }),
+      error => error instanceof ContractViolation && error.error.reason === reason
+    );
+  }
+});
+
+test('Wave 2 commands close task payloads, capabilities, and fingerprints', () => {
+  for (const { commandType, payload, changedField, changedValue } of wave2CommandCases) {
+    const raw = wave2CommandRaw(commandType, payload);
+    const command = parseCommandEnvelope(raw);
+    assert.deepEqual(command.target_ref, { kind: 'task', id: 'task-1' });
+    assert.deepEqual(command.required_capabilities, [commandType]);
+    assert.deepEqual(command.payload, payload);
+
+    const replayRaw = clone(raw);
+    replayRaw.request_id = `${raw.request_id}-replay`;
+    assert.deepEqual(
+      [...commandFingerprint(parseCommandEnvelope(replayRaw))],
+      [...commandFingerprint(command)],
+    );
+
+    const changed = clone(raw);
+    changed.payload[changedField] = changedValue;
+    assert.notDeepEqual(
+      [...commandFingerprint(parseCommandEnvelope(changed))],
+      [...commandFingerprint(command)],
+    );
+
+    const unknown = clone(raw);
+    unknown.payload.unknown = true;
+    assert.throws(
+      () => parseCommandEnvelope(unknown),
+      error => error instanceof ContractViolation && error.error.reason === 'UNKNOWN_FIELD',
+    );
+
+    const wrongKind = clone(raw);
+    wrongKind.target_ref = { kind: 'attempt', id: 'attempt-1' };
+    assert.throws(
+      () => parseCommandEnvelope(wrongKind),
+      error => error instanceof ContractViolation && error.error.reason === 'IDENTITY_KIND_MISMATCH',
+    );
+
+    for (const capabilities of [[], [commandType, 'task.result']]) {
+      const wrongCapability = clone(raw);
+      wrongCapability.required_capabilities = capabilities;
+      assert.throws(
+        () => parseCommandEnvelope(wrongCapability),
+        error => error instanceof ContractViolation && error.error.reason === 'REQUIRED_CAPABILITY_MISMATCH',
+      );
+    }
+  }
+});
+
+test('Wave 2 update, input, reason, and constraints enforce UTF-8 bounds', () => {
+  const updatePayload = clone(wave2CommandCases[0].payload);
+  updatePayload.instruction = `${'界'.repeat(1_365)}a`;
+  assert.equal(new TextEncoder().encode(updatePayload.instruction).byteLength, 4_096);
+  assert.equal(
+    parseCommandEnvelope(wave2CommandRaw('task.update', updatePayload)).payload.instruction,
+    updatePayload.instruction,
+  );
+
+  const clearPayload = { ...updatePayload, instruction: null, constraints: [] };
+  assert.deepEqual(
+    parseCommandEnvelope(wave2CommandRaw('task.update', clearPayload)).payload,
+    clearPayload,
+  );
+
+  const invalidUpdates = [
+    { ...clearPayload, constraints: null },
+    { ...updatePayload, instruction: '界'.repeat(1_366) },
+    { ...updatePayload, instruction: 'contains\0nul' },
+    { ...updatePayload, instruction: '\ud800' },
+    { ...updatePayload, constraints: Array.from({ length: 17 }, (_, index) => `constraint-${index}`) },
+    { ...updatePayload, constraints: ['duplicate', 'duplicate'] },
+    { ...updatePayload, constraints: [''] },
+    { ...updatePayload, constraints: ['contains\0nul'] },
+    { ...updatePayload, constraints: ['界'.repeat(342)] },
+    {
+      ...updatePayload,
+      constraints: ['a'.repeat(1_024), 'b'.repeat(1_024), 'c'.repeat(1_024), 'd'.repeat(1_023), 'ee'],
+    },
+  ];
+  for (const payload of invalidUpdates) {
+    assert.throws(() => parseCommandEnvelope(wave2CommandRaw('task.update', payload)), ContractViolation);
+  }
+
+  const exactConstraints = {
+    ...updatePayload,
+    constraints: ['a'.repeat(1_024), 'b'.repeat(1_024), 'c'.repeat(1_024), 'd'.repeat(1_024)],
+  };
+  assert.deepEqual(
+    parseCommandEnvelope(wave2CommandRaw('task.update', exactConstraints)).payload.constraints,
+    exactConstraints.constraints,
+  );
+  parseCommandEnvelope(wave2CommandRaw('task.update', {
+    ...updatePayload,
+    constraints: Array.from({ length: 16 }, (_, index) => `constraint-${index}`),
+  }));
+
+  const inputPayload = clone(wave2CommandCases[1].payload);
+  inputPayload.text = `${'界'.repeat(1_365)}a`;
+  parseCommandEnvelope(wave2CommandRaw('task.provide_input', inputPayload));
+  for (const invalidText of ['界'.repeat(1_366), 'contains\0nul', '\ud800']) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.provide_input', { ...inputPayload, text: invalidText })),
+      ContractViolation,
+    );
+  }
+
+  for (const commandType of ['task.pause', 'task.resume', 'task.reprioritize']) {
+    const reasonPayload = clone(wave2CommandCases.find(item => item.commandType === commandType).payload);
+    reasonPayload.reason = `${'界'.repeat(341)}a`;
+    parseCommandEnvelope(wave2CommandRaw(commandType, reasonPayload));
+    reasonPayload.reason = null;
+    parseCommandEnvelope(wave2CommandRaw(commandType, reasonPayload));
+    for (const invalidReason of ['界'.repeat(342), 'contains\0nul', '\ud800']) {
+      assert.throws(
+        () => parseCommandEnvelope(wave2CommandRaw(commandType, { ...reasonPayload, reason: invalidReason })),
+        ContractViolation,
+      );
+    }
+  }
+});
+
+test('Wave 2 unsigned integers, enums, digest, and successor spec are closed', () => {
+  const updatePayload = { ...clone(wave2CommandCases[0].payload), expected_event_head: MAX_SAFE_INTEGER };
+  parseCommandEnvelope(wave2CommandRaw('task.update', updatePayload));
+  for (const invalidHead of [-1, true, MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.update', { ...updatePayload, expected_event_head: invalidHead })),
+      ContractViolation,
+    );
+  }
+
+  const reprioritize = clone(wave2CommandCases[4].payload);
+  for (const priority of ['low', 'normal', 'high', 'urgent']) {
+    assert.equal(
+      parseCommandEnvelope(wave2CommandRaw('task.reprioritize', { ...reprioritize, priority })).payload.priority,
+      priority,
+    );
+  }
+  for (const priority of ['critical', 1, null]) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.reprioritize', { ...reprioritize, priority })),
+      ContractViolation,
+    );
+  }
+
+  const successor = {
+    ...clone(wave2CommandCases[5].payload),
+    expected_predecessor_revision_number: MAX_SAFE_INTEGER,
+    expected_predecessor_event_head: MAX_SAFE_INTEGER,
+  };
+  for (const sideEffectClass of ['read_only', 'project_mutation']) {
+    parseCommandEnvelope(wave2CommandRaw('task.create_successor', {
+      ...successor,
+      side_effect_class: sideEffectClass,
+    }));
+  }
+
+  const invalidSuccessors = [
+    { ...successor, expected_predecessor_revision_number: -1 },
+    { ...successor, expected_predecessor_event_head: MAX_SAFE_INTEGER + 1 },
+    { ...successor, predecessor_result_sha256: 'A'.repeat(64) },
+    { ...successor, predecessor_result_sha256: 'a'.repeat(63) },
+    { ...successor, predecessor_result_sha256: null },
+    { ...successor, side_effect_class: 'network_mutation' },
+    { ...successor, instruction: '界'.repeat(1_366) },
+    { ...successor, constraints: ['duplicate', 'duplicate'] },
+    { ...successor, attributes: [] },
+    { ...successor, attributes: { model_identity: 7 } },
+    { ...successor, attributes: { '': 'agent-1' } },
+  ];
+  for (const payload of invalidSuccessors) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.create_successor', payload)),
+      ContractViolation,
+    );
+  }
+
+  for (const outcome of ['failed', 'cancelled', 'interrupted', 'unknown']) {
+    const withoutResult = {
+      ...successor,
+      predecessor_outcome: outcome,
+      predecessor_result_sha256: null,
+    };
+    const raw = wave2CommandRaw('task.create_successor', withoutResult);
+    const command = parseCommandEnvelope(raw);
+    if (outcome === 'unknown') {
+      const replayRaw = clone(raw);
+      replayRaw.request_id = 'request-successor-unknown-replay';
+      assert.deepEqual(
+        [...commandFingerprint(parseCommandEnvelope(replayRaw))],
+        [...commandFingerprint(command)],
+      );
+      assert.equal(command.payload.predecessor_outcome, 'unknown');
+      assert.equal(command.payload.predecessor_result_sha256, null);
+    }
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.create_successor', {
+        ...withoutResult,
+        predecessor_result_sha256: 'b'.repeat(64),
+      })),
+      ContractViolation,
+    );
+  }
+});
+
+test('unread and ACK payloads close presentation class and safe integers', () => {
+  for (const presentationClass of ['text', 'voice']) {
+    for (const limit of [1, 500]) {
+      const raw = wave2QueryRaw({ presentation_class: presentationClass, limit });
+      const query = parseQueryEnvelope(raw);
+      assert.deepEqual(query.target_ref, { kind: 'task', id: 'task-1' });
+      assert.deepEqual(query.required_capabilities, ['task.unread_events']);
+      assert.deepEqual(query.payload, raw.payload);
+    }
+  }
+
+  for (const payload of [
+    { presentation_class: 'browser', limit: 10 },
+    { presentation_class: 'text', limit: 0 },
+    { presentation_class: 'text', limit: 501 },
+    { presentation_class: 'text', limit: true },
+    { presentation_class: 'text', limit: 10, cursor: 3 },
+  ]) {
+    assert.throws(() => parseQueryEnvelope(wave2QueryRaw(payload)), ContractViolation);
+  }
+
+  const wrongCapability = wave2QueryRaw({ presentation_class: 'text', limit: 10 });
+  wrongCapability.required_capabilities = [];
+  assert.throws(
+    () => parseQueryEnvelope(wrongCapability),
+    error => error instanceof ContractViolation && error.error.reason === 'REQUIRED_CAPABILITY_MISMATCH',
+  );
+  const wrongKind = wave2QueryRaw({ presentation_class: 'text', limit: 10 });
+  wrongKind.target_ref = { kind: 'attempt', id: 'attempt-1' };
+  assert.throws(
+    () => parseQueryEnvelope(wrongKind),
+    error => error instanceof ContractViolation && error.error.reason === 'IDENTITY_KIND_MISMATCH',
+  );
+
+  const ack = {
+    ...clone(wave2CommandCases[6].payload),
+    acked_through_seq: MAX_SAFE_INTEGER,
+    expected_event_head: MAX_SAFE_INTEGER,
+  };
+  for (const presentationClass of ['text', 'voice']) {
+    parseCommandEnvelope(wave2CommandRaw('task.ack_events', { ...ack, presentation_class: presentationClass }));
+  }
+  for (const [field, value] of [
+    ['presentation_class', 'browser'],
+    ['acked_through_seq', -1],
+    ['acked_through_seq', true],
+    ['expected_event_head', MAX_SAFE_INTEGER + 1],
+    ['acked_event_id', ''],
+  ]) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.ack_events', { ...ack, [field]: value })),
+      ContractViolation,
+    );
+  }
+});
+
+test('unread result parser binds one authenticated consumer page and serializes its exact ACK prefix candidate', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 4 }));
+  const events = [
+    taskUnreadEventRaw(owner, {
+      seq: 0,
+      event_type: 'task.accepted',
+      state: 'accepted',
+      details: { prior_cursor: -1 },
+    }),
+    taskUnreadEventRaw(owner, { seq: 1, event_type: 'attempt.running', state: 'running' }),
+    taskUnreadEventRaw(owner, {
+      seq: 2,
+      event_type: 'attempt.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+    }),
+    taskUnreadEventRaw(owner, {
+      seq: 3,
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+    }),
+  ];
+  const raw = taskUnreadResultRaw(owner, taskUnreadPageRaw(owner, { events, head_seq: 3 }));
+
+  const parsed = parseTaskUnreadEventsResult(raw, owner);
+  const ack = buildTaskUnreadEventsAck(parsed, owner, taskAckSeed());
+
+  assert.equal(parsed.result.task_id, 'task-1');
+  assert.equal(parsed.result.presentation_class, 'text');
+  assert.deepEqual(
+    parsed.result.events.map(event => event.seq),
+    [0, 1, 2, 3],
+  );
+  assert.equal(parsed.result.events[0].scope.session_id, 'session-at-event-time');
+  assert.equal(Object.isFrozen(parsed), true);
+  assert.equal(Object.isFrozen(parsed.result), true);
+  assert.equal(Object.isFrozen(parsed.result.events), true);
+  assert.equal(Object.isFrozen(parsed.result.events[0].details), true);
+  assert.deepEqual(ack, {
+    contract_version: 'live-voice.contract.v2',
+    request_id: 'request-presentation-ack-1',
+    command_id: 'command-presentation-ack-1',
+    command_type: 'task.ack_events',
+    issued_at: '2026-08-19T12:01:01Z',
+    scope: owner.scope,
+    correlation_id: 'presentation-correlation-1',
+    causation_id: 'presentation-ack-1',
+    origin: { kind: 'structured', turn_id: null, commit_id: null },
+    target_ref: { kind: 'task', id: 'task-1' },
+    context_refs: owner.context_refs,
+    required_capabilities: ['task.ack_events'],
+    payload: {
+      presentation_class: 'text',
+      acked_through_seq: 3,
+      acked_event_id: 'event-3',
+      expected_event_head: 3,
+    },
+    extensions: {},
+  });
+  assert.equal(Object.isFrozen(ack), true);
+  assert.equal(Object.isFrozen(ack.payload), true);
+});
+
+test('unread result parser closes result, page, event, scope, class, and integer boundaries', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 2 }));
+  const invalid = [];
+  const add = mutate => {
+    const raw = taskUnreadResultRaw(owner);
+    mutate(raw);
+    invalid.push(raw);
+  };
+  add(raw => {
+    raw.contract_version = 'live-voice.contract.v1';
+  });
+  add(raw => {
+    raw.request_id = 'request-foreign';
+  });
+  add(raw => {
+    raw.command_id = 'command-forged';
+  });
+  add(raw => {
+    raw.extra = true;
+  });
+  add(raw => {
+    raw.result.extra = true;
+  });
+  add(raw => {
+    raw.result.events[0].extra = true;
+  });
+  add(raw => {
+    raw.result.task_id = 'task-foreign';
+  });
+  add(raw => {
+    raw.result.presentation_class = 'voice';
+  });
+  add(raw => {
+    raw.result.events[0].task_id = 'task-foreign';
+  });
+  add(raw => {
+    raw.result.events[0].attempt_id = '';
+  });
+  add(raw => {
+    raw.result.events[0].event_id = '';
+  });
+  add(raw => {
+    raw.result.events[0].scope.subject_id = 'subject-foreign';
+  });
+  add(raw => {
+    raw.result.events[0].scope.project_id = 'project-foreign';
+  });
+  add(raw => {
+    raw.result.events[0].scope.assurance = 'request_asserted';
+  });
+  add(raw => {
+    raw.result.events[0].seq = true;
+  });
+  add(raw => {
+    raw.result.events[0].seq = MAX_SAFE_INTEGER + 1;
+  });
+  add(raw => {
+    raw.result.watermark = -2;
+  });
+  add(raw => {
+    raw.result.head_seq = 0.5;
+  });
+  add(raw => {
+    raw.result.has_more = 1;
+  });
+  add(raw => {
+    raw.result.events[0].state = 'queued';
+  });
+  add(raw => {
+    raw.result.events[0].outcome = 'completed';
+  });
+  add(raw => {
+    raw.result.events[0].state = 'terminal';
+    raw.result.events[0].event_type = 'task.terminal';
+    raw.result.events[0].outcome = null;
+  });
+  add(raw => {
+    raw.result.events[0].event_type = 'task.terminal';
+  });
+  add(raw => {
+    raw.result.events[0].event_type = 'attempt.terminal';
+  });
+  add(raw => {
+    raw.result.events[0].event_type = 'task.running';
+    raw.result.events[0].state = 'terminal';
+    raw.result.events[0].outcome = 'completed';
+  });
+  add(raw => {
+    raw.result.events[0].details = { nested: {} };
+  });
+  add(raw => {
+    raw.result.events[0].details = { fraction: 0.5 };
+  });
+
+  for (const raw of invalid) {
+    assert.throws(() => parseTaskUnreadEventsResult(raw, owner), ContractViolation);
+  }
+
+  const wrongPrototype = taskUnreadResultRaw(owner);
+  Object.setPrototypeOf(wrongPrototype.result, { forged: true });
+  assert.throws(() => parseTaskUnreadEventsResult(wrongPrototype, owner), ContractViolation);
+
+  const accessor = taskUnreadResultRaw(owner);
+  Object.defineProperty(accessor.result.events[0], 'event_id', {
+    enumerable: true,
+    get() {
+      throw new Error('accessor must never execute');
+    },
+  });
+  assert.throws(() => parseTaskUnreadEventsResult(accessor, owner), ContractViolation);
+
+  const sparse = taskUnreadResultRaw(owner);
+  sparse.result.events = new Array(1);
+  assert.throws(() => parseTaskUnreadEventsResult(sparse, owner), ContractViolation);
+
+  const requestAsserted = wave2QueryRaw({ presentation_class: 'text', limit: 2 });
+  requestAsserted.scope.assurance = 'request_asserted';
+  const untrustedOwner = parseQueryEnvelope(requestAsserted);
+  assert.throws(
+    () => parseTaskUnreadEventsResult(taskUnreadResultRaw(untrustedOwner), untrustedOwner),
+    error => error instanceof ContractViolation && error.error.reason === 'AUTHENTICATED_CONSUMER_REQUIRED',
+  );
+
+  const wrongQuery = clone(owner);
+  wrongQuery.query_type = 'task.events';
+  wrongQuery.required_capabilities = ['task.events'];
+  wrongQuery.payload = {};
+  assert.throws(
+    () => parseTaskUnreadEventsResult(taskUnreadResultRaw(owner), wrongQuery),
+    error => error instanceof ContractViolation && error.error.reason === 'UNREAD_RESULT_OWNER_REQUIRED',
+  );
+});
+
+test('unread result parser accepts only one frozen contiguous page prefix', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 2 }));
+  const complete = taskUnreadPageRaw(owner, {
+    events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 1 })],
+    head_seq: 1,
+  });
+  const truncated = taskUnreadPageRaw(owner, {
+    events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 1 })],
+    head_seq: 2,
+    has_more: true,
+    next_after_seq: 1,
+  });
+  const empty = taskUnreadPageRaw(owner, {
+    watermark: 1,
+    acked_event_id: 'event-1',
+    events: [],
+    head_seq: 1,
+  });
+  for (const page of [complete, truncated, empty]) {
+    parseTaskUnreadEventsResult(taskUnreadResultRaw(owner, page), owner);
+  }
+
+  const invalidPages = [
+    { ...clone(complete), events: [taskUnreadEventRaw(owner, { seq: 1 })] },
+    {
+      ...clone(complete),
+      events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 0, event_id: 'duplicate-seq' })],
+    },
+    {
+      ...clone(complete),
+      events: [taskUnreadEventRaw(owner, { seq: 0 }), taskUnreadEventRaw(owner, { seq: 2 })],
+      head_seq: 2,
+    },
+    { ...clone(complete), head_seq: 2 },
+    { ...clone(truncated), next_after_seq: 0 },
+    { ...clone(truncated), next_after_seq: null },
+    { ...clone(truncated), head_seq: 1 },
+    { ...clone(empty), watermark: -1, acked_event_id: 'event-forged' },
+    { ...clone(empty), acked_event_id: null },
+    { ...clone(empty), head_seq: 2 },
+    {
+      ...clone(complete),
+      events: [...clone(complete.events), taskUnreadEventRaw(owner, { seq: 2 })],
+      head_seq: 2,
+    },
+  ];
+  for (const page of invalidPages) {
+    assert.throws(() => parseTaskUnreadEventsResult(taskUnreadResultRaw(owner, page), owner), ContractViolation);
+  }
+});
+
+test('unread ACK builder rejects forged presentation metadata and never ACKs an empty page', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'voice', limit: 2 }));
+  const emptyResult = parseTaskUnreadEventsResult(
+    taskUnreadResultRaw(
+      owner,
+      taskUnreadPageRaw(owner, {
+        watermark: 0,
+        acked_event_id: 'event-0',
+        events: [],
+        head_seq: 0,
+      }),
+    ),
+    owner,
+  );
+  assert.equal(buildTaskUnreadEventsAck(emptyResult, owner, taskAckSeed()), null);
+
+  const parsed = parseTaskUnreadEventsResult(taskUnreadResultRaw(owner), owner);
+  for (const seed of [
+    taskAckSeed({ delivery_id: 'delivery-forged' }),
+    taskAckSeed({ generation: 7 }),
+    taskAckSeed({ response_id: 'response-forged' }),
+    taskAckSeed({ command_id: '' }),
+    taskAckSeed({ causation_id: '' }),
+  ]) {
+    assert.throws(() => buildTaskUnreadEventsAck(parsed, owner, seed), ContractViolation);
+  }
+
+  const textOwnerRaw = wave2QueryRaw({ presentation_class: 'text', limit: 2 });
+  textOwnerRaw.request_id = 'request-unread-events-text';
+  const textOwner = parseQueryEnvelope(textOwnerRaw);
+  assert.throws(
+    () => buildTaskUnreadEventsAck(parsed, textOwner, taskAckSeed()),
+    error => error instanceof ContractViolation && error.error.reason === 'RESULT_OWNER_MISMATCH',
+  );
+});
+
+test('unread parser and ACK builder are pure and tolerate only Session drift in retained events', () => {
+  const owner = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 2 }));
+  const raw = taskUnreadResultRaw(
+    owner,
+    taskUnreadPageRaw(owner, {
+      events: [taskUnreadEventRaw(owner, { session_id: 'prior-session' })],
+    }),
+  );
+  const before = clone(raw);
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  let networkEffects = 0;
+  let domEffects = 0;
+  globalThis.fetch = () => {
+    networkEffects += 1;
+    throw new Error('network effect forbidden');
+  };
+  globalThis.document = new Proxy(
+    {},
+    {
+      get() {
+        domEffects += 1;
+        throw new Error('DOM effect forbidden');
+      },
+    },
+  );
+  try {
+    const parsed = parseTaskUnreadEventsResult(raw, owner);
+    buildTaskUnreadEventsAck(parsed, owner, taskAckSeed());
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+  assert.deepEqual(raw, before);
+  assert.equal(networkEffects, 0);
+  assert.equal(domEffects, 0);
+});
+
+test('command result extension is exact while legacy and query results stay unchanged', () => {
+  const command = parseCommandEnvelope(wave2CommandRaw('task.update', wave2CommandCases[0].payload));
+  const query = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 10 }));
+  const applied = successResult(
+    command,
+    { task_id: 'task-1' },
+    '2026-08-19T12:00:00Z',
+    commandResultExtension('applied'),
+  );
+  assert.deepEqual(applied.extensions, commandResultExtension('applied'));
+  assert.deepEqual(parseResultEnvelope(applied, command), applied);
+
+  const legacy = successResult(command, { accepted: true }, '2026-08-19T12:00:01Z');
+  assert.deepEqual(legacy.extensions, {});
+  assert.deepEqual(parseResultEnvelope(legacy, command), legacy);
+
+  const queryResult = successResult(query, { events: [] }, '2026-08-19T12:00:02Z');
+  assert.equal(queryResult.command_id, null);
+  assert.deepEqual(queryResult.extensions, {});
+  assert.throws(
+    () => successResult(
+      query,
+      { events: [] },
+      '2026-08-19T12:00:03Z',
+      commandResultExtension('applied'),
+    ),
+    error => error instanceof ContractViolation && error.error.reason === 'COMMAND_RESULT_EXTENSION_FORBIDDEN',
+  );
+  assert.throws(
+    () => parseResultEnvelope({ ...queryResult, extensions: commandResultExtension('applied') }, query),
+    error => error instanceof ContractViolation && error.error.reason === 'COMMAND_RESULT_EXTENSION_FORBIDDEN',
+  );
+
+  const malformed = commandResultExtension('applied');
+  malformed['live_voice.command'].extra = true;
+  assert.throws(
+    () => successResult(command, { task_id: 'task-1' }, '2026-08-19T12:00:04Z', malformed),
+    error => error instanceof ContractViolation && error.error.reason === 'UNKNOWN_FIELD',
+  );
+  assert.throws(
+    () => successResult(
+      command,
+      { task_id: 'task-1' },
+      '2026-08-19T12:00:05Z',
+      commandResultExtension('unsupported'),
+    ),
+    ContractViolation,
+  );
+  assert.throws(
+    () => failureResult(
+      command,
+      resultError('UNSUPPORTED'),
+      '2026-08-19T12:00:06Z',
+      commandResultExtension('applied'),
+    ),
+    ContractViolation,
+  );
+});
+
+test('negative command dispositions require their exact error families', () => {
+  const command = parseCommandEnvelope(wave2CommandRaw('task.update', wave2CommandCases[0].payload));
+  for (const [disposition, code] of [
+    ['rejected', 'INVALID_ARGUMENT'],
+    ['rejected', 'UNAUTHENTICATED'],
+    ['rejected', 'PERMISSION_DENIED'],
+    ['rejected', 'NOT_FOUND'],
+    ['unsupported', 'UNSUPPORTED'],
+    ['unsupported', 'CAPABILITY_UNAVAILABLE'],
+    ['conflict', 'CONFLICT'],
+    ['conflict', 'STALE'],
+    ['timeout', 'TIMEOUT'],
+    ['unknown', 'RESULT_UNKNOWN'],
+  ]) {
+    const result = failureResult(
+      command,
+      resultError(code),
+      '2026-08-19T12:01:00Z',
+      commandResultExtension(disposition),
+    );
+    assert.deepEqual(result.extensions, commandResultExtension(disposition));
+
+    const wrongCode = disposition === 'unknown' ? 'TIMEOUT' : 'RESULT_UNKNOWN';
+    assert.throws(
+      () => failureResult(
+        command,
+        resultError(wrongCode),
+        '2026-08-19T12:01:01Z',
+        commandResultExtension(disposition),
+      ),
+      error => error instanceof ContractViolation && error.error.reason === 'COMMAND_DISPOSITION_ERROR_MISMATCH',
+    );
   }
 });
 

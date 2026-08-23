@@ -208,6 +208,16 @@ revision requires a distinct explicit create request. `provide_input`, generic
 side-effect reconciliation remain `UNSUPPORTED` until a later contract
 explicitly adds them.
 
+D-093 freezes the current production Direct matrix more narrowly. The factory
+consumes one explicit validated Direct D0 or Store-backed D2 profile; missing,
+D1 and unknown profiles fail closed because no Direct D1 construction candidate
+exists. D0 claims dispatch/status/cancel only. D2 additionally claims the
+implemented checkpoint, linked recovery and effect-reconciliation boundary.
+For this profile, `provide_input`, `pause` and `resume` are accepted as stable,
+sanitized, zero-business-effect `UNSUPPORTED` rather than left undecided. A
+future positive primitive or additional Executor/profile is a new contract, not
+configuration fallback.
+
 `task.cancel` targets one exact task. A cancel command result says only accepted/replayed/rejected/unknown. The task becomes terminal `cancelled` only from authoritative Executor/Core evidence. Already completed or irreversible side effects are not retroactively cancelled. D0 means a task may outlive voice/session/media disconnect while the application and Executor remain alive; after process restart, Task Core reconciles and reports truth but does not promise attempt resume.
 
 ## 7. Cancel, commit, fence, and presented history
@@ -307,6 +317,7 @@ Stable reasons include domain distinctions such as `IDEMPOTENCY_CONFLICT`, `TASK
 - A failure in P1/P2/P3 must not corrupt or block the text path. Fallback is explicit and carries capability/provider provenance.
 - Provider-specific objects and status enums stop at their Adapter. Shared modules receive only v2 types or a clearly labeled compatibility projection.
 - Raw audio is not persisted by default. Capture, retention, replay, export, and deletion require explicit consent and a documented policy.
+- Formal status diagnostics are post-authority, read-only Store projections. They may expose only HMAC-public Task/Attempt/seam identities and closed low-cardinality state for current outbox, verified checkpoint/effect, linked recovery and reconciliation. Recovery checkpoint/effect identities retain their producer Attempt; a status event-head race drops diagnostics. Raw task/context/result/artifact/reconciliation content and credentials are forbidden, and identities never become open metric labels.
 - Machine-private credentials, provider endpoints/configuration, project registration, devices, browser permissions, runtime data, and network availability are never represented as Git-restored capability.
 
 ## 12. Dependency DAG and implementation gates

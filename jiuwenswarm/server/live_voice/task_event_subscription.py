@@ -19,13 +19,18 @@ from enum import StrEnum
 from typing import Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ContractViolation,
     ErrorCode,
+    LifecycleKind,
     ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
+    validate_transition,
 )
 
 from .formal_task_models import (
+    AdmissionPriority,
     FormalAttemptState,
     FormalTaskSpec,
     FormalTaskState,
@@ -42,42 +47,11 @@ _EVENTS_CAPABILITY = frozenset({"task.events"})
 _TASK_LIFECYCLE_EVENT_STATES = {
     "task.accepted": FormalTaskState.ACCEPTED,
     "task.retry_accepted": FormalTaskState.ACCEPTED,
+    "task.recovery_accepted": FormalTaskState.ACCEPTED,
     "task.running": FormalTaskState.RUNNING,
     "task.blocked": FormalTaskState.BLOCKED,
     "task.decision_required": FormalTaskState.DECISION_REQUIRED,
     "task.terminal": FormalTaskState.TERMINAL,
-}
-_TASK_TRANSITIONS = {
-    FormalTaskState.ACCEPTED: frozenset(
-        {
-            FormalTaskState.RUNNING,
-            FormalTaskState.BLOCKED,
-            FormalTaskState.DECISION_REQUIRED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.RUNNING: frozenset(
-        {
-            FormalTaskState.BLOCKED,
-            FormalTaskState.DECISION_REQUIRED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.BLOCKED: frozenset(
-        {
-            FormalTaskState.RUNNING,
-            FormalTaskState.DECISION_REQUIRED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.DECISION_REQUIRED: frozenset(
-        {
-            FormalTaskState.RUNNING,
-            FormalTaskState.BLOCKED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.TERMINAL: frozenset(),
 }
 _ATTEMPT_LIFECYCLE_EVENT_STATES = {
     "attempt.accepted": FormalAttemptState.ACCEPTED,
@@ -101,6 +75,7 @@ _INTERNAL_ATTEMPT_TERMINAL_PRODUCERS = frozenset(
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.retry_accepted": frozenset({"task_core"}),
+    "task.recovery_accepted": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
     "task.blocked": frozenset({"task_core"}),
     "task.decision_required": frozenset({"task_core"}),
@@ -111,6 +86,10 @@ _TASK_EVENT_PRODUCERS = {
     "task.adjust_requested": frozenset({"task_core.control"}),
     "task.adjust_applied": frozenset({"task_core.control"}),
     "task.adjust_rejected": frozenset({"task_core.control"}),
+    "task.update_requested": frozenset({"task_core.control"}),
+    "task.update_applied": frozenset({"task_core.control"}),
+    "task.reprioritize_requested": frozenset({"task_core.control"}),
+    "task.reprioritize_applied": frozenset({"task_core.control"}),
 }
 _CANONICAL_EVENT_TYPES = frozenset(_TASK_EVENT_PRODUCERS) | frozenset(
     _ATTEMPT_LIFECYCLE_EVENT_STATES
@@ -204,6 +183,7 @@ class TaskEventSubscription:
         validation_capacity: int = 4096,
         poll_interval: float = 0.05,
         authority_atomic_replay: bool = False,
+        consumer_scope: bool = False,
         clock: Callable[[], str] = utc_now,
     ) -> None:
         if type(task_id) is not str or not task_id.strip():
@@ -228,6 +208,12 @@ class TaskEventSubscription:
             raise _violation(
                 "INVALID_TASK_EVENT_AUTHORITY_MODE",
                 "TaskEvent authority replay mode must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(consumer_scope) is not bool:
+            raise _violation(
+                "INVALID_TASK_EVENT_AUTHORITY_MODE",
+                "TaskEvent consumer scope mode must be boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if type(queue_capacity) is not int or queue_capacity <= 0:
@@ -262,6 +248,7 @@ class TaskEventSubscription:
         self._validation_capacity = validation_capacity
         self._poll_interval = float(poll_interval)
         self._authority_atomic_replay = authority_atomic_replay
+        self._consumer_scope = consumer_scope
         self._clock = clock
 
         # Locks contain no background work.  Queue, Events and worker are created
@@ -405,8 +392,12 @@ class TaskEventSubscription:
             )
 
         genesis = events[0]
-        expected_boundary_type = (
-            "task.accepted" if attempt.attempt_number == 1 else "task.retry_accepted"
+        successor_boundary = genesis.event_type if attempt.attempt_number > 1 else None
+        recovery_boundary = successor_boundary == "task.recovery_accepted"
+        boundary_type_valid = (
+            genesis.event_type == "task.accepted"
+            if attempt.attempt_number == 1
+            else successor_boundary in {"task.retry_accepted", "task.recovery_accepted"}
         )
         expected_details = (
             {"command_id": genesis.causation_id}
@@ -415,7 +406,7 @@ class TaskEventSubscription:
         )
         if (
             genesis.seq != snapshot.start_seq
-            or genesis.event_type != expected_boundary_type
+            or not boundary_type_valid
             or genesis.state != FormalTaskState.ACCEPTED.value
             or genesis.outcome is not None
             or genesis.producer != "task_core"
@@ -432,22 +423,64 @@ class TaskEventSubscription:
                 and (
                     snapshot.start_seq <= 0
                     or set(genesis.details)
-                    != {
-                        "command_id",
-                        "retry_of_attempt_id",
-                        "previous_outcome",
-                        "attempt_number",
-                    }
+                    != (
+                        {
+                            "recovery_id",
+                            "producer_attempt_id",
+                            "producer_outcome",
+                            "recovery_generation",
+                            "recovery_budget_remaining",
+                            "attempt_number",
+                        }
+                        if recovery_boundary
+                        else {
+                            "command_id",
+                            "retry_of_attempt_id",
+                            "previous_outcome",
+                            "attempt_number",
+                        }
+                    )
                     or genesis.details.get("attempt_number") != attempt.attempt_number
-                    or genesis.details.get("command_id") != genesis.causation_id
-                    or type(genesis.details.get("retry_of_attempt_id")) is not str
-                    or not str(genesis.details.get("retry_of_attempt_id")).strip()
-                    or genesis.details.get("retry_of_attempt_id") == attempt.attempt_id
-                    or genesis.details.get("previous_outcome")
-                    not in {
-                        TerminalOutcome.CANCELLED.value,
-                        TerminalOutcome.COMPLETED.value,
-                    }
+                    or (
+                        recovery_boundary
+                        and (
+                            genesis.details.get("recovery_id") != genesis.causation_id
+                            or type(genesis.details.get("producer_attempt_id"))
+                            is not str
+                            or not str(
+                                genesis.details.get("producer_attempt_id")
+                            ).strip()
+                            or genesis.details.get("producer_attempt_id")
+                            == attempt.attempt_id
+                            or genesis.details.get("producer_outcome")
+                            != TerminalOutcome.INTERRUPTED.value
+                            or type(genesis.details.get("recovery_generation"))
+                            is not int
+                            or int(genesis.details.get("recovery_generation", 0)) <= 0
+                            or type(genesis.details.get("recovery_budget_remaining"))
+                            is not int
+                            or int(genesis.details.get("recovery_budget_remaining", -1))
+                            < 0
+                        )
+                    )
+                    or (
+                        not recovery_boundary
+                        and (
+                            genesis.details.get("command_id") != genesis.causation_id
+                            or type(genesis.details.get("retry_of_attempt_id"))
+                            is not str
+                            or not str(
+                                genesis.details.get("retry_of_attempt_id")
+                            ).strip()
+                            or genesis.details.get("retry_of_attempt_id")
+                            == attempt.attempt_id
+                            or genesis.details.get("previous_outcome")
+                            not in {
+                                TerminalOutcome.CANCELLED.value,
+                                TerminalOutcome.COMPLETED.value,
+                            }
+                        )
+                    )
                 )
             )
         ):
@@ -790,7 +823,7 @@ class TaskEventSubscription:
                 "TaskEvent source returned an invalid task snapshot",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        if task.task_id != self._task_id or task.scope != self._scope:
+        if task.task_id != self._task_id or not self._scope_matches(task.scope):
             raise _violation(
                 "TASK_EVENT_SUBSCRIPTION_SCOPE_MISMATCH",
                 "TaskEvent source returned a foreign task snapshot",
@@ -929,6 +962,17 @@ class TaskEventSubscription:
             required_capabilities=_EVENTS_CAPABILITY,
             destructive=False,
             now=self._clock(),
+        )
+
+    def _scope_matches(self, stored: ScopeRef) -> bool:
+        if not self._consumer_scope:
+            return stored == self._scope
+        return (
+            isinstance(stored, ScopeRef)
+            and stored.assurance is Assurance.AUTHENTICATED
+            and self._scope.assurance is Assurance.AUTHENTICATED
+            and (stored.subject_id, stored.project_id)
+            == (self._scope.subject_id, self._scope.project_id)
         )
 
     async def _poll_loop(self) -> None:
@@ -1077,7 +1121,9 @@ class TaskEventSubscription:
                         "TaskEvent subscription reached its declared validation limit",
                         ErrorCode.UNAVAILABLE,
                     )
-                if event.task_id != self._task_id or event.scope != self._scope:
+                if event.task_id != self._task_id or not self._scope_matches(
+                    event.scope
+                ):
                     raise _violation(
                         "TASK_EVENT_SCOPE_MISMATCH",
                         "TaskEvent does not belong to the subscribed task scope",
@@ -1140,12 +1186,19 @@ class TaskEventSubscription:
                             "TaskEvent type and lifecycle state disagree",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
-                    if lifecycle_state not in _TASK_TRANSITIONS[task_state]:
+                    try:
+                        validate_transition(
+                            LifecycleKind.TASK,
+                            task_state.value,
+                            lifecycle_state.value,
+                            outcome=event.outcome,
+                        )
+                    except ContractViolation as error:
                         raise _violation(
                             "TASK_EVENT_LIFECYCLE_CONFLICT",
                             "TaskEvent contains a backward or repeated task transition",
                             ErrorCode.PROTOCOL_VIOLATION,
-                        )
+                        ) from error
                     coupled_to_attempt = expected_task_type is not None
                     if coupled_to_attempt and (
                         event.producer not in expected_task_producers
@@ -1201,6 +1254,10 @@ class TaskEventSubscription:
                     "task.adjust_requested",
                     "task.adjust_applied",
                     "task.adjust_rejected",
+                    "task.update_requested",
+                    "task.update_applied",
+                    "task.reprioritize_requested",
+                    "task.reprioritize_applied",
                 }:
                     if event.producer not in _TASK_EVENT_PRODUCERS[event.event_type]:
                         raise _violation(
@@ -1250,6 +1307,28 @@ class TaskEventSubscription:
                             raise _violation(
                                 "TASK_EVENT_ADJUSTMENT_EVIDENCE_MISMATCH",
                                 "task adjustment event has invalid authority evidence",
+                                ErrorCode.PROTOCOL_VIOLATION,
+                            )
+                    elif event.event_type.startswith("task.update_"):
+                        if (
+                            set(event.details) != {"command_id"}
+                            or event.details.get("command_id") != event.causation_id
+                        ):
+                            raise _violation(
+                                "TASK_EVENT_UPDATE_EVIDENCE_MISMATCH",
+                                "task update event has invalid authority evidence",
+                                ErrorCode.PROTOCOL_VIOLATION,
+                            )
+                    elif event.event_type.startswith("task.reprioritize_"):
+                        if (
+                            set(event.details) != {"command_id", "priority"}
+                            or event.details.get("command_id") != event.causation_id
+                            or event.details.get("priority")
+                            not in {item.value for item in AdmissionPriority}
+                        ):
+                            raise _violation(
+                                "TASK_EVENT_REPRIORITIZE_EVIDENCE_MISMATCH",
+                                "task reprioritize event has invalid authority evidence",
                                 ErrorCode.PROTOCOL_VIOLATION,
                             )
                 attempt_lifecycle_state = _ATTEMPT_LIFECYCLE_EVENT_STATES.get(

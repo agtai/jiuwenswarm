@@ -34,7 +34,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from .formal_task_models import PersistentTaskEvent
+from .formal_task_models import (
+    PersistentTaskEvent,
+    TaskEventConsumerCursorBaseline,
+)
 
 
 class ProgressNotificationArbiterViolation(ValueError):
@@ -108,6 +111,8 @@ class ProgressNotificationBinding:
 
 _NO_PROJECTION_ADVANCE_TOKEN = object()
 _ATTEMPT_EPOCH_BASELINE_TOKEN = object()
+_CONSUMER_CURSOR_BASELINE_TOKEN = object()
+_CONSUMER_PROJECTION_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False, repr=False)
@@ -116,12 +121,14 @@ class _VerifiedNoProjectionAdvance:
 
     source_event: PersistentTaskEvent
     binding: ProgressNotificationBinding
+    consumer_scope: bool
 
     def __init__(
         self,
         source_event: PersistentTaskEvent,
         binding: ProgressNotificationBinding,
         *,
+        consumer_scope: bool,
         _token: object,
     ) -> None:
         if _token is not _NO_PROJECTION_ADVANCE_TOKEN:
@@ -132,17 +139,27 @@ class _VerifiedNoProjectionAdvance:
             )
         object.__setattr__(self, "source_event", source_event)
         object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "consumer_scope", consumer_scope)
 
 
 def _mint_verified_no_projection_advance(
     source_event: PersistentTaskEvent,
     binding: ProgressNotificationBinding,
+    *,
+    consumer_scope: bool = False,
 ) -> _VerifiedNoProjectionAdvance:
     """Mint an internal capability after the owning bridge checks its lease."""
 
+    if type(consumer_scope) is not bool:
+        raise ProgressNotificationArbiterViolation(
+            "INVALID_NO_PROJECTION_CAPABILITY",
+            "consumer scope mode must be an exact boolean",
+            ErrorCode.INVALID_ARGUMENT,
+        )
     return _VerifiedNoProjectionAdvance(
         source_event,
         binding,
+        consumer_scope=consumer_scope,
         _token=_NO_PROJECTION_ADVANCE_TOKEN,
     )
 
@@ -151,12 +168,14 @@ def _mint_verified_no_projection_advance(
 class _VerifiedAttemptEpochBaseline:
     source_event: PersistentTaskEvent
     binding: ProgressNotificationBinding
+    consumer_scope: bool
 
     def __init__(
         self,
         source_event: PersistentTaskEvent,
         binding: ProgressNotificationBinding,
         *,
+        consumer_scope: bool,
         _token: object,
     ) -> None:
         if _token is not _ATTEMPT_EPOCH_BASELINE_TOKEN:
@@ -167,17 +186,161 @@ class _VerifiedAttemptEpochBaseline:
             )
         object.__setattr__(self, "source_event", source_event)
         object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "consumer_scope", consumer_scope)
 
 
 def _mint_verified_attempt_epoch_baseline(
     source_event: PersistentTaskEvent,
     binding: ProgressNotificationBinding,
+    *,
+    consumer_scope: bool = False,
 ) -> _VerifiedAttemptEpochBaseline:
+    if type(consumer_scope) is not bool:
+        raise ProgressNotificationArbiterViolation(
+            "INVALID_ATTEMPT_EPOCH_CAPABILITY",
+            "consumer scope mode must be an exact boolean",
+            ErrorCode.INVALID_ARGUMENT,
+        )
     return _VerifiedAttemptEpochBaseline(
         source_event,
         binding,
+        consumer_scope=consumer_scope,
         _token=_ATTEMPT_EPOCH_BASELINE_TOKEN,
     )
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class _VerifiedConsumerCursorBaseline:
+    cursor: TaskEventConsumerCursorBaseline
+    binding: ProgressNotificationBinding
+
+    def __init__(
+        self,
+        cursor: TaskEventConsumerCursorBaseline,
+        binding: ProgressNotificationBinding,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _CONSUMER_CURSOR_BASELINE_TOKEN:
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_CONSUMER_CURSOR_CAPABILITY",
+                "consumer cursor baseline must be minted by its package owner",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        object.__setattr__(self, "cursor", cursor)
+        object.__setattr__(self, "binding", binding)
+
+
+def _mint_verified_consumer_cursor_baseline(
+    cursor: TaskEventConsumerCursorBaseline,
+    binding: ProgressNotificationBinding,
+) -> _VerifiedConsumerCursorBaseline:
+    return _VerifiedConsumerCursorBaseline(
+        cursor,
+        binding,
+        _token=_CONSUMER_CURSOR_BASELINE_TOKEN,
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class _VerifiedConsumerProjection:
+    persistent_event: PersistentTaskEvent
+    source_event: EventEnvelope
+    progress_event: EventEnvelope
+    binding: ProgressNotificationBinding
+
+    def __init__(
+        self,
+        persistent_event: PersistentTaskEvent,
+        source_event: EventEnvelope,
+        progress_event: EventEnvelope,
+        binding: ProgressNotificationBinding,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _CONSUMER_PROJECTION_TOKEN:
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_CONSUMER_PROJECTION_CAPABILITY",
+                "consumer projection must be minted by its package owner",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        object.__setattr__(self, "persistent_event", persistent_event)
+        object.__setattr__(self, "source_event", source_event)
+        object.__setattr__(self, "progress_event", progress_event)
+        object.__setattr__(self, "binding", binding)
+
+
+def _mint_verified_consumer_projection(
+    persistent_event: PersistentTaskEvent,
+    source_event: EventEnvelope,
+    progress_event: EventEnvelope,
+    binding: ProgressNotificationBinding,
+) -> _VerifiedConsumerProjection:
+    return _VerifiedConsumerProjection(
+        persistent_event,
+        source_event,
+        progress_event,
+        binding,
+        _token=_CONSUMER_PROJECTION_TOKEN,
+    )
+
+
+def _stable_consumer_scope_matches(source: ScopeRef, consumer: ScopeRef) -> bool:
+    return (
+        source.assurance is Assurance.AUTHENTICATED
+        and consumer.assurance is Assurance.AUTHENTICATED
+        and source.project_id is not None
+        and source.subject_id == consumer.subject_id
+        and source.project_id == consumer.project_id
+    )
+
+
+def _attempt_epoch_number(event: PersistentTaskEvent) -> int | None:
+    details = event.details
+    if event.event_type == "task.retry_accepted":
+        attempt_number = details.get("attempt_number")
+        if (
+            set(details)
+            != {
+                "command_id",
+                "retry_of_attempt_id",
+                "previous_outcome",
+                "attempt_number",
+            }
+            or details.get("command_id") != event.causation_id
+            or type(details.get("retry_of_attempt_id")) is not str
+            or not str(details.get("retry_of_attempt_id")).strip()
+            or details.get("retry_of_attempt_id") == event.attempt_id
+            or attempt_number not in {2, 3}
+            or details.get("previous_outcome")
+            not in {TerminalOutcome.CANCELLED.value, TerminalOutcome.COMPLETED.value}
+        ):
+            return None
+        return int(attempt_number)
+    if event.event_type == "task.recovery_accepted":
+        attempt_number = details.get("attempt_number")
+        if (
+            set(details)
+            != {
+                "recovery_id",
+                "producer_attempt_id",
+                "producer_outcome",
+                "recovery_generation",
+                "recovery_budget_remaining",
+                "attempt_number",
+            }
+            or details.get("recovery_id") != event.causation_id
+            or type(details.get("producer_attempt_id")) is not str
+            or not str(details.get("producer_attempt_id")).strip()
+            or details.get("producer_attempt_id") == event.attempt_id
+            or attempt_number not in {2, 3}
+            or details.get("producer_outcome") != TerminalOutcome.INTERRUPTED.value
+            or details.get("recovery_generation") != int(attempt_number) - 1
+            or details.get("recovery_budget_remaining") != 3 - int(attempt_number)
+        ):
+            return None
+        return int(attempt_number)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +419,7 @@ class _InputRejected(ValueError):
 _SourceStreamKey = tuple[str, str, IdentityKind, str]
 _ProgressStreamKey = tuple[str, str, IdentityKind, str]
 _WorkKey = tuple[ScopeRef, IdentityKind, str]
+_ConsumerKey = tuple[str, str, str]
 _NO_PROJECTION_EVENT_TYPES = frozenset(
     {
         "attempt.accepted",
@@ -329,6 +493,10 @@ class ProgressNotificationArbiter:
         self._no_projection_duplicates = 0
         self._superseded_notifications = 0
         self._attempt_epochs: dict[_WorkKey, tuple[str, int, int]] = {}
+        self._consumer_routes: dict[
+            _ConsumerKey,
+            tuple[_SourceStreamKey, _ProgressStreamKey, _WorkKey],
+        ] = {}
 
     def _begin_attempt_epoch(self, baseline: object) -> None:
         """Reset one task stream only from a verified retry boundary capability."""
@@ -343,35 +511,38 @@ class ProgressNotificationArbiter:
             )
         event = baseline.source_event
         binding = baseline.binding
+        consumer_scope = baseline.consumer_scope
+        attempt_number = (
+            None
+            if type(event) is not PersistentTaskEvent
+            else _attempt_epoch_number(event)
+        )
+        binding_matches = (
+            type(event) is PersistentTaskEvent
+            and type(binding) is ProgressNotificationBinding
+            and (
+                _stable_consumer_scope_matches(event.scope, binding.scope)
+                if consumer_scope is True
+                else event.scope == binding.scope
+                and event.correlation_id == binding.correlation_id
+            )
+        )
         if (
             type(event) is not PersistentTaskEvent
             or type(binding) is not ProgressNotificationBinding
-            or event.event_type != "task.retry_accepted"
+            or type(consumer_scope) is not bool
+            or event.event_type not in {"task.retry_accepted", "task.recovery_accepted"}
             or event.state != WorkState.ACCEPTED.value
             or event.outcome is not None
             or event.task_id != binding.work_ref.id
-            or event.scope != binding.scope
-            or event.correlation_id != binding.correlation_id
+            or not binding_matches
             or event.producer != "task_core"
             or event.source_event_id is not None
-            or set(event.details)
-            != {
-                "command_id",
-                "retry_of_attempt_id",
-                "previous_outcome",
-                "attempt_number",
-            }
-            or event.details.get("command_id") != event.causation_id
-            or type(event.details.get("retry_of_attempt_id")) is not str
-            or not str(event.details.get("retry_of_attempt_id")).strip()
-            or event.details.get("retry_of_attempt_id") == event.attempt_id
-            or event.details.get("attempt_number") not in {2, 3}
-            or event.details.get("previous_outcome")
-            not in {TerminalOutcome.CANCELLED.value, TerminalOutcome.COMPLETED.value}
+            or attempt_number is None
         ):
             raise ProgressNotificationArbiterViolation(
                 "INVALID_ATTEMPT_EPOCH_BASELINE",
-                "attempt epoch boundary is not canonical retry authority evidence",
+                "attempt epoch boundary is not canonical retry/recovery authority evidence",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         source_key = (
@@ -387,7 +558,8 @@ class ProgressNotificationArbiter:
             binding.work_ref.id,
         )
         work_key = (binding.scope, binding.work_ref.kind, binding.work_ref.id)
-        epoch = (event.attempt_id, int(event.details["attempt_number"]), event.seq)
+        assert attempt_number is not None
+        epoch = (event.attempt_id, attempt_number, event.seq)
         with self._lock:
             prior = self._attempt_epochs.get(work_key)
             if prior is not None:
@@ -409,6 +581,230 @@ class ProgressNotificationArbiter:
                 # callers can therefore distinguish supersession from consumption.
                 self._superseded_notifications += 1
             self._attempt_epochs[work_key] = epoch
+
+    def _resume_consumer_cursor(self, baseline: object) -> None:
+        """Resume one ephemeral Arbiter from Store-owned durable cursor facts."""
+
+        if not self._enabled:
+            return
+        if type(baseline) is not _VerifiedConsumerCursorBaseline:
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor requires an internally minted capability",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        cursor = baseline.cursor
+        binding = baseline.binding
+        if (
+            type(cursor) is not TaskEventConsumerCursorBaseline
+            or type(binding) is not ProgressNotificationBinding
+            or binding.work_ref.kind is not IdentityKind.TASK
+            or binding.source_work_ref != binding.work_ref
+            or cursor.task_id != binding.work_ref.id
+            or not _stable_consumer_scope_matches(cursor.scope, binding.scope)
+        ):
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor does not bind the authenticated Task stream",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        next_seq = cursor.watermark + 1
+        lifecycle = cursor.lifecycle_event
+        boundary = cursor.attempt_boundary
+        last_state: WorkState | None = None
+        terminal = False
+        epoch: tuple[str, int, int] | None = None
+        if cursor.watermark >= 0:
+            if (
+                type(lifecycle) is not PersistentTaskEvent
+                or type(boundary) is not PersistentTaskEvent
+                or lifecycle.task_id != cursor.task_id
+                or boundary.task_id != cursor.task_id
+                or not _stable_consumer_scope_matches(lifecycle.scope, binding.scope)
+                or not _stable_consumer_scope_matches(boundary.scope, binding.scope)
+            ):
+                raise ProgressNotificationArbiterViolation(
+                    "INVALID_CONSUMER_CURSOR_BASELINE",
+                    "consumer cursor lacks exact lifecycle authority",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            try:
+                last_state = WorkState(lifecycle.state)
+            except ValueError as error:
+                raise ProgressNotificationArbiterViolation(
+                    "INVALID_CONSUMER_CURSOR_BASELINE",
+                    "consumer cursor lifecycle state is not canonical",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                ) from error
+            terminal = last_state is WorkState.TERMINAL
+            if boundary.event_type == "task.accepted":
+                if (
+                    boundary.seq != 0
+                    or set(boundary.details) != {"command_id"}
+                    or boundary.details.get("command_id") != boundary.causation_id
+                ):
+                    raise ProgressNotificationArbiterViolation(
+                        "INVALID_CONSUMER_CURSOR_BASELINE",
+                        "initial Attempt boundary is not canonical",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                attempt_number = 1
+            else:
+                attempt_number = _attempt_epoch_number(boundary)
+                if attempt_number is None:
+                    raise ProgressNotificationArbiterViolation(
+                        "INVALID_CONSUMER_CURSOR_BASELINE",
+                        "consumer cursor Attempt boundary is not canonical",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+            epoch = (boundary.attempt_id, attempt_number, boundary.seq)
+        source_key = (
+            binding.source_producer.component,
+            binding.source_producer.instance_id,
+            binding.source_work_ref.kind,
+            binding.source_work_ref.id,
+        )
+        progress_key = (
+            binding.progress_producer.component,
+            binding.progress_producer.instance_id,
+            binding.work_ref.kind,
+            binding.work_ref.id,
+        )
+        work_key = (binding.scope, binding.work_ref.kind, binding.work_ref.id)
+        assert binding.scope.project_id is not None
+        consumer_key = (
+            binding.scope.subject_id,
+            binding.scope.project_id,
+            binding.work_ref.id,
+        )
+        with self._lock:
+            prior = self._consumer_routes.get(consumer_key)
+            prospective_sources = set(self._source_streams)
+            prospective_progress = set(self._progress_streams)
+            prospective_work = set(self._work_streams)
+            if prior is not None:
+                prior_source, prior_progress, prior_work = prior
+                prospective_sources.discard(prior_source)
+                prospective_progress.discard(prior_progress)
+                prospective_work.discard(prior_work)
+            prospective_sources.add(source_key)
+            prospective_progress.add(progress_key)
+            prospective_work.add(work_key)
+            if (
+                len(prospective_sources) > self._stream_capacity
+                or len(prospective_progress) > self._stream_capacity
+                or len(prospective_work) > self._stream_capacity
+            ):
+                raise ProgressNotificationArbiterViolation(
+                    "CONSUMER_CURSOR_CAPACITY_EXHAUSTED",
+                    "consumer cursor cannot allocate bounded Arbiter streams",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if prior is not None:
+                self._source_streams.pop(prior_source, None)
+                self._progress_streams.pop(prior_progress, None)
+                self._work_streams.pop(prior_work, None)
+                self._pending.pop(prior_work, None)
+                self._attempt_epochs.pop(prior_work, None)
+            self._source_streams[source_key] = _SequenceState(next_seq, {})
+            self._progress_streams[progress_key] = _SequenceState(next_seq, {})
+            self._work_streams[work_key] = _WorkState(
+                _SequenceState(next_seq, {}),
+                last_state=last_state,
+                terminal=terminal,
+            )
+            if epoch is not None:
+                self._attempt_epochs[work_key] = epoch
+            self._consumer_routes[consumer_key] = (
+                source_key,
+                progress_key,
+                work_key,
+            )
+
+    def _offer_consumer(
+        self,
+        projection: object,
+        foreground: object,
+    ) -> NotificationDecision:
+        if not self._enabled:
+            return NotificationDecision(
+                disposition=NotificationDisposition.FEATURE_DISABLED,
+                speech=SpeechDisposition.NOT_A_CANDIDATE,
+                reason="feature_disabled",
+                code=ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        if type(projection) is not _VerifiedConsumerProjection:
+            return self._rejected(
+                "INVALID_CONSUMER_PROJECTION_CAPABILITY",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        persistent = projection.persistent_event
+        source = projection.source_event
+        binding = projection.binding
+        extension = source.extensions.get(_TASK_PROGRESS_RETURN_EXTENSION)
+        if (
+            type(persistent) is not PersistentTaskEvent
+            or type(source) is not EventEnvelope
+            or type(projection.progress_event) is not EventEnvelope
+            or type(binding) is not ProgressNotificationBinding
+            or source.event_id != persistent.event_id
+            or source.seq != persistent.seq
+            or not isinstance(extension, Mapping)
+            or extension.get("persistent_attempt_id") != persistent.attempt_id
+            or extension.get("persistent_event_type") != persistent.event_type
+            or not _stable_consumer_scope_matches(persistent.scope, binding.scope)
+        ):
+            return self._rejected(
+                "INVALID_CONSUMER_PROJECTION_CAPABILITY",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        with self._lock:
+            return self._offer_locked(
+                source,
+                projection.progress_event,
+                foreground,
+                binding,
+                consumer_cursor=True,
+            )
+
+    def _release_consumer_cursor(self, baseline: object) -> bool:
+        if type(baseline) is not _VerifiedConsumerCursorBaseline:
+            return False
+        binding = baseline.binding
+        if (
+            type(binding) is not ProgressNotificationBinding
+            or binding.scope.project_id is None
+        ):
+            return False
+        source_key = (
+            binding.source_producer.component,
+            binding.source_producer.instance_id,
+            binding.source_work_ref.kind,
+            binding.source_work_ref.id,
+        )
+        progress_key = (
+            binding.progress_producer.component,
+            binding.progress_producer.instance_id,
+            binding.work_ref.kind,
+            binding.work_ref.id,
+        )
+        work_key = (binding.scope, binding.work_ref.kind, binding.work_ref.id)
+        consumer_key = (
+            binding.scope.subject_id,
+            binding.scope.project_id,
+            binding.work_ref.id,
+        )
+        route = (source_key, progress_key, work_key)
+        with self._lock:
+            if self._consumer_routes.get(consumer_key) != route:
+                return False
+            self._consumer_routes.pop(consumer_key, None)
+            self._source_streams.pop(source_key, None)
+            self._progress_streams.pop(progress_key, None)
+            self._work_streams.pop(work_key, None)
+            self._pending.pop(work_key, None)
+            self._attempt_epochs.pop(work_key, None)
+            return True
 
     def offer(
         self,
@@ -432,7 +828,13 @@ class ProgressNotificationArbiter:
                 code=ErrorCode.CAPABILITY_UNAVAILABLE,
             )
         with self._lock:
-            return self._offer_locked(source_event, progress_event, foreground, binding)
+            return self._offer_locked(
+                source_event,
+                progress_event,
+                foreground,
+                binding,
+                consumer_cursor=False,
+            )
 
     def _advance_without_projection(
         self,
@@ -458,6 +860,10 @@ class ProgressNotificationArbiter:
         self,
         advance: object,
     ) -> NoProjectionAdvanceDecision:
+        consumer_cursor = (
+            type(advance) is _VerifiedNoProjectionAdvance
+            and advance.consumer_scope is True
+        )
         try:
             event, expected, source_bytes = self._validate_no_projection_advance(
                 advance
@@ -527,7 +933,7 @@ class ProgressNotificationArbiter:
         ).digest()
 
         prior_source = self._observed_source_fingerprints.get(event.event_id)
-        if prior_source is not None:
+        if not consumer_cursor and prior_source is not None:
             if event.event_id in self._observed_source_to_progress:
                 self._rejected_events += 1
                 return NoProjectionAdvanceDecision(
@@ -591,17 +997,28 @@ class ProgressNotificationArbiter:
                 ErrorCode.PROTOCOL_VIOLATION,
             )
 
-        if len(self._observed_source_fingerprints) >= self._observation_capacity:
+        if (
+            not consumer_cursor
+            and len(self._observed_source_fingerprints) >= self._observation_capacity
+        ):
             self._backpressure_events += 1
             return NoProjectionAdvanceDecision(
                 NoProjectionAdvanceDisposition.BACKPRESSURE,
                 "SOURCE_OBSERVATION_CAPACITY_EXHAUSTED",
                 ErrorCode.UNAVAILABLE,
             )
-        capacity_reason = self._no_projection_capacity_reason(
-            source_key=source_key,
-            progress_key=progress_key,
-            work_key=work_key,
+        capacity_reason = (
+            self._consumer_cursor_stream_capacity_reason(
+                source_key=source_key,
+                progress_key=progress_key,
+                work_key=work_key,
+            )
+            if consumer_cursor
+            else self._no_projection_capacity_reason(
+                source_key=source_key,
+                progress_key=progress_key,
+                work_key=work_key,
+            )
         )
         if capacity_reason is not None:
             self._backpressure_events += 1
@@ -617,13 +1034,18 @@ class ProgressNotificationArbiter:
         if progress_sequence is None:
             progress_sequence = _SequenceState(0, {})
             self._progress_streams[progress_key] = progress_sequence
-        self._accept_sequence(source_sequence, event.seq, source_fingerprint)
-        self._accept_sequence(progress_sequence, event.seq, progress_fingerprint)
-        self._accept_sequence(work.sequence, event.seq, work_fingerprint)
-        self._observed_source_fingerprints[event.event_id] = (
-            source_observation_fingerprint
-        )
-        self._observed_no_projection_fingerprints[event.event_id] = evidence_bytes
+        if consumer_cursor:
+            source_sequence.next_seq = event.seq + 1
+            progress_sequence.next_seq = event.seq + 1
+            work.sequence.next_seq = event.seq + 1
+        else:
+            self._accept_sequence(source_sequence, event.seq, source_fingerprint)
+            self._accept_sequence(progress_sequence, event.seq, progress_fingerprint)
+            self._accept_sequence(work.sequence, event.seq, work_fingerprint)
+            self._observed_source_fingerprints[event.event_id] = (
+                source_observation_fingerprint
+            )
+            self._observed_no_projection_fingerprints[event.event_id] = evidence_bytes
         self._no_projection_advances += 1
         return NoProjectionAdvanceDecision(
             NoProjectionAdvanceDisposition.ADVANCED,
@@ -638,10 +1060,16 @@ class ProgressNotificationArbiter:
         progress_event: object,
         foreground: object,
         binding: object,
+        *,
+        consumer_cursor: bool,
     ) -> NotificationDecision:
         try:
             validated = self._validate_offer(
-                source_event, progress_event, foreground, binding
+                source_event,
+                progress_event,
+                foreground,
+                binding,
+                consumer_cursor=consumer_cursor,
             )
         except _InputRejected as error:
             self._rejected_events += 1
@@ -671,18 +1099,25 @@ class ProgressNotificationArbiter:
                 "INVALID_EVENT_ENVELOPE", ErrorCode.PROTOCOL_VIOLATION
             )
 
-        if source.event_id in self._observed_no_projection_fingerprints:
+        if (
+            not consumer_cursor
+            and source.event_id in self._observed_no_projection_fingerprints
+        ):
             self._rejected_events += 1
             return self._rejected(
                 "SOURCE_EVENT_PROJECTION_CLASS_CONFLICT",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
 
-        observation_reason = self._observe_identity(
-            source,
-            projected,
-            source_bytes=source_bytes,
-            progress_bytes=progress_bytes,
+        observation_reason = (
+            None
+            if consumer_cursor
+            else self._observe_identity(
+                source,
+                projected,
+                source_bytes=source_bytes,
+                progress_bytes=progress_bytes,
+            )
         )
         if observation_reason is not None:
             if observation_reason.endswith("OBSERVATION_CAPACITY_EXHAUSTED"):
@@ -696,7 +1131,7 @@ class ProgressNotificationArbiter:
                 )
             self._rejected_events += 1
             return self._rejected(observation_reason, ErrorCode.PROTOCOL_VIOLATION)
-        if projected.event_id in self._decisions:
+        if not consumer_cursor and projected.event_id in self._decisions:
             decision = self._decisions[projected.event_id]
             self._duplicate_events += 1
             return NotificationDecision(
@@ -716,10 +1151,18 @@ class ProgressNotificationArbiter:
 
         source_key = source.stream_key
         progress_key = projected.stream_key
-        capacity_reason = self._capacity_reason(
-            source_key=source_key,
-            progress_key=progress_key,
-            work_key=work_key,
+        capacity_reason = (
+            self._consumer_cursor_stream_capacity_reason(
+                source_key=source_key,
+                progress_key=progress_key,
+                work_key=work_key,
+            )
+            if consumer_cursor
+            else self._capacity_reason(
+                source_key=source_key,
+                progress_key=progress_key,
+                work_key=work_key,
+            )
         )
         if capacity_reason is not None:
             self._backpressure_events += 1
@@ -759,9 +1202,14 @@ class ProgressNotificationArbiter:
         if work is None:
             work = _WorkState(_SequenceState(0, {}))
             self._work_streams[work_key] = work
-        self._accept_sequence(source_sequence, source.seq, source_bytes)
-        self._accept_sequence(progress_sequence, projected.seq, progress_bytes)
-        self._accept_sequence(work.sequence, progress.seq, progress_bytes)
+        if consumer_cursor:
+            source_sequence.next_seq = source.seq + 1
+            progress_sequence.next_seq = projected.seq + 1
+            work.sequence.next_seq = progress.seq + 1
+        else:
+            self._accept_sequence(source_sequence, source.seq, source_bytes)
+            self._accept_sequence(progress_sequence, projected.seq, progress_bytes)
+            self._accept_sequence(work.sequence, progress.seq, progress_bytes)
         work.last_state = progress.state
         work.terminal = progress.state is WorkState.TERMINAL
 
@@ -802,7 +1250,8 @@ class ProgressNotificationArbiter:
                 retained_event_id=retained,
                 reason_prefix="offer",
             )
-        self._decisions[projected.event_id] = decision
+        if not consumer_cursor:
+            self._decisions[projected.event_id] = decision
         return decision
 
     def drain(
@@ -963,6 +1412,13 @@ class ProgressNotificationArbiter:
                 "no-projection ingestion requires an exact product binding",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        consumer_scope = advance.consumer_scope
+        if type(consumer_scope) is not bool:
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_ADVANCE",
+                "no-projection consumer scope mode must be exact",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         expected = binding
         if (
             type(event.scope) is not ScopeRef
@@ -1043,11 +1499,16 @@ class ProgressNotificationArbiter:
                 "no-projection evidence is not canonical authority data",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
+        scope_matches = (
+            _stable_consumer_scope_matches(event.scope, expected.scope)
+            if consumer_scope
+            else event.scope == expected.scope
+            and event.correlation_id == expected.correlation_id
+        )
         if (
-            event.scope != expected.scope
+            not scope_matches
             or event.task_id != expected.work_ref.id
             or event.task_id != expected.source_work_ref.id
-            or event.correlation_id != expected.correlation_id
         ):
             raise _InputRejected(
                 "NO_PROJECTION_BINDING_MISMATCH",
@@ -1137,6 +1598,8 @@ class ProgressNotificationArbiter:
         progress_event: object,
         foreground: object,
         binding: object,
+        *,
+        consumer_cursor: bool,
     ) -> tuple[
         EventEnvelope,
         EventEnvelope,
@@ -1281,7 +1744,11 @@ class ProgressNotificationArbiter:
                 "WorkProgress must retain its exact authoritative source binding",
                 ErrorCode.PERMISSION_DENIED,
             )
-        self._validate_source_relation(source_event, progress)
+        self._validate_source_relation(
+            source_event,
+            progress,
+            consumer_cursor=consumer_cursor,
+        )
         return source_event, progress_event, facts, expected, progress
 
     @staticmethod
@@ -1337,7 +1804,10 @@ class ProgressNotificationArbiter:
 
     @staticmethod
     def _validate_source_relation(
-        source_event: EventEnvelope, progress: WorkProgressEventV2
+        source_event: EventEnvelope,
+        progress: WorkProgressEventV2,
+        *,
+        consumer_cursor: bool,
     ) -> None:
         expected_kind = {
             WorkSourceAuthority.HARNESS: IdentityKind.ROUND,
@@ -1372,7 +1842,17 @@ class ProgressNotificationArbiter:
             and progress.state is WorkState.ACCEPTED
             and source_event.event_type == "task.retry_accepted"
         )
-        if source_event.event_type != expected_event_type and not retry_boundary:
+        recovery_boundary = (
+            consumer_cursor
+            and source_event.stream_ref.kind is IdentityKind.TASK
+            and progress.state is WorkState.ACCEPTED
+            and source_event.event_type == "task.recovery_accepted"
+        )
+        if (
+            source_event.event_type != expected_event_type
+            and not retry_boundary
+            and not recovery_boundary
+        ):
             raise _InputRejected(
                 "PROGRESS_SOURCE_STATE_MISMATCH",
                 "source event type must match projected state",
@@ -1509,6 +1989,30 @@ class ProgressNotificationArbiter:
             and len(work.sequence.fingerprints) >= self._events_per_stream
         ):
             return "WORK_EVENT_CAPACITY_EXHAUSTED"
+        return None
+
+    def _consumer_cursor_stream_capacity_reason(
+        self,
+        *,
+        source_key: _SourceStreamKey,
+        progress_key: _ProgressStreamKey,
+        work_key: _WorkKey,
+    ) -> str | None:
+        if (
+            source_key not in self._source_streams
+            and len(self._source_streams) >= self._stream_capacity
+        ):
+            return "SOURCE_STREAM_CAPACITY_EXHAUSTED"
+        if (
+            progress_key not in self._progress_streams
+            and len(self._progress_streams) >= self._stream_capacity
+        ):
+            return "PROGRESS_STREAM_CAPACITY_EXHAUSTED"
+        if (
+            work_key not in self._work_streams
+            and len(self._work_streams) >= self._stream_capacity
+        ):
+            return "WORK_STREAM_CAPACITY_EXHAUSTED"
         return None
 
     @staticmethod

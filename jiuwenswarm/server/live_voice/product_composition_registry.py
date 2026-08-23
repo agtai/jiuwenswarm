@@ -19,11 +19,12 @@ import secrets
 import threading
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CommandEnvelope,
     CONTRACT_VERSION,
     ContextRef,
     ContractViolation,
@@ -32,6 +33,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     OriginRef,
     ProducerRef,
     ResponseRef,
+    ResultEnvelope,
     ScopeRef,
     TurnCommit,
     TurnCommitLedger,
@@ -45,6 +47,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 from .agent_conversation_runtime import (
     AgentConversationRuntime,
     AuthoritativePresentationHandle,
+    PresentationAckResult,
 )
 from .critical_token_safety import (
     CommittedSpeechCandidate,
@@ -58,20 +61,26 @@ from .critical_token_safety import (
 from .formal_task_models import (
     FormalTaskState,
     FormalTaskViolation,
+    OutboxKind,
     PersistentTaskEvent,
     PersistentTaskRecord,
     ResolvedTaskContext,
     TaskResultArtifact,
     TaskResultAvailability,
+    TaskResultRecord,
     TerminalOutcome,
     utc_now,
 )
+from .task_store import TaskDurabilityDiagnosticSnapshot
 from .interaction_engine import InteractionEnginePort
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
     P3_MUTATIONS,
+    P3_PRODUCTION_MUTATIONS,
+    P3_PRODUCTION_OPERATIONS,
     P3AuthenticatedComposition,
     P3RouteResult,
+    PreparedProductionIntentAuthority,
 )
 from .p3_confirmation import (
     BoundedP3ConfirmationOwner,
@@ -79,6 +88,11 @@ from .p3_confirmation import (
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
     TrustedP3ConfirmationIssue,
+    ValidatedP3ConfirmationForwarding,
+)
+from .p3_production_intent_composition import (
+    CallLocalProductionConfirmationConsumer,
+    CallLocalProductionOriginAuthority,
 )
 from .p3_product_confirmation import ProductP3ConfirmationForwarder
 from .product_authority import (
@@ -103,6 +117,14 @@ from .product_composition_contract import (
     ProductSegment,
     create_product_composition_manifest,
 )
+from .observability_exporter import ExportRecord
+from .observability import (
+    OBSERVABILITY_SCHEMA_VERSION,
+    LiveVoiceMetric,
+    LiveVoiceObservation,
+    create_observation,
+    observation_from_task_event,
+)
 from .product_composition_root import (
     ProductCompositionActivationError,
     ProductCompositionContext,
@@ -112,6 +134,13 @@ from .product_composition_root import (
     ProductCompositionRoot,
     ProductSegmentActivation,
     ProductSegmentActivationError,
+)
+from .product_observability_adapter import (
+    ActiveProductObservabilityActivation,
+    ProductObservabilityAdapter,
+    ProductObservabilityActivationError,
+    ProductObservabilityActivationEvidence,
+    activate_product_observability_adapter,
 )
 from .product_p2_interaction_adapter import (
     P2ActivationLease,
@@ -130,12 +159,38 @@ from .product_p3_text_adapter import (
     ProductP3QueryRequest,
     ProductP3TextAdapter,
 )
-from .presentation_ledger import PresentationAck, PresentationSurface
+from .presentation_ledger import (
+    PresentationAck,
+    PresentationSurface,
+    TaskPresentationConsumptionOwner,
+    TaskPresentationDelivery,
+    TaskPresentationRuntimeReceipt,
+    TaskPresentationViolation,
+    TextPresentationAdoptionAck,
+    next_task_presentation_event,
+)
 from .progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
     ProgressNotificationArbiter,
     SpeechPolicy,
+)
+from .production_task_classifier import (
+    ProductionTaskIntentClassifier,
+    ProductionTaskIntentClassifierContext,
+)
+from .production_task_intent import (
+    AuthenticatedTaskFact,
+    BoundedClarificationOwner,
+    ClarificationAnswer,
+    ProductionConfirmationBinding,
+    ProductionIntentOrigin,
+    ProductionTaskIntentProposal,
+    ProductionTaskIntentRequest,
+    ProductionTaskPolicyOutcome,
+    ProductionTaskResolution,
+    TrustedConfirmationConsumptionReceipt,
+    build_production_origin_binding,
 )
 from .task_progress_return import (
     TaskProgressNotificationIntent,
@@ -155,6 +210,9 @@ from .voice_task_bridge import (
     VoiceTaskBridge,
     VoiceTaskBridgeViolation,
 )
+
+if TYPE_CHECKING:
+    from .product_observability_runtime import ProductObservabilityRuntime
 from .unified_committed_input import SqliteUnifiedCommittedInputJournal
 
 logger = logging.getLogger(__name__)
@@ -170,7 +228,18 @@ PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABL
 PRODUCT_DEMO_POLICY_BYPASS_ENV = (
     "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
 )
+_FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES = frozenset(
+    {
+        "后台任务怎么样了",
+        "当前后台任务怎么样了",
+        "后台任务什么情况",
+        "当前后台任务什么情况",
+    }
+)
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
+_PRODUCT_P2_PRESENTATION_FAILURE_OPERATION = (
+    "live_voice.composition.p2.presentation.failed"
+)
 # The only Agent profile whose facade implements the formal Live Voice seam.
 _FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
 _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
@@ -188,6 +257,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
         "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         _PRODUCT_P2_PRESENTATION_ACK_OPERATION,
+        _PRODUCT_P2_PRESENTATION_FAILURE_OPERATION,
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",
@@ -199,7 +269,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
     }
 )
 PRODUCT_P3_QUERY_OPERATIONS = frozenset(
-    {"task.get", "task.list", "task.status", "task.events"}
+    {"task.get", "task.list", "task.status", "task.events", "task.result"}
 )
 
 
@@ -357,6 +427,8 @@ class _P2Route:
     activation_lease: P2ActivationLease
     lease: ProductCompositionLease
     manifest: ProductCompositionManifest
+    observability_context: ProductCompositionContext | None = None
+    observability_adapter: ProductObservabilityAdapter | None = None
     notification_replay_floor: int = 0
     notification_admitted_sequence: int = 0
 
@@ -376,6 +448,11 @@ class _ProgressRoute:
     manifest: ProductCompositionManifest
     channel_id: str
     request_id: str
+    unread_authority: ResolvedProductAuthority | None = None
+    result_authority: ResolvedProductAuthority | None = None
+    pending_presentations: dict[tuple[str, str], "_PendingProgressPresentation"] = (
+        field(default_factory=dict)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +483,39 @@ class _ProgressDelivery:
     evidence_id: str
     delivered: bool = False
     acknowledged: bool = False
+    closed: bool = False
+    presentation: TaskPresentationDelivery | None = None
+    command: CommandEnvelope | None = None
+    presentation_binding: str | None = None
+    runtime_ack: PresentationAck | None = None
+    text_adoption_ack: TextPresentationAdoptionAck | None = None
+    audio_ack_in_flight: bool = False
+    fallback_event: TaskProgressTextEvent | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingProgressPresentation:
+    event: TaskProgressTextEvent | TaskProgressNotificationIntent
+    presentation_class: str
+    fallback_reason: str | None = None
+
+
+class _ProgressPresentationDeferred(RuntimeError):
+    pass
+
+
+class _ProgressPresentationConsumed(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class _TaskPresentationFallback:
+    progress_delivery: _ProgressDelivery
+    presentation: TaskPresentationDelivery
+    event: TaskProgressTextEvent
+    failure_reason: str
+    audio_closed: bool = False
+    text_emitted: bool = False
 
 
 @dataclass(slots=True)
@@ -425,6 +535,7 @@ class _RetainedProductOperation:
     intent_interaction_id: str | None = None
     intent_turn_id: str | None = None
     intent_commit_id: str | None = None
+    intent_production: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,6 +547,36 @@ class _PendingTaskIntent:
     session_id: str
     correlation_id: str
     origin_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingProductionTaskIntent:
+    """Bounded continuation metadata; authority remains in dedicated owners."""
+
+    token: str
+    kind: str
+    proposal: ProductionTaskIntentProposal
+    resolution: ProductionTaskResolution
+    commit: TurnCommit | None
+    source: str
+    session_id: str
+    correlation_id: str
+    origin_key: str
+    expires_at: datetime
+    confirmation_id: str | None = None
+    confirmation_owner_context: P3ConfirmationOwnerContext | None = None
+    clarification_answer_fingerprint: str | None = None
+
+
+class _RejectingProductionConfirmationConsumer:
+    """Initial-resolution Port that cannot consume a confirmation."""
+
+    @staticmethod
+    def verify_and_consume(
+        _confirmation_id: str,
+        _binding: ProductionConfirmationBinding,
+    ) -> TrustedConfirmationConsumptionReceipt:
+        raise ValueError("PRODUCTION_CONFIRMATION_NOT_AVAILABLE")
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +636,103 @@ def _serialize_manifest(manifest: ProductCompositionManifest) -> dict[str, objec
             for route in manifest.routes
         ],
     }
+
+
+def _project_production_status_authority(
+    result_payload: Mapping[str, object],
+    *,
+    production_authority: PreparedProductionIntentAuthority,
+    authority_fact: AuthenticatedTaskFact,
+    retry_admission: Mapping[str, object],
+    authorized_operations: frozenset[str],
+) -> dict[str, object]:
+    """Bind raw Core status to the existing production authority projection."""
+
+    raw_task = result_payload.get("task")
+    raw_attempt = result_payload.get("attempt")
+    if type(authority_fact) is not AuthenticatedTaskFact:
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "task status authority projection requires an exact authenticated fact",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    fact = authority_fact.canonical_dict()
+    if (
+        not isinstance(raw_task, Mapping)
+        or not isinstance(raw_attempt, Mapping)
+        or "supported_operations" in result_payload
+        or raw_task.get("scope") != production_authority.scope.to_dict()
+        or raw_task.get("task_id") != fact.get("task_id")
+        or raw_task.get("attempt_id") != fact.get("attempt_id")
+        or raw_task.get("event_head") != fact.get("event_head")
+        or raw_task.get("state") != fact.get("state")
+        or raw_task.get("outcome") != fact.get("outcome")
+        or not isinstance(raw_task.get("revision"), Mapping)
+        or raw_task["revision"].get("number") != fact.get("revision_number")
+        or not isinstance(raw_task.get("spec"), Mapping)
+        or raw_task["spec"].get("name") != fact.get("name")
+        or raw_attempt.get("task_id") != fact.get("task_id")
+        or raw_attempt.get("attempt_id") != fact.get("attempt_id")
+        or raw_attempt.get("state") != fact.get("attempt_state")
+        or raw_attempt.get("outcome") != fact.get("attempt_outcome")
+        or retry_admission.get("task_id") != fact.get("task_id")
+        or (
+            retry_admission.get("eligible") is True
+            and retry_admission.get("attempt_id") != fact.get("attempt_id")
+        )
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "raw Task status does not bind the production authority fact",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    supported = fact.get("supported_operations")
+    if (
+        not isinstance(supported, list)
+        or any(type(item) is not str for item in supported)
+        or not isinstance(authorized_operations, frozenset)
+        or any(type(item) is not str for item in authorized_operations)
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "production authority operations are not canonical",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    operations = set(supported).intersection(authorized_operations)
+    # Retry is not a production-intent operation. Its existing status admission
+    # reader is already principal-, scope-, lifecycle- and limit-aware.
+    if (
+        retry_admission.get("eligible") is True
+        and "task.retry" in authorized_operations
+    ):
+        operations.add("task.retry")
+    projected = dict(result_payload)
+    projected["retry_admission"] = dict(retry_admission)
+    projected["supported_operations"] = sorted(operations)
+    return projected
+
+
+def _project_production_collection_authority(
+    result_payload: Mapping[str, object],
+    *,
+    supported_operations: frozenset[str],
+) -> dict[str, object]:
+    """Expose only already-authorized collection controls to the Web carrier."""
+
+    if (
+        "supported_operations" in result_payload
+        or not isinstance(result_payload.get("tasks"), list)
+        or not isinstance(supported_operations, frozenset)
+        or any(type(item) is not str for item in supported_operations)
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "Task collection control projection is not canonical",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+    projected = dict(result_payload)
+    projected["supported_operations"] = sorted(supported_operations)
+    return projected
 
 
 def _required_text(value: object, field: str, *, maximum: int = 256) -> str:
@@ -666,6 +904,10 @@ class AgentServerProductCompositionRegistry:
         commit_ledger: TurnCommitLedger | None = None,
         critical_token_gate: CriticalTokenSafetyGate | None = None,
         unified_journal: SqliteUnifiedCommittedInputJournal | None = None,
+        observability_exporter: (
+            Callable[[ExportRecord], Awaitable[None]] | None
+        ) = None,
+        observability_runtime: ProductObservabilityRuntime | None = None,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -675,8 +917,26 @@ class AgentServerProductCompositionRegistry:
             raise ValueError("product text event sink is required")
         self._settings = settings
         self._p3_composition = p3_composition
+        self._p3_presentation_consumption_available = bool(
+            settings.p2_enabled
+            and settings.p3_text_enabled
+            and p3_composition.product_presentation_consumption_available
+        )
         self._agent_manager = agent_manager
         self._push_text_event = push_text_event
+        if observability_exporter is not None and observability_runtime is not None:
+            raise ValueError("observability has one selected exporter owner")
+        if observability_runtime is not None:
+            from .product_observability_runtime import ProductObservabilityRuntime
+
+            if type(observability_runtime) is not ProductObservabilityRuntime:
+                raise ValueError("observability runtime must use the exact owner")
+        self._observability_runtime = observability_runtime
+        self._observability_exporter = (
+            observability_runtime.export
+            if observability_runtime is not None
+            else observability_exporter
+        )
         self._p3_confirmation_owner = p3_confirmation_owner
         self._p3_confirmation_forwarder = p3_confirmation_forwarder
         self._commit_ledger = commit_ledger or TurnCommitLedger(
@@ -701,6 +961,9 @@ class AgentServerProductCompositionRegistry:
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
         self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
         self._progress_routes: dict[tuple[str, str, str, str], _ProgressRoute] = {}
+        self._progress_route_adoptions: dict[
+            tuple[str, str, str, str], asyncio.Event
+        ] = {}
         self._closed_progress_routes: dict[
             tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
@@ -712,6 +975,9 @@ class AgentServerProductCompositionRegistry:
         self._pending_p2_agents: dict[tuple[str, str, str, int], Any] = {}
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
+        self._root_cleanup_tasks: dict[
+            ProductCompositionLease, asyncio.Task[None]
+        ] = {}
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
         self._foreground_latency_probes: dict[str, object] = {}
@@ -726,6 +992,30 @@ class AgentServerProductCompositionRegistry:
         # may therefore replace only the delivery binding without losing the
         # authoritative event that still needs presentation.
         self._terminal_notification_responses: dict[str, ResponseRef] = {}
+        self._task_presentation_state_lock = threading.RLock()
+        self._task_presentation_runtime_routes: dict[ResponseRef, _P2Route] = {}
+        self._task_presentation_deliveries: dict[
+            ResponseRef, tuple[_ProgressDelivery, TaskPresentationDelivery]
+        ] = {}
+        self._task_presentation_owner = TaskPresentationConsumptionOwner(
+            self._task_presentation_runtime_authority,
+            capacity=self._PROGRESS_DELIVERY_CAPACITY,
+        )
+        self._consumed_task_presentation_acks: dict[
+            ResponseRef,
+            tuple[
+                TaskPresentationDelivery,
+                PresentationAck,
+                PresentationAckResult,
+            ],
+        ] = {}
+        self._closed_task_presentations: dict[
+            ResponseRef, tuple[TaskPresentationDelivery, bool]
+        ] = {}
+        self._task_presentation_fallbacks: dict[
+            ResponseRef, _TaskPresentationFallback
+        ] = {}
+        self._presentation_drain_tasks: set[asyncio.Task[None]] = set()
         task_database = p3_composition.task_database_path
         self._unified_journal = unified_journal or (
             None
@@ -751,12 +1041,24 @@ class AgentServerProductCompositionRegistry:
         self._consumed_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_presentation_failure_operations: dict[
+            str, _RetainedProductOperation
+        ] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_intent_operations: dict[str, _RetainedProductOperation] = {}
         self._pending_task_intents: dict[str, _PendingTaskIntent] = {}
+        self._pending_production_task_intents: dict[
+            str, _PendingProductionTaskIntent
+        ] = {}
         self._voice_task_origins: dict[str, _VoiceTaskOrigin] = {}
+        self._production_task_classifier = ProductionTaskIntentClassifier()
+        self._production_clarification_owner = BoundedClarificationOwner(
+            capacity=self._PRODUCT_OPERATION_CAPACITY,
+            per_subject_capacity=min(8, self._PRODUCT_OPERATION_CAPACITY),
+            boot_id=f"registry.{secrets.token_urlsafe(24)}",
+        )
         self._task_intent_bridge = (
             VoiceTaskBridge()
             if (
@@ -806,6 +1108,9 @@ class AgentServerProductCompositionRegistry:
             query_owner=p3_composition,
             subscription_factory=p3_composition.create_product_subscription,
             prepared_source_factory=p3_composition.create_product_progress_source,
+            replay_text_from_prepared_source=(
+                p3_composition.product_progress_authority_atomic_replay
+            ),
             generation_is_current=self._generation_is_current,
             arbiter=ProgressNotificationArbiter(enabled=True),
             foreground=lambda: ForegroundSnapshot(
@@ -814,8 +1119,10 @@ class AgentServerProductCompositionRegistry:
                 presentation=ForegroundFact.UNKNOWN,
                 speech_policy=SpeechPolicy.DISPLAY_ONLY,
             ),
+            foreground_factory=self._task_progress_foreground_supplier,
             text_sink=self._emit_text_progress,
             voice_sink=self._emit_voice_progress,
+            deferred_voice_sink=self._defer_voice_progress,
         )
 
     @property
@@ -829,6 +1136,576 @@ class AgentServerProductCompositionRegistry:
     @property
     def p3_mutation_enabled(self) -> bool:
         return self._settings.p3_mutation_enabled
+
+    def consume_product_observation(
+        self,
+        *,
+        session_id: object,
+        correlation_id: object,
+        observation: object,
+        diagnostic_identity: object,
+    ) -> bool:
+        """Send one AgentServer producer fact through its active X-OBS lease.
+
+        The product adapter remains the sole FIFO/worker owner.  This hook can
+        only consume a fact whose session, correlation and interaction bind an
+        already-active P2 observability context; it cannot create or widen an
+        authority, adapter, route, or lifecycle lease.
+        """
+
+        if type(observation) is not LiveVoiceObservation:
+            return False
+        return self._consume_product_observability_fact(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            fact=observation,
+            diagnostic_identity=diagnostic_identity,
+        )
+
+    def consume_product_metric(
+        self,
+        *,
+        session_id: object,
+        correlation_id: object,
+        metric: object,
+        diagnostic_identity: object,
+    ) -> bool:
+        """Send one metric through the exact active product adapter FIFO."""
+
+        if type(metric) is not LiveVoiceMetric:
+            return False
+        return self._consume_product_observability_fact(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            fact=metric,
+            diagnostic_identity=diagnostic_identity,
+        )
+
+    def _consume_product_observability_fact(
+        self,
+        *,
+        session_id: object,
+        correlation_id: object,
+        fact: LiveVoiceObservation | LiveVoiceMetric,
+        diagnostic_identity: object,
+    ) -> bool:
+        runtime = self._observability_runtime
+        binding = fact.binding
+        interaction_id = binding.interaction_id
+        if (
+            runtime is None
+            or self._stopped
+            or type(session_id) is not str
+            or not session_id
+            or type(correlation_id) is not str
+            or not correlation_id
+            or binding.correlation_id != correlation_id
+        ):
+            return False
+        from .product_observability_runtime import (
+            ProductDiagnosticIdentity,
+            ProductDiagnosticSeam,
+        )
+
+        if type(diagnostic_identity) is not ProductDiagnosticIdentity:
+            return False
+        owned_identity = diagnostic_identity
+        if diagnostic_identity.seam is ProductDiagnosticSeam.COMMAND:
+            resolution_id = fact.source_record_id
+            if diagnostic_identity.command_id is None:
+                if (
+                    type(fact) is not LiveVoiceObservation
+                    or fact.segment_name != "task.command"
+                    or type(resolution_id) is not str
+                    or len(resolution_id) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in resolution_id
+                    )
+                    or diagnostic_identity.seam_id != resolution_id
+                ):
+                    return False
+                # This registry owns the intent continuation which dispatches
+                # ``intent-{resolution_id}``; AgentServer never derives it.
+                owned_identity = replace(
+                    diagnostic_identity,
+                    command_id=f"intent-{resolution_id}",
+                )
+            elif (
+                type(fact) is not LiveVoiceObservation
+                or fact.event_name != "segment.completed"
+                or fact.segment_name != "task.command"
+                or fact.source_component != "product.composition.registry"
+                or fact.route.implementation_class != "formal"
+                or fact.route.owner_module != "product.composition.registry"
+                or fact.binding.task_id is None
+                or fact.binding.attempt_id is None
+                or diagnostic_identity.seam_id != diagnostic_identity.command_id
+                or type(resolution_id) is not str
+                or not resolution_id
+                or diagnostic_identity.outbox_id != resolution_id
+            ):
+                return False
+        candidates = tuple(
+            retained
+            for (retained_session, _retained_interaction), retained in tuple(
+                self._p2_routes.items()
+            )
+            if retained_session == session_id
+            and retained.binding.correlation_id == correlation_id
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            and retained.observability_context is not None
+            and retained.observability_adapter is not None
+        )
+        # A diagnostic producer is not an interaction router.  Select only the
+        # unique OPEN authority route for this Session/correlation; ambiguity,
+        # absence, closing and closed leases all fail before identity
+        # registration, so no stale or foreign diagnostic can reach a backend.
+        if len(candidates) != 1:
+            return False
+        retained = candidates[0]
+        if (
+            interaction_id is not None
+            and interaction_id != retained.binding.interaction_id
+        ):
+            return False
+        source_id = (
+            fact.event_id if type(fact) is LiveVoiceObservation else fact.measurement_id
+        )
+        if (
+            runtime.register_diagnostic_identity(
+                source_id,
+                owned_identity,
+                correlation_id=correlation_id,
+            )
+            is not True
+        ):
+            return False
+        disposition = (
+            retained.observability_adapter.consume_observation(
+                context=retained.observability_context,
+                observation=fact,
+            )
+            if type(fact) is LiveVoiceObservation
+            else retained.observability_adapter.consume_metric(
+                context=retained.observability_context,
+                metric=fact,
+            )
+        )
+        return disposition.accepted_for_export
+
+    @staticmethod
+    def _diagnostic_route() -> dict[str, object]:
+        return {
+            "implementation_class": "formal",
+            "owner_module": "product.composition.registry",
+            "capability_provider": "jiuwenswarm-runtime",
+            "contract_version": CONTRACT_VERSION,
+            "reason_code": None,
+        }
+
+    def _current_observability_correlation(
+        self,
+        *,
+        session_id: str,
+        scope: ScopeRef,
+    ) -> str | None:
+        candidates = tuple(
+            retained.binding.correlation_id
+            for (candidate_session, _interaction), retained in tuple(
+                self._p2_routes.items()
+            )
+            if candidate_session == session_id
+            and retained.binding.scope == scope
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            and retained.observability_context is not None
+            and retained.observability_adapter is not None
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _emit_authoritative_route_diagnostic(
+        self,
+        *,
+        session_id: str,
+        correlation_id: str,
+        segment_name: str,
+        seam_name: str,
+        seam_id: str,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        response_ref: ResponseRef | None = None,
+        source_record_id: str | None = None,
+        command_id: str | None = None,
+        event_id: str | None = None,
+        outbox_id: str | None = None,
+        executor_id: str | None = None,
+        checkpoint_id: str | None = None,
+        effect_id: str | None = None,
+        presentation_id: str | None = None,
+        event_name: str | None = None,
+        source_seq: int | None = None,
+        state: str | None = None,
+        completed: bool = False,
+        observed_at: str | None = None,
+    ) -> bool:
+        """Project one owner-validated identity set without business content."""
+
+        if self._observability_runtime is None:
+            return False
+        try:
+            from .product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
+
+            binding: dict[str, object] = {"correlation_id": correlation_id}
+            if task_id is not None:
+                binding["task_id"] = task_id
+            if attempt_id is not None:
+                binding["attempt_id"] = attempt_id
+            if response_ref is not None:
+                binding.update(
+                    {
+                        "interaction_id": response_ref.interaction_id,
+                        "response_id": response_ref.response_id,
+                        "response_generation": response_ref.response_generation,
+                    }
+                )
+            observation_id = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "correlation_id": correlation_id,
+                        "segment_name": segment_name,
+                        "seam_name": seam_name,
+                        "seam_id": seam_id,
+                        "source_record_id": source_record_id,
+                        "event_name": event_name,
+                        "source_seq": source_seq,
+                        "state": state,
+                    }
+                )
+            ).hexdigest()
+            payload: dict[str, object] = {
+                "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                "event_id": observation_id,
+                "event_name": event_name
+                or ("segment.completed" if completed else "route.selected"),
+                "segment_name": segment_name,
+                "observed_at": observed_at or utc_now(),
+                "monotonic_ms": 0.0,
+                "binding": binding,
+                "route": self._diagnostic_route(),
+                "source_component": "product.composition.registry",
+            }
+            if source_record_id is not None:
+                payload["source_record_id"] = source_record_id
+            if source_seq is not None:
+                payload["source_seq"] = source_seq
+            if state is not None:
+                payload["state"] = state
+            if completed:
+                payload.update(
+                    {"state": "terminal", "outcome": "completed", "duration_ms": 0.0}
+                )
+            observation = create_observation(payload)
+            return self.consume_product_observation(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                observation=observation,
+                diagnostic_identity=ProductDiagnosticIdentity(
+                    seam=ProductDiagnosticSeam(seam_name),
+                    seam_id=seam_id,
+                    command_id=command_id,
+                    event_id=event_id,
+                    outbox_id=outbox_id,
+                    executor_id=executor_id,
+                    checkpoint_id=checkpoint_id,
+                    effect_id=effect_id,
+                    presentation_id=presentation_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- diagnostics never rewrite business truth
+            logger.warning(
+                "[LiveVoiceProduct] authoritative diagnostic rejected; "
+                "reason=FACT_REJECTED"
+            )
+            return False
+
+    def _emit_authoritative_task_event(
+        self,
+        event: PersistentTaskEvent,
+        *,
+        session_id: str,
+        correlation_id: str,
+    ) -> bool:
+        """Project one exact Store event with content-free causal identities."""
+
+        if self._observability_runtime is None:
+            return False
+
+        try:
+            from .product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
+
+            command_id = (
+                event.causation_id
+                if event.event_type in {"task.accepted", "task.retry_accepted"}
+                else None
+            )
+            candidates = tuple(
+                retained
+                for (candidate_session, _interaction), retained in tuple(
+                    self._p2_routes.items()
+                )
+                if candidate_session == session_id
+                and retained.binding.correlation_id == correlation_id
+                and retained.binding.scope.subject_id == event.scope.subject_id
+                and retained.binding.scope.project_id == event.scope.project_id
+                and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            )
+            if len(candidates) != 1:
+                return False
+            observation_payload = observation_from_task_event(
+                event,
+                observation_id=hashlib.sha256(
+                    f"store-event\0{event.event_id}".encode("utf-8")
+                ).hexdigest(),
+                observed_at=event.occurred_at,
+                monotonic_ms=0.0,
+                route=self._diagnostic_route(),
+            ).to_dict()
+            observation_binding = observation_payload.get("binding")
+            if not isinstance(observation_binding, dict):
+                return False
+            observation_binding["correlation_id"] = correlation_id
+            observation = create_observation(observation_payload)
+            return self.consume_product_observation(
+                # A fresh authenticated Session may read an older Task event.
+                # Attribution follows the unique current OPEN route while the
+                # Store-owned Task scope still proves subject/project identity.
+                session_id=session_id,
+                correlation_id=correlation_id,
+                observation=observation,
+                diagnostic_identity=ProductDiagnosticIdentity(
+                    seam=ProductDiagnosticSeam.EVENT,
+                    seam_id=event.event_id,
+                    command_id=command_id,
+                    event_id=event.event_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- diagnostics never rewrite business truth
+            logger.warning(
+                "[LiveVoiceProduct] authoritative task event diagnostic rejected; "
+                "reason=FACT_REJECTED"
+            )
+            return False
+
+    def _emit_authoritative_status_diagnostics(
+        self,
+        *,
+        session_id: str,
+        correlation_id: str,
+        snapshot: TaskDurabilityDiagnosticSnapshot,
+        event_id: str,
+        observed_at: str,
+    ) -> None:
+        """Project verified current Store seams after an authorized status read."""
+
+        common = {
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "task_id": snapshot.task_id,
+            "attempt_id": snapshot.attempt_id,
+            "executor_id": snapshot.executor_id,
+            "observed_at": observed_at,
+        }
+        for item in snapshot.outbox:
+            event_name = {
+                OutboxKind.ATTEMPT_DISPATCH: "task.dispatch_outbox_observed",
+                OutboxKind.ATTEMPT_CANCEL: "task.cancel_outbox_observed",
+                OutboxKind.ATTEMPT_ADJUST: "task.adjust_outbox_observed",
+            }.get(item.kind)
+            self._emit_authoritative_route_diagnostic(
+                **common,
+                segment_name="task.queue",
+                seam_name="outbox",
+                seam_id=(
+                    f"{item.outbox_id}:{item.state.value}:{item.delivery_count}"
+                ),
+                source_record_id=item.outbox_id,
+                command_id=item.command_id,
+                outbox_id=item.outbox_id,
+                event_name=event_name,
+                source_seq=(item.delivery_count if event_name is not None else None),
+                state=(item.state.value if event_name is not None else None),
+            )
+        if snapshot.checkpoint_id is not None:
+            self._emit_authoritative_route_diagnostic(
+                **{
+                    **common,
+                    "attempt_id": snapshot.checkpoint_attempt_id,
+                },
+                segment_name="task.attempt",
+                seam_name="checkpoint",
+                seam_id=snapshot.checkpoint_id,
+                source_record_id=snapshot.checkpoint_id,
+                checkpoint_id=snapshot.checkpoint_id,
+            )
+        if snapshot.effect_id is not None:
+            self._emit_authoritative_route_diagnostic(
+                **{
+                    **common,
+                    "attempt_id": snapshot.effect_attempt_id,
+                },
+                segment_name="task.attempt",
+                seam_name="effect",
+                seam_id=snapshot.effect_id,
+                source_record_id=snapshot.effect_id,
+                effect_id=snapshot.effect_id,
+            )
+        if snapshot.recovery_id is not None:
+            self._emit_authoritative_route_diagnostic(
+                **common,
+                segment_name="task.attempt",
+                seam_name="recovery",
+                seam_id=snapshot.recovery_id,
+                source_record_id=snapshot.recovery_id,
+            )
+        if snapshot.reconciliation_state is not None:
+            reconcile_id = (
+                f"{snapshot.task_id}:{snapshot.attempt_id}:"
+                f"{snapshot.reconciliation_state.value}:{event_id}"
+            )
+            self._emit_authoritative_route_diagnostic(
+                **common,
+                segment_name="task.attempt",
+                seam_name="reconcile",
+                seam_id=reconcile_id,
+                source_record_id=reconcile_id,
+                event_name="task.reconciliation_observed",
+                source_seq=snapshot.event_head,
+                state=snapshot.reconciliation_state.value,
+            )
+
+    def _emit_authoritative_progress_generation(
+        self,
+        *,
+        event: TaskProgressTextEvent | TaskProgressNotificationIntent,
+        generation_id: str,
+        delivery: _ProgressDelivery,
+    ) -> bool:
+        if self._observability_runtime is None:
+            return False
+        try:
+            from .product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
+
+            key = self._progress_key_for_delivery(delivery)
+            retained = None if key is None else self._progress_routes.get(key)
+            if retained is None:
+                return False
+            binding = retained.binding
+            task_event = event.task_event
+            source_event = event.source_event
+            if (
+                task_event.task_id != binding.task_id
+                or source_event.event_id != task_event.event_id
+                or source_event.stream_ref.id != task_event.task_id
+                or source_event.correlation_id != binding.correlation_id
+                or source_event.scope != binding.scope
+                or task_event.scope.subject_id != binding.scope.subject_id
+                or task_event.scope.project_id != binding.scope.project_id
+            ):
+                return False
+
+            observation_payload = observation_from_task_event(
+                task_event,
+                observation_id=hashlib.sha256(
+                    f"progress-generation\0{generation_id}\0{delivery.delivery_id}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+                observed_at=task_event.occurred_at,
+                monotonic_ms=0.0,
+                route=self._diagnostic_route(),
+            ).to_dict()
+            observation_binding = observation_payload.get("binding")
+            if not isinstance(observation_binding, dict):
+                return False
+            observation_binding["correlation_id"] = binding.correlation_id
+            presentation = delivery.presentation
+            if presentation is not None:
+                observation_binding.update(
+                    {
+                        "interaction_id": presentation.response_ref.interaction_id,
+                        "response_id": presentation.response_ref.response_id,
+                        "response_generation": (
+                            presentation.response_ref.response_generation
+                        ),
+                    }
+                )
+            observation = create_observation(observation_payload)
+            return self.consume_product_observation(
+                session_id=binding.session_id,
+                correlation_id=binding.correlation_id,
+                observation=observation,
+                diagnostic_identity=ProductDiagnosticIdentity(
+                    seam=ProductDiagnosticSeam.GENERATION,
+                    seam_id=generation_id,
+                    event_id=task_event.event_id,
+                    presentation_id=(
+                        None if presentation is None else presentation.delivery_id
+                    ),
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- diagnostics never rewrite business truth
+            logger.warning(
+                "[LiveVoiceProduct] authoritative generation diagnostic rejected; "
+                "reason=FACT_REJECTED"
+            )
+            return False
+
+    def _emit_authoritative_progress_ack(
+        self,
+        *,
+        delivery: _ProgressDelivery,
+        presentation: TaskPresentationDelivery | None,
+        observed_at: str,
+    ) -> bool:
+        """Project an ACK only from a retained, consumed progress delivery."""
+
+        key = self._progress_key_for_delivery(delivery)
+        retained = None if key is None else self._progress_routes.get(key)
+        if retained is None:
+            return False
+        binding = retained.binding
+        response_ref = None if presentation is None else presentation.response_ref
+        return self._emit_authoritative_route_diagnostic(
+            session_id=binding.session_id,
+            correlation_id=binding.correlation_id,
+            segment_name=(
+                "task.progress" if presentation is None else "runtime.presentation"
+            ),
+            seam_name="ack",
+            seam_id=delivery.delivery_id,
+            task_id=binding.task_id,
+            attempt_id=delivery.attempt_id,
+            response_ref=response_ref,
+            source_record_id=delivery.delivery_id,
+            command_id=(
+                None if delivery.command is None else delivery.command.command_id
+            ),
+            event_id=delivery.source_event_id,
+            presentation_id=(
+                None if presentation is None else presentation.delivery_id
+            ),
+            completed=presentation is not None,
+            observed_at=observed_at,
+        )
 
     def _create_p2_runtime(
         self,
@@ -992,11 +1869,63 @@ class AgentServerProductCompositionRegistry:
         )
         return self._progress_generations.get(key) == binding.generation
 
+    def _settle_progress_route_adoption(self, key: tuple[str, str, str, str]) -> None:
+        adoption = self._progress_route_adoptions.pop(key, None)
+        if adoption is not None:
+            adoption.set()
+
     def _retain_root_cleanup(self, cleanup: ProductCompositionLease | None) -> None:
-        if cleanup is not None and all(
-            retained is not cleanup for retained in self._root_orphan_cleanups
-        ):
+        if cleanup is None:
+            return
+        if all(retained is not cleanup for retained in self._root_orphan_cleanups):
             self._root_orphan_cleanups.append(cleanup)
+
+    def _retire_p2_root_cleanup(self, cleanup: ProductCompositionLease) -> None:
+        """Retain and autonomously finish one logically fenced P2 root."""
+
+        self._retain_root_cleanup(cleanup)
+        if cleanup in self._root_cleanup_tasks:
+            return
+        task = asyncio.create_task(
+            self._drain_root_cleanup(cleanup),
+            name="live-voice-product-p2-retained-cleanup",
+        )
+        self._root_cleanup_tasks[cleanup] = task
+
+    async def _drain_root_cleanup(self, cleanup: ProductCompositionLease) -> None:
+        """Finish a logically retired route without blocking its successor."""
+
+        try:
+            while not cleanup.closed:
+                try:
+                    await cleanup.close()
+                except ProductCompositionLeaseCloseError:
+                    # The P2 segment uses a bounded observation wait while its
+                    # shielded Runtime coordinator completes the accepted turn.
+                    # Once P2 is gone, any remaining owner needs the registry's
+                    # normal explicit cleanup path instead of an endless P2
+                    # retry loop.
+                    if "agent_server.product_p2.v1" not in cleanup.pending_adapter_ids:
+                        logger.error(
+                            "[LiveVoiceProduct] retained non-P2 composition cleanup "
+                            "still pending: adapters=%s",
+                            cleanup.pending_adapter_ids,
+                        )
+                        return
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    logger.exception(
+                        "[LiveVoiceProduct] retained composition cleanup failed"
+                    )
+                    return
+        finally:
+            self._root_cleanup_tasks.pop(cleanup, None)
+            if cleanup.closed:
+                self._root_orphan_cleanups = [
+                    retained
+                    for retained in self._root_orphan_cleanups
+                    if retained is not cleanup
+                ]
 
     def _retain_closed_p2_route(
         self,
@@ -1061,7 +1990,7 @@ class AgentServerProductCompositionRegistry:
                     retained_key
                     for retained_key, retained in self._closed_progress_routes.items()
                     if all(
-                        delivery.acknowledged
+                        delivery.acknowledged or delivery.closed
                         for delivery in retained.deliveries.values()
                     )
                 ),
@@ -1080,6 +2009,14 @@ class AgentServerProductCompositionRegistry:
         retained: _ProgressRoute,
     ) -> bool:
         deliveries = self._progress_deliveries.get(key, {})
+        if self._p3_presentation_consumption_available:
+            try:
+                self._close_task_presentations_for_progress_route(
+                    deliveries,
+                    reason="progress_generation_archived",
+                )
+            except TaskPresentationViolation:
+                return False
         closed_key = (*key, retained.binding.generation)
         try:
             self._retain_closed_progress_route(
@@ -1116,7 +2053,7 @@ class AgentServerProductCompositionRegistry:
             )
             if any(
                 not all(
-                    delivery.acknowledged
+                    delivery.acknowledged or delivery.closed
                     for delivery in self._closed_progress_routes[
                         closed_key
                     ].deliveries.values()
@@ -1144,7 +2081,7 @@ class AgentServerProductCompositionRegistry:
                 (
                     delivery_id
                     for delivery_id, retained in deliveries.items()
-                    if retained.acknowledged
+                    if retained.acknowledged or retained.closed
                 ),
                 None,
             )
@@ -1155,6 +2092,118 @@ class AgentServerProductCompositionRegistry:
             deliveries.pop(acknowledged_id)
         deliveries[delivery.delivery_id] = delivery
         return delivery
+
+    def _defer_progress_presentation(
+        self,
+        retained: _ProgressRoute,
+        event: TaskProgressTextEvent | TaskProgressNotificationIntent,
+        *,
+        presentation_class: str,
+        fallback_reason: str | None = None,
+    ) -> None:
+        if presentation_class not in {"text", "voice"}:
+            raise RuntimeError("Task progress pending class is invalid")
+        if event.origin != retained.binding:
+            raise RuntimeError("Task progress pending event changed route binding")
+        key = (presentation_class, event.task_event.event_id)
+        pending = _PendingProgressPresentation(
+            event=event,
+            presentation_class=presentation_class,
+            fallback_reason=fallback_reason,
+        )
+        prior = retained.pending_presentations.get(key)
+        if prior is not None:
+            prior_event = prior.event
+            if (
+                type(prior_event) is not type(event)
+                or prior.presentation_class != presentation_class
+                or prior.fallback_reason != fallback_reason
+                or prior_event.origin != event.origin
+                or prior_event.task_event != event.task_event
+                or prior_event.source_event != event.source_event
+                or prior_event.progress_event != event.progress_event
+                or prior_event.evidence_id != event.evidence_id
+            ):
+                raise RuntimeError("Task progress pending event was rewritten")
+            # Arbiter decisions are ephemeral scheduling facts.  The same exact
+            # Store event may first arrive as DEFERRED and later as DISPLAY_NOW;
+            # its retained product identity is the authority/origin/event tuple
+            # above, not the transient decision object.
+            return
+        if len(retained.pending_presentations) >= self._PROGRESS_DELIVERY_CAPACITY:
+            raise RuntimeError("Task progress pending capacity has no safe eviction")
+        retained.pending_presentations[key] = pending
+
+    def _progress_key_for_delivery(
+        self, delivery: _ProgressDelivery
+    ) -> tuple[str, str, str, str] | None:
+        for key, deliveries in self._progress_deliveries.items():
+            if any(retained is delivery for retained in deliveries.values()):
+                return key
+        return None
+
+    def _schedule_progress_presentation_drain(
+        self,
+        delivery: _ProgressDelivery,
+        presentation_class: str,
+    ) -> None:
+        key = self._progress_key_for_delivery(delivery)
+        if key is None or key not in self._progress_routes or self._stopped:
+            return
+        task = asyncio.create_task(
+            self._drain_progress_presentation(key, presentation_class)
+        )
+        self._presentation_drain_tasks.add(task)
+
+        def settled(completed: asyncio.Task[None]) -> None:
+            self._presentation_drain_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.error(
+                    "[LiveVoiceProduct] Task progress drain remains pending",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(settled)
+
+    async def _drain_progress_presentation(
+        self,
+        key: tuple[str, str, str, str],
+        presentation_class: str,
+    ) -> None:
+        retained = self._progress_routes.get(key)
+        if retained is None or self._stopped:
+            return
+        candidates = sorted(
+            (
+                (pending.event.task_event.seq, pending_key, pending)
+                for pending_key, pending in retained.pending_presentations.items()
+                if pending.presentation_class == presentation_class
+            ),
+            key=lambda item: item[0],
+        )
+        if not candidates:
+            return
+        _seq, pending_key, pending = candidates[0]
+        retained.pending_presentations.pop(pending_key, None)
+        try:
+            if isinstance(pending.event, TaskProgressNotificationIntent):
+                await self._emit_voice_progress(pending.event)
+            else:
+                await self._emit_text_progress(
+                    pending.event,
+                    fallback_reason=pending.fallback_reason,
+                )
+        except _ProgressPresentationDeferred:
+            # The delivery method retained the exact immutable event again.
+            return
+        except BaseException:
+            current = self._progress_routes.get(key)
+            if current is retained:
+                current.pending_presentations.setdefault(pending_key, pending)
+            raise
 
     async def _emit_text_progress(
         self,
@@ -1235,6 +2284,95 @@ class AgentServerProductCompositionRegistry:
                 evidence_id=event.evidence_id,
             ),
         )
+        presentation_payload: dict[str, object] = {}
+        if self._p3_presentation_consumption_available:
+            retained_progress = self._progress_routes.get(key)
+            if retained_progress is None:
+                adoption = self._progress_route_adoptions.get(key)
+                if adoption is not None:
+                    try:
+                        await asyncio.wait_for(adoption.wait(), timeout=1.0)
+                    except TimeoutError:
+                        pass
+                    retained_progress = self._progress_routes.get(key)
+            retained_p2 = self._current_task_presentation_route(binding)
+            if retained_progress is None or retained_p2 is None:
+                if not previously_delivered and deliveries.get(delivery_id) is delivery:
+                    deliveries.pop(delivery_id, None)
+                raise RuntimeError("Task progress presentation route is unavailable")
+            try:
+                presentation = await self._prepare_progress_presentation(
+                    event,
+                    delivery,
+                    retained_progress=retained_progress,
+                    retained_p2=retained_p2,
+                    surface=PresentationSurface.TEXT,
+                )
+            except _ProgressPresentationConsumed:
+                if (
+                    delivery.presentation is None
+                    and not delivery.delivered
+                    and deliveries.get(delivery_id) is delivery
+                ):
+                    deliveries.pop(delivery_id, None)
+                return
+            except _ProgressPresentationDeferred:
+                if (
+                    delivery.presentation is None
+                    and not delivery.delivered
+                    and deliveries.get(delivery_id) is delivery
+                ):
+                    deliveries.pop(delivery_id, None)
+                self._defer_progress_presentation(
+                    retained_progress,
+                    event,
+                    presentation_class="text",
+                    fallback_reason=fallback_reason,
+                )
+                return
+            response_ref_payload = {
+                "interaction_id": presentation.response_ref.interaction_id,
+                "response_id": presentation.response_ref.response_id,
+                "response_generation": presentation.response_ref.response_generation,
+            }
+            delivery.presentation_binding = json.dumps(
+                {
+                    "correlation_id": binding.correlation_id,
+                    "delivery_id": delivery_id,
+                    "delivery_mode": delivery_mode,
+                    "effective_origin_kind": effective_origin_kind,
+                    "evidence_id": event.evidence_id,
+                    "expected_event_head": presentation.expected_event_head,
+                    "fallback_reason": fallback_reason,
+                    "generation": binding.generation,
+                    "generation_id": binding.generation_id,
+                    "generation_kind": binding.generation_kind,
+                    "origin_id": binding.origin_id,
+                    "origin_kind": reported_origin_kind,
+                    "presentation_class": presentation.presentation_class,
+                    "progress_event": progress_event,
+                    "project_id": binding.project_id,
+                    "requested_origin_kind": reported_origin_kind,
+                    "response_ref": response_ref_payload,
+                    "result_source_event_id": presentation.result_source_event_id,
+                    "session_id": binding.session_id,
+                    "source_event": source_event,
+                    "state": event.task_event.state,
+                    "task_id": binding.task_id,
+                    "unit_id": presentation.unit_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            presentation_payload = {
+                "presentation_class": presentation.presentation_class,
+                "response_ref": response_ref_payload,
+                "unit_id": presentation.unit_id,
+                "expected_event_head": presentation.expected_event_head,
+                "result_source_event_id": presentation.result_source_event_id,
+                "state": event.task_event.state,
+            }
         delivered = await self._push_text_event(
             {
                 "request_id": target.request_id,
@@ -1259,20 +2397,202 @@ class AgentServerProductCompositionRegistry:
                     "source_event": source_event,
                     "progress_event": progress_event,
                     "evidence_id": event.evidence_id,
+                    **presentation_payload,
                 },
                 "is_complete": False,
             }
         )
         if delivered is not True:
-            if not previously_delivered and deliveries.get(delivery_id) is delivery:
+            if (
+                not previously_delivered
+                and delivery.presentation is None
+                and deliveries.get(delivery_id) is delivery
+            ):
                 deliveries.pop(delivery_id, None)
             raise RuntimeError("text progress Web sink is unavailable")
         delivery.delivered = True
+        self._emit_authoritative_progress_generation(
+            event=event,
+            generation_id=binding.generation_id,
+            delivery=delivery,
+        )
         if (
-            event.task_event.event_type == "task.terminal"
+            not self._p3_presentation_consumption_available
+            and event.task_event.event_type == "task.terminal"
             and target.requested_origin_kind is TaskProgressOriginKind.VOICE
         ):
             self._remember_terminal_notification(event)
+
+    async def _prepare_progress_presentation(
+        self,
+        event: TaskProgressTextEvent,
+        delivery: _ProgressDelivery,
+        *,
+        retained_progress: _ProgressRoute,
+        retained_p2: _P2Route,
+        surface: PresentationSurface,
+    ) -> TaskPresentationDelivery:
+        presentation_class = "text" if surface is PresentationSurface.TEXT else "voice"
+        if delivery.presentation is not None:
+            if delivery.presentation.presentation_class != presentation_class:
+                raise RuntimeError("Task progress presentation class changed")
+            return delivery.presentation
+        if (
+            retained_progress.binding.scope != retained_p2.binding.scope
+            or retained_progress.binding.task_id != event.task_event.task_id
+            or retained_progress.unread_authority is None
+            or retained_progress.result_authority is None
+        ):
+            raise RuntimeError("Task progress presentation scope changed")
+        page = await self._p3_composition.read_product_unread_events(
+            retained_progress.unread_authority,
+            presentation_class=presentation_class,
+            request_id=f"unread-{delivery.delivery_id}",
+            limit=500,
+        )
+        if event.task_event.seq <= page.watermark:
+            if (
+                event.task_event.seq == page.watermark
+                and page.acked_event_id != event.task_event.event_id
+            ):
+                raise RuntimeError(
+                    "Task progress consumed watermark does not bind its event"
+                )
+            raise _ProgressPresentationConsumed(
+                "Task progress event was already durably consumed"
+            )
+        selected_event = next_task_presentation_event(page)
+        if selected_event.seq < event.task_event.seq:
+            raise _ProgressPresentationDeferred(
+                "an earlier presentable Task event still awaits durable consumption"
+            )
+        if (
+            selected_event.event_id != event.task_event.event_id
+            or selected_event.attempt_id != event.task_event.attempt_id
+            or selected_event.seq != event.task_event.seq
+        ):
+            raise RuntimeError(
+                "Task progress event is not the next durable unread fact"
+            )
+        result_record: TaskResultRecord | None = None
+        if (
+            event.task_event.event_type == "task.terminal"
+            and event.task_event.outcome == TerminalOutcome.COMPLETED.value
+        ):
+            (
+                availability,
+                result_record,
+            ) = await self._p3_composition.read_product_task_result(
+                retained_progress.result_authority,
+                request_id=f"result-{delivery.delivery_id}",
+            )
+            if (
+                availability is not TaskResultAvailability.AVAILABLE
+                or result_record is None
+            ):
+                raise RuntimeError("completed Task presentation has no legal result")
+        outcome = event.task_event.outcome
+        if event.task_event.event_type != "task.terminal":
+            text = f"Background task update: {event.task_event.state}."
+        elif outcome == TerminalOutcome.COMPLETED.value:
+            text = "The background task is complete and its result is ready."
+        elif outcome == TerminalOutcome.CANCELLED.value:
+            text = "The background task was cancelled."
+        elif outcome == TerminalOutcome.FAILED.value:
+            text = "The background task failed."
+        elif outcome == TerminalOutcome.INTERRUPTED.value:
+            text = "The background task was interrupted."
+        else:
+            text = "The background task ended with an unknown outcome."
+        commit = TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": f"commit-task-progress-{delivery.delivery_id[:40]}",
+                "turn_id": f"turn-task-progress-{delivery.delivery_id[:40]}",
+                "interaction_id": retained_p2.binding.interaction_id,
+                "text": (
+                    f"Task presentation for {event.task_event.task_id} "
+                    f"event {event.task_event.event_id}"
+                ),
+                "hypothesis_provenance": {
+                    "source": "task_event",
+                    "task_id": event.task_event.task_id,
+                    "event_id": event.task_event.event_id,
+                },
+                "scope": retained_p2.binding.scope.to_dict(),
+                "context_refs": [],
+                "committed_at": event.task_event.occurred_at,
+            }
+        )
+        reserved: TaskPresentationDelivery | None = None
+
+        async def reserve_before_publish(
+            handle: AuthoritativePresentationHandle,
+        ) -> None:
+            nonlocal reserved
+            with self._task_presentation_state_lock:
+                self._task_presentation_runtime_routes[handle.response_ref] = (
+                    retained_p2
+                )
+                try:
+                    reserved = self._task_presentation_owner.reserve_next(
+                        page,
+                        scope=retained_p2.binding.scope,
+                        response_ref=handle.response_ref,
+                        delivery_id=delivery.delivery_id,
+                        unit_id=handle.presentation_unit.unit_id,
+                        result=result_record,
+                    )
+                except BaseException:
+                    self._task_presentation_runtime_routes.pop(
+                        handle.response_ref, None
+                    )
+                    raise
+                self._task_presentation_deliveries[handle.response_ref] = (
+                    delivery,
+                    reserved,
+                )
+
+        try:
+            handle = await retained_p2.activation_lease.present_task_notification(
+                retained_p2.binding,
+                request_id=f"task-progress-{delivery.delivery_id}",
+                response_id=f"response-task-progress-{delivery.delivery_id[:40]}",
+                correlation_id=retained_p2.binding.correlation_id,
+                commit=commit,
+                text=text,
+                channel_id=retained_progress.channel_id,
+                presentation_surface=surface,
+                publish_notification=surface is PresentationSurface.AUDIO,
+                before_publish=reserve_before_publish,
+            )
+            if (
+                reserved is None
+                or reserved.response_ref != handle.response_ref
+                or reserved.unit_id != handle.presentation_unit.unit_id
+            ):
+                raise RuntimeError("Runtime published without exact Task reservation")
+        except BaseException:
+            if reserved is not None:
+                with self._task_presentation_state_lock:
+                    try:
+                        self._task_presentation_owner.close_response(
+                            reserved.response_ref,
+                            reservation_id=reserved.runtime_reservation_id,
+                            reason="task_progress_publish_failed",
+                        )
+                    finally:
+                        self._task_presentation_runtime_routes.pop(
+                            reserved.response_ref,
+                            None,
+                        )
+                        self._task_presentation_deliveries.pop(
+                            reserved.response_ref,
+                            None,
+                        )
+            raise
+        delivery.presentation = reserved
+        return reserved
 
     def _remember_terminal_notification(self, event: TaskProgressTextEvent) -> None:
         event_id = event.task_event.event_id
@@ -1288,6 +2608,147 @@ class AgentServerProductCompositionRegistry:
             )
             return
         self._pending_terminal_notifications[event_id] = event
+
+    def _current_task_presentation_route(
+        self,
+        binding: TaskProgressOriginBinding,
+    ) -> _P2Route | None:
+        if binding.origin_kind is TaskProgressOriginKind.VOICE:
+            origin = self._voice_task_origins.get(binding.task_id)
+            exact = self._p2_routes.get((binding.session_id, binding.origin_id))
+            if (
+                origin is not None
+                and exact is not None
+                and origin.session_id == binding.session_id
+                and origin.interaction_id == binding.origin_id
+                and origin.correlation_id == binding.correlation_id
+                and origin.activation_id == exact.binding.activation_id
+                and origin.activation_generation == exact.binding.activation_generation
+                and exact.binding.scope == binding.scope
+                and exact.activation_lease.snapshot().state is P2LeaseState.OPEN
+            ):
+                return exact
+        candidates = tuple(
+            retained
+            for (session_id, _interaction_id), retained in self._p2_routes.items()
+            if session_id == binding.session_id
+            and retained.binding.scope == binding.scope
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _task_progress_foreground_supplier(
+        self, binding: TaskProgressOriginBinding
+    ) -> Callable[[], ForegroundSnapshot]:
+        """Bind arbiter foreground truth to the exact P2 Runtime route."""
+
+        def read() -> ForegroundSnapshot:
+            origin = self._voice_task_origins.get(binding.task_id)
+            retained = (
+                None
+                if origin is None
+                else self._p2_routes.get((origin.session_id, origin.interaction_id))
+            )
+            exact = bool(
+                binding.origin_kind is TaskProgressOriginKind.VOICE
+                and origin is not None
+                and retained is not None
+                and origin.session_id == binding.session_id
+                and origin.interaction_id == binding.origin_id
+                and origin.correlation_id == binding.correlation_id
+                and origin.activation_id == retained.binding.activation_id
+                and origin.activation_generation
+                == retained.binding.activation_generation
+                and retained.binding.scope == binding.scope
+            )
+            safe = False
+            if exact:
+                assert retained is not None
+                try:
+                    safe = retained.activation_lease.task_notification_foreground_safe(
+                        retained.binding
+                    )
+                except Exception:
+                    safe = False
+            fact = ForegroundFact.SAFE if safe else ForegroundFact.BUSY
+            return ForegroundSnapshot(
+                interaction=fact,
+                response=fact,
+                presentation=fact,
+                speech_policy=(
+                    SpeechPolicy.ALLOW_CANDIDATE if safe else SpeechPolicy.DISPLAY_ONLY
+                ),
+            )
+
+        return read
+
+    async def _drain_voice_progress_for_p2_binding(
+        self, binding: P2InteractionBinding
+    ) -> None:
+        """Wake only deferred Task voice owned by the acknowledged P2 route."""
+
+        async with self._lock:
+            routes = tuple(
+                (key, retained)
+                for key, retained in self._progress_routes.items()
+                if retained.binding.origin_kind is TaskProgressOriginKind.VOICE
+                and retained.binding.scope == binding.scope
+                and retained.binding.session_id == binding.session_id
+                and retained.binding.correlation_id == binding.correlation_id
+                and retained.binding.origin_id == binding.interaction_id
+                and (
+                    (origin := self._voice_task_origins.get(retained.binding.task_id))
+                    is not None
+                )
+                and origin.session_id == binding.session_id
+                and origin.interaction_id == binding.interaction_id
+                and origin.correlation_id == binding.correlation_id
+                and origin.activation_id == binding.activation_id
+                and origin.activation_generation == binding.activation_generation
+            )
+        for key, retained in routes:
+            await self._drain_progress_presentation(key, "voice")
+            await retained.progress_lease.drain_voice()
+
+    async def _defer_voice_progress(
+        self, intent: TaskProgressNotificationIntent
+    ) -> None:
+        """Retain every exact event while the P2 Runtime foreground is busy."""
+
+        if not self._p3_presentation_consumption_available:
+            return
+        binding = intent.origin
+        key = (
+            binding.session_id,
+            binding.task_id,
+            binding.origin_id,
+            binding.generation_id,
+        )
+        retained = self._progress_routes.get(key)
+        if retained is None:
+            adoption = self._progress_route_adoptions.get(key)
+            if adoption is not None:
+                try:
+                    await asyncio.wait_for(adoption.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+                retained = self._progress_routes.get(key)
+        target = self._progress_targets.get(key)
+        exact_p2 = self._current_task_presentation_route(binding)
+        if (
+            retained is None
+            or target is None
+            or exact_p2 is None
+            or target.requested_origin_kind is not TaskProgressOriginKind.VOICE
+            or target.correlation_id != binding.correlation_id
+            or target.generation != binding.generation
+        ):
+            raise RuntimeError("deferred voice progress route is no longer current")
+        self._defer_progress_presentation(
+            retained,
+            intent,
+            presentation_class="voice",
+        )
 
     def _current_terminal_notification_route(
         self, event: TaskProgressTextEvent
@@ -1316,6 +2777,435 @@ class AgentServerProductCompositionRegistry:
             return
         self._terminal_notification_responses.pop(event_id, None)
         self._pending_terminal_notifications.pop(event_id, None)
+
+    def _task_presentation_runtime_authority(
+        self,
+        response_ref: ResponseRef,
+        reservation_id: str | None,
+        phase: str,
+    ) -> TaskPresentationRuntimeReceipt:
+        with self._task_presentation_state_lock:
+            retained = self._task_presentation_runtime_routes.get(response_ref)
+            if retained is None:
+                raise TaskPresentationViolation(
+                    "RUNTIME_PRESENTATION_AUTHORITY_REJECTED",
+                    "Task presentation has no exact retained P2 Runtime route",
+                )
+            receipt = retained.activation_lease.task_presentation_runtime_authority(
+                retained.binding,
+                response_ref,
+                reservation_id,
+                phase,
+            )
+            if phase == "close" and receipt.active is False:
+                self._task_presentation_runtime_routes.pop(response_ref, None)
+            return receipt
+
+    def _record_closed_task_presentation(
+        self,
+        presentation: TaskPresentationDelivery,
+        *,
+        consumed: bool,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            response_ref = presentation.response_ref
+            prior = self._closed_task_presentations.get(response_ref)
+            if prior is not None:
+                if prior[0] != presentation:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_CLOSE_REWRITE",
+                        "closed Task response changed its presentation identity",
+                    )
+                self._closed_task_presentations[response_ref] = (
+                    presentation,
+                    prior[1] or consumed,
+                )
+                return
+            if len(self._closed_task_presentations) >= self._PROGRESS_DELIVERY_CAPACITY:
+                evictable = next(
+                    (
+                        retained_ref
+                        for retained_ref, (_delivery, was_consumed) in (
+                            self._closed_task_presentations.items()
+                        )
+                        if was_consumed
+                    ),
+                    None,
+                )
+                if evictable is None:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_CLOSE_CAPACITY_EXHAUSTED",
+                        "closed unconsumed Task responses have no safe eviction",
+                    )
+                self._closed_task_presentations.pop(evictable)
+            self._closed_task_presentations[response_ref] = (presentation, consumed)
+
+    def _retain_consumed_task_presentation_ack(
+        self,
+        presentation: TaskPresentationDelivery,
+        ack: PresentationAck,
+        outcome: PresentationAckResult,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            if (
+                ack.ref not in self._consumed_task_presentation_acks
+                and len(self._consumed_task_presentation_acks)
+                >= self._PROGRESS_DELIVERY_CAPACITY
+            ):
+                self._consumed_task_presentation_acks.pop(
+                    next(iter(self._consumed_task_presentation_acks))
+                )
+            self._consumed_task_presentation_acks[ack.ref] = (
+                presentation,
+                ack,
+                outcome,
+            )
+
+    @staticmethod
+    def _task_presentation_ack_command_id(
+        presentation: TaskPresentationDelivery,
+    ) -> str:
+        return (
+            "task-ack-"
+            + hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "scope": presentation.scope.to_dict(),
+                        "task_id": presentation.task_id,
+                        "presentation_class": presentation.presentation_class,
+                        "event_id": presentation.event_id,
+                        "event_seq": presentation.event_seq,
+                        "expected_event_head": presentation.expected_event_head,
+                        "delivery_id": presentation.delivery_id,
+                        "runtime_reservation_id": (presentation.runtime_reservation_id),
+                        "response_ref": {
+                            "interaction_id": presentation.response_ref.interaction_id,
+                            "response_id": presentation.response_ref.response_id,
+                            "response_generation": (
+                                presentation.response_ref.response_generation
+                            ),
+                        },
+                        "unit_id": presentation.unit_id,
+                    }
+                )
+            ).hexdigest()
+        )
+
+    def _close_task_presentations_for_p2_route(
+        self,
+        retained: _P2Route,
+        *,
+        reason: str,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            for response_ref, owner in tuple(
+                self._task_presentation_runtime_routes.items()
+            ):
+                if owner.binding != retained.binding:
+                    continue
+                mapped = self._task_presentation_deliveries.get(response_ref)
+                if mapped is None:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_DELIVERY_NOT_FOUND",
+                        "retained Runtime Task presentation lost its delivery",
+                    )
+                progress_delivery, presentation = mapped
+                if progress_delivery.audio_ack_in_flight:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_ACK_IN_FLIGHT",
+                        "Task presentation ACK owns the close race",
+                    )
+                self._task_presentation_owner.close_response(
+                    response_ref,
+                    reservation_id=presentation.runtime_reservation_id,
+                    reason=reason,
+                )
+                self._record_closed_task_presentation(
+                    presentation,
+                    consumed=False,
+                )
+                self._task_presentation_runtime_routes.pop(response_ref, None)
+                self._task_presentation_deliveries.pop(response_ref, None)
+
+    def _close_task_presentations_for_progress_route(
+        self,
+        deliveries: Mapping[str, _ProgressDelivery],
+        *,
+        reason: str,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            for progress_delivery in deliveries.values():
+                presentation = progress_delivery.presentation
+                if presentation is None or progress_delivery.closed:
+                    continue
+                if progress_delivery.audio_ack_in_flight:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_ACK_IN_FLIGHT",
+                        "Task presentation ACK owns the close race",
+                    )
+                self._task_presentation_owner.close_response(
+                    presentation.response_ref,
+                    reservation_id=presentation.runtime_reservation_id,
+                    reason=reason,
+                )
+                self._record_closed_task_presentation(
+                    presentation,
+                    consumed=False,
+                )
+                self._task_presentation_runtime_routes.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                self._task_presentation_deliveries.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                progress_delivery.closed = True
+
+    def _settle_consumed_task_presentation(
+        self,
+        progress_delivery: _ProgressDelivery,
+        presentation: TaskPresentationDelivery,
+        *,
+        audio_ack: PresentationAck | None = None,
+        audio_outcome: PresentationAckResult | None = None,
+    ) -> None:
+        with self._task_presentation_state_lock:
+            progress_delivery.acknowledged = True
+            if audio_ack is not None and audio_outcome is not None:
+                self._retain_consumed_task_presentation_ack(
+                    presentation,
+                    audio_ack,
+                    audio_outcome,
+                )
+            try:
+                self._task_presentation_owner.close_response(
+                    presentation.response_ref,
+                    reservation_id=presentation.runtime_reservation_id,
+                    reason="task_progress_consumed",
+                )
+                self._record_closed_task_presentation(
+                    presentation,
+                    consumed=True,
+                )
+                self._task_presentation_runtime_routes.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                self._task_presentation_deliveries.pop(
+                    presentation.response_ref,
+                    None,
+                )
+                progress_delivery.closed = True
+            except TaskPresentationViolation:
+                logger.exception(
+                    "[LiveVoiceProduct] consumed Task presentation cleanup pending"
+                )
+        self._schedule_progress_presentation_drain(
+            progress_delivery,
+            presentation.presentation_class,
+        )
+
+    async def _reauthorize_task_presentation_replay(
+        self,
+        presentation: TaskPresentationDelivery,
+        *,
+        params: Mapping[str, object],
+        route: AuthorityRouteContext,
+    ) -> None:
+        state = _AuthorityState()
+        authority = await self._authority_registration(
+            state=state,
+            bearer_token=params.get("auth_token"),
+            route=route,
+            operation="task.ack_events",
+            task_id=presentation.task_id,
+        )
+        if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
+            raise FormalTaskViolation(
+                state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                "fresh Task presentation replay authority is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            assert state.canonical is not None
+            if state.canonical.scope != presentation.scope:
+                raise FormalTaskViolation(
+                    "TASK_PRESENTATION_AUTHORITY_MISMATCH",
+                    "presentation replay changed its authenticated scope",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        finally:
+            if authority.lease is not None:
+                await authority.lease.close()
+
+    async def _acknowledge_task_voice_presentation(
+        self,
+        *,
+        retained: _P2Route,
+        ack: PresentationAck,
+        params: Mapping[str, object],
+        route: AuthorityRouteContext,
+        request_id: str,
+    ) -> PresentationAckResult | None:
+        with self._task_presentation_state_lock:
+            consumed = self._consumed_task_presentation_acks.get(ack.ref)
+        if consumed is not None:
+            presentation, prior_ack, prior_outcome = consumed
+            await self._reauthorize_task_presentation_replay(
+                presentation,
+                params=params,
+                route=route,
+            )
+            if prior_ack != ack:
+                raise FormalTaskViolation(
+                    "TASK_PROGRESS_PRESENTATION_MISMATCH",
+                    "consumed Task audio ACK cannot be rewritten",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return PresentationAckResult(
+                ack=ack,
+                accepted=True,
+                replayed=True,
+                history_records_written=0,
+                history_pending=prior_outcome.history_pending,
+            )
+        with self._task_presentation_state_lock:
+            closed = self._closed_task_presentations.get(ack.ref)
+        if closed is not None:
+            presentation, _was_consumed = closed
+            await self._reauthorize_task_presentation_replay(
+                presentation,
+                params=params,
+                route=route,
+            )
+            raise FormalTaskViolation(
+                "TASK_PROGRESS_PRESENTATION_CLOSED",
+                "Task presentation was closed before this audio ACK",
+                ErrorCode.STALE,
+            )
+        with self._task_presentation_state_lock:
+            mapped = self._task_presentation_deliveries.get(ack.ref)
+        if mapped is None:
+            return None
+        progress_delivery, presentation = mapped
+        if (
+            presentation.presentation_class != "voice"
+            or ack.surface is not PresentationSurface.AUDIO
+            or ack.unit_id != presentation.unit_id
+            or retained.binding.scope != presentation.scope
+        ):
+            raise TaskPresentationViolation(
+                "VOICE_PRESENTATION_ACK_MISMATCH",
+                "P2 ACK does not match the exact Task voice presentation",
+            )
+        accepted_outcome: PresentationAckResult | None = None
+
+        async def runtime_ack_port(item: PresentationAck) -> object:
+            nonlocal accepted_outcome
+            accepted_outcome = await retained.activation_lease.acknowledge_presentation(
+                retained.binding,
+                item,
+            )
+            return accepted_outcome
+
+        await self._task_presentation_owner.mark_voice_presented(
+            presentation,
+            ack,
+            runtime_ack_port,
+        )
+        if accepted_outcome is None or accepted_outcome.accepted is not True:
+            raise TaskPresentationViolation(
+                "RUNTIME_PRESENTATION_ACK_REJECTED",
+                "Runtime did not accept the exact Task audio presentation",
+            )
+        state = _AuthorityState()
+        authority = await self._authority_registration(
+            state=state,
+            bearer_token=params.get("auth_token"),
+            route=route,
+            operation="task.ack_events",
+            task_id=presentation.task_id,
+        )
+        if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
+            raise FormalTaskViolation(
+                state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                "fresh Task presentation authority is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            assert state.canonical is not None
+            issued_at = (
+                progress_delivery.command.issued_at
+                if progress_delivery.command is not None
+                else utc_now()
+            )
+            command_id = self._task_presentation_ack_command_id(presentation)
+            command, grant = self._p3_composition.prepare_product_presentation_ack(
+                state.canonical,
+                presentation,
+                request_id=(
+                    progress_delivery.command.request_id
+                    if progress_delivery.command is not None
+                    else request_id
+                ),
+                command_id=command_id,
+                now=issued_at,
+            )
+            if (
+                progress_delivery.command is not None
+                and progress_delivery.command != command
+            ):
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_COMMAND_REWRITE",
+                    "voice presentation ACK command changed across retry",
+                )
+            progress_delivery.command = command
+            result = await asyncio.to_thread(
+                self._task_presentation_owner.consume,
+                presentation,
+                command,
+                grant,
+                lambda item, authorization: (
+                    self._p3_composition.execute_product_presentation_ack(
+                        state.canonical,
+                        item,
+                        authorization,
+                    )
+                ),
+            )
+            if not isinstance(result, ResultEnvelope) or not result.ok:
+                raise FormalTaskViolation(
+                    (
+                        "TASK_PROGRESS_CONSUMPTION_FAILED"
+                        if not isinstance(result, ResultEnvelope)
+                        or result.error is None
+                        or result.error.reason is None
+                        else result.error.reason
+                    ),
+                    "Task voice presentation consumption failed",
+                    (
+                        ErrorCode.UNAVAILABLE
+                        if not isinstance(result, ResultEnvelope)
+                        or result.error is None
+                        else result.error.code
+                    ),
+                )
+            self._settle_consumed_task_presentation(
+                progress_delivery,
+                presentation,
+                audio_ack=ack,
+                audio_outcome=accepted_outcome,
+            )
+            self._emit_authoritative_progress_ack(
+                delivery=progress_delivery,
+                presentation=presentation,
+                observed_at=ack.presented_at,
+            )
+            return accepted_outcome
+        finally:
+            if authority.lease is not None:
+                await authority.lease.close()
 
     async def _terminal_notification_text(self, task_event: PersistentTaskEvent) -> str:
         try:
@@ -1415,10 +3305,14 @@ class AgentServerProductCompositionRegistry:
                 "committed_at": event.task_event.occurred_at,
             }
         )
+
         async def register_before_publish(
             handle: AuthoritativePresentationHandle,
         ) -> None:
-            if self._pending_terminal_notifications.get(event.task_event.event_id) is event:
+            if (
+                self._pending_terminal_notifications.get(event.task_event.event_id)
+                is event
+            ):
                 self._terminal_notification_responses[event.task_event.event_id] = (
                     handle.response_ref
                 )
@@ -1464,15 +3358,181 @@ class AgentServerProductCompositionRegistry:
             and retained.binding.activation_generation == origin.activation_generation
             and retained.binding.scope == binding.scope
         )
+        voice_key: tuple[str, str, str, str] | None = None
+        voice_deliveries: dict[str, _ProgressDelivery] | None = None
+        voice_delivery: _ProgressDelivery | None = None
         if exact_live_origin:
             assert retained is not None
             assert origin is not None
             try:
-                await retained.activation_lease.deliver_task_progress(
-                    retained.binding, intent, origin.response_ref
+                if not self._p3_presentation_consumption_available:
+                    await retained.activation_lease.deliver_task_progress(
+                        retained.binding,
+                        intent,
+                        origin.response_ref,
+                    )
+                else:
+                    key = (
+                        binding.session_id,
+                        binding.task_id,
+                        binding.origin_id,
+                        binding.generation_id,
+                    )
+                    voice_key = key
+                    target = self._progress_targets.get(key)
+                    retained_progress = self._progress_routes.get(key)
+                    if retained_progress is None:
+                        adoption = self._progress_route_adoptions.get(key)
+                        if adoption is not None:
+                            try:
+                                await asyncio.wait_for(adoption.wait(), timeout=1.0)
+                            except TimeoutError:
+                                pass
+                            retained_progress = self._progress_routes.get(key)
+                    if (
+                        target is None
+                        or retained_progress is None
+                        or target.requested_origin_kind
+                        is not TaskProgressOriginKind.VOICE
+                        or target.correlation_id != binding.correlation_id
+                        or target.generation != binding.generation
+                    ):
+                        raise RuntimeError(
+                            "voice progress presentation route is no longer current"
+                        )
+                    source_event = intent.source_event.to_dict()
+                    progress_event = intent.progress_event.to_dict()
+                    source_event_id = _required_text(
+                        source_event.get("event_id"), "source_event.event_id"
+                    )
+                    progress_event_id = _required_text(
+                        progress_event.get("event_id"), "progress_event.event_id"
+                    )
+                    seq = source_event.get("seq")
+                    if (
+                        type(seq) is not int
+                        or seq < 0
+                        or progress_event.get("seq") != seq
+                    ):
+                        raise RuntimeError(
+                            "voice progress delivery sequence is invalid"
+                        )
+                    delivery_id = hashlib.sha256(
+                        canonical_json_bytes(
+                            {
+                                "session_id": binding.session_id,
+                                "task_id": binding.task_id,
+                                "attempt_id": intent.task_event.attempt_id,
+                                "correlation_id": binding.correlation_id,
+                                "origin_id": binding.origin_id,
+                                "origin_kind": "voice",
+                                "requested_origin_kind": "voice",
+                                "effective_origin_kind": "voice",
+                                "delivery_mode": "voice",
+                                "fallback_reason": None,
+                                "generation_id": binding.generation_id,
+                                "generation": binding.generation,
+                                "source_event_id": source_event_id,
+                                "progress_event_id": progress_event_id,
+                                "seq": seq,
+                                "evidence_id": intent.evidence_id,
+                            }
+                        )
+                    ).hexdigest()
+                    deliveries = self._progress_deliveries.setdefault(key, {})
+                    voice_deliveries = deliveries
+                    delivery = self._reserve_progress_delivery(
+                        deliveries,
+                        _ProgressDelivery(
+                            delivery_id=delivery_id,
+                            attempt_id=intent.task_event.attempt_id,
+                            source_event_id=source_event_id,
+                            progress_event_id=progress_event_id,
+                            seq=seq,
+                            evidence_id=intent.evidence_id,
+                        ),
+                    )
+                    voice_delivery = delivery
+                    fallback_event = TaskProgressTextEvent(
+                        origin=binding,
+                        task_event=intent.task_event,
+                        source_event=intent.source_event,
+                        progress_event=intent.progress_event,
+                        evidence_id=intent.evidence_id,
+                    )
+                    if (
+                        delivery.fallback_event is not None
+                        and delivery.fallback_event != fallback_event
+                    ):
+                        raise RuntimeError(
+                            "voice progress fallback event was rewritten"
+                        )
+                    delivery.fallback_event = fallback_event
+                    await self._prepare_progress_presentation(
+                        fallback_event,
+                        delivery,
+                        retained_progress=retained_progress,
+                        retained_p2=retained,
+                        surface=PresentationSurface.AUDIO,
+                    )
+                    delivery.delivered = True
+                    self._emit_authoritative_progress_generation(
+                        event=intent,
+                        generation_id=binding.generation_id,
+                        delivery=delivery,
+                    )
+                return
+            except _ProgressPresentationConsumed:
+                assert voice_key is not None
+                assert voice_deliveries is not None
+                assert voice_delivery is not None
+                if (
+                    voice_delivery.presentation is None
+                    and not voice_delivery.delivered
+                    and voice_deliveries.get(voice_delivery.delivery_id)
+                    is voice_delivery
+                ):
+                    voice_deliveries.pop(voice_delivery.delivery_id, None)
+                return
+            except _ProgressPresentationDeferred:
+                assert voice_key is not None
+                assert voice_deliveries is not None
+                assert voice_delivery is not None
+                retained_progress = self._progress_routes.get(voice_key)
+                if retained_progress is None:
+                    raise RuntimeError(
+                        "voice progress route closed while presentation was deferred"
+                    )
+                if (
+                    voice_delivery.presentation is None
+                    and not voice_delivery.delivered
+                    and voice_deliveries.get(voice_delivery.delivery_id)
+                    is voice_delivery
+                ):
+                    voice_deliveries.pop(voice_delivery.delivery_id, None)
+                self._defer_progress_presentation(
+                    retained_progress,
+                    intent,
+                    presentation_class="voice",
                 )
                 return
             except Exception as exc:
+                if (
+                    voice_delivery is not None
+                    and voice_deliveries is not None
+                    and not voice_delivery.delivered
+                    and voice_deliveries.get(voice_delivery.delivery_id)
+                    is voice_delivery
+                ):
+                    if (
+                        voice_delivery.presentation is not None
+                        and not voice_delivery.closed
+                    ):
+                        self._close_task_presentations_for_progress_route(
+                            {voice_delivery.delivery_id: voice_delivery},
+                            reason="voice_progress_delivery_failed",
+                        )
+                    voice_deliveries.pop(voice_delivery.delivery_id, None)
                 # A route may close after the exact check.  Fall through to the
                 # explicit text projection; never synthesize a voice delivery.
                 fallback_reason = (
@@ -1491,12 +3551,17 @@ class AgentServerProductCompositionRegistry:
                     },
                 )
                 await self._emit_text_progress(
-                    TaskProgressTextEvent(
-                        origin=binding,
-                        task_event=intent.task_event,
-                        source_event=intent.source_event,
-                        progress_event=intent.progress_event,
-                        evidence_id=intent.evidence_id,
+                    (
+                        voice_delivery.fallback_event
+                        if voice_delivery is not None
+                        and voice_delivery.fallback_event is not None
+                        else TaskProgressTextEvent(
+                            origin=binding,
+                            task_event=intent.task_event,
+                            source_event=intent.source_event,
+                            progress_event=intent.progress_event,
+                            evidence_id=intent.evidence_id,
+                        )
                     ),
                     fallback_reason=fallback_reason,
                 )
@@ -1529,16 +3594,22 @@ class AgentServerProductCompositionRegistry:
         route: AuthorityRouteContext,
         operation: str,
         task_id: str | None,
+        consumer_task_access: bool = False,
     ) -> ProductSegmentActivation:
         try:
+            candidate_kwargs: dict[str, object] = {
+                "bearer_token": bearer_token,
+                "operation": operation,
+                "session_id": route.session_id,
+                "correlation_id": route.correlation_id,
+                "required_capabilities": frozenset({operation}),
+                "task_id": task_id,
+            }
+            if consumer_task_access:
+                candidate_kwargs["consumer_task_access"] = True
             candidate, resolved_context = await asyncio.to_thread(
                 self._p3_composition.resolve_product_authority_candidate,
-                bearer_token=bearer_token,
-                operation=operation,
-                session_id=route.session_id,
-                correlation_id=route.correlation_id,
-                required_capabilities=frozenset({operation}),
-                task_id=task_id,
+                **candidate_kwargs,
             )
         except FormalTaskViolation as exc:
             state.reason = exc.reason
@@ -1582,6 +3653,15 @@ class AgentServerProductCompositionRegistry:
         state.canonical = decision.authority
         state.context = resolved_context
         state.service = service
+        runtime = self._observability_runtime
+        if (
+            runtime is not None
+            and runtime.bind_authority(decision.authority) is not True
+        ):
+            # Diagnostics fail closed independently and never alter authority.
+            logger.warning(
+                "[LiveVoiceProduct] observability authority projection rejected"
+            )
         return ProductSegmentActivation(
             _formal_fact(ProductSegment.AUTHORITY),
             _AuthorityLease(state),
@@ -1626,8 +3706,10 @@ class AgentServerProductCompositionRegistry:
         authority: Callable[
             [ProductCompositionContext], Awaitable[ProductSegmentActivation]
         ],
+        *,
+        observability_holder: dict[str, object] | None = None,
     ) -> list[ProductCompositionRegistration]:
-        return [
+        registrations = [
             self._registration(
                 ProductSegment.AUTHORITY,
                 "agent_server.trusted_authority.v1",
@@ -1644,6 +3726,103 @@ class AgentServerProductCompositionRegistry:
                 self._control_unavailable,
             ),
         ]
+        if (
+            self._observability_exporter is not None
+            and observability_holder is not None
+        ):
+
+            async def activate_observability(
+                context: ProductCompositionContext,
+            ) -> ProductSegmentActivation:
+                return await self._activate_observability(
+                    context,
+                    holder=observability_holder,
+                )
+
+            registrations.append(
+                self._registration(
+                    ProductSegment.OBSERVABILITY,
+                    "agent_server.product_observability.v1",
+                    activate_observability,
+                )
+            )
+        return registrations
+
+    @staticmethod
+    def _issue_observability_route_fact(
+        evidence: ProductObservabilityActivationEvidence,
+    ) -> ProductRouteFact:
+        """Issue a formal X-OBS fact only after the leaf proves its live lease."""
+
+        if type(evidence) is not ProductObservabilityActivationEvidence:
+            raise ValueError("product observability activation evidence is required")
+        return _formal_fact(ProductSegment.OBSERVABILITY)
+
+    async def _activate_observability(
+        self,
+        context: ProductCompositionContext,
+        *,
+        holder: dict[str, object],
+    ) -> ProductSegmentActivation:
+        try:
+            activation = await activate_product_observability_adapter(
+                enabled=True,
+                context=context,
+                exporter=self._observability_exporter,
+                formal_route_fact_issuer=self._issue_observability_route_fact,
+            )
+        except ProductObservabilityActivationError as exc:
+            raise ProductSegmentActivationError(
+                "OBSERVABILITY_ACTIVATION_CLEANUP_PENDING",
+                cleanup_lease=exc.cleanup_lease,
+            ) from exc
+        if not isinstance(activation, ActiveProductObservabilityActivation):
+            return ProductSegmentActivation(activation.route_fact, None)
+        holder["context"] = context
+        holder["adapter"] = activation.adapter
+        return ProductSegmentActivation(activation.route_fact, activation.lease)
+
+    @staticmethod
+    def _observe_p2_activation(route: _P2Route) -> None:
+        """Send one public activation fact through the retained package adapter."""
+
+        context = route.observability_context
+        adapter = route.observability_adapter
+        if context is None or adapter is None:
+            return
+        try:
+            digest = hashlib.sha256(
+                (
+                    f"{route.binding.session_id}\0{route.binding.correlation_id}\0"
+                    f"{route.binding.interaction_id}\0{route.binding.activation_id}\0"
+                    f"{route.binding.activation_generation}"
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            observation = create_observation(
+                {
+                    "schema_version": "live-voice.observability.v1",
+                    "event_id": f"product-p2-activation-{digest}",
+                    "event_name": "route.selected",
+                    "segment_name": "runtime.queue",
+                    "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "monotonic_ms": asyncio.get_running_loop().time() * 1000.0,
+                    "binding": {
+                        "correlation_id": route.binding.correlation_id,
+                        "interaction_id": route.binding.interaction_id,
+                    },
+                    "route": {
+                        "implementation_class": "formal",
+                        "owner_module": "product.composition.registry",
+                        "capability_provider": "jiuwenswarm-runtime",
+                        "contract_version": CONTRACT_VERSION,
+                        "reason_code": None,
+                    },
+                    "source_component": "product.registry",
+                }
+            )
+            adapter.consume_observation(context=context, observation=observation)
+        except Exception:  # diagnostics can never rewrite activation truth
+            logger.exception("[LiveVoiceProduct] P2 activation observation rejected")
 
     @staticmethod
     def _route_context(
@@ -1916,10 +4095,27 @@ class AgentServerProductCompositionRegistry:
                     )
                 if replay_authority.lease is not None:
                     await replay_authority.lease.close()
+                cleanup_pending = False
                 try:
+                    self._close_task_presentations_for_p2_route(
+                        existing,
+                        reason="p2_route_superseded",
+                    )
                     await existing.lease.close()
                 except ProductCompositionLeaseCloseError as exc:
-                    self._retain_root_cleanup(exc.lease)
+                    if existing.activation_lease.snapshot().state not in {
+                        P2LeaseState.CLOSING,
+                        P2LeaseState.CLOSED,
+                    }:
+                        return _error_result(
+                            request_id,
+                            reason="PRODUCT_P2_CLEANUP_PENDING",
+                            code=ErrorCode.UNAVAILABLE,
+                            manifest=existing.manifest,
+                        )
+                    self._retire_p2_root_cleanup(exc.lease)
+                    cleanup_pending = True
+                except TaskPresentationViolation:
                     return _error_result(
                         request_id,
                         reason="PRODUCT_P2_CLEANUP_PENDING",
@@ -1927,6 +4123,7 @@ class AgentServerProductCompositionRegistry:
                         manifest=existing.manifest,
                     )
                 self._p2_routes.pop(key, None)
+                self._drop_voice_task_origins_for_route_locked(key)
                 self._retain_closed_p2_route(
                     key,
                     _ClosedP2Route(
@@ -1935,6 +4132,11 @@ class AgentServerProductCompositionRegistry:
                         existing.notification_replay_floor,
                     ),
                 )
+                self._critical_token_gate.release_interaction(interaction_id)
+                if cleanup_pending:
+                    logger.info(
+                        "[LiveVoiceProduct] predecessor P2 route retired while cleanup completes"
+                    )
 
             closed = self._closed_p2_routes.get(key)
             if generation <= self._closed_p2_generation_high_water(key):
@@ -2096,7 +4298,15 @@ class AgentServerProductCompositionRegistry:
                     None,
                 )
 
-            registrations = self._base_registrations(activate_authority)
+            observability_holder: dict[str, object] = {}
+            composition_context = ProductCompositionContext(
+                routed_session,
+                correlation_id,
+            )
+            registrations = self._base_registrations(
+                activate_authority,
+                observability_holder=observability_holder,
+            )
             registrations.append(
                 self._registration(
                     ProductSegment.P2_AGENT_INTERACTION,
@@ -2108,7 +4318,7 @@ class AgentServerProductCompositionRegistry:
                 activation = await ProductCompositionRoot(
                     enabled=True,
                     registrations=registrations,
-                ).activate(ProductCompositionContext(routed_session, correlation_id))
+                ).activate(composition_context)
             except ProductCompositionActivationError as exc:
                 self._retain_root_cleanup(exc.cleanup_lease)
                 logger.exception("[LiveVoiceProduct] P2 activation failed closed")
@@ -2124,10 +4334,22 @@ class AgentServerProductCompositionRegistry:
                 )
             binding = holder.get("binding")
             activation_lease = holder.get("activation_lease")
+            observability_context = observability_holder.get("context")
+            observability_adapter = observability_holder.get("adapter")
             if (
                 not isinstance(binding, P2InteractionBinding)
                 or not isinstance(activation_lease, P2ActivationLease)
                 or activation.lease is None
+                or (
+                    self._observability_exporter is not None
+                    and (
+                        observability_context is not composition_context
+                        or not isinstance(
+                            observability_adapter,
+                            ProductObservabilityAdapter,
+                        )
+                    )
+                )
             ):
                 reason = state.reason or "PRODUCT_P2_UNAVAILABLE"
                 if activation.lease is not None:
@@ -2143,12 +4365,24 @@ class AgentServerProductCompositionRegistry:
                     reason=reason,
                     manifest=activation.manifest,
                 )
-            self._p2_routes[key] = _P2Route(
+            retained_route = _P2Route(
                 binding=binding,
                 activation_lease=activation_lease,
                 lease=activation.lease,
                 manifest=activation.manifest,
+                observability_context=(
+                    observability_context
+                    if isinstance(observability_context, ProductCompositionContext)
+                    else None
+                ),
+                observability_adapter=(
+                    observability_adapter
+                    if isinstance(observability_adapter, ProductObservabilityAdapter)
+                    else None
+                ),
             )
+            self._p2_routes[key] = retained_route
+            self._observe_p2_activation(retained_route)
             self._closed_p2_routes.pop(key, None)
             return _success_result(
                 request_id,
@@ -3053,6 +5287,67 @@ class AgentServerProductCompositionRegistry:
         }
 
     @staticmethod
+    def _matches_frozen_one_current_task_status(text: str) -> bool:
+        candidate = text.strip()
+        if candidate[-1:] in {"?", "？", ".", "。"}:
+            candidate = candidate[:-1].rstrip()
+        return candidate in _FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES
+
+    @classmethod
+    def _bind_frozen_one_current_task_status(
+        cls,
+        resolution: ResolvedUnifiedCommittedInput,
+        *,
+        commit: TurnCommit,
+        current_task: CurrentBackgroundTaskContext | None,
+    ) -> ResolvedUnifiedCommittedInput:
+        """Close only the reproduced one-current-Task status utterances.
+
+        This fallback is intentionally an exact full-utterance list rather than
+        a generalized classifier.  It can only refine a Dialogue decision into
+        the existing read-only status route; Store-derived current-task identity
+        remains the target authority.
+        """
+
+        if (
+            resolution.route is not UnifiedCommittedInputRoute.DIALOGUE
+            or not cls._matches_frozen_one_current_task_status(commit.text)
+        ):
+            return resolution
+        task_id = None if current_task is None else current_task.task_id
+        target_binding = None if current_task is None else "current_background_task"
+        source_span = TaskIntentSourceSpan(0, len(commit.text))
+        reason = "FROZEN_ONE_CURRENT_TASK_STATUS_RESOLVED"
+        identity = {
+            "provider": resolution.provider,
+            "implementation_class": resolution.implementation_class,
+            "commit_sha256": resolution.commit_sha256,
+            "current_task_sha256": resolution.current_task_sha256,
+            "route": UnifiedCommittedInputRoute.BACKGROUND_STATUS.value,
+            "reason": reason,
+            "task_id": task_id,
+            "name": None,
+            "instruction": None,
+            "source_span": {
+                "start": source_span.start,
+                "end": source_span.end,
+            },
+            "target_binding": target_binding,
+        }
+        return ResolvedUnifiedCommittedInput(
+            route=UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+            reason=reason,
+            provider=resolution.provider,
+            implementation_class=resolution.implementation_class,
+            resolution_id=hashlib.sha256(canonical_json_bytes(identity)).hexdigest(),
+            commit_sha256=resolution.commit_sha256,
+            current_task_sha256=resolution.current_task_sha256,
+            task_id=task_id,
+            source_span=source_span,
+            target_binding=target_binding,
+        )
+
+    @staticmethod
     def _restore_unified_semantic_binding(
         binding: Mapping[str, object],
         *,
@@ -3180,6 +5475,32 @@ class AgentServerProductCompositionRegistry:
             source_span=span,
             target_binding=binding["target_binding"],
         )
+
+    @staticmethod
+    def _reserve_task_result_context_slot(
+        context: FormalContextSnapshot,
+    ) -> tuple[FormalContextEntry, ...]:
+        entries = context.entries
+        if len(entries) > 8 or len(entries) % 2 != 0:
+            raise FormalTaskViolation(
+                "TASK_RESULT_CONTEXT_INVALID",
+                "formal dialogue context cannot reserve a TaskResult slot",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        for index in range(0, len(entries), 2):
+            if (
+                entries[index].ref.source != "live_voice.cr_committed_user"
+                or entries[index + 1].ref.source != "live_voice.cr_presented_assistant"
+            ):
+                raise FormalTaskViolation(
+                    "TASK_RESULT_CONTEXT_INVALID",
+                    "formal dialogue context lost its complete pair boundary",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        # CR selects complete user/assistant pairs.  At the eight-entry ceiling,
+        # evict the oldest complete pair so the TaskResult remains the final
+        # entry without splitting a conversation pair.
+        return entries[2:] if len(entries) == 8 else entries
 
     @staticmethod
     def _bounded_untrusted_result_context(
@@ -3835,23 +6156,55 @@ class AgentServerProductCompositionRegistry:
             created_task_id: str | None = None
             if result.ok:
                 formal_task_result = result.payload.get("result")
+                created_state: str | None = None
+                created_attempt_id: str | None = None
+                created_outbox_id: str | None = None
+                candidate_task_id: str | None = None
                 if isinstance(formal_task_result, Mapping):
                     created = formal_task_result.get("task_id")
-                    if isinstance(created, str) and created:
-                        created_task_id = created
-                        _mark_foreground_latency(
-                            self._foreground_latency_probes.get(voice_identity),
-                            "agent.task_command_accepted",
-                            task_id=created_task_id,
-                        )
-                speech = "已开始处理。" if chinese else "Background processing started."
+                    if type(created) is str and created and created == created.strip():
+                        candidate_task_id = created
+                    attempt = formal_task_result.get("attempt_id")
+                    if type(attempt) is str and attempt and attempt == attempt.strip():
+                        created_attempt_id = attempt
+                    state = formal_task_result.get("state")
+                    if isinstance(state, str):
+                        created_state = state
+                    outbox = formal_task_result.get("outbox_id")
+                    if type(outbox) is str and outbox and outbox == outbox.strip():
+                        created_outbox_id = outbox
+                canonical_accepted_receipt = (
+                    isinstance(formal_task_result, Mapping)
+                    and set(formal_task_result)
+                    == {"task_id", "attempt_id", "state", "outbox_id"}
+                    and candidate_task_id is not None
+                    and created_attempt_id is not None
+                    and created_state == FormalTaskState.ACCEPTED.value
+                    and created_outbox_id is not None
+                )
+                if canonical_accepted_receipt:
+                    created_task_id = candidate_task_id
+                    _mark_foreground_latency(
+                        self._foreground_latency_probes.get(voice_identity),
+                        "agent.task_command_accepted",
+                        task_id=created_task_id,
+                    )
+                speech = (
+                    "后台任务已受理，正在等待执行。开始执行后会显示正在执行。"
+                    if canonical_accepted_receipt and chinese
+                    else "The background task was accepted and is waiting to run; it will show as running after execution starts."
+                    if canonical_accepted_receipt
+                    else "后台任务创建回执不完整，当前状态尚未确认。"
+                    if chinese
+                    else "The background-task creation receipt is incomplete, so its current state is not confirmed."
+                )
             else:
                 error = result.payload.get("error")
                 reason = error.get("reason") if isinstance(error, Mapping) else None
                 speech = (
-                    "当前后台任务仍在运行。"
+                    "当前已有未结束的后台任务，请先查看其权威状态。"
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE" and chinese
-                    else "The current background task is still running."
+                    else "A background task is already non-terminal; check its authoritative status first."
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE"
                     else "项目工作区有未提交修改，无法启动后台任务。"
                     if reason == "TASK_CONTEXT_WORKTREE_DIRTY" and chinese
@@ -4141,13 +6494,29 @@ class AgentServerProductCompositionRegistry:
                     if outcome == TerminalOutcome.INTERRUPTED.value
                     else unavailable_text
                 )
-            elif isinstance(state, str):
+            elif state == FormalTaskState.ACCEPTED.value:
+                speech = (
+                    f"后台任务已受理，正在等待执行，已记录 {status_events} 条状态更新。"
+                    if chinese and status_events is not None
+                    else f"The background task is accepted and waiting to run, with {status_events} recorded status updates."
+                    if status_events is not None
+                    else "后台任务已受理，正在等待执行。"
+                    if chinese
+                    else "The background task is accepted and waiting to run."
+                )
+            elif state == FormalTaskState.RUNNING.value:
                 speech = (
                     f"后台任务正在运行，已记录 {status_events} 条状态更新。"
                     if chinese and status_events is not None
                     else f"The background task is running with {status_events} recorded status updates."
                     if status_events is not None
                     else f"当前任务状态是 {state}。"
+                    if chinese
+                    else f"The current task status is {state}."
+                )
+            elif isinstance(state, str):
+                speech = (
+                    f"当前任务状态是 {state}。"
                     if chinese
                     else f"The current task status is {state}."
                 )
@@ -4262,9 +6631,9 @@ class AgentServerProductCompositionRegistry:
             )
             if availability == "not_ready":
                 speech = (
-                    "相关内容尚未生成，后台任务继续运行。"
+                    "相关内容尚未生成；后台任务尚未结束。"
                     if chinese
-                    else "That content is not ready; the background task is still running."
+                    else "That content is not ready; the background task has not reached a terminal state."
                 )
             else:
                 speech = (
@@ -4295,7 +6664,7 @@ class AgentServerProductCompositionRegistry:
                 channel_id=channel_id,
             )
         task_result_record = result_payload.get("task_result")
-        if not isinstance(task_result_record, Mapping) or len(context.entries) >= 8:
+        if not isinstance(task_result_record, Mapping):
             return await self._present_unified_text(
                 retained=retained,
                 voice_identity=voice_identity,
@@ -4310,19 +6679,20 @@ class AgentServerProductCompositionRegistry:
                 ),
                 channel_id=channel_id,
             )
+        dialogue_entries = self._reserve_task_result_context_slot(context)
         ref, entry = self._bounded_untrusted_result_context(
             scope=commit.scope,
             task_result=task_result_record,
         )
         agent_context = FormalContextSnapshot(
             scope=context.scope,
-            entries=(*context.entries, entry),
+            entries=(*dialogue_entries, entry),
         )
         agent_commit = TurnCommit.from_dict(
             {
                 **commit.to_dict(),
                 "context_refs": [
-                    *[item.to_dict() for item in commit.context_refs],
+                    *[item.ref.to_dict() for item in dialogue_entries],
                     ref.to_dict(),
                 ],
             }
@@ -4478,6 +6848,11 @@ class AgentServerProductCompositionRegistry:
             )
             _mark_foreground_latency(latency_probe, "agent.commit_accepted")
             preliminary = bridge.resolve_unified(commit, commit.scope, None)
+            preliminary = self._bind_frozen_one_current_task_status(
+                preliminary,
+                commit=commit,
+                current_task=None,
+            )
             current: PersistentTaskRecord | None = None
             background_authority_unavailable = False
             if preliminary.route is not UnifiedCommittedInputRoute.DIALOGUE:
@@ -4496,10 +6871,16 @@ class AgentServerProductCompositionRegistry:
                         }:
                             raise
                         background_authority_unavailable = True
+            current_context = self._current_background_context(current)
             resolution = bridge.resolve_unified(
                 commit,
                 commit.scope,
-                self._current_background_context(current),
+                current_context,
+            )
+            resolution = self._bind_frozen_one_current_task_status(
+                resolution,
+                commit=commit,
+                current_task=current_context,
             )
             proposed_semantic_binding = self._unified_semantic_binding(resolution)
             admission = await asyncio.to_thread(
@@ -5325,6 +7706,13 @@ class AgentServerProductCompositionRegistry:
                     "surface must be text or audio",
                     ErrorCode.INVALID_ARGUMENT,
                 ) from exc
+            ack = PresentationAck(
+                ref=ResponseRef(parsed[2], response_id, response_generation),
+                surface=surface,
+                unit_id=unit_id,
+                contiguous_cursor=cursor,
+                presented_at=presented_at,
+            )
             fingerprint = canonical_json_bytes(
                 {key: value for key, value in params.items() if key != "auth_token"}
             )
@@ -5372,19 +7760,36 @@ class AgentServerProductCompositionRegistry:
                             "bounded presentation ACK replay ledger is full",
                             ErrorCode.UNAVAILABLE,
                         )
-                    ack = PresentationAck(
-                        ref=ResponseRef(parsed[2], response_id, response_generation),
-                        surface=surface,
-                        unit_id=unit_id,
-                        contiguous_cursor=cursor,
-                        presented_at=presented_at,
-                    )
 
                     async def acknowledge() -> P3RouteResult:
+                        marked_delivery: _ProgressDelivery | None = None
                         try:
-                            outcome = await retained.activation_lease.acknowledge_presentation(
-                                retained.binding, ack
+                            async with self._lock:
+                                with self._task_presentation_state_lock:
+                                    mapped = self._task_presentation_deliveries.get(
+                                        ack.ref
+                                    )
+                                    if mapped is not None:
+                                        marked_delivery = mapped[0]
+                                        if marked_delivery.audio_ack_in_flight:
+                                            raise FormalTaskViolation(
+                                                "PRESENTATION_ACK_IN_FLIGHT",
+                                                "an exact Task audio ACK is already in flight",
+                                                ErrorCode.CONFLICT,
+                                            )
+                                        marked_delivery.audio_ack_in_flight = True
+                            outcome = await self._acknowledge_task_voice_presentation(
+                                retained=retained,
+                                ack=ack,
+                                params=params,
+                                route=parsed[5],
+                                request_id=request_id,
                             )
+                            if outcome is None:
+                                outcome = await retained.activation_lease.acknowledge_presentation(
+                                    retained.binding,
+                                    ack,
+                                )
                             if (
                                 outcome.accepted
                                 and ack.surface is PresentationSurface.TEXT
@@ -5422,6 +7827,11 @@ class AgentServerProductCompositionRegistry:
                                 message=str(exc),
                                 manifest=retained.manifest,
                             )
+                        finally:
+                            if marked_delivery is not None:
+                                async with self._lock:
+                                    with self._task_presentation_state_lock:
+                                        marked_delivery.audio_ack_in_flight = False
 
                     task = asyncio.create_task(
                         acknowledge(),
@@ -5433,7 +7843,349 @@ class AgentServerProductCompositionRegistry:
                         p2_binding=retained.binding,
                     )
                     self._p2_ack_operations[request_id] = entry
-            return await asyncio.shield(entry.task)
+            result = await asyncio.shield(entry.task)
+            error = result.payload.get("error")
+            error_code = error.get("code") if isinstance(error, Mapping) else None
+            with self._task_presentation_state_lock:
+                task_presentation_still_active = (
+                    ack.ref in self._task_presentation_deliveries
+                )
+            if (
+                not result.ok
+                and task_presentation_still_active
+                and error_code
+                in {
+                    ErrorCode.UNAVAILABLE.value,
+                    ErrorCode.TIMEOUT.value,
+                    ErrorCode.INTERNAL.value,
+                }
+            ):
+                async with self._lock:
+                    if self._p2_ack_operations.get(request_id) is entry:
+                        self._p2_ack_operations.pop(request_id, None)
+            accepted = result.payload.get("result")
+            if (
+                result.ok
+                and isinstance(accepted, Mapping)
+                and accepted.get("accepted") is True
+                and entry.p2_binding is not None
+            ):
+                await self._drain_voice_progress_for_p2_binding(entry.p2_binding)
+            return result
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+    async def handle_p2_presentation_failed(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Close one failed Task AUDIO attempt and emit an exact TEXT fallback."""
+
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "response_id",
+                        "response_generation",
+                        "surface",
+                        "unit_id",
+                        "failure_reason",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            response_id = _required_text(params.get("response_id"), "response_id")
+            response_generation = params.get("response_generation")
+            if (
+                type(response_generation) is not int
+                or response_generation < 0
+                or response_generation > MAX_SAFE_INTEGER
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "response_generation must be a non-negative safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if params.get("surface") != PresentationSurface.AUDIO.value:
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "only an AUDIO Task presentation may fail into text",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            unit_id = _required_text(params.get("unit_id"), "unit_id")
+            failure_reason = _required_text(
+                params.get("failure_reason"), "failure_reason", maximum=64
+            )
+            if failure_reason not in {
+                "task_audio_playout_failed",
+                "task_audio_owner_unavailable",
+            }:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_PRESENTATION_FAILURE",
+                    "Task presentation failure reason is not closed",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            response_ref = ResponseRef(parsed[2], response_id, response_generation)
+            fingerprint = canonical_json_bytes(
+                {key: value for key, value in params.items() if key != "auth_token"}
+            )
+            async with self._lock:
+                entry = self._p2_presentation_failure_operations.get(request_id)
+                if entry is not None:
+                    if entry.p2_binding is None:
+                        raise RuntimeError(
+                            "retained P2 presentation failure lost its binding"
+                        )
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=entry.p2_binding,
+                    )
+                    if entry.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "presentation failure request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    self._require_product_request_not_evicted(
+                        "p2.presentation.failed", request_id
+                    )
+                    if (
+                        len(self._p2_presentation_failure_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_presentation_failure_operations,
+                            namespace="p2.presentation.failed",
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded presentation failure replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+
+                    async def fail_presentation() -> P3RouteResult:
+                        fallback: _TaskPresentationFallback | None = None
+                        try:
+                            with self._task_presentation_state_lock:
+                                fallback = self._task_presentation_fallbacks.get(
+                                    response_ref
+                                )
+                                if fallback is None:
+                                    mapped = self._task_presentation_deliveries.get(
+                                        response_ref
+                                    )
+                                    if mapped is None:
+                                        raise FormalTaskViolation(
+                                            "TASK_PROGRESS_PRESENTATION_UNAVAILABLE",
+                                            "failed Task presentation is not active",
+                                            ErrorCode.STALE,
+                                        )
+                                    progress_delivery, presentation = mapped
+                                    if (
+                                        presentation.presentation_class != "voice"
+                                        or presentation.scope != retained.binding.scope
+                                        or presentation.unit_id != unit_id
+                                        or progress_delivery.fallback_event is None
+                                    ):
+                                        raise FormalTaskViolation(
+                                            "TASK_PROGRESS_PRESENTATION_MISMATCH",
+                                            "failed Task presentation changed identity",
+                                            ErrorCode.PERMISSION_DENIED,
+                                        )
+                                    if progress_delivery.audio_ack_in_flight:
+                                        raise FormalTaskViolation(
+                                            "PRESENTATION_SETTLEMENT_IN_FLIGHT",
+                                            "Task presentation already has a settlement owner",
+                                            ErrorCode.CONFLICT,
+                                        )
+                                    if (
+                                        len(self._task_presentation_fallbacks)
+                                        >= self._PROGRESS_DELIVERY_CAPACITY
+                                    ):
+                                        evictable = next(
+                                            (
+                                                ref
+                                                for ref, item in self._task_presentation_fallbacks.items()
+                                                if item.text_emitted
+                                            ),
+                                            None,
+                                        )
+                                        if evictable is None:
+                                            raise FormalTaskViolation(
+                                                "PRESENTATION_FALLBACK_CAPACITY_EXHAUSTED",
+                                                "failed Task presentations have no safe eviction",
+                                                ErrorCode.UNAVAILABLE,
+                                            )
+                                        self._task_presentation_fallbacks.pop(evictable)
+                                    fallback = _TaskPresentationFallback(
+                                        progress_delivery=progress_delivery,
+                                        presentation=presentation,
+                                        event=progress_delivery.fallback_event,
+                                        failure_reason=failure_reason,
+                                    )
+                                    self._task_presentation_fallbacks[response_ref] = (
+                                        fallback
+                                    )
+                                elif (
+                                    fallback.presentation.scope
+                                    != retained.binding.scope
+                                    or fallback.presentation.unit_id != unit_id
+                                    or fallback.failure_reason != failure_reason
+                                ):
+                                    raise FormalTaskViolation(
+                                        "TASK_PRESENTATION_FAILURE_REWRITE",
+                                        "failed Task presentation cannot change identity",
+                                        ErrorCode.CONFLICT,
+                                    )
+                                if fallback.progress_delivery.audio_ack_in_flight:
+                                    raise FormalTaskViolation(
+                                        "PRESENTATION_SETTLEMENT_IN_FLIGHT",
+                                        "Task presentation already has a settlement owner",
+                                        ErrorCode.CONFLICT,
+                                    )
+                                fallback.progress_delivery.audio_ack_in_flight = True
+
+                            fallback_close_reason = failure_reason
+                            fallback_delivery_reason = (
+                                "TASK_PROGRESS_AUDIO_OWNER_UNAVAILABLE"
+                                if failure_reason == "task_audio_owner_unavailable"
+                                else "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED"
+                            )
+                            if not fallback.audio_closed:
+                                await retained.activation_lease.fail_task_presentation(
+                                    retained.binding,
+                                    fallback.presentation.response_ref,
+                                    fallback.presentation.runtime_reservation_id,
+                                    reason=failure_reason,
+                                )
+                                with self._task_presentation_state_lock:
+                                    self._task_presentation_owner.close_response(
+                                        fallback.presentation.response_ref,
+                                        reservation_id=(
+                                            fallback.presentation.runtime_reservation_id
+                                        ),
+                                        reason=fallback_close_reason,
+                                    )
+                                    self._record_closed_task_presentation(
+                                        fallback.presentation,
+                                        consumed=False,
+                                    )
+                                    self._task_presentation_runtime_routes.pop(
+                                        fallback.presentation.response_ref, None
+                                    )
+                                    self._task_presentation_deliveries.pop(
+                                        fallback.presentation.response_ref, None
+                                    )
+                                    fallback.progress_delivery.closed = True
+                                    fallback.audio_closed = True
+                            replayed = fallback.text_emitted
+                            if not fallback.text_emitted:
+                                await self._emit_text_progress(
+                                    fallback.event,
+                                    fallback_reason=fallback_delivery_reason,
+                                )
+                                with self._task_presentation_state_lock:
+                                    fallback.text_emitted = True
+                            return _success_result(
+                                request_id,
+                                {
+                                    "status": "presentation_failed_fallback_text",
+                                    "session_id": retained.binding.session_id,
+                                    "correlation_id": retained.binding.correlation_id,
+                                    "interaction_id": retained.binding.interaction_id,
+                                    "activation_id": retained.binding.activation_id,
+                                    "activation_generation": (
+                                        retained.binding.activation_generation
+                                    ),
+                                    "response_id": response_ref.response_id,
+                                    "response_generation": (
+                                        response_ref.response_generation
+                                    ),
+                                    "surface": "audio",
+                                    "unit_id": unit_id,
+                                    "failure_reason": failure_reason,
+                                    "fallback": "text",
+                                    "replayed": replayed,
+                                },
+                                retained.manifest,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            return _error_result(
+                                request_id,
+                                reason=getattr(
+                                    exc,
+                                    "reason",
+                                    "PRODUCT_P2_PRESENTATION_FAILURE_FAILED",
+                                ),
+                                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                                message=str(exc),
+                                manifest=retained.manifest,
+                            )
+                        finally:
+                            if fallback is not None:
+                                with self._task_presentation_state_lock:
+                                    fallback.progress_delivery.audio_ack_in_flight = (
+                                        False
+                                    )
+
+                    task = asyncio.create_task(
+                        fail_presentation(),
+                        name=f"live-voice-product-p2-presentation-failed:{request_id}",
+                    )
+                    entry = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                    )
+                    self._p2_presentation_failure_operations[request_id] = entry
+            result = await asyncio.shield(entry.task)
+            error = result.payload.get("error")
+            error_code = error.get("code") if isinstance(error, Mapping) else None
+            if not result.ok and error_code in {
+                ErrorCode.UNAVAILABLE.value,
+                ErrorCode.TIMEOUT.value,
+                ErrorCode.INTERNAL.value,
+            }:
+                async with self._lock:
+                    if (
+                        self._p2_presentation_failure_operations.get(request_id)
+                        is entry
+                    ):
+                        self._p2_presentation_failure_operations.pop(request_id, None)
+            return result
         except FormalTaskViolation as exc:
             return _error_result(
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
@@ -5734,8 +8486,25 @@ class AgentServerProductCompositionRegistry:
                     code=ErrorCode.PERMISSION_DENIED,
                 )
             try:
+                self._close_task_presentations_for_p2_route(
+                    retained,
+                    reason="p2_route_closed",
+                )
                 await retained.lease.close()
-            except ProductCompositionLeaseCloseError:
+            except ProductCompositionLeaseCloseError as exc:
+                if retained.activation_lease.snapshot().state not in {
+                    P2LeaseState.CLOSING,
+                    P2LeaseState.CLOSED,
+                }:
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P2_CLEANUP_PENDING",
+                    )
+                self._retire_p2_root_cleanup(exc.lease)
+                logger.info(
+                    "[LiveVoiceProduct] closed P2 route retired while cleanup completes"
+                )
+            except TaskPresentationViolation:
                 return _error_result(
                     request_id,
                     reason="PRODUCT_P2_CLEANUP_PENDING",
@@ -6169,6 +8938,48 @@ class AgentServerProductCompositionRegistry:
                         commit = self._accepted_turn_commits_by_commit.get(commit_id)
                         if commit is not None and commit.turn_id == turn_id:
                             self._consume_voice_origin_locked(commit)
+                formal_result = result.payload.get("result")
+                if isinstance(formal_result, Mapping):
+                    task_id = formal_result.get("task_id")
+                    attempt_id = formal_result.get("attempt_id")
+                    outbox_id = formal_result.get("outbox_id")
+                    state = formal_result.get("state")
+                    if (
+                        type(task_id) is str
+                        and task_id
+                        and type(attempt_id) is str
+                        and attempt_id
+                        and type(outbox_id) is str
+                        and outbox_id
+                        and state == FormalTaskState.ACCEPTED.value
+                    ):
+                        self._emit_authoritative_route_diagnostic(
+                            session_id=session_id,
+                            correlation_id=prepared.correlation_id,
+                            segment_name="task.command",
+                            seam_name="command",
+                            seam_id=prepared.binding.command_id,
+                            task_id=task_id,
+                            attempt_id=attempt_id,
+                            source_record_id=outbox_id,
+                            command_id=prepared.binding.command_id,
+                            outbox_id=outbox_id,
+                            completed=True,
+                            observed_at=prepared.observed_at,
+                        )
+                        self._emit_authoritative_route_diagnostic(
+                            session_id=session_id,
+                            correlation_id=prepared.correlation_id,
+                            segment_name="task.queue",
+                            seam_name="outbox",
+                            seam_id=outbox_id,
+                            task_id=task_id,
+                            attempt_id=attempt_id,
+                            source_record_id=outbox_id,
+                            command_id=prepared.binding.command_id,
+                            outbox_id=outbox_id,
+                            observed_at=prepared.observed_at,
+                        )
                 return _success_result(
                     request_id,
                     {
@@ -6553,6 +9364,11 @@ class AgentServerProductCompositionRegistry:
                 "commit_id",
                 "committed_at",
                 "text",
+                "structured_intent",
+                "source_id",
+                "source_confidence",
+                "committed",
+                "continuation_id",
                 "claimed_user_id",
                 "claimed_project_id",
             }
@@ -6566,32 +9382,48 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.PERMISSION_DENIED,
             )
         source = _required_text(params.get("source"), "source", maximum=16)
-        if source not in {"text", "voice"}:
+        if source not in {"text", "voice", "structured"}:
             raise FormalTaskViolation(
                 "INVALID_TASK_INTENT_SOURCE",
-                "formal natural-language task source must be text or voice",
+                "formal task source must be text, voice or structured",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        operation = _required_text(
-            params.get("operation_hint"), "operation_hint", maximum=32
+        operation_value = params.get("operation_hint")
+        operation = (
+            None
+            if operation_value is None
+            else _required_text(operation_value, "operation_hint", maximum=32)
         )
-        if operation not in {"task.create", "task.status", "task.cancel"}:
+        if operation is not None and operation not in P3_PRODUCTION_OPERATIONS:
             raise FormalTaskViolation(
                 "UNSUPPORTED_FORMAL_TASK_INTENT",
-                "natural-language Alpha supports create, status and cancel",
+                "task intent hint is outside the closed production vocabulary",
                 ErrorCode.UNSUPPORTED,
             )
         task_id = params.get("task_id_hint")
-        if operation == "task.create":
-            if task_id is not None:
-                raise FormalTaskViolation(
-                    "INVALID_TASK_CREATE_INTENT",
-                    "task.create cannot claim an existing task id",
-                    ErrorCode.INVALID_ARGUMENT,
-                )
-            parsed_task_id = None
-        else:
-            parsed_task_id = _required_text(task_id, "task_id_hint")
+        parsed_task_id = (
+            None if task_id is None else _required_text(task_id, "task_id_hint")
+        )
+        if operation in {"task.create", "task.list"} and parsed_task_id is not None:
+            raise FormalTaskViolation(
+                "INVALID_TASK_COLLECTION_INTENT",
+                "collection task intent cannot claim an existing task id",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        confidence_value = params.get("source_confidence", 1.0)
+        if type(confidence_value) not in {int, float} or not 0 <= confidence_value <= 1:
+            raise FormalTaskViolation(
+                "INVALID_TASK_INTENT_CONFIDENCE",
+                "task intent confidence must be between zero and one",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        committed_value = params.get("committed", True)
+        if type(committed_value) is not bool:
+            raise FormalTaskViolation(
+                "INVALID_TASK_INTENT_COMMIT_STATE",
+                "task intent committed state must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         clean: dict[str, object] = {
             "auth_token": params.get("auth_token"),
             "session_id": routed_session,
@@ -6601,26 +9433,73 @@ class AgentServerProductCompositionRegistry:
             "source": source,
             "operation_hint": operation,
             "task_id_hint": parsed_task_id,
-            "interaction_id": _required_text(
-                params.get("interaction_id"), "interaction_id"
+            "source_confidence": float(confidence_value),
+            "committed": committed_value,
+            "continuation_id": (
+                None
+                if params.get("continuation_id") is None
+                else _required_text(
+                    params.get("continuation_id"),
+                    "continuation_id",
+                    maximum=256,
+                )
             ),
-            "turn_id": _required_text(params.get("turn_id"), "turn_id"),
-            "commit_id": _required_text(params.get("commit_id"), "commit_id"),
         }
         for key in ("claimed_user_id", "claimed_project_id"):
             if key in params:
                 clean[key] = _required_text(params[key], key)
         if source == "text":
+            clean["interaction_id"] = _required_text(
+                params.get("interaction_id"), "interaction_id"
+            )
+            clean["turn_id"] = _required_text(params.get("turn_id"), "turn_id")
+            clean["commit_id"] = _required_text(params.get("commit_id"), "commit_id")
             clean["committed_at"] = _required_text(
                 params.get("committed_at"), "committed_at", maximum=64
             )
             clean["text"] = _required_content(params.get("text"), "text", maximum=8_192)
-        elif "committed_at" in params or "text" in params:
-            raise FormalTaskViolation(
-                "INVALID_VOICE_TASK_ORIGIN",
-                "voice task intent text must come from the retained P2 TurnCommit",
-                ErrorCode.INVALID_ARGUMENT,
+        elif source == "voice":
+            clean["interaction_id"] = _required_text(
+                params.get("interaction_id"), "interaction_id"
             )
+            clean["turn_id"] = _required_text(params.get("turn_id"), "turn_id")
+            clean["commit_id"] = _required_text(params.get("commit_id"), "commit_id")
+            if (
+                "committed_at" in params
+                or "text" in params
+                or "structured_intent" in params
+                or "source_id" in params
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_VOICE_TASK_ORIGIN",
+                    "voice task intent text must come from the retained P2 TurnCommit",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        else:
+            clean["source_id"] = _required_text(params.get("source_id"), "source_id")
+            structured = params.get("structured_intent")
+            if not isinstance(structured, (str, Mapping)):
+                raise FormalTaskViolation(
+                    "INVALID_STRUCTURED_TASK_INTENT",
+                    "structured task intent payload is required",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            clean["structured_intent"] = structured
+            if any(
+                field in params
+                for field in (
+                    "interaction_id",
+                    "turn_id",
+                    "commit_id",
+                    "committed_at",
+                    "text",
+                )
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_STRUCTURED_TASK_ORIGIN",
+                    "structured intent cannot claim a natural committed turn",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
         return clean
 
     async def handle_p3_intent(
@@ -6638,39 +9517,107 @@ class AgentServerProductCompositionRegistry:
         try:
             self._ensure_running()
             clean = self._validate_task_intent_params(params, session_id=session_id)
-            operation = str(clean["operation_hint"])
-            if operation == "task.status":
-                if not self._settings.p3_text_enabled:
-                    return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
-            elif not self._p3_control_ready():
-                return _error_result(
-                    request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
-                )
-            canonical = await self._preauthorize_task_intent(
-                params=clean,
-                session_id=str(clean["session_id"]),
-                operation=operation,
-                task_id=(
-                    None
-                    if clean["task_id_hint"] is None
-                    else str(clean["task_id_hint"])
-                ),
+            production = bool(
+                getattr(self._p3_composition, "production_intent_available", False)
             )
+            canonical: (
+                ResolvedProductAuthority | PreparedProductionIntentAuthority | None
+            ) = None
+            operation_hint = clean.get("operation_hint")
+            production_operation: str | None = None
+            if production:
+                async with self._lock:
+                    retained_preflight = self._p3_intent_operations.get(request_id)
+                if (
+                    retained_preflight is not None
+                    and retained_preflight.intent_production
+                ):
+                    retained_operation = retained_preflight.intent_operation
+                    if retained_operation not in P3_PRODUCTION_OPERATIONS:
+                        raise FormalTaskViolation(
+                            "TASK_INTENT_RECOVERY_UNAVAILABLE",
+                            "retained production operation is not exact",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    production_operation = retained_operation
+                    canonical = await asyncio.to_thread(
+                        self._p3_composition.prepare_production_intent_authority,
+                        bearer_token=clean.get("auth_token"),
+                        operation=production_operation,
+                        session_id=str(clean["session_id"]),
+                    )
+                    if (
+                        retained_preflight.intent_scope is None
+                        or canonical.scope != retained_preflight.intent_scope
+                    ):
+                        raise FormalTaskViolation(
+                            "TASK_INTENT_RECOVERY_SCOPE_MISMATCH",
+                            "current authority cannot replay the retained Task intent",
+                            ErrorCode.PERMISSION_DENIED,
+                        )
+                else:
+                    (
+                        production_operation,
+                        canonical,
+                    ) = await self._preflight_p3_production_intent(clean=clean)
+                if not bool(clean["committed"]):
+                    return self._intent_rejected_result(
+                        request_id,
+                        reason="INPUT_NOT_COMMITTED",
+                        code=ErrorCode.PERMISSION_DENIED,
+                        message="production Task intent requires committed input",
+                    )
+            else:
+                operation = _required_text(operation_hint, "operation_hint", maximum=32)
+                if operation not in {"task.create", "task.status", "task.cancel"}:
+                    raise FormalTaskViolation(
+                        "UNSUPPORTED_FORMAL_TASK_INTENT",
+                        "legacy task intent supports create, status and cancel",
+                        ErrorCode.UNSUPPORTED,
+                    )
+                task_hint = clean.get("task_id_hint")
+                if operation != "task.create" and task_hint is None:
+                    raise FormalTaskViolation(
+                        "INVALID_TASK_INTENT_TARGET",
+                        "legacy targeted task intent requires task_id_hint",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if operation == "task.status":
+                    if not self._settings.p3_text_enabled:
+                        return _error_result(
+                            request_id, reason="PRODUCT_P3_TEXT_DISABLED"
+                        )
+                elif not self._p3_control_ready():
+                    return _error_result(
+                        request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
+                    )
+                canonical = await self._preauthorize_task_intent(
+                    params=clean,
+                    session_id=str(clean["session_id"]),
+                    operation=operation,
+                    task_id=(None if task_hint is None else str(task_hint)),
+                )
             fingerprint = hashlib.sha256(
                 canonical_json_bytes(
                     {key: value for key, value in clean.items() if key != "auth_token"}
                 )
             ).digest()
+            replayed_existing = False
+            replay_fingerprint_conflict = False
             async with self._lock:
                 self._ensure_running()
                 existing = self._p3_intent_operations.get(request_id)
                 if existing is not None:
+                    replayed_existing = True
                     if existing.fingerprint != fingerprint:
-                        raise FormalTaskViolation(
-                            "PRODUCT_REQUEST_ID_CONFLICT",
-                            "task intent request_id cannot change binding",
-                            ErrorCode.CONFLICT,
-                        )
+                        if production:
+                            replay_fingerprint_conflict = True
+                        else:
+                            raise FormalTaskViolation(
+                                "PRODUCT_REQUEST_ID_CONFLICT",
+                                "task intent request_id cannot change binding",
+                                ErrorCode.CONFLICT,
+                            )
                 else:
                     self._require_product_request_not_evicted("p3.intent", request_id)
                     if (
@@ -6686,10 +9633,17 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.UNAVAILABLE,
                         )
                     task = asyncio.create_task(
-                        self._run_p3_intent(
-                            clean=clean,
-                            request_id=request_id,
-                            canonical=canonical,
+                        (
+                            self._run_p3_production_intent(
+                                clean=clean,
+                                request_id=request_id,
+                            )
+                            if production
+                            else self._run_p3_intent(
+                                clean=clean,
+                                request_id=request_id,
+                                canonical=canonical,
+                            )
                         ),
                         name=f"live-voice-product-p3-intent:{request_id}",
                     )
@@ -6698,19 +9652,79 @@ class AgentServerProductCompositionRegistry:
                         task,
                         intent_session_id=str(clean["session_id"]),
                         intent_correlation_id=str(clean["correlation_id"]),
-                        intent_operation=operation,
+                        intent_operation=(
+                            production_operation
+                            if production
+                            else None
+                            if operation_hint is None
+                            else str(operation_hint)
+                        ),
                         intent_task_id=(
                             None
                             if clean["task_id_hint"] is None
                             else str(clean["task_id_hint"])
                         ),
                         intent_source=str(clean["source"]),
-                        intent_scope=canonical.scope,
-                        intent_interaction_id=str(clean["interaction_id"]),
-                        intent_turn_id=str(clean["turn_id"]),
-                        intent_commit_id=str(clean["commit_id"]),
+                        intent_scope=(None if canonical is None else canonical.scope),
+                        intent_interaction_id=(
+                            None
+                            if clean.get("interaction_id") is None
+                            else str(clean["interaction_id"])
+                        ),
+                        intent_turn_id=(
+                            None
+                            if clean.get("turn_id") is None
+                            else str(clean["turn_id"])
+                        ),
+                        intent_commit_id=(
+                            None
+                            if clean.get("commit_id") is None
+                            else str(clean["commit_id"])
+                        ),
+                        intent_production=production,
                     )
                     self._p3_intent_operations[request_id] = existing
+            if production and replayed_existing:
+                # Wait for the original call to freeze its server-resolved
+                # operation and Scope before reauthorizing a response replay.
+                # Authorizing the pre-resolution fallback (normally task.list)
+                # could otherwise disclose a retained mutation result to a
+                # principal whose destructive authority was revoked while the
+                # first call was still in flight.
+                completed = await asyncio.shield(existing.task)
+                async with self._lock:
+                    if self._p3_intent_operations.get(request_id) is not existing:
+                        raise FormalTaskViolation(
+                            "TASK_INTENT_RECOVERY_UNAVAILABLE",
+                            "the exact retained Task intent is no longer available",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    retained_operation = existing.intent_operation
+                    retained_scope = existing.intent_scope
+                replay_operation = (
+                    retained_operation
+                    if retained_operation in P3_PRODUCTION_OPERATIONS
+                    else "task.list"
+                )
+                replay_authority = await asyncio.to_thread(
+                    self._p3_composition.prepare_production_intent_authority,
+                    bearer_token=clean.get("auth_token"),
+                    operation=replay_operation,
+                    session_id=str(clean["session_id"]),
+                )
+                if retained_scope is None or replay_authority.scope != retained_scope:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_RECOVERY_SCOPE_MISMATCH",
+                        "current authority cannot replay the retained Task intent",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                if replay_fingerprint_conflict:
+                    raise FormalTaskViolation(
+                        "PRODUCT_REQUEST_ID_CONFLICT",
+                        "task intent request_id cannot change binding",
+                        ErrorCode.CONFLICT,
+                    )
+                return completed
             return await asyncio.shield(existing.task)
         except FormalTaskViolation as exc:
             return self._intent_rejected_result(
@@ -6785,7 +9799,7 @@ class AgentServerProductCompositionRegistry:
                 else None
             ),
         }
-        if retained.intent_source not in {"text", "voice"}:
+        if retained.intent_source not in {"text", "voice", "structured"}:
             raise FormalTaskViolation(
                 "TASK_INTENT_RECOVERY_INVALID",
                 "retained task intent source is unavailable",
@@ -6836,9 +9850,10 @@ class AgentServerProductCompositionRegistry:
                     retained is None
                     or retained.intent_session_id != routed_session
                     or retained.intent_correlation_id != correlation_id
-                    or retained.intent_operation
+                    or retained.intent_operation not in P3_PRODUCTION_OPERATIONS
+                    and retained.intent_operation
                     not in {"task.create", "task.status", "task.cancel"}
-                    or retained.intent_source not in {"text", "voice"}
+                    or retained.intent_source not in {"text", "voice", "structured"}
                     or retained.intent_scope is None
                 ):
                     raise FormalTaskViolation(
@@ -6857,13 +9872,23 @@ class AgentServerProductCompositionRegistry:
             for key in ("claimed_user_id", "claimed_project_id"):
                 if key in params:
                     authority_params[key] = params[key]
-            canonical = await self._preauthorize_task_intent(
-                params=authority_params,
-                session_id=routed_session,
-                operation=operation,
-                task_id=task_id,
-            )
-            if canonical.scope != expected_scope:
+            if retained.intent_production:
+                prepared = await asyncio.to_thread(
+                    self._p3_composition.prepare_production_intent_authority,
+                    bearer_token=authority_params.get("auth_token"),
+                    operation=operation,
+                    session_id=routed_session,
+                )
+                current_scope = prepared.scope
+            else:
+                canonical = await self._preauthorize_task_intent(
+                    params=authority_params,
+                    session_id=routed_session,
+                    operation=operation,
+                    task_id=task_id,
+                )
+                current_scope = canonical.scope
+            if current_scope != expected_scope:
                 raise FormalTaskViolation(
                     "TASK_INTENT_RECOVERY_SCOPE_MISMATCH",
                     "current authority cannot recover the retained task intent",
@@ -6889,6 +9914,22 @@ class AgentServerProductCompositionRegistry:
                 if isinstance(confirmation_token, str):
                     async with self._lock:
                         pending = self._pending_task_intents.get(confirmation_token)
+                        production_pending = self._pending_production_task_intents.get(
+                            confirmation_token
+                        )
+                        if (
+                            production_pending is not None
+                            and datetime.now(UTC) >= production_pending.expires_at
+                        ):
+                            self._pending_production_task_intents.pop(
+                                confirmation_token, None
+                            )
+                            if production_pending.commit is not None:
+                                self._release_task_intent_commit_locked(
+                                    production_pending.commit,
+                                    production_pending.source,
+                                )
+                            production_pending = None
                         pending_is_current = bool(
                             pending is not None
                             and pending.session_id == retained.intent_session_id
@@ -6904,6 +9945,16 @@ class AgentServerProductCompositionRegistry:
                             == safe.get("resolution_id")
                             and pending.resolution.commit_sha256
                             == safe.get("commit_sha256")
+                        ) or bool(
+                            production_pending is not None
+                            and production_pending.session_id
+                            == retained.intent_session_id
+                            and production_pending.resolution.operation
+                            == retained.intent_operation
+                            and production_pending.resolution.target_task_id
+                            == retained.intent_task_id
+                            and production_pending.resolution.fingerprint
+                            == safe.get("resolution_id")
                         )
                     if not pending_is_current:
                         return _success_result(
@@ -6953,7 +10004,7 @@ class AgentServerProductCompositionRegistry:
         self,
         *,
         clean: Mapping[str, object],
-        canonical: ResolvedProductAuthority,
+        canonical: ResolvedProductAuthority | PreparedProductionIntentAuthority,
     ) -> TurnCommit:
         source = str(clean["source"])
         commit_id = str(clean["commit_id"])
@@ -7034,10 +10085,18 @@ class AgentServerProductCompositionRegistry:
             commit.scope,
         )
         self._critical_token_gate.release_commit(commit.commit_id)
-        if not any(
-            pending.commit.interaction_id == commit.interaction_id
-            for pending in self._pending_task_intents.values()
-        ) and not any(key[1] == commit.interaction_id for key in self._p2_routes):
+        if (
+            not any(
+                pending.commit.interaction_id == commit.interaction_id
+                for pending in self._pending_task_intents.values()
+            )
+            and not any(
+                pending.commit is not None
+                and pending.commit.interaction_id == commit.interaction_id
+                for pending in self._pending_production_task_intents.values()
+            )
+            and not any(key[1] == commit.interaction_id for key in self._p2_routes)
+        ):
             self._critical_token_gate.release_interaction(commit.interaction_id)
 
     def _drop_voice_task_origins_for_route_locked(
@@ -7053,6 +10112,16 @@ class AgentServerProductCompositionRegistry:
             ):
                 self._pending_task_intents.pop(token, None)
                 self._release_task_intent_commit_locked(pending.commit, pending.source)
+        for token, pending in tuple(self._pending_production_task_intents.items()):
+            if (
+                pending.source == "voice"
+                and (pending.session_id, pending.origin_key) == route_key
+            ):
+                self._pending_production_task_intents.pop(token, None)
+                if pending.commit is not None:
+                    self._release_task_intent_commit_locked(
+                        pending.commit, pending.source
+                    )
 
     def _evict_oldest_pending_task_intent_locked(self) -> bool:
         try:
@@ -7062,6 +10131,1255 @@ class AgentServerProductCompositionRegistry:
         pending = self._pending_task_intents.pop(token)
         self._release_task_intent_commit_locked(pending.commit, pending.source)
         return True
+
+    async def _peek_voice_task_intent_commit(
+        self, clean: Mapping[str, object]
+    ) -> TurnCommit:
+        commit_id = str(clean["commit_id"])
+        turn_id = str(clean["turn_id"])
+        interaction_id = str(clean["interaction_id"])
+        route_key = (str(clean["session_id"]), interaction_id)
+        async with self._lock:
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if (
+                commit is None
+                or commit.turn_id != turn_id
+                or commit.interaction_id != interaction_id
+                or self._accepted_voice_commit_routes.get(commit_id) != route_key
+                or route_key not in self._p2_routes
+                or commit.commit_id not in self._critical_input_guarded_commits
+            ):
+                raise FormalTaskViolation(
+                    "VOICE_TASK_ROUTE_MISMATCH",
+                    "voice task intent requires its exact live P2 TurnCommit route",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return commit
+
+    async def _peek_production_intent_continuation(
+        self,
+        *,
+        clean: Mapping[str, object],
+        source_text: str | None,
+    ) -> _PendingProductionTaskIntent | None:
+        """Read one continuation without allocating, evicting, or consuming it."""
+
+        explicit = clean.get("continuation_id")
+        async with self._lock:
+            now = datetime.now(UTC)
+            if explicit is not None:
+                pending = self._pending_production_task_intents.get(str(explicit))
+                if pending is None or now >= pending.expires_at:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "the exact production intent continuation is unavailable",
+                        ErrorCode.CONFLICT,
+                    )
+                matches = (pending,)
+            elif source_text is not None:
+                matches = tuple(
+                    pending
+                    for token, pending in self._pending_production_task_intents.items()
+                    if now < pending.expires_at and token in source_text
+                )
+            else:
+                matches = ()
+            if len(matches) > 1:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_AMBIGUOUS",
+                    "committed input names more than one continuation",
+                    ErrorCode.CONFLICT,
+                )
+            if not matches:
+                return None
+            pending = matches[0]
+            if pending.session_id != clean["session_id"]:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                    "production continuation belongs to another Session",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return pending
+
+    async def _preflight_p3_production_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+    ) -> tuple[str, PreparedProductionIntentAuthority]:
+        """Authorize and feature-gate production intent before replay allocation."""
+
+        source = str(clean["source"])
+        source_commit = (
+            await self._peek_voice_task_intent_commit(clean)
+            if source == "voice"
+            else None
+        )
+        source_text = (
+            source_commit.text
+            if source_commit is not None
+            else str(clean["text"])
+            if source == "text"
+            else None
+        )
+        continuation = await self._peek_production_intent_continuation(
+            clean=clean,
+            source_text=source_text,
+        )
+        proposal = self._classify_production_task_intent(
+            clean=clean,
+            source_text=source_text,
+            continuation=continuation,
+        )
+        operation = (
+            proposal.operation
+            if proposal.operation in P3_PRODUCTION_OPERATIONS
+            else "task.list"
+        )
+        if operation in P3_PRODUCTION_MUTATIONS and not self._p3_control_ready():
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation requires the confirmation owner",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            operation not in P3_PRODUCTION_MUTATIONS
+            and not self._settings.p3_text_enabled
+        ):
+            raise FormalTaskViolation(
+                "PRODUCT_P3_TEXT_DISABLED",
+                "production Task query route is disabled",
+                ErrorCode.UNAVAILABLE,
+            )
+        authority = await asyncio.to_thread(
+            self._p3_composition.prepare_production_intent_authority,
+            bearer_token=clean.get("auth_token"),
+            operation=operation,
+            session_id=str(clean["session_id"]),
+        )
+        return operation, authority
+
+    async def _production_intent_continuation(
+        self,
+        *,
+        clean: Mapping[str, object],
+        source_text: str | None,
+    ) -> _PendingProductionTaskIntent | None:
+        explicit = clean.get("continuation_id")
+        async with self._lock:
+            now = datetime.now(UTC)
+            for token, stale in tuple(self._pending_production_task_intents.items()):
+                if now >= stale.expires_at:
+                    self._pending_production_task_intents.pop(token, None)
+                    if stale.commit is not None:
+                        self._release_task_intent_commit_locked(
+                            stale.commit, stale.source
+                        )
+            if explicit is not None:
+                pending = self._pending_production_task_intents.get(str(explicit))
+                if pending is None:
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "the exact production intent continuation is unavailable",
+                        ErrorCode.CONFLICT,
+                    )
+                matches = (pending,)
+            elif source_text is not None:
+                matches = tuple(
+                    pending
+                    for token, pending in self._pending_production_task_intents.items()
+                    if token in source_text
+                )
+            else:
+                matches = ()
+            if len(matches) > 1:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_AMBIGUOUS",
+                    "committed input names more than one continuation",
+                    ErrorCode.CONFLICT,
+                )
+            if not matches:
+                return None
+            pending = matches[0]
+            if pending.session_id != clean["session_id"]:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                    "production continuation belongs to another Session",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return pending
+
+    def _classify_production_task_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        source_text: str | None,
+        continuation: _PendingProductionTaskIntent | None,
+    ) -> ProductionTaskIntentProposal:
+        context = (
+            None
+            if continuation is None
+            else ProductionTaskIntentClassifierContext(
+                kind=continuation.kind,
+                context_id=continuation.token,
+                bound_operation=str(continuation.resolution.operation),
+                bound_target_task_id=continuation.resolution.target_task_id,
+                bound_arguments=continuation.resolution.arguments,
+                bound_origin_deferred_fields=tuple(
+                    field
+                    for field in continuation.proposal.origin_deferred_fields
+                    if field not in continuation.resolution.arguments
+                ),
+            )
+        )
+        committed = bool(clean["committed"])
+        confidence = float(clean["source_confidence"])
+        source = str(clean["source"])
+        try:
+            if source == "structured":
+                # The structured carrier already supplied a closed-schema proposal.
+                # Confirmation must reuse that exact retained proposal; reparsing a
+                # client payload here would let the operation or arguments drift.
+                if continuation is not None:
+                    return continuation.proposal
+                return self._production_task_classifier.parse_structured(
+                    clean["structured_intent"],
+                    committed=committed,
+                    source_confidence=confidence,
+                )
+            assert source_text is not None
+            return self._production_task_classifier.classify_natural(
+                source_text,
+                origin=(
+                    ProductionIntentOrigin.VOICE
+                    if source == "voice"
+                    else ProductionIntentOrigin.NATURAL_TEXT
+                ),
+                committed=committed,
+                source_confidence=confidence,
+                context=context,
+            )
+        except ValueError as error:
+            raise FormalTaskViolation(
+                str(error),
+                "production task intent classifier rejected the committed input",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+
+    @staticmethod
+    def _production_intent_request(
+        *,
+        clean: Mapping[str, object],
+        proposal: ProductionTaskIntentProposal,
+        authority: PreparedProductionIntentAuthority,
+        commit: TurnCommit | None,
+        command_id: str,
+        clarification_answer: ClarificationAnswer | None = None,
+        confirmation_id: str | None = None,
+    ) -> ProductionTaskIntentRequest:
+        source = str(clean["source"])
+        origin = (
+            ProductionIntentOrigin.STRUCTURED
+            if source == "structured"
+            else ProductionIntentOrigin.VOICE
+            if source == "voice"
+            else ProductionIntentOrigin.NATURAL_TEXT
+        )
+        return ProductionTaskIntentRequest(
+            origin=origin,
+            scope=authority.scope,
+            command_id=command_id,
+            proposal=proposal,
+            commit=commit,
+            source_id=(
+                str(clean["source_id"])
+                if source == "structured"
+                else str(clean["turn_id"])
+            ),
+            clarification_answer=clarification_answer,
+            confirmation_id=confirmation_id,
+        )
+
+    @staticmethod
+    def _resolve_clarification_selection(
+        *,
+        proposal: ProductionTaskIntentProposal,
+        pending: _PendingProductionTaskIntent,
+        authority: PreparedProductionIntentAuthority,
+    ) -> ClarificationAnswer:
+        resolution = pending.resolution
+        if (
+            pending.kind != "clarification"
+            or resolution.clarification_handle_id is None
+            or resolution.clarification_generation is None
+            or resolution.task_set_fingerprint is None
+            or not resolution.candidate_task_ids
+            or proposal.operation != resolution.operation
+            or dict(proposal.arguments) != dict(resolution.arguments)
+        ):
+            raise FormalTaskViolation(
+                "CLARIFICATION_BINDING_CONFLICT",
+                "clarification answer changed the retained operation or arguments",
+                ErrorCode.CONFLICT,
+            )
+        visible = authority.reader.list_visible_tasks(authority.scope)
+        candidates = tuple(
+            fact
+            for fact in visible.tasks
+            if fact.task_id in resolution.candidate_task_ids
+        )
+        selected = tuple(
+            fact
+            for fact in candidates
+            if (
+                proposal.target_kind == "task_id"
+                and fact.task_id == proposal.target
+                or proposal.target_kind == "stable_reference"
+                and fact.stable_reference.casefold() == str(proposal.target).casefold()
+                or proposal.target_kind == "name"
+                and fact.name.casefold() == str(proposal.target).casefold()
+            )
+        )
+        if len(selected) != 1:
+            raise FormalTaskViolation(
+                "CLARIFICATION_SELECTION_UNRESOLVED",
+                "clarification answer must select one exact retained candidate",
+                ErrorCode.CONFLICT,
+            )
+        return ClarificationAnswer(
+            handle_id=resolution.clarification_handle_id,
+            generation=resolution.clarification_generation,
+            selected_task_id=selected[0].task_id,
+            task_set_fingerprint=resolution.task_set_fingerprint,
+        )
+
+    async def _retain_production_continuation(
+        self,
+        *,
+        kind: str,
+        proposal: ProductionTaskIntentProposal,
+        resolution: ProductionTaskResolution,
+        commit: TurnCommit | None,
+        clean: Mapping[str, object],
+        replacing_token: str | None = None,
+        confirmation_id: str | None = None,
+        confirmation_owner_context: P3ConfirmationOwnerContext | None = None,
+        clarification_answer_fingerprint: str | None = None,
+    ) -> str:
+        if kind not in {"clarification", "confirmation"}:
+            raise ValueError("INVALID_PRODUCTION_CONTINUATION_KIND")
+        if (
+            (confirmation_id is None) != (confirmation_owner_context is None)
+            or (kind == "confirmation" and confirmation_id is None)
+            or (kind == "clarification" and confirmation_id is not None)
+        ):
+            raise ValueError("INVALID_PRODUCTION_CONFIRMATION_CONTINUATION")
+        token = secrets.token_urlsafe(24)
+        pending = _PendingProductionTaskIntent(
+            token=token,
+            kind=kind,
+            proposal=proposal,
+            resolution=resolution,
+            commit=commit,
+            source=str(clean["source"]),
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            origin_key=str(
+                clean.get("interaction_id") or clean.get("source_id") or "structured"
+            ),
+            expires_at=datetime.now(UTC) + P3_CONFIRMATION_MAX_TTL,
+            confirmation_id=confirmation_id,
+            confirmation_owner_context=confirmation_owner_context,
+            clarification_answer_fingerprint=clarification_answer_fingerprint,
+        )
+        async with self._lock:
+            if self._stopped:
+                raise FormalTaskViolation(
+                    "PRODUCT_COMPOSITION_STOPPED",
+                    "Live Voice product composition is stopped",
+                    ErrorCode.UNAVAILABLE,
+                )
+            now = datetime.now(UTC)
+            for stale_token, stale in tuple(
+                self._pending_production_task_intents.items()
+            ):
+                if now >= stale.expires_at:
+                    self._pending_production_task_intents.pop(stale_token, None)
+                    if stale.commit is not None:
+                        self._release_task_intent_commit_locked(
+                            stale.commit, stale.source
+                        )
+            replacing_current = bool(
+                replacing_token is not None
+                and replacing_token in self._pending_production_task_intents
+            )
+            if (
+                len(self._pending_production_task_intents) - int(replacing_current)
+                >= self._PRODUCT_OPERATION_CAPACITY
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_CAPACITY_UNAVAILABLE",
+                    "bounded production continuation capacity is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            self._pending_production_task_intents[token] = pending
+        return token
+
+    @staticmethod
+    def _production_resolution_facts(
+        resolution: ProductionTaskResolution,
+    ) -> dict[str, object]:
+        return {
+            "operation": resolution.operation,
+            "task_id": resolution.target_task_id,
+            "resolver_provider": "production_multi_task",
+            "resolver_implementation_class": "formal",
+            "resolution_id": resolution.fingerprint,
+            "commit_sha256": (
+                None
+                if resolution.origin_binding is None
+                else resolution.origin_binding.commit_sha256
+            ),
+            "source_span": None,
+            "target_span": None,
+            "partial_command_count": 0,
+        }
+
+    async def _release_production_intent_origins(
+        self,
+        *,
+        current_commit: TurnCommit | None,
+        current_source: str,
+        pending: _PendingProductionTaskIntent | None = None,
+        remove_pending: bool = False,
+    ) -> None:
+        async with self._lock:
+            if pending is not None and remove_pending:
+                if self._pending_production_task_intents.get(pending.token) is pending:
+                    self._pending_production_task_intents.pop(pending.token, None)
+            prior = None if pending is None else pending.commit
+            if prior is not None and prior is not current_commit:
+                self._release_task_intent_commit_locked(prior, pending.source)
+            if current_commit is not None:
+                self._release_task_intent_commit_locked(current_commit, current_source)
+
+    async def _retire_prior_production_continuation(
+        self,
+        *,
+        pending: _PendingProductionTaskIntent | None,
+        current_commit: TurnCommit | None,
+    ) -> None:
+        if pending is None:
+            return
+        async with self._lock:
+            if self._pending_production_task_intents.get(pending.token) is pending:
+                self._pending_production_task_intents.pop(pending.token, None)
+            if pending.commit is not None and pending.commit is not current_commit:
+                self._release_task_intent_commit_locked(pending.commit, pending.source)
+
+    async def _release_failed_production_intent(
+        self,
+        *,
+        current_commit: TurnCommit | None,
+        current_source: str,
+        pending: _PendingProductionTaskIntent | None,
+    ) -> None:
+        released_pending = None
+        if pending is not None:
+            async with self._lock:
+                if (
+                    self._pending_production_task_intents.get(pending.token)
+                    is not pending
+                ):
+                    released_pending = pending
+        await self._release_production_intent_origins(
+            current_commit=current_commit,
+            current_source=current_source,
+            pending=released_pending,
+        )
+
+    async def _invoke_production_resolution(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        resolution: ProductionTaskResolution,
+        origin_authority: CallLocalProductionOriginAuthority,
+        confirmation_consumer: CallLocalProductionConfirmationConsumer | None,
+    ) -> P3RouteResult:
+        return await self._p3_composition.handle_production_resolution(
+            resolution=resolution,
+            bearer_token=clean.get("auth_token"),
+            request_id=f"production-core-{request_id}",
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            origin_authority=origin_authority,
+            confirmation_consumer=confirmation_consumer,
+            current_background_session_id=str(clean["session_id"]),
+        )
+
+    async def _production_voice_origin(
+        self,
+        pending: _PendingProductionTaskIntent,
+    ) -> _VoiceTaskOrigin | None:
+        original = pending.commit
+        if pending.source != "voice" or original is None:
+            return None
+        async with self._lock:
+            route_key = self._accepted_voice_commit_routes.get(original.commit_id)
+            response_ref = self._accepted_voice_commit_responses.get(original.commit_id)
+            retained = None if route_key is None else self._p2_routes.get(route_key)
+            if retained is None or response_ref is None:
+                return None
+            return _VoiceTaskOrigin(
+                session_id=pending.session_id,
+                interaction_id=retained.binding.interaction_id,
+                activation_id=retained.binding.activation_id,
+                activation_generation=retained.binding.activation_generation,
+                correlation_id=retained.binding.correlation_id,
+                response_ref=response_ref,
+            )
+
+    async def _issue_production_confirmation_continuation(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        proposal: ProductionTaskIntentProposal,
+        resolution: ProductionTaskResolution,
+        commit: TurnCommit | None,
+        authority: PreparedProductionIntentAuthority,
+        replacing_token: str | None,
+        clarification_answer_fingerprint: str | None,
+    ) -> str:
+        """Issue the durable confirmation before returning its carrier token."""
+
+        owner = self._p3_confirmation_owner
+        generation = self._p3_confirmation_generation
+        binding = resolution.confirmation_binding
+        if owner is None or generation is None:
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation confirmation is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            binding is None
+            or resolution.confirmation != "required"
+            or resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+        ):
+            raise FormalTaskViolation(
+                resolution.reason,
+                "production mutation did not produce an exact confirmation binding",
+                ErrorCode.CONFLICT,
+            )
+        p3_binding = P3ConfirmationBinding(
+            principal_id=binding.principal_id,
+            scope=binding.scope,
+            operation=binding.operation,
+            command_id=binding.command_id,
+            target_task_id=binding.target_task_id,
+            intent_fingerprint=binding.fingerprint,
+        )
+        owner_context = P3ConfirmationOwnerContext(
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            owner_generation=generation,
+        )
+        observed = datetime.fromisoformat(
+            authority.observed_at.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        expires_at = (
+            (observed + P3_CONFIRMATION_MAX_TTL)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+        confirmation_id = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "binding": binding.fingerprint,
+                    "generation": generation,
+                    "request_id": request_id,
+                }
+            )
+        ).hexdigest()
+        token = await self._retain_production_continuation(
+            kind="confirmation",
+            proposal=proposal,
+            resolution=resolution,
+            commit=commit,
+            clean=clean,
+            replacing_token=replacing_token,
+            confirmation_id=confirmation_id,
+            confirmation_owner_context=owner_context,
+            clarification_answer_fingerprint=clarification_answer_fingerprint,
+        )
+        async with self._lock:
+            retained = self._pending_production_task_intents.get(token)
+            replaced = (
+                None
+                if replacing_token is None
+                else self._pending_production_task_intents.get(replacing_token)
+            )
+        try:
+            await asyncio.to_thread(
+                owner.issue,
+                TrustedP3ConfirmationIssue(
+                    binding=p3_binding,
+                    owner=owner_context,
+                    expires_at=expires_at,
+                    confirmation_id=confirmation_id,
+                ),
+                now=authority.observed_at,
+            )
+        except Exception as issue_error:
+            try:
+                await asyncio.to_thread(
+                    owner.validate_for_forwarding,
+                    confirmation_id,
+                    p3_binding,
+                    owner_context,
+                    now=authority.observed_at,
+                )
+            except Exception:
+                async with self._lock:
+                    if self._pending_production_task_intents.get(token) is retained:
+                        self._pending_production_task_intents.pop(token, None)
+                    if (
+                        replacing_token is not None
+                        and self._pending_production_task_intents.get(replacing_token)
+                        is replaced
+                    ):
+                        self._pending_production_task_intents.pop(replacing_token, None)
+                raise issue_error
+            return token
+        except BaseException:
+            async with self._lock:
+                if self._pending_production_task_intents.get(token) is retained:
+                    self._pending_production_task_intents.pop(token, None)
+                if (
+                    replacing_token is not None
+                    and self._pending_production_task_intents.get(replacing_token)
+                    is replaced
+                ):
+                    self._pending_production_task_intents.pop(replacing_token, None)
+            raise
+        return token
+
+    async def _confirm_production_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        pending: _PendingProductionTaskIntent,
+        request: ProductionTaskIntentRequest,
+        authority: PreparedProductionIntentAuthority,
+        origin_authority: CallLocalProductionOriginAuthority,
+        preliminary: ProductionTaskResolution,
+    ) -> tuple[ProductionTaskResolution, P3RouteResult]:
+        owner = self._p3_confirmation_owner
+        forwarder = self._p3_confirmation_forwarder
+        binding = preliminary.confirmation_binding
+        confirmation_id = pending.confirmation_id
+        owner_context = pending.confirmation_owner_context
+        if (
+            owner is None
+            or forwarder is None
+            or confirmation_id is None
+            or owner_context is None
+        ):
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "production mutation confirmation is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            binding is None
+            or preliminary.confirmation != "required"
+            or preliminary.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+        ):
+            raise FormalTaskViolation(
+                preliminary.reason,
+                "production continuation no longer resolves to an exact mutation",
+                ErrorCode.CONFLICT,
+            )
+        p3_binding = P3ConfirmationBinding(
+            principal_id=binding.principal_id,
+            scope=binding.scope,
+            operation=binding.operation,
+            command_id=binding.command_id,
+            target_task_id=binding.target_task_id,
+            intent_fingerprint=binding.fingerprint,
+        )
+        if owner_context.session_id != clean["session_id"]:
+            raise FormalTaskViolation(
+                "TASK_INTENT_CONTINUATION_SCOPE_MISMATCH",
+                "production confirmation belongs to another Session",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        async with self._p3_operation_lock:
+            async with self._lock:
+                if (
+                    self._pending_production_task_intents.get(pending.token)
+                    is not pending
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "production confirmation continuation is no longer current",
+                        ErrorCode.CONFLICT,
+                    )
+            validated: ValidatedP3ConfirmationForwarding = await asyncio.to_thread(
+                owner.validate_for_forwarding,
+                confirmation_id,
+                p3_binding,
+                owner_context,
+                now=authority.observed_at,
+            )
+            consumer = CallLocalProductionConfirmationConsumer(
+                expected_binding=binding,
+                validated=validated,
+                forwarder=forwarder,
+                now=authority.observed_at,
+            )
+            confirmed_request = replace(request, confirmation_id=confirmation_id)
+            confirmed = await asyncio.to_thread(
+                self._task_intent_bridge.resolve_production,
+                confirmed_request,
+                authority.reader,
+                origin_authority,
+                consumer,
+                self._production_clarification_owner,
+            )
+            if (
+                confirmed.outcome is not ProductionTaskPolicyOutcome.PROPOSED
+                or confirmed.confirmation != "confirmed"
+            ):
+                raise FormalTaskViolation(
+                    confirmed.reason,
+                    "production confirmation failed its final authority reread",
+                    ErrorCode.CONFLICT,
+                )
+            async with self._lock:
+                if (
+                    self._pending_production_task_intents.get(pending.token)
+                    is not pending
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_UNAVAILABLE",
+                        "production confirmation lost its exact continuation",
+                        ErrorCode.CONFLICT,
+                    )
+                self._pending_production_task_intents.pop(pending.token, None)
+            result = await self._invoke_production_resolution(
+                clean=clean,
+                request_id=request_id,
+                resolution=confirmed,
+                origin_authority=origin_authority,
+                confirmation_consumer=consumer,
+            )
+            return confirmed, result
+
+    async def _run_p3_production_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+    ) -> P3RouteResult:
+        bridge = self._task_intent_bridge
+        if bridge is None:
+            return _error_result(request_id, reason="PRODUCT_P3_INTENT_DISABLED")
+        source = str(clean["source"])
+        commit: TurnCommit | None = None
+        pending: _PendingProductionTaskIntent | None = None
+        try:
+            source_commit = (
+                await self._peek_voice_task_intent_commit(clean)
+                if source == "voice"
+                else None
+            )
+            source_text = (
+                source_commit.text
+                if source_commit is not None
+                else str(clean["text"])
+                if source == "text"
+                else None
+            )
+            pending = await self._production_intent_continuation(
+                clean=clean,
+                source_text=source_text,
+            )
+            proposal = self._classify_production_task_intent(
+                clean=clean,
+                source_text=source_text,
+                continuation=pending,
+            )
+            operation_hint = clean.get("operation_hint")
+            task_hint = clean.get("task_id_hint")
+            if operation_hint is not None and proposal.operation != operation_hint:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "operation hint does not match the classified committed intent",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if pending is not None and (
+                proposal.operation != pending.resolution.operation
+                or dict(proposal.arguments) != dict(pending.resolution.arguments)
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_CONTINUATION_BINDING_MISMATCH",
+                    "continuation changed the retained operation or arguments",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            auth_operation = (
+                proposal.operation
+                if proposal.operation in P3_PRODUCTION_OPERATIONS
+                else "task.list"
+            )
+            if (
+                auth_operation in P3_PRODUCTION_MUTATIONS
+                and not self._p3_control_ready()
+            ):
+                raise FormalTaskViolation(
+                    "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                    "production mutation requires the confirmation owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if (
+                auth_operation not in P3_PRODUCTION_MUTATIONS
+                and not self._settings.p3_text_enabled
+            ):
+                raise FormalTaskViolation(
+                    "PRODUCT_P3_TEXT_DISABLED",
+                    "production Task query route is disabled",
+                    ErrorCode.UNAVAILABLE,
+                )
+            authority = await asyncio.to_thread(
+                self._p3_composition.prepare_production_intent_authority,
+                bearer_token=clean.get("auth_token"),
+                operation=auth_operation,
+                session_id=str(clean["session_id"]),
+            )
+            if source != "structured":
+                commit = await self._obtain_task_intent_commit(
+                    clean=clean,
+                    canonical=authority,
+                )
+                if source_commit is not None and commit is not source_commit:
+                    raise FormalTaskViolation(
+                        "VOICE_TASK_ROUTE_MISMATCH",
+                        "voice Task origin changed during classification",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+            command_id = (
+                str(pending.resolution.command_id)
+                if pending is not None
+                else "production-intent."
+                + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+            )
+            clarification_answer = (
+                None
+                if pending is None or pending.kind != "clarification"
+                else self._resolve_clarification_selection(
+                    proposal=proposal,
+                    pending=pending,
+                    authority=authority,
+                )
+            )
+            if (
+                task_hint is not None
+                and clarification_answer is not None
+                and clarification_answer.selected_task_id != task_hint
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "task hint does not match the authenticated clarification target",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if pending is not None and pending.kind == "confirmation":
+                pending_origin = (
+                    ProductionIntentOrigin.STRUCTURED
+                    if pending.source == "structured"
+                    else ProductionIntentOrigin.VOICE
+                    if pending.source == "voice"
+                    else ProductionIntentOrigin.NATURAL_TEXT
+                )
+                if pending_origin is not ProductionIntentOrigin.STRUCTURED and (
+                    pending.commit is None
+                ):
+                    raise FormalTaskViolation(
+                        "TASK_INTENT_CONTINUATION_BINDING_MISMATCH",
+                        "natural confirmation lost its original committed origin",
+                        ErrorCode.CONFLICT,
+                    )
+                intent_request = ProductionTaskIntentRequest(
+                    origin=pending_origin,
+                    scope=authority.scope,
+                    command_id=command_id,
+                    proposal=pending.proposal,
+                    commit=pending.commit,
+                    source_id=(
+                        pending.origin_key
+                        if pending_origin is ProductionIntentOrigin.STRUCTURED
+                        else pending.commit.turn_id  # type: ignore[union-attr]
+                    ),
+                    clarification_answer_fingerprint=(
+                        pending.clarification_answer_fingerprint
+                    ),
+                )
+            else:
+                intent_request = self._production_intent_request(
+                    clean=clean,
+                    proposal=proposal,
+                    authority=authority,
+                    commit=commit,
+                    command_id=command_id,
+                    clarification_answer=clarification_answer,
+                )
+            origin_binding = build_production_origin_binding(intent_request)
+            origin_authority = CallLocalProductionOriginAuthority(
+                expected_binding=origin_binding,
+                commit_ledger=(
+                    None
+                    if intent_request.origin is ProductionIntentOrigin.STRUCTURED
+                    else self._commit_ledger
+                ),
+            )
+            resolution = await asyncio.to_thread(
+                bridge.resolve_production,
+                intent_request,
+                authority.reader,
+                origin_authority,
+                _RejectingProductionConfirmationConsumer(),
+                self._production_clarification_owner,
+            )
+            if operation_hint is not None and resolution.operation != operation_hint:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "operation hint does not match the classified committed intent",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if task_hint is not None and resolution.target_task_id != task_hint:
+                raise FormalTaskViolation(
+                    "TASK_INTENT_HINT_MISMATCH",
+                    "task hint does not match the resolved authenticated target",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if (
+                pending is not None
+                and pending.kind == "confirmation"
+                and (
+                    resolution.operation != pending.resolution.operation
+                    or resolution.target_task_id != pending.resolution.target_task_id
+                    or dict(resolution.arguments) != dict(pending.resolution.arguments)
+                    or resolution.task_set_fingerprint
+                    != pending.resolution.task_set_fingerprint
+                    or resolution.authority_fingerprint
+                    != pending.resolution.authority_fingerprint
+                    or resolution.confirmation_binding is None
+                    or pending.resolution.confirmation_binding is None
+                    or resolution.confirmation_binding.capability_profile_digest
+                    != pending.resolution.confirmation_binding.capability_profile_digest
+                )
+            ):
+                await self._release_production_intent_origins(
+                    current_commit=commit,
+                    current_source=source,
+                    pending=pending,
+                    remove_pending=True,
+                )
+                return self._intent_rejected_result(
+                    request_id,
+                    reason="TASK_INTENT_CONFIRMATION_FACTS_CHANGED",
+                    code=ErrorCode.CONFLICT,
+                    message="confirmed production Task facts changed before execution",
+                    origin_kind=(source if source in {"text", "voice"} else None),
+                    origin_id=(None if commit is None else commit.interaction_id),
+                )
+            async with self._lock:
+                retained = self._p3_intent_operations.get(request_id)
+                if retained is not None:
+                    retained.intent_operation = resolution.operation
+                    retained.intent_task_id = resolution.target_task_id
+                    retained.intent_scope = authority.scope
+
+            if pending is not None and pending.kind == "confirmation":
+                voice_origin = await self._production_voice_origin(pending)
+                confirmed, formal = await self._confirm_production_intent(
+                    clean=clean,
+                    request_id=request_id,
+                    pending=pending,
+                    request=intent_request,
+                    authority=authority,
+                    origin_authority=origin_authority,
+                    preliminary=resolution,
+                )
+                await self._release_production_intent_origins(
+                    current_commit=commit,
+                    current_source=source,
+                    pending=pending,
+                    remove_pending=True,
+                )
+                if not formal.ok:
+                    error = formal.payload.get("error")
+                    reason = (
+                        str(error.get("reason"))
+                        if isinstance(error, Mapping)
+                        else "TASK_INTENT_DISPATCH_REJECTED"
+                    )
+                    return self._intent_rejected_result(
+                        request_id,
+                        reason=reason,
+                        code=ErrorCode.CONFLICT,
+                        message="production Task mutation was rejected",
+                        formal_task_result=formal.payload,
+                        origin_kind=source,
+                        origin_id=(
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                    )
+                formal_result = formal.payload.get("result")
+                task_id = confirmed.target_task_id
+                if confirmed.operation == "task.create" and isinstance(
+                    formal_result, Mapping
+                ):
+                    created = formal_result.get("task_id")
+                    if isinstance(created, str) and created:
+                        task_id = created
+                if voice_origin is not None and task_id is not None:
+                    async with self._lock:
+                        if (
+                            task_id in self._voice_task_origins
+                            or len(self._voice_task_origins)
+                            < self._PRODUCT_OPERATION_CAPACITY
+                        ):
+                            self._voice_task_origins[task_id] = voice_origin
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.DISPATCHED.value,
+                        "reason": "TASK_INTENT_DISPATCHED",
+                        **self._production_resolution_facts(confirmed),
+                        "task_id": task_id,
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_commit_id": (
+                            None if commit is None else commit.commit_id
+                        ),
+                        "formal_task_result": formal_result,
+                    },
+                    self._p3_control_manifest(),
+                )
+
+            if resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED:
+                if resolution.confirmation == "required":
+                    token = await self._issue_production_confirmation_continuation(
+                        clean=clean,
+                        request_id=request_id,
+                        proposal=proposal,
+                        resolution=resolution,
+                        commit=commit,
+                        authority=authority,
+                        replacing_token=(None if pending is None else pending.token),
+                        clarification_answer_fingerprint=(
+                            None
+                            if clarification_answer is None
+                            else clarification_answer.fingerprint
+                        ),
+                    )
+                    await self._retire_prior_production_continuation(
+                        pending=pending,
+                        current_commit=commit,
+                    )
+                    return _success_result(
+                        request_id,
+                        {
+                            "status": TaskIntentDisposition.CLARIFICATION.value,
+                            "reason": "TASK_CONFIRMATION_REQUIRED",
+                            **self._production_resolution_facts(resolution),
+                            "origin_kind": source,
+                            "origin_id": (
+                                commit.interaction_id
+                                if commit is not None
+                                else str(clean["source_id"])
+                            ),
+                            "confirmation_token": token,
+                            "confirmation_form": f"confirm task request {token}",
+                            "partial_command_count": 0,
+                        },
+                        self._p3_control_manifest(),
+                    )
+                formal = await self._invoke_production_resolution(
+                    clean=clean,
+                    request_id=request_id,
+                    resolution=resolution,
+                    origin_authority=origin_authority,
+                    confirmation_consumer=None,
+                )
+                await self._release_production_intent_origins(
+                    current_commit=commit,
+                    current_source=source,
+                    pending=pending,
+                    remove_pending=pending is not None,
+                )
+                if not formal.ok:
+                    error = formal.payload.get("error")
+                    reason = (
+                        str(error.get("reason"))
+                        if isinstance(error, Mapping)
+                        else "TASK_INTENT_QUERY_REJECTED"
+                    )
+                    return self._intent_rejected_result(
+                        request_id,
+                        reason=reason,
+                        code=ErrorCode.UNAVAILABLE,
+                        message="production Task query was rejected",
+                        formal_task_result=formal.payload,
+                        origin_kind=source,
+                        origin_id=(
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                    )
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.DISPATCHED.value,
+                        "reason": "TASK_INTENT_DISPATCHED",
+                        **self._production_resolution_facts(resolution),
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_token": None,
+                        "confirmation_form": None,
+                        "formal_task_result": formal.payload.get("result"),
+                    },
+                    self._p3_control_manifest(),
+                )
+
+            if resolution.outcome is ProductionTaskPolicyOutcome.CLARIFICATION:
+                token = await self._retain_production_continuation(
+                    kind="clarification",
+                    proposal=proposal,
+                    resolution=resolution,
+                    commit=commit,
+                    clean=clean,
+                    replacing_token=(None if pending is None else pending.token),
+                )
+                await self._retire_prior_production_continuation(
+                    pending=pending,
+                    current_commit=commit,
+                )
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.CLARIFICATION.value,
+                        "reason": resolution.reason,
+                        **self._production_resolution_facts(resolution),
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_token": token,
+                        "confirmation_form": None,
+                        "candidate_task_ids": list(resolution.candidate_task_ids),
+                        "clarification_generation": resolution.clarification_generation,
+                        "partial_command_count": 0,
+                    },
+                    self._p3_control_manifest(),
+                )
+
+            await self._release_production_intent_origins(
+                current_commit=commit,
+                current_source=source,
+                pending=pending,
+                remove_pending=pending is not None,
+            )
+            if resolution.outcome is ProductionTaskPolicyOutcome.DIALOGUE:
+                return _success_result(
+                    request_id,
+                    {
+                        "status": TaskIntentDisposition.CLARIFICATION.value,
+                        "reason": resolution.reason,
+                        **self._production_resolution_facts(resolution),
+                        "origin_kind": source,
+                        "origin_id": (
+                            commit.interaction_id
+                            if commit is not None
+                            else str(clean["source_id"])
+                        ),
+                        "confirmation_token": None,
+                        "confirmation_form": None,
+                        "partial_command_count": 0,
+                    },
+                    self._p3_control_manifest(),
+                )
+            code = (
+                ErrorCode.UNSUPPORTED
+                if resolution.outcome is ProductionTaskPolicyOutcome.UNSUPPORTED
+                else ErrorCode.CONFLICT
+                if resolution.outcome is ProductionTaskPolicyOutcome.CONFLICT
+                else ErrorCode.PERMISSION_DENIED
+            )
+            return self._intent_rejected_result(
+                request_id,
+                reason=resolution.reason,
+                code=code,
+                message="production Task intent was rejected",
+                origin_kind=source,
+                origin_id=(
+                    commit.interaction_id
+                    if commit is not None
+                    else str(clean["source_id"])
+                ),
+            )
+        except FormalTaskViolation as error:
+            await self._release_failed_production_intent(
+                current_commit=commit,
+                current_source=source,
+                pending=pending,
+            )
+            return self._intent_rejected_result(
+                request_id,
+                reason=error.reason,
+                code=error.code,
+                message="production Task intent failed closed",
+                origin_kind=(source if source in {"text", "voice"} else None),
+                origin_id=(None if commit is None else commit.interaction_id),
+            )
+        except Exception as error:  # noqa: BLE001 - never leak resolver details
+            await self._release_failed_production_intent(
+                current_commit=commit,
+                current_source=source,
+                pending=pending,
+            )
+            logger.warning(
+                "[LiveVoiceProduct] production Task intent failed closed",
+                extra={
+                    "live_voice_event": "production_task_intent_failed",
+                    "reason": "PRODUCTION_TASK_INTENT_FAILED",
+                    "exception_class": type(error).__name__,
+                    "request_digest": hashlib.sha256(
+                        request_id.encode("utf-8", errors="replace")
+                    ).hexdigest()[:16],
+                },
+            )
+            return self._intent_rejected_result(
+                request_id,
+                reason="PRODUCTION_TASK_INTENT_FAILED",
+                code=ErrorCode.UNAVAILABLE,
+                message="production Task intent failed closed",
+            )
 
     async def _run_p3_intent(
         self,
@@ -7528,6 +11846,10 @@ class AgentServerProductCompositionRegistry:
                 allowed_fields.add("task_id")
             if operation == "task.events":
                 allowed_fields.add("after_seq")
+                allowed_fields.add("limit")
+            elif operation == "task.list":
+                allowed_fields.add("cursor")
+                allowed_fields.add("limit")
             _require_exact_params(
                 params,
                 frozenset(allowed_fields),
@@ -7552,6 +11874,18 @@ class AgentServerProductCompositionRegistry:
                     "after_seq must be an integer at least -1",
                     ErrorCode.INVALID_ARGUMENT,
                 )
+            cursor = params.get("cursor")
+            if cursor is not None:
+                cursor = _required_text(cursor, "cursor", maximum=256)
+            limit = params.get("limit")
+            if limit is not None:
+                maximum = 100 if operation == "task.list" else 500
+                if type(limit) is not int or not 1 <= limit <= maximum:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        f"{operation} limit must be between 1 and {maximum}",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
             correlation_id = request_id
             route = self._route_context(
                 session_id=routed_session,
@@ -7610,6 +11944,8 @@ class AgentServerProductCompositionRegistry:
                     request_id=request_id,
                     task_id=task_id,
                     after_seq=after_seq,
+                    cursor=cursor,
+                    limit=limit,
                     resource=canonical.resource,
                 ),
                 p3_authority,
@@ -7669,7 +12005,50 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
-            if operation == "task.status" and envelope.ok:
+            diagnostic_correlation = (
+                None
+                if state.canonical is None
+                else self._current_observability_correlation(
+                    session_id=routed_session,
+                    scope=state.canonical.scope,
+                )
+            )
+            if operation == "task.list" and envelope.ok:
+                result_payload = payload.get("result")
+                if not isinstance(result_payload, dict):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P3_QUERY_FAILED",
+                        code=ErrorCode.INTERNAL,
+                        manifest=activation.manifest,
+                    )
+                collection_operations: frozenset[str] = frozenset()
+                if self._p3_control_ready():
+                    try:
+                        await asyncio.to_thread(
+                            self._p3_composition.prepare_production_intent_authority,
+                            bearer_token=params.get("auth_token"),
+                            operation="task.create",
+                            session_id=routed_session,
+                        )
+                    except FormalTaskViolation:
+                        pass
+                    else:
+                        collection_operations = frozenset({"task.create"})
+                try:
+                    payload["result"] = _project_production_collection_authority(
+                        result_payload,
+                        supported_operations=collection_operations,
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                        manifest=activation.manifest,
+                    )
+            elif operation == "task.status" and envelope.ok:
                 result_payload = payload.get("result")
                 if not isinstance(result_payload, dict):
                     return _error_result(
@@ -7679,12 +12058,23 @@ class AgentServerProductCompositionRegistry:
                         manifest=activation.manifest,
                     )
                 try:
+                    production_authority = await asyncio.to_thread(
+                        self._p3_composition.prepare_production_intent_authority,
+                        bearer_token=params.get("auth_token"),
+                        operation="task.status",
+                        session_id=routed_session,
+                    )
                     retry_admission = (
                         await self._p3_composition.read_product_status_retry_admission(
                             bearer_token=params.get("auth_token"),
                             session_id=routed_session,
                             task_id=str(task_id or ""),
                         )
+                    )
+                    authority_fact = await asyncio.to_thread(
+                        production_authority.reader.task_status,
+                        production_authority.scope,
+                        str(task_id or ""),
                     )
                 except FormalTaskViolation as exc:
                     return _error_result(
@@ -7703,9 +12093,251 @@ class AgentServerProductCompositionRegistry:
                         reason="PRODUCT_P3_QUERY_FAILED",
                         manifest=activation.manifest,
                     )
-                result_payload = dict(result_payload)
-                result_payload["retry_admission"] = retry_admission
+                if authority_fact is None:
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+                        code=ErrorCode.PROTOCOL_VIOLATION,
+                        manifest=activation.manifest,
+                    )
+                durability_diagnostics: TaskDurabilityDiagnosticSnapshot | None = None
+                diagnostic_reader = (
+                    self._p3_composition.read_product_status_diagnostics
+                    if type(self._p3_composition) is P3AuthenticatedComposition
+                    else None
+                )
+                if callable(diagnostic_reader):
+                    try:
+                        candidate_diagnostics = await diagnostic_reader(
+                            bearer_token=params.get("auth_token"),
+                            session_id=routed_session,
+                            task_id=str(task_id or ""),
+                        )
+                        if type(candidate_diagnostics) is TaskDurabilityDiagnosticSnapshot:
+                            durability_diagnostics = candidate_diagnostics
+                    except Exception:  # noqa: BLE001 -- diagnostics are effect-free
+                        logger.warning(
+                            "[LiveVoiceProduct] Store diagnostics unavailable; "
+                            "reason=FACT_REJECTED"
+                        )
+                authorized_operations: set[str] = set()
+                if self._p3_control_ready():
+                    if retry_admission.get("eligible") is True:
+                        # The existing retry-admission owner already revalidates
+                        # principal, scope, lifecycle and retry limits. Retry is
+                        # not passed through the production-intent operation set.
+                        authorized_operations.add("task.retry")
+                    candidates = set(authority_fact.supported_operations)
+                    for candidate in sorted(
+                        candidates.intersection(P3_PRODUCTION_MUTATIONS)
+                    ):
+                        try:
+                            candidate_authority = await asyncio.to_thread(
+                                self._p3_composition.prepare_production_intent_authority,
+                                bearer_token=params.get("auth_token"),
+                                operation=candidate,
+                                session_id=routed_session,
+                            )
+                        except FormalTaskViolation:
+                            continue
+                        if (
+                            candidate_authority.principal_id
+                            != production_authority.principal_id
+                            or candidate_authority.scope != production_authority.scope
+                        ):
+                            return _error_result(
+                                request_id,
+                                reason="PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+                                code=ErrorCode.PROTOCOL_VIOLATION,
+                                manifest=activation.manifest,
+                            )
+                        authorized_operations.add(candidate)
+                try:
+                    result_payload = _project_production_status_authority(
+                        result_payload,
+                        production_authority=production_authority,
+                        authority_fact=authority_fact,
+                        retry_admission=retry_admission,
+                        authorized_operations=frozenset(authorized_operations),
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                        manifest=activation.manifest,
+                    )
                 payload["result"] = result_payload
+                raw_task = result_payload.get("task")
+                raw_attempt = result_payload.get("attempt")
+                if isinstance(raw_task, Mapping) and isinstance(raw_attempt, Mapping):
+                    status_correlation = raw_task.get("correlation_id")
+                    status_task_id = raw_task.get("task_id")
+                    status_attempt_id = raw_attempt.get("attempt_id")
+                    executor_id = raw_attempt.get("executor_id")
+                    revision = raw_task.get("revision")
+                    create_command_id = (
+                        revision.get("create_command_id")
+                        if isinstance(revision, Mapping)
+                        else None
+                    )
+                    if diagnostic_correlation is not None and all(
+                        type(value) is str and bool(value)
+                        for value in (
+                            status_correlation,
+                            status_task_id,
+                            status_attempt_id,
+                            executor_id,
+                        )
+                    ):
+                        self._emit_authoritative_route_diagnostic(
+                            session_id=routed_session,
+                            correlation_id=diagnostic_correlation,
+                            segment_name="task.attempt",
+                            seam_name="executor",
+                            seam_id=str(executor_id),
+                            task_id=str(status_task_id),
+                            attempt_id=str(status_attempt_id),
+                            source_record_id=authority_fact.event_head_id,
+                            command_id=(
+                                create_command_id
+                                if type(create_command_id) is str and create_command_id
+                                else None
+                            ),
+                            event_id=authority_fact.event_head_id,
+                            executor_id=str(executor_id),
+                            observed_at=envelope.observed_at,
+                        )
+                        if (
+                            durability_diagnostics is not None
+                            and durability_diagnostics.task_id == status_task_id
+                            and durability_diagnostics.attempt_id == status_attempt_id
+                            and durability_diagnostics.executor_id == executor_id
+                            and durability_diagnostics.event_head
+                            == authority_fact.event_head
+                            and durability_diagnostics.event_head_id
+                            == authority_fact.event_head_id
+                        ):
+                            self._emit_authoritative_status_diagnostics(
+                                session_id=routed_session,
+                                correlation_id=diagnostic_correlation,
+                                snapshot=durability_diagnostics,
+                                event_id=authority_fact.event_head_id,
+                                observed_at=envelope.observed_at,
+                            )
+            elif operation == "task.events" and envelope.ok:
+                result_payload = payload.get("result")
+                raw_events = (
+                    result_payload.get("events")
+                    if isinstance(result_payload, Mapping)
+                    else None
+                )
+                if isinstance(raw_events, list):
+                    for raw_event in raw_events:
+                        try:
+                            if not isinstance(raw_event, Mapping) or set(raw_event) != {
+                                "event_id",
+                                "task_id",
+                                "attempt_id",
+                                "scope",
+                                "seq",
+                                "event_type",
+                                "state",
+                                "outcome",
+                                "producer",
+                                "source_event_id",
+                                "causation_id",
+                                "correlation_id",
+                                "occurred_at",
+                                "details",
+                            }:
+                                raise ValueError("non-canonical event projection")
+                            event = PersistentTaskEvent(
+                                event_id=raw_event["event_id"],  # type: ignore[arg-type]
+                                task_id=raw_event["task_id"],  # type: ignore[arg-type]
+                                attempt_id=raw_event["attempt_id"],  # type: ignore[arg-type]
+                                scope=ScopeRef.from_dict(raw_event["scope"]),
+                                seq=raw_event["seq"],  # type: ignore[arg-type]
+                                event_type=raw_event["event_type"],  # type: ignore[arg-type]
+                                state=raw_event["state"],  # type: ignore[arg-type]
+                                outcome=raw_event["outcome"],  # type: ignore[arg-type]
+                                producer=raw_event["producer"],  # type: ignore[arg-type]
+                                source_event_id=raw_event["source_event_id"],  # type: ignore[arg-type]
+                                causation_id=raw_event["causation_id"],  # type: ignore[arg-type]
+                                correlation_id=raw_event["correlation_id"],  # type: ignore[arg-type]
+                                occurred_at=raw_event["occurred_at"],  # type: ignore[arg-type]
+                                details=raw_event["details"],  # type: ignore[arg-type]
+                            )
+                        except Exception:  # noqa: BLE001 -- projection only
+                            continue
+                        if event.task_id == task_id:
+                            if diagnostic_correlation is not None:
+                                self._emit_authoritative_task_event(
+                                    event,
+                                    session_id=routed_session,
+                                    correlation_id=diagnostic_correlation,
+                                )
+            elif operation == "task.result" and envelope.ok:
+                result_payload = payload.get("result")
+                raw_result = (
+                    result_payload.get("task_result")
+                    if isinstance(result_payload, Mapping)
+                    and result_payload.get("availability")
+                    == TaskResultAvailability.AVAILABLE.value
+                    else None
+                )
+                try:
+                    if not isinstance(raw_result, Mapping) or set(raw_result) != {
+                        "task_id",
+                        "attempt_id",
+                        "source_event_id",
+                        "result_text",
+                        "artifacts",
+                        "completed_at",
+                    }:
+                        raise ValueError("non-canonical result projection")
+                    artifacts = raw_result["artifacts"]
+                    if not isinstance(artifacts, list):
+                        raise ValueError("non-canonical artifact projection")
+                    result_record = TaskResultRecord(
+                        task_id=raw_result["task_id"],  # type: ignore[arg-type]
+                        attempt_id=raw_result["attempt_id"],  # type: ignore[arg-type]
+                        source_event_id=raw_result["source_event_id"],  # type: ignore[arg-type]
+                        result_text=raw_result["result_text"],  # type: ignore[arg-type]
+                        artifacts=tuple(
+                            TaskResultArtifact(
+                                relative_path=item["relative_path"],
+                                sha256=item["sha256"],
+                            )
+                            for item in artifacts
+                            if isinstance(item, Mapping)
+                            and set(item) == {"relative_path", "sha256"}
+                        ),
+                        completed_at=raw_result["completed_at"],  # type: ignore[arg-type]
+                    )
+                    if len(result_record.artifacts) != len(artifacts):
+                        raise ValueError("non-canonical artifact projection")
+                except Exception:  # noqa: BLE001 -- projection only
+                    result_record = None
+                if (
+                    result_record is not None
+                    and result_record.task_id == task_id
+                    and diagnostic_correlation is not None
+                ):
+                    self._emit_authoritative_route_diagnostic(
+                        session_id=routed_session,
+                        correlation_id=diagnostic_correlation,
+                        segment_name="task.attempt",
+                        seam_name="result",
+                        seam_id=result_record.source_event_id,
+                        task_id=result_record.task_id,
+                        attempt_id=result_record.attempt_id,
+                        source_record_id=result_record.source_event_id,
+                        event_id=result_record.source_event_id,
+                        completed=True,
+                        observed_at=result_record.completed_at,
+                    )
             payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
         finally:
@@ -7813,12 +12445,11 @@ class AgentServerProductCompositionRegistry:
                     effective_origin_kind = TaskProgressOriginKind.TEXT
                     fallback_reason = "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
                 else:
-                    # The current production composition has no audible
-                    # Task-progress consumer or drain for the CR-owned voice
-                    # notification.  Do not advertise a route that would defer
-                    # forever; project the exact event to visible Web text.
-                    effective_origin_kind = TaskProgressOriginKind.TEXT
-                    fallback_reason = "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
+                    if self._p3_presentation_consumption_available:
+                        effective_origin_kind = TaskProgressOriginKind.VOICE
+                    else:
+                        effective_origin_kind = TaskProgressOriginKind.TEXT
+                        fallback_reason = "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
 
             def log_progress_fallback() -> None:
                 if fallback_reason is None:
@@ -7849,6 +12480,7 @@ class AgentServerProductCompositionRegistry:
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
                 if (
                     preauthorized_authority.route_fact.truth
@@ -7886,12 +12518,14 @@ class AgentServerProductCompositionRegistry:
                     code=ErrorCode.CONFLICT,
                 )
             if existing is not None:
+                retained_target = self._progress_targets.get(key)
                 preauthorized_authority = await self._authority_registration(
                     state=state,
                     bearer_token=params.get("auth_token"),
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
                 if (
                     preauthorized_authority.route_fact.truth
@@ -7943,9 +12577,16 @@ class AgentServerProductCompositionRegistry:
                         )
                 if (
                     route_is_active
+                    and retained_target is not None
+                    and existing.channel_id == channel_id
+                    and retained_target.channel_id == channel_id
                     and existing.binding.generation == generation
                     and existing.binding.correlation_id == correlation_id
                     and existing.binding.origin_kind is effective_origin_kind
+                    and retained_target.correlation_id == correlation_id
+                    and retained_target.generation == generation
+                    and retained_target.requested_origin_kind is requested_origin_kind
+                    and retained_target.fallback_reason == fallback_reason
                 ):
                     if preauthorized_authority.lease is not None:
                         await preauthorized_authority.lease.close()
@@ -7955,24 +12596,28 @@ class AgentServerProductCompositionRegistry:
                         {
                             "status": "active",
                             "replayed": True,
-                            "session_id": routed_session,
-                            "correlation_id": correlation_id,
-                            "task_id": task_id,
-                            "origin_id": origin_id,
-                            "generation_id": generation_id,
-                            "generation": generation,
-                            "requested_origin_kind": requested_origin_kind.value,
-                            "origin_kind": effective_origin_kind.value,
-                            "fallback_reason": fallback_reason,
+                            "session_id": existing.binding.session_id,
+                            "correlation_id": retained_target.correlation_id,
+                            "task_id": existing.binding.task_id,
+                            "origin_id": existing.binding.origin_id,
+                            "generation_id": existing.binding.generation_id,
+                            "generation": retained_target.generation,
+                            "requested_origin_kind": (
+                                retained_target.requested_origin_kind.value
+                            ),
+                            "origin_kind": existing.binding.origin_kind.value,
+                            "fallback_reason": retained_target.fallback_reason,
                             "voice_progress": (
                                 "available"
-                                if effective_origin_kind is TaskProgressOriginKind.VOICE
+                                if existing.binding.origin_kind
+                                is TaskProgressOriginKind.VOICE
                                 else "unavailable"
                             ),
                             "voice_reason": (
                                 None
-                                if effective_origin_kind is TaskProgressOriginKind.VOICE
-                                else fallback_reason
+                                if existing.binding.origin_kind
+                                is TaskProgressOriginKind.VOICE
+                                else retained_target.fallback_reason
                                 or "TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE"
                             ),
                         },
@@ -8010,6 +12655,7 @@ class AgentServerProductCompositionRegistry:
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
                 if (
                     preauthorized_authority.route_fact.truth
@@ -8049,6 +12695,7 @@ class AgentServerProductCompositionRegistry:
                     route=route,
                     operation="task.events",
                     task_id=task_id,
+                    consumer_task_access=True,
                 )
 
             holder: dict[str, object] = {}
@@ -8157,6 +12804,7 @@ class AgentServerProductCompositionRegistry:
                     activate_progress,
                 )
             )
+            self._progress_route_adoptions[key] = asyncio.Event()
             try:
                 activation = await ProductCompositionRoot(
                     enabled=True,
@@ -8169,6 +12817,7 @@ class AgentServerProductCompositionRegistry:
                     self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
                 self._progress_deliveries.pop(key, None)
+                self._settle_progress_route_adoption(key)
                 self._retain_root_cleanup(exc.cleanup_lease)
                 logger.exception("[LiveVoiceProduct] P3 progress failed closed")
                 return _error_result(
@@ -8182,6 +12831,7 @@ class AgentServerProductCompositionRegistry:
                     self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
                 self._progress_deliveries.pop(key, None)
+                self._settle_progress_route_adoption(key)
                 logger.exception("[LiveVoiceProduct] P3 progress failed closed")
                 return _error_result(
                     request_id,
@@ -8200,6 +12850,7 @@ class AgentServerProductCompositionRegistry:
                     self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
                 self._progress_deliveries.pop(key, None)
+                self._settle_progress_route_adoption(key)
                 if activation.lease is not None:
                     try:
                         await activation.lease.close()
@@ -8213,6 +12864,53 @@ class AgentServerProductCompositionRegistry:
                     reason=state.reason or "PRODUCT_P3_PROGRESS_UNAVAILABLE",
                     manifest=activation.manifest,
                 )
+            presentation_authorities: dict[str, ResolvedProductAuthority] = {}
+            for presentation_operation in (
+                ("task.unread_events", "task.result")
+                if self._p3_presentation_consumption_available
+                else ()
+            ):
+                presentation_state = _AuthorityState()
+                presentation_activation = await self._authority_registration(
+                    state=presentation_state,
+                    bearer_token=params.get("auth_token"),
+                    route=route,
+                    operation=presentation_operation,
+                    task_id=task_id,
+                )
+                try:
+                    if (
+                        presentation_activation.route_fact.truth
+                        is not ProductRouteTruth.FORMAL
+                        or presentation_state.canonical is None
+                        or presentation_state.canonical.scope != binding.scope
+                    ):
+                        try:
+                            await activation.lease.close()
+                        except ProductCompositionLeaseCloseError as exc:
+                            self._retain_root_cleanup(exc.lease)
+                        self._progress_targets.pop(key, None)
+                        self._progress_deliveries.pop(key, None)
+                        self._settle_progress_route_adoption(key)
+                        if previous_generation is None:
+                            self._progress_generations.pop(key, None)
+                        else:
+                            self._progress_generations[key] = previous_generation
+                        return _error_result(
+                            request_id,
+                            reason=(
+                                presentation_state.reason
+                                or "TASK_PRESENTATION_AUTHORITY_UNAVAILABLE"
+                            ),
+                            code=ErrorCode.PERMISSION_DENIED,
+                            manifest=activation.manifest,
+                        )
+                    presentation_authorities[presentation_operation] = (
+                        presentation_state.canonical
+                    )
+                finally:
+                    if presentation_activation.lease is not None:
+                        await presentation_activation.lease.close()
             retained = _ProgressRoute(
                 binding=binding,
                 progress_lease=progress_lease,
@@ -8220,8 +12918,11 @@ class AgentServerProductCompositionRegistry:
                 manifest=activation.manifest,
                 channel_id=channel_id,
                 request_id=request_id,
+                unread_authority=presentation_authorities.get("task.unread_events"),
+                result_authority=presentation_authorities.get("task.result"),
             )
             self._progress_routes[key] = retained
+            self._settle_progress_route_adoption(key)
             log_progress_fallback()
             return _success_result(
                 request_id,
@@ -8270,6 +12971,21 @@ class AgentServerProductCompositionRegistry:
 
         if not self._settings.p3_text_enabled:
             return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
+        presentation_enabled = self._p3_presentation_consumption_available
+        presentation_fields = (
+            frozenset(
+                {
+                    "presentation_class",
+                    "response_ref",
+                    "unit_id",
+                    "expected_event_head",
+                    "result_source_event_id",
+                    "presentation_binding",
+                }
+            )
+            if presentation_enabled
+            else frozenset()
+        )
         try:
             _require_exact_params(
                 params,
@@ -8290,7 +13006,8 @@ class AgentServerProductCompositionRegistry:
                         "claimed_user_id",
                         "claimed_project_id",
                     }
-                ),
+                )
+                | presentation_fields,
             )
             self._ensure_running()
             routed_session = _required_text(session_id, "routed_session_id")
@@ -8328,6 +13045,79 @@ class AgentServerProductCompositionRegistry:
                 params.get("progress_event_id"), "progress_event_id"
             )
             evidence_id = _required_text(params.get("evidence_id"), "evidence_id")
+            presentation_class: str | None = None
+            response_ref: ResponseRef | None = None
+            unit_id: str | None = None
+            expected_event_head: int | None = None
+            result_source_event_id: str | None = None
+            presentation_binding: str | None = None
+            if presentation_enabled:
+                presentation_class = _required_text(
+                    params.get("presentation_class"), "presentation_class"
+                )
+                if presentation_class != "text":
+                    raise FormalTaskViolation(
+                        "INVALID_PRESENTATION_CLASS",
+                        "Web DOM adoption can acknowledge only text",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                raw_response_ref = params.get("response_ref")
+                if not isinstance(raw_response_ref, Mapping) or set(
+                    raw_response_ref
+                ) != {
+                    "interaction_id",
+                    "response_id",
+                    "response_generation",
+                }:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "response_ref must be one exact Runtime tuple",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                response_generation = raw_response_ref.get("response_generation")
+                if type(response_generation) is not int or response_generation < 0:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "response_generation must be a non-negative integer",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                response_ref = ResponseRef(
+                    _required_text(
+                        raw_response_ref.get("interaction_id"),
+                        "response_ref.interaction_id",
+                    ),
+                    _required_text(
+                        raw_response_ref.get("response_id"),
+                        "response_ref.response_id",
+                    ),
+                    response_generation,
+                )
+                unit_id = _required_text(params.get("unit_id"), "unit_id")
+                raw_event_head = params.get("expected_event_head")
+                if (
+                    type(raw_event_head) is not int
+                    or raw_event_head < 0
+                    or raw_event_head < seq
+                ):
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "expected_event_head must contain the acknowledged event",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                expected_event_head = raw_event_head
+                raw_result_source_event_id = params.get("result_source_event_id")
+                result_source_event_id = (
+                    None
+                    if raw_result_source_event_id is None
+                    else _required_text(
+                        raw_result_source_event_id, "result_source_event_id"
+                    )
+                )
+                presentation_binding = _required_text(
+                    params.get("presentation_binding"),
+                    "presentation_binding",
+                    maximum=131_072,
+                )
             route = self._route_context(
                 session_id=routed_session,
                 correlation_id=correlation_id,
@@ -8346,7 +13136,9 @@ class AgentServerProductCompositionRegistry:
                 state=state,
                 bearer_token=params.get("auth_token"),
                 route=route,
-                operation="task.events",
+                operation=(
+                    "task.ack_events" if presentation_enabled else "task.events"
+                ),
                 task_id=task_id,
             )
             if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
@@ -8431,8 +13223,215 @@ class AgentServerProductCompositionRegistry:
                         reason="TASK_PROGRESS_DELIVERY_MISMATCH",
                         code=ErrorCode.PERMISSION_DENIED,
                     )
-                replayed = delivery.acknowledged
-                delivery.acknowledged = True
+                if not presentation_enabled:
+                    replayed = delivery.acknowledged
+                    delivery.acknowledged = True
+                    if not replayed:
+                        self._emit_authoritative_progress_ack(
+                            delivery=delivery,
+                            presentation=None,
+                            observed_at=utc_now(),
+                        )
+                    return _success_result(
+                        request_id,
+                        {
+                            "status": "acknowledged",
+                            "replayed": replayed,
+                            "session_id": routed_session,
+                            "task_id": task_id,
+                            "attempt_id": delivery.attempt_id,
+                            "correlation_id": correlation_id,
+                            "origin_id": origin_id,
+                            "generation_id": generation_id,
+                            "generation": generation,
+                            "delivery_id": delivery_id,
+                            "source_event_id": source_event_id,
+                            "progress_event_id": progress_event_id,
+                            "seq": seq,
+                            "evidence_id": evidence_id,
+                            "acknowledgement": "web_ui_text_consumed",
+                        },
+                        manifest,
+                    )
+                assert presentation_class is not None
+                assert response_ref is not None
+                assert unit_id is not None
+                assert expected_event_head is not None
+                assert presentation_binding is not None
+                presentation = delivery.presentation
+                if (
+                    presentation is None
+                    or presentation.presentation_class != presentation_class
+                    or presentation.response_ref != response_ref
+                    or presentation.unit_id != unit_id
+                    or presentation.expected_event_head != expected_event_head
+                    or presentation.result_source_event_id != result_source_event_id
+                    or delivery.presentation_binding != presentation_binding
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_PRESENTATION_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                if delivery.acknowledged:
+                    return _success_result(
+                        request_id,
+                        {
+                            "status": "acknowledged",
+                            "replayed": True,
+                            "session_id": routed_session,
+                            "task_id": task_id,
+                            "attempt_id": delivery.attempt_id,
+                            "correlation_id": correlation_id,
+                            "origin_id": origin_id,
+                            "generation_id": generation_id,
+                            "generation": generation,
+                            "delivery_id": delivery_id,
+                            "source_event_id": source_event_id,
+                            "progress_event_id": progress_event_id,
+                            "seq": seq,
+                            "evidence_id": evidence_id,
+                            "presentation_class": presentation_class,
+                            "response_ref": {
+                                "interaction_id": response_ref.interaction_id,
+                                "response_id": response_ref.response_id,
+                                "response_generation": (
+                                    response_ref.response_generation
+                                ),
+                            },
+                            "unit_id": unit_id,
+                            "expected_event_head": expected_event_head,
+                            "result_source_event_id": result_source_event_id,
+                            "presentation_binding": presentation_binding,
+                            "acknowledgement": "web_ui_text_consumed",
+                        },
+                        manifest,
+                    )
+                if delivery.closed:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_PRESENTATION_CLOSED",
+                        code=ErrorCode.STALE,
+                    )
+                with self._task_presentation_state_lock:
+                    retained_p2 = self._task_presentation_runtime_routes.get(
+                        response_ref
+                    )
+                if retained_p2 is None:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_PRESENTATION_UNAVAILABLE",
+                        code=ErrorCode.STALE,
+                    )
+                try:
+                    adoption_ack = delivery.text_adoption_ack
+                    if adoption_ack is None:
+                        adoption_ack = TextPresentationAdoptionAck.from_delivery(
+                            presentation,
+                            adopted_at=utc_now(),
+                        )
+                        delivery.text_adoption_ack = adoption_ack
+                    self._task_presentation_owner.mark_text_adopted(adoption_ack)
+                    runtime_ack = delivery.runtime_ack
+                    if runtime_ack is None:
+                        runtime_ack = PresentationAck(
+                            ref=response_ref,
+                            surface=PresentationSurface.TEXT,
+                            unit_id=unit_id,
+                            contiguous_cursor=0,
+                            presented_at=adoption_ack.adopted_at,
+                        )
+                        delivery.runtime_ack = runtime_ack
+                    runtime_outcome = (
+                        await retained_p2.activation_lease.acknowledge_presentation(
+                            retained_p2.binding,
+                            runtime_ack,
+                        )
+                    )
+                    if runtime_outcome.accepted is not True:
+                        raise TaskPresentationViolation(
+                            "RUNTIME_PRESENTATION_ACK_REJECTED",
+                            "Runtime rejected the exact DOM presentation",
+                        )
+                    issued_at = (
+                        delivery.command.issued_at
+                        if delivery.command is not None
+                        else utc_now()
+                    )
+                    command_id = self._task_presentation_ack_command_id(presentation)
+                    command, grant = (
+                        self._p3_composition.prepare_product_presentation_ack(
+                            state.canonical,
+                            presentation,
+                            request_id=(
+                                delivery.command.request_id
+                                if delivery.command is not None
+                                else request_id
+                            ),
+                            command_id=command_id,
+                            now=issued_at,
+                        )
+                    )
+                    if delivery.command is not None and delivery.command != command:
+                        raise TaskPresentationViolation(
+                            "CONSUMPTION_COMMAND_REWRITE",
+                            "presentation ACK command changed across retry",
+                        )
+                    delivery.command = command
+                    result = await asyncio.to_thread(
+                        self._task_presentation_owner.consume,
+                        presentation,
+                        command,
+                        grant,
+                        lambda item, authorization: (
+                            self._p3_composition.execute_product_presentation_ack(
+                                state.canonical,
+                                item,
+                                authorization,
+                            )
+                        ),
+                    )
+                    if not isinstance(result, ResultEnvelope) or not result.ok:
+                        reason = (
+                            "TASK_PROGRESS_CONSUMPTION_FAILED"
+                            if not isinstance(result, ResultEnvelope)
+                            or result.error is None
+                            or result.error.reason is None
+                            else result.error.reason
+                        )
+                        return _error_result(
+                            request_id,
+                            reason=reason,
+                            code=(
+                                ErrorCode.UNAVAILABLE
+                                if not isinstance(result, ResultEnvelope)
+                                or result.error is None
+                                else result.error.code
+                            ),
+                        )
+                except (FormalTaskViolation, TaskPresentationViolation) as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=getattr(exc, "code", ErrorCode.PERMISSION_DENIED),
+                        message=str(exc),
+                    )
+                except Exception:
+                    logger.exception(
+                        "[LiveVoiceProduct] Task text consumption failed closed"
+                    )
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_CONSUMPTION_UNAVAILABLE",
+                        code=ErrorCode.UNAVAILABLE,
+                    )
+                replayed = False
+                self._settle_consumed_task_presentation(delivery, presentation)
+                self._emit_authoritative_progress_ack(
+                    delivery=delivery,
+                    presentation=presentation,
+                    observed_at=runtime_ack.presented_at,
+                )
                 return _success_result(
                     request_id,
                     {
@@ -8450,6 +13449,16 @@ class AgentServerProductCompositionRegistry:
                         "progress_event_id": progress_event_id,
                         "seq": seq,
                         "evidence_id": evidence_id,
+                        "presentation_class": presentation_class,
+                        "response_ref": {
+                            "interaction_id": response_ref.interaction_id,
+                            "response_id": response_ref.response_id,
+                            "response_generation": (response_ref.response_generation),
+                        },
+                        "unit_id": unit_id,
+                        "expected_event_head": expected_event_head,
+                        "result_source_event_id": result_source_event_id,
+                        "presentation_binding": presentation_binding,
                         "acknowledgement": "web_ui_text_consumed",
                     },
                     manifest,
@@ -8593,8 +13602,13 @@ class AgentServerProductCompositionRegistry:
                     code=ErrorCode.PERMISSION_DENIED,
                 )
             try:
+                if self._p3_presentation_consumption_available:
+                    self._close_task_presentations_for_progress_route(
+                        self._progress_deliveries.get(key, {}),
+                        reason="progress_route_closed",
+                    )
                 await retained.lease.close()
-            except ProductCompositionLeaseCloseError:
+            except (ProductCompositionLeaseCloseError, TaskPresentationViolation):
                 return _error_result(
                     request_id,
                     reason="PRODUCT_P3_PROGRESS_CLEANUP_PENDING",
@@ -8631,6 +13645,11 @@ class AgentServerProductCompositionRegistry:
                 tuple(self._progress_routes.items())
             ):
                 try:
+                    if self._p3_presentation_consumption_available:
+                        self._close_task_presentations_for_progress_route(
+                            self._progress_deliveries.get(progress_key, {}),
+                            reason="gateway_progress_route_closed",
+                        )
                     await progress_retained.lease.close()
                 except Exception:
                     failures = True
@@ -8645,6 +13664,10 @@ class AgentServerProductCompositionRegistry:
                     )
             for p2_key, p2_retained in reversed(tuple(self._p2_routes.items())):
                 try:
+                    self._close_task_presentations_for_p2_route(
+                        p2_retained,
+                        reason="gateway_route_closed",
+                    )
                     await p2_retained.lease.close()
                 except Exception:
                     failures = True
@@ -8686,7 +13709,13 @@ class AgentServerProductCompositionRegistry:
 
     async def stop(self) -> None:
         self._stopped = True
+        for adoption in tuple(self._progress_route_adoptions.values()):
+            adoption.set()
+        self._progress_route_adoptions.clear()
         await self.close_active_routes()
+        drain_tasks = tuple(self._presentation_drain_tasks)
+        if drain_tasks:
+            await asyncio.shield(asyncio.gather(*drain_tasks, return_exceptions=True))
         retained_tasks = tuple(
             entry.task
             for ledger in (
@@ -8694,6 +13723,7 @@ class AgentServerProductCompositionRegistry:
                 self._unified_operations,
                 self._p2_notification_operations,
                 self._p2_ack_operations,
+                self._p2_presentation_failure_operations,
                 self._p2_barge_operations,
                 self._p3_issue_operations,
                 self._p3_mutation_operations,
@@ -8717,6 +13747,12 @@ class AgentServerProductCompositionRegistry:
                         pending.commit, pending.source
                     )
             self._pending_task_intents.clear()
+            for pending in tuple(self._pending_production_task_intents.values()):
+                if pending.commit is not None:
+                    self._release_task_intent_commit_locked(
+                        pending.commit, pending.source
+                    )
+            self._pending_production_task_intents.clear()
             self._voice_task_origins.clear()
             self._pending_terminal_notifications.clear()
             self._terminal_notification_responses.clear()
@@ -8739,6 +13775,8 @@ def create_product_composition_registry_from_environment(
     p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
     commit_ledger: TurnCommitLedger | None = None,
     critical_token_gate: CriticalTokenSafetyGate | None = None,
+    observability_exporter: (Callable[[ExportRecord], Awaitable[None]] | None) = None,
+    observability_runtime: ProductObservabilityRuntime | None = None,
 ) -> AgentServerProductCompositionRegistry | None:
     """Construct no registry or Adapter unless the master gate is explicit."""
 
@@ -8759,6 +13797,8 @@ def create_product_composition_registry_from_environment(
         p3_confirmation_forwarder=p3_confirmation_forwarder,
         commit_ledger=commit_ledger,
         critical_token_gate=critical_token_gate,
+        observability_exporter=observability_exporter,
+        observability_runtime=observability_runtime,
     )
 
 

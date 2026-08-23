@@ -267,6 +267,115 @@ def test_status_is_a_read_only_query_with_exact_task_and_no_context() -> None:
     assert invocation.context is None
 
 
+def test_bounded_list_events_and_result_queries_have_closed_payloads() -> None:
+    adapter = FormalTaskPolicyAdapter()
+    list_intent = FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="structured",
+        operation="task.list",
+        request_id="request-list",
+        issued_at=NOW,
+        scope=_scope(),
+        correlation_id="correlation-list",
+        authorization=_grant("task.list", command_id=None, target=None),
+        cursor="task-anchor",
+        limit=7,
+    )
+    events_intent = replace(
+        list_intent,
+        operation="task.events",
+        request_id="request-events",
+        correlation_id="correlation-events",
+        authorization=_grant("task.events", command_id=None, target="task-1"),
+        task_id="task-1",
+        cursor=None,
+        after_seq=4,
+        limit=11,
+    )
+    result_intent = replace(
+        events_intent,
+        operation="task.result",
+        request_id="request-result",
+        correlation_id="correlation-result",
+        authorization=_grant("task.result", command_id=None, target="task-1"),
+        after_seq=-1,
+        limit=None,
+    )
+
+    list_query = adapter.map(list_intent).envelope
+    events_query = adapter.map(events_intent).envelope
+    result_query = adapter.map(result_intent).envelope
+
+    assert isinstance(list_query, QueryEnvelope)
+    assert list_query.target_ref.id == "task-list"
+    assert list_query.payload == {"cursor": "task-anchor", "limit": 7}
+    assert isinstance(events_query, QueryEnvelope)
+    assert events_query.payload == {"after_seq": 4, "limit": 11}
+    assert isinstance(result_query, QueryEnvelope)
+    assert result_query.query_type == "task.result"
+    assert result_query.target_ref.id == "task-1"
+    assert result_query.payload == {}
+
+
+@pytest.mark.parametrize(
+    ("intent", "reason"),
+    [
+        (
+            FormalTaskPolicyInput(
+                state=InputCommitState.COMMITTED,
+                source="structured",
+                operation="task.list",
+                request_id="request-list",
+                issued_at=NOW,
+                scope=_scope(),
+                correlation_id="correlation-list",
+                authorization=_grant("task.list", command_id=None, target=None),
+                limit=101,
+            ),
+            "INVALID_TASK_PAGE_LIMIT",
+        ),
+        (
+            FormalTaskPolicyInput(
+                state=InputCommitState.COMMITTED,
+                source="structured",
+                operation="task.events",
+                request_id="request-events",
+                issued_at=NOW,
+                scope=_scope(),
+                correlation_id="correlation-events",
+                authorization=_grant("task.events", command_id=None, target="task-1"),
+                task_id="task-1",
+                cursor="wrong-cursor-kind",
+            ),
+            "INVALID_EVENT_CURSOR",
+        ),
+        (
+            FormalTaskPolicyInput(
+                state=InputCommitState.COMMITTED,
+                source="structured",
+                operation="task.result",
+                request_id="request-result",
+                issued_at=NOW,
+                scope=_scope(),
+                correlation_id="correlation-result",
+                authorization=_grant("task.result", command_id=None, target="task-1"),
+                task_id="task-1",
+                limit=1,
+            ),
+            "INVALID_TASK_QUERY_CURSOR",
+        ),
+    ],
+)
+def test_query_pagination_rejects_wrong_kind_or_unbounded_values(
+    intent: FormalTaskPolicyInput,
+    reason: str,
+) -> None:
+    with pytest.raises(FormalTaskViolation) as rejected:
+        FormalTaskPolicyAdapter().map(intent)
+
+    assert rejected.value.reason == reason
+
+
 def test_request_derived_scope_cannot_be_promoted_to_formal_authorization() -> None:
     request_scope = ScopeRef(
         "web-channel",

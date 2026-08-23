@@ -42,7 +42,54 @@ export interface ProductTextProgressEvent {
   readonly source_event: ProductTextProgressEnvelope;
   readonly progress_event: ProductTextProgressEnvelope;
   readonly evidence_id: string;
+  readonly consumption_mode: 'legacy_delivery' | 'presentation';
+  readonly presentation_class: 'text' | null;
+  readonly response_ref: Readonly<{
+    interaction_id: string;
+    response_id: string;
+    response_generation: number;
+  }> | null;
+  readonly unit_id: string | null;
+  readonly expected_event_head: number | null;
+  readonly result_source_event_id: string | null;
   readonly state: string;
+}
+
+const PRESENTATION_PROGRESS_KEYS = Object.freeze([
+  'correlation_id',
+  'delivery_id',
+  'delivery_mode',
+  'effective_origin_kind',
+  'event_type',
+  'evidence_id',
+  'expected_event_head',
+  'fallback_reason',
+  'generation',
+  'generation_id',
+  'generation_kind',
+  'origin_id',
+  'origin_kind',
+  'presentation_class',
+  'progress_event',
+  'project_id',
+  'requested_origin_kind',
+  'response_ref',
+  'result_source_event_id',
+  'session_id',
+  'source_event',
+  'task_id',
+  'unit_id',
+]);
+
+const LEGACY_PROGRESS_KEYS = Object.freeze(
+  PRESENTATION_PROGRESS_KEYS.filter(
+    key => !['expected_event_head', 'presentation_class', 'response_ref', 'result_source_event_id', 'unit_id'].includes(key),
+  ),
+);
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -87,12 +134,41 @@ function sameScope(left: ProductTextProgressScope, right: ProductTextProgressSco
 function parseEnvelope(value: unknown): ProductTextProgressEnvelope | null {
   const raw = objectValue(value);
   if (!raw) return null;
+  const envelopeKeys = Object.keys(raw).sort();
+  if (
+    ![
+      [
+        'causation_id',
+        'correlation_id',
+        'event_id',
+        'event_type',
+        'payload',
+        'scope',
+        'seq',
+        'stream_ref',
+      ],
+      [
+        'causation_id',
+        'correlation_id',
+        'event_id',
+        'event_type',
+        'extensions',
+        'payload',
+        'scope',
+        'seq',
+        'stream_ref',
+      ],
+    ].some(expected => expected.length === envelopeKeys.length && expected.every((key, index) => key === envelopeKeys[index]))
+  ) {
+    return null;
+  }
   const eventId = textValue(raw.event_id);
   const eventType = textValue(raw.event_type);
   const seq = uintValue(raw.seq);
   const correlationId = textValue(raw.correlation_id);
   const causationId = raw.causation_id === null ? null : textValue(raw.causation_id);
   const streamRef = objectValue(raw.stream_ref);
+  if (!streamRef || !hasExactKeys(streamRef, ['id', 'kind'])) return null;
   const streamKind = textValue(streamRef?.kind);
   const streamId = textValue(streamRef?.id);
   const scope = parseScope(raw.scope);
@@ -126,6 +202,12 @@ function parseEnvelope(value: unknown): ProductTextProgressEnvelope | null {
 export function parseProductTextProgressEvent(value: unknown): ProductTextProgressEvent | null {
   const raw = objectValue(value);
   if (!raw || raw.event_type !== PRODUCT_TEXT_PROGRESS_EVENT) return null;
+  const consumptionMode = hasExactKeys(raw, PRESENTATION_PROGRESS_KEYS)
+    ? 'presentation'
+    : hasExactKeys(raw, LEGACY_PROGRESS_KEYS)
+      ? 'legacy_delivery'
+      : null;
+  if (consumptionMode === null) return null;
   const sessionId = textValue(raw.session_id);
   const deliveryId = textValue(raw.delivery_id);
   const taskId = textValue(raw.task_id);
@@ -141,6 +223,18 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
   const generationId = textValue(raw.generation_id);
   const generation = uintValue(raw.generation);
   const evidenceId = textValue(raw.evidence_id);
+  const presentationClass = consumptionMode === 'presentation' ? raw.presentation_class : null;
+  const responseRef = consumptionMode === 'presentation' ? objectValue(raw.response_ref) : null;
+  if (consumptionMode === 'presentation' && (!responseRef || !hasExactKeys(responseRef, ['interaction_id', 'response_generation', 'response_id']))) {
+    return null;
+  }
+  const responseInteractionId = responseRef === null ? null : textValue(responseRef.interaction_id);
+  const responseId = responseRef === null ? null : textValue(responseRef.response_id);
+  const responseGeneration = responseRef === null ? null : uintValue(responseRef.response_generation);
+  const unitId = consumptionMode === 'presentation' ? textValue(raw.unit_id) : null;
+  const expectedEventHead = consumptionMode === 'presentation' ? uintValue(raw.expected_event_head) : null;
+  const resultSourceEventId =
+    consumptionMode === 'legacy_delivery' || raw.result_source_event_id === null ? null : textValue(raw.result_source_event_id);
   const sourceEvent = parseEnvelope(raw.source_event);
   const progressEvent = parseEnvelope(raw.progress_event);
   const sourceExtensions = objectValue(sourceEvent?.raw.extensions);
@@ -152,7 +246,27 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
   const progressPayload = progressEvent?.payload;
   const workRef = objectValue(progressPayload?.work_ref);
   const state = textValue(progressPayload?.state);
+  const sourceState = textValue(sourceEvent?.payload.state);
+  const sourceOutcome =
+    sourceEvent?.payload.outcome === null || sourceEvent?.payload.outcome === undefined
+      ? null
+      : textValue(sourceEvent.payload.outcome);
+  const progressOutcome =
+    progressPayload?.outcome === null || progressPayload?.outcome === undefined
+      ? null
+      : textValue(progressPayload.outcome);
   const payloadSeq = uintValue(progressPayload?.seq);
+  const terminal = sourceEvent?.event_type === 'task.terminal';
+  const completed = terminal && sourceOutcome === 'completed';
+  const terminalOutcomeLegal =
+    sourceOutcome === 'completed' ||
+    sourceOutcome === 'failed' ||
+    sourceOutcome === 'cancelled' ||
+    sourceOutcome === 'interrupted' ||
+    sourceOutcome === 'unknown';
+  const resultBindingLegal =
+    consumptionMode === 'legacy_delivery' ||
+    (completed ? resultSourceEventId !== null && textValue(persistentSourceEventId) === resultSourceEventId : resultSourceEventId === null);
   if (
     !sessionId ||
     !deliveryId ||
@@ -175,9 +289,23 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     generation === null ||
     generation === 0 ||
     !evidenceId ||
+    (consumptionMode === 'presentation' &&
+      (presentationClass !== 'text' ||
+        !responseInteractionId ||
+        !responseId ||
+        responseGeneration === null ||
+        !unitId ||
+        expectedEventHead === null ||
+        expectedEventHead < sourceEvent?.seq ||
+        (raw.result_source_event_id !== null && !resultSourceEventId))) ||
     !sourceEvent ||
     !progressEvent ||
     !state ||
+    !sourceState ||
+    sourceState !== state ||
+    (terminal && (state !== 'terminal' || !terminalOutcomeLegal || progressOutcome !== sourceOutcome)) ||
+    (!terminal && (state === 'terminal' || sourceOutcome !== null || progressOutcome !== null)) ||
+    !resultBindingLegal ||
     payloadSeq === null ||
     sourceEvent.stream_ref.kind !== 'task' ||
     sourceEvent.stream_ref.id !== taskId ||
@@ -219,8 +347,69 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     source_event: sourceEvent,
     progress_event: progressEvent,
     evidence_id: evidenceId,
+    consumption_mode: consumptionMode,
+    presentation_class: consumptionMode === 'presentation' ? 'text' : null,
+    response_ref:
+      responseInteractionId === null || responseId === null || responseGeneration === null
+        ? null
+        : Object.freeze({
+            interaction_id: responseInteractionId,
+            response_id: responseId,
+            response_generation: responseGeneration,
+          }),
+    unit_id: unitId,
+    expected_event_head: expectedEventHead,
+    result_source_event_id: resultSourceEventId,
     state,
   });
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    .join(',')}}`;
+}
+
+/** Exact immutable tuple placed in the committed DOM and echoed in its ACK. */
+export function productTextProgressPresentationBinding(event: Readonly<ProductTextProgressEvent>): string {
+  const common = {
+    consumption_mode: event.consumption_mode,
+    correlation_id: event.correlation_id,
+    delivery_id: event.delivery_id,
+    delivery_mode: event.delivery_mode,
+    effective_origin_kind: event.effective_origin_kind,
+    evidence_id: event.evidence_id,
+    expected_event_head: event.expected_event_head,
+    fallback_reason: event.fallback_reason,
+    generation: event.generation,
+    generation_id: event.generation_id,
+    generation_kind: event.generation_kind,
+    origin_id: event.origin_id,
+    origin_kind: event.origin_kind,
+    progress_event: event.progress_event.raw,
+    project_id: event.project_id,
+    requested_origin_kind: event.requested_origin_kind,
+    session_id: event.session_id,
+    source_event: event.source_event.raw,
+    state: event.state,
+    task_id: event.task_id,
+  };
+  return canonicalJson(
+    event.consumption_mode === 'legacy_delivery'
+      ? common
+      : {
+          ...common,
+          expected_event_head: event.expected_event_head,
+          presentation_class: event.presentation_class,
+          response_ref: event.response_ref,
+          result_source_event_id: event.result_source_event_id,
+          unit_id: event.unit_id,
+        },
+  );
 }
 
 export function adoptProductTextProgressEvent(
@@ -263,7 +452,7 @@ export function adoptParsedProductTextProgressEvent(
   return incoming;
 }
 
-export interface ProductTextProgressDeliveryAck {
+export interface ProductTextProgressLegacyDeliveryAck {
   readonly session_id: string;
   readonly task_id: string;
   readonly correlation_id: string;
@@ -277,8 +466,19 @@ export interface ProductTextProgressDeliveryAck {
   readonly evidence_id: string;
 }
 
+export interface ProductTextProgressPresentationAck extends ProductTextProgressLegacyDeliveryAck {
+  readonly presentation_class: 'text';
+  readonly response_ref: NonNullable<ProductTextProgressEvent['response_ref']>;
+  readonly unit_id: string;
+  readonly expected_event_head: number;
+  readonly result_source_event_id: string | null;
+  readonly presentation_binding: string;
+}
+
+export type ProductTextProgressDeliveryAck = ProductTextProgressLegacyDeliveryAck | ProductTextProgressPresentationAck;
+
 export function createProductTextProgressDeliveryAck(event: Readonly<ProductTextProgressEvent>): ProductTextProgressDeliveryAck {
-  return Object.freeze({
+  const base = {
     session_id: event.session_id,
     task_id: event.task_id,
     correlation_id: event.correlation_id,
@@ -290,6 +490,24 @@ export function createProductTextProgressDeliveryAck(event: Readonly<ProductText
     progress_event_id: event.progress_event.event_id,
     seq: event.source_event.seq,
     evidence_id: event.evidence_id,
+  };
+  if (event.consumption_mode === 'legacy_delivery') return Object.freeze(base);
+  if (
+    event.presentation_class !== 'text' ||
+    event.response_ref === null ||
+    event.unit_id === null ||
+    event.expected_event_head === null
+  ) {
+    throw new Error('presentation progress binding is incomplete');
+  }
+  return Object.freeze({
+    ...base,
+    presentation_class: event.presentation_class,
+    response_ref: event.response_ref,
+    unit_id: event.unit_id,
+    expected_event_head: event.expected_event_head,
+    result_source_event_id: event.result_source_event_id,
+    presentation_binding: productTextProgressPresentationBinding(event),
   });
 }
 
@@ -314,7 +532,7 @@ interface RetainedDeliveryAck {
 }
 
 function sameDeliveryAck(left: Readonly<ProductTextProgressDeliveryAck>, right: Readonly<ProductTextProgressDeliveryAck>): boolean {
-  return (
+  const baseMatches =
     left.session_id === right.session_id &&
     left.task_id === right.task_id &&
     left.correlation_id === right.correlation_id &&
@@ -325,7 +543,21 @@ function sameDeliveryAck(left: Readonly<ProductTextProgressDeliveryAck>, right: 
     left.source_event_id === right.source_event_id &&
     left.progress_event_id === right.progress_event_id &&
     left.seq === right.seq &&
-    left.evidence_id === right.evidence_id
+    left.evidence_id === right.evidence_id;
+  if (!baseMatches) return false;
+  const leftPresentation = 'presentation_class' in left;
+  const rightPresentation = 'presentation_class' in right;
+  if (leftPresentation !== rightPresentation) return false;
+  if (!leftPresentation || !rightPresentation) return true;
+  return (
+    left.presentation_class === right.presentation_class &&
+    left.response_ref.interaction_id === right.response_ref.interaction_id &&
+    left.response_ref.response_id === right.response_ref.response_id &&
+    left.response_ref.response_generation === right.response_ref.response_generation &&
+    left.unit_id === right.unit_id &&
+    left.expected_event_head === right.expected_event_head &&
+    left.result_source_event_id === right.result_source_event_id &&
+    left.presentation_binding === right.presentation_binding
   );
 }
 
@@ -333,7 +565,7 @@ function requireAckResponse(value: unknown, retained: RetainedDeliveryAck): void
   const ack = retained.ack;
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
-  if (
+  const baseMismatch =
     payload?.ok !== true ||
     result?.status !== 'acknowledged' ||
     result.attempt_id !== retained.expected_attempt_id ||
@@ -349,9 +581,35 @@ function requireAckResponse(value: unknown, retained: RetainedDeliveryAck): void
     result.seq !== ack.seq ||
     result.evidence_id !== ack.evidence_id ||
     result.acknowledgement !== 'web_ui_text_consumed' ||
-    typeof result.replayed !== 'boolean'
-  ) {
+    typeof result.replayed !== 'boolean';
+  if (baseMismatch) {
     throw new Error('product text-progress acknowledgement mismatch');
+  }
+  if (!('presentation_class' in ack)) {
+    if (
+      'presentation_class' in result ||
+      'response_ref' in result ||
+      'unit_id' in result ||
+      'expected_event_head' in result ||
+      'result_source_event_id' in result ||
+      'presentation_binding' in result
+    ) {
+      throw new Error('legacy text-progress acknowledgement gained presentation authority');
+    }
+    return;
+  }
+  const responseRef = objectValue(result.response_ref);
+  if (
+    result.presentation_class !== ack.presentation_class ||
+    responseRef?.interaction_id !== ack.response_ref.interaction_id ||
+    responseRef?.response_id !== ack.response_ref.response_id ||
+    responseRef?.response_generation !== ack.response_ref.response_generation ||
+    result.unit_id !== ack.unit_id ||
+    result.expected_event_head !== ack.expected_event_head ||
+    result.result_source_event_id !== ack.result_source_event_id ||
+    result.presentation_binding !== ack.presentation_binding
+  ) {
+    throw new Error('product text-progress presentation acknowledgement mismatch');
   }
 }
 
@@ -487,5 +745,85 @@ export class ProductTextProgressAckOwner {
     const snapshot = this.snapshot(retained);
     this.onSnapshot?.(snapshot);
     return snapshot;
+  }
+}
+
+export interface ProductTextProgressDomNode {
+  readonly isConnected: boolean;
+  getAttribute(name: string): string | null;
+}
+
+/**
+ * Converts real, exact DOM adoption into the existing delivery ACK.
+ *
+ * React state assignment is not presentation.  The mounted product carrier calls
+ * this owner from a layout effect with the actual connected element after commit.
+ */
+export class ProductTextProgressDomAdoptionOwner {
+  private readonly ackOwner: Pick<ProductTextProgressAckOwner, 'retain'>;
+
+  constructor(ackOwner: Pick<ProductTextProgressAckOwner, 'retain'>) {
+    if (!ackOwner || typeof ackOwner.retain !== 'function') {
+      throw new Error('product text-progress ACK owner is required');
+    }
+    this.ackOwner = ackOwner;
+  }
+
+  adopt(
+    event: Readonly<ProductTextProgressEvent>,
+    node: ProductTextProgressDomNode | null
+  ): ProductTextProgressAckSnapshot | null {
+    if (!node || node.isConnected !== true) return null;
+    const expected: Record<string, string> = {
+      'data-delivery-id': event.delivery_id,
+      'data-session-id': event.session_id,
+      'data-subject-id': event.source_event.scope.subject_id,
+      'data-project-id': event.project_id,
+      'data-task-id': event.task_id,
+      'data-attempt-id': event.attempt_id,
+      'data-event-id': event.source_event.event_id,
+      'data-event-seq': String(event.source_event.seq),
+      'data-generation-id': event.generation_id,
+      'data-generation': String(event.generation),
+    };
+    if (event.consumption_mode === 'presentation') {
+      if (
+        event.presentation_class !== 'text' ||
+        event.response_ref === null ||
+        event.unit_id === null ||
+        event.expected_event_head === null
+      ) {
+        throw new Error('DOM presentation authority is incomplete');
+      }
+      expected['data-presentation-binding'] = productTextProgressPresentationBinding(event);
+      expected['data-presentation-class'] = event.presentation_class;
+      expected['data-response-interaction-id'] = event.response_ref.interaction_id;
+      expected['data-response-id'] = event.response_ref.response_id;
+      expected['data-response-generation'] = String(event.response_ref.response_generation);
+      expected['data-unit-id'] = event.unit_id;
+      expected['data-expected-event-head'] = String(event.expected_event_head);
+      expected['data-result-source-event-id'] = event.result_source_event_id ?? '';
+    } else {
+      for (const name of [
+        'data-presentation-binding',
+        'data-presentation-class',
+        'data-response-interaction-id',
+        'data-response-id',
+        'data-response-generation',
+        'data-unit-id',
+        'data-expected-event-head',
+        'data-result-source-event-id',
+      ]) {
+        if (node.getAttribute(name) !== null) {
+          throw new Error('legacy DOM acquired presentation authority');
+        }
+      }
+    }
+    for (const [name, value] of Object.entries(expected)) {
+      if (node.getAttribute(name) !== value) {
+        throw new Error('DOM presentation binding mismatch');
+      }
+    }
+    return this.ackOwner.retain(event);
   }
 }

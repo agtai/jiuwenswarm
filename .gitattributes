@@ -1,1 +1,2 @@
 *.mp4 filter=lfs diff=lfs merge=lfs -text
+/tests/fixtures/live_voice_p3_6_intent_corpus_v1/cases.jsonl text eol=lf

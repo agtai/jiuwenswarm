@@ -123,8 +123,6 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly expected_origin: string;
   readonly endpoint_url: string;
   readonly media_ticket?: string;
-  /** W2-only ticket-in-path compatibility. Alpha product never enables this. */
-  readonly legacy_path_ticket_compat?: boolean;
   readonly binding: MediaAuthorityBinding | null;
   readonly provider_available: boolean;
   readonly transport_available: boolean;
@@ -210,7 +208,7 @@ function canonicalOrigin(value: unknown): URL | null {
   return parsed;
 }
 
-function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown, legacyPathTicketCompat: boolean): string | null {
+function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown): string | null {
   const origin = canonicalOrigin(expectedOrigin);
   if (origin === null || typeof endpointUrl !== 'string' || endpointUrl !== endpointUrl.trim()) return null;
   let endpoint: URL;
@@ -227,11 +225,7 @@ function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown, legacy
     endpoint.password !== '' ||
     endpoint.search !== '' ||
     endpoint.hash !== '' ||
-    (
-      legacyPathTicketCompat
-        ? !endpoint.pathname.startsWith(`${DEDICATED_MEDIA_ROUTE_PATH}/`)
-        : endpoint.pathname !== DEDICATED_MEDIA_ROUTE_PATH
-    )
+    endpoint.pathname !== DEDICATED_MEDIA_ROUTE_PATH
   )
     return null;
   return endpoint.href;
@@ -470,14 +464,10 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   }
   if (request.provider_available !== true) return inactive('MEDIA_PROVIDER_UNAVAILABLE');
   if (request.transport_available !== true) return inactive('MEDIA_TRANSPORT_UNAVAILABLE');
-  if (request.legacy_path_ticket_compat !== undefined && typeof request.legacy_path_ticket_compat !== 'boolean') {
-    throw new TypeError('legacy_path_ticket_compat must be boolean');
-  }
-  const legacyPathTicketCompat = request.legacy_path_ticket_compat === true;
-  const endpoint = dedicatedEndpoint(request.expected_origin, request.endpoint_url, legacyPathTicketCompat);
+  const endpoint = dedicatedEndpoint(request.expected_origin, request.endpoint_url);
   if (endpoint === null) return inactive('MEDIA_ORIGIN_REJECTED');
   const ticket = request.media_ticket;
-  if (!legacyPathTicketCompat && !validMediaTicket(ticket)) {
+  if (!validMediaTicket(ticket)) {
     return inactive('MEDIA_AUTHORITY_UNAVAILABLE');
   }
   if (typeof request.socket_factory !== 'function') {
@@ -542,7 +532,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   }
   let socket: DedicatedMediaSocketLike | null = null;
   try {
-    const authenticationFrame = legacyPathTicketCompat ? null : mediaAuthFrame(ticket as string, activation.binding);
+    const authenticationFrame = mediaAuthFrame(ticket, activation.binding);
     socket = request.socket_factory(endpoint, Object.freeze([DEDICATED_MEDIA_SUBPROTOCOL]));
     if (socket.readyState !== SOCKET_CONNECTING) {
       throw new TypeError('dedicated media socket factory must return a new connecting socket');

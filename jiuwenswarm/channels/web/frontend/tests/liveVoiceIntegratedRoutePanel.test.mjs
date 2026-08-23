@@ -10,6 +10,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
+  PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS,
+  PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY,
   bindProductVoiceTaskOrigin,
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
@@ -22,12 +24,18 @@ import {
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
+  productP2NotificationRepollDelayMs,
   productLatencyForegroundPresentation,
   productP3RetryInspectionFailureReason,
+  productP3ProgressReconciliationRetryDelayMs,
+  productP3ProgressFailureIsQuarantinable,
+  rememberProductP3ProgressExhaustion,
   productVoiceDraftMatchesBinding,
   recognizedSpeechConfirmationMatches,
   productTextBlockedByP1Status,
   progressMatchesOwnedBinding,
+  productRecoveryDiagnosticMatchesClear,
+  productTaskProgressTranslationKey,
   resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
   shouldYieldProductP2PollToVoiceCapture,
@@ -425,7 +433,7 @@ function retryEvents(events = retryHistoryThroughB(), headSeq = 3) {
   };
 }
 
-function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, progressOutcome = event.outcome } = {}) {
+function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, progressOutcome = event.outcome, rawOnly = false } = {}) {
   const sourcePayload = { state: event.state };
   if (sourceOutcome !== null) sourcePayload.outcome = sourceOutcome;
   const raw = {
@@ -445,6 +453,15 @@ function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, pro
     generation_id: 'generation-1',
     generation: 1,
     evidence_id: `evidence-${event.seq}`,
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: 'interaction-progress-1',
+      response_id: `response-progress-${event.seq}`,
+      response_generation: 1,
+    },
+    unit_id: `unit-progress-${event.seq}`,
+    expected_event_head: event.seq,
+    result_source_event_id: sourceOutcome === 'completed' ? event.source_event_id : null,
     source_event: {
       event_id: event.event_id,
       event_type: event.event_type,
@@ -480,6 +497,7 @@ function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, pro
       },
     },
   };
+  if (rawOnly) return raw;
   const parsed = parseProductTextProgressEvent(raw);
   assert.notEqual(parsed, null);
   return parsed;
@@ -571,6 +589,15 @@ test('route panel renders only a validated authenticated text progress fact', as
     generation_id: 'web-generation-1',
     generation: 2,
     evidence_id: 'evidence-product-1',
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: 'interaction-product-1',
+      response_id: 'response-product-1',
+      response_generation: 2,
+    },
+    unit_id: 'unit-product-1',
+    expected_event_head: 11,
+    result_source_event_id: null,
     source_event: {
       event_id: 'source-product-1',
       event_type: 'task.running',
@@ -642,11 +669,11 @@ test('formal P1 discloses the 30-second capture bound and disables restart on te
     },
   });
 
-  assert.equal(html.includes('This turn retains at most 30 seconds of captured audio.'), true);
-  assert.equal(html.includes('audio captured during overlapping playback counts toward the limit.'), true);
+  assert.equal(html.includes('One spoken utterance retains at most 30 seconds of captured audio, measured from the recognized start'), true);
+  assert.equal(html.includes('Silent listening and overlapping playback rotate the capture automatically and do not count toward the limit.'), true);
   assert.equal(html.includes('Speak and press Stop and recognize before the limit.'), true);
   assert.equal(html.includes('AUDIO_CAPTURE_DURATION_EXCEEDED'), true);
-  assert.equal(html.includes('The expired capture was discarded without a new Speech or Agent submission. Refresh to start again.'), true);
+  assert.equal(html.includes('The utterance exceeded its 30-second budget; the expired capture was discarded without a new Speech or Agent submission.'), true);
   assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
 });
 
@@ -798,6 +825,64 @@ test('natural-language task status projects the authoritative terminal result', 
   );
 });
 
+test('accepted and running task progress use distinct localized presentation truth', async () => {
+  assert.equal(productTaskProgressTranslationKey('accepted'), 'liveVoice.formal.taskStateAccepted');
+  assert.equal(productTaskProgressTranslationKey('running'), 'liveVoice.formal.taskStateRunning');
+  assert.equal(productTaskProgressTranslationKey('decision_required'), 'liveVoice.formal.taskState');
+  const [zh, en] = await Promise.all([
+    readFile(new URL('../src/i18n/locales/zh.json', import.meta.url), 'utf8').then(JSON.parse),
+    readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8').then(JSON.parse),
+  ]);
+  assert.equal(zh.liveVoice.formal.taskStateAccepted, '已受理，正在等待执行');
+  assert.equal(zh.liveVoice.formal.taskStateRunning, '正在执行');
+  assert.equal(en.liveVoice.formal.taskStateAccepted, 'Accepted; waiting to run');
+  assert.equal(en.liveVoice.formal.taskStateRunning, 'Running');
+});
+
+test('activation recovery scope converges only through its exact Session and correlation successor', () => {
+  const scopeDiagnostic = Object.freeze({
+    seam: 'activation',
+    disposition: 'retrying',
+    reason: 'P2_REFRESH_RECONCILIATION_REQUIRED',
+    session_id: 'scope-session',
+    correlation_id: 'scope-correlation',
+    interaction_id: null,
+    activation_id: null,
+    activation_generation: null,
+    response_id: null,
+    response_generation: null,
+  });
+  const successor = Object.freeze({
+    session_id: 'scope-session',
+    correlation_id: 'scope-correlation',
+    interaction_id: 'scope-interaction',
+    activation_id: 'scope-activation',
+    activation_generation: 2,
+  });
+
+  assert.equal(
+    productRecoveryDiagnosticMatchesClear(scopeDiagnostic, {
+      seam: 'activation',
+      binding: successor,
+    }),
+    true,
+  );
+  assert.equal(
+    productRecoveryDiagnosticMatchesClear(scopeDiagnostic, {
+      seam: 'activation',
+      binding: { ...successor, correlation_id: 'foreign-correlation' },
+    }),
+    false,
+  );
+  assert.equal(
+    productRecoveryDiagnosticMatchesClear(
+      { ...scopeDiagnostic, interaction_id: 'old-interaction', activation_id: 'old-activation', activation_generation: 1 },
+      { seam: 'activation', binding: successor },
+    ),
+    false,
+  );
+});
+
 test('recognized Speech confirmation is fenced to its exact Session and displayed text', () => {
   const pending = Object.freeze({
     intent: 'agent',
@@ -887,6 +972,28 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(replayedPresentation.task_notification, false);
   assert.equal(replayedPresentation.adjustment_notification, false);
   assert.equal(replayedPresentation.history_message_id, `live-voice:interaction-1:response-stable:7:text:0:0:${'a'.repeat(64)}`);
+  const dialogueTaskClaim = classifyProductP2Notification({
+    kind: 'agent.output',
+    task_notification: true,
+    adjustment_notification: true,
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-dialogue-claim',
+      response_generation: 8,
+    },
+    agent_event: {
+      event_type: 'chat.final',
+      text: '修改已经应用，后台任务已完成，结果已经生成。',
+      source_provenance: '{"source":"formal_speech_recognition"}',
+      task_id: 'task-forged',
+      state: 'terminal',
+      outcome: 'completed',
+    },
+    presentation_unit: { surface: 'text', unit_id: 'unit-dialogue-claim', seq: 0 },
+  });
+  assert.equal(dialogueTaskClaim.kind, 'presentation');
+  assert.equal(dialogueTaskClaim.task_notification, false);
+  assert.equal(dialogueTaskClaim.adjustment_notification, false);
   const terminalPresentation = classifyProductP2Notification({
     kind: 'agent.output',
     response: {
@@ -904,6 +1011,45 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(terminalPresentation.kind, 'presentation');
   assert.equal(terminalPresentation.task_notification, true);
   assert.equal(terminalPresentation.adjustment_notification, false);
+  const audioTaskPresentation = classifyProductP2Notification({
+    kind: 'agent.output',
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-task-audio',
+      response_generation: 9,
+    },
+    agent_event: {
+      event_type: 'chat.final',
+      text: 'The background task is running.',
+      source_provenance: 'server.task_notification',
+    },
+    presentation_unit: {
+      surface: 'audio',
+      unit_id: 'unit-task-audio',
+      seq: 0,
+      content_ref: `sha256:${'b'.repeat(64)}`,
+    },
+  });
+  assert.equal(audioTaskPresentation.kind, 'presentation');
+  assert.equal(audioTaskPresentation.task_notification, true);
+  assert.equal(audioTaskPresentation.ack.surface, 'audio');
+  assert.equal(
+    audioTaskPresentation.history_message_id,
+    `live-voice:interaction-1:response-task-audio:9:audio:0:0:${'b'.repeat(64)}`,
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({
+      kind: 'agent.output',
+      response: {
+        interaction_id: 'interaction-1',
+        response_id: 'response-untrusted-audio',
+        response_generation: 10,
+      },
+      agent_event: { event_type: 'chat.final', text: 'untrusted audio' },
+      presentation_unit: { surface: 'audio', unit_id: 'unit-untrusted-audio', seq: 0 },
+    }),
+    { kind: 'continue' },
+  );
   const adjustmentPresentation = classifyProductP2Notification({
     kind: 'agent.output',
     response: {
@@ -986,6 +1132,23 @@ test('foreground response waiting retains P2 polling ahead of a queued terminal 
   assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, foreground_response_waiting: true }), false);
   assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, voice_loop_enabled: false }), false);
   assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, terminal_notification_check_required: false }), false);
+  assert.equal(
+    productP2NotificationRepollDelayMs({
+      disposition: { kind: 'continue' },
+      terminal_notification_check_required: true,
+      foreground_response_waiting: true,
+    }),
+    PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS,
+  );
+  assert.equal(PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS >= 500, true);
+  assert.equal(
+    productP2NotificationRepollDelayMs({
+      disposition: { kind: 'continue' },
+      terminal_notification_check_required: false,
+      foreground_response_waiting: true,
+    }),
+    0,
+  );
 });
 
 test('Web response error extraction preserves nested product reason', () => {
@@ -1000,6 +1163,11 @@ test('Web response error extraction preserves nested product reason', () => {
     'TASK_CONTEXT_PERMISSION_MISSING',
   );
   assert.equal(extractWebErrorReason({ reason: ' TOP_LEVEL_REASON ' }), 'TOP_LEVEL_REASON');
+  assert.equal(extractWebErrorReason({}, ' MEDIA_PLAYOUT_RECEIPT_UNTRUSTED '), 'MEDIA_PLAYOUT_RECEIPT_UNTRUSTED');
+  assert.equal(
+    extractWebErrorReason({ error: { reason: 'EXACT_MEDIA_REASON' } }, 'MEDIA_PLAYOUT_RECEIPT_UNTRUSTED'),
+    'EXACT_MEDIA_REASON',
+  );
   assert.equal(extractWebErrorReason({ error: 'legacy error' }), undefined);
 });
 
@@ -1454,6 +1622,60 @@ test('P3 progress reconciliation advances accepted UI truth only from exact auth
   }
 });
 
+test('P3 progress reconciliation retry is bounded and cannot become a busy loop', () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 0, Number.NaN].map(productP3ProgressReconciliationRetryDelayMs),
+    [250, 500, 1000, null, null, null, null],
+  );
+});
+
+test('P3 exhausted-delivery quarantine stays bounded and duplicate bad deliveries do not grow it', () => {
+  assert.equal(
+    productP3ProgressFailureIsQuarantinable(
+      new Error('formal product progress source, state, outcome, or producer mismatch'),
+    ),
+    true,
+  );
+  assert.equal(productP3ProgressFailureIsQuarantinable(Object.assign(new Error('transport timeout'), { reason: 'REQUEST_TIMEOUT' })), false);
+  const exhausted = new Map();
+  for (let index = 0; index < PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 32; index += 1) {
+    rememberProductP3ProgressExhaustion(exhausted, `bad-delivery-${index}`);
+  }
+  assert.equal(exhausted.size, PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY);
+  assert.equal(exhausted.has('bad-delivery-0'), false);
+  assert.equal(exhausted.has(`bad-delivery-${PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 31}`), true);
+  const sizeBeforeDuplicate = exhausted.size;
+  rememberProductP3ProgressExhaustion(exhausted, `bad-delivery-${PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 31}`);
+  rememberProductP3ProgressExhaustion(exhausted, `bad-delivery-${PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 31}`);
+  assert.equal(exhausted.size, sizeBeforeDuplicate);
+});
+
+test('P3 progress reconciliation authenticates an early delivery when task.events has already advanced to a later head', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+  const running = retryEvent(1, {
+    attemptId: 'attempt-a',
+    eventType: 'task.running',
+    state: 'running',
+    sourceEventId: 'executor-a:1',
+    causationId: 'executor-a:1',
+  });
+  adoptTaskEvents(leaf, retryEvents([accepted], 0));
+
+  const record = await reconcileProductP3ProgressEvent({
+    request: async () => retryEvents([accepted, running], 1),
+    leaf,
+    event: productProgressForTaskEvent(accepted),
+    session_id: 'session-1',
+    request_nonce: 'advanced-head',
+    is_current: () => true,
+  });
+
+  assert.equal(record.state, 'running');
+  assert.equal(record.last_event_seq, 1);
+  assert.deepEqual(leaf.snapshot().progress_receipts, []);
+});
+
 test('P3 progress reconciliation works after reconnect with the new connection generation', async () => {
   const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
   const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
@@ -1493,16 +1715,10 @@ test('P3 progress reconciliation fails closed on outcome disagreement without li
   });
   adoptTaskEvents(leaf, retryEvents([accepted], 0));
 
-  await assert.rejects(
-    reconcileProductP3ProgressEvent({
-      request: async () => retryEvents([accepted, failed], 1),
-      leaf,
-      event: productProgressForTaskEvent(failed, { progressOutcome: 'completed' }),
-      session_id: 'session-1',
-      request_nonce: 'outcome-conflict',
-      is_current: () => true,
-    }),
-    /source, state, outcome, or producer mismatch/,
+  assert.equal(
+    parseProductTextProgressEvent(productProgressForTaskEvent(failed, { progressOutcome: 'completed', rawOnly: true })),
+    null,
+    'the carrier must reject outcome disagreement before reconciliation or DOM adoption',
   );
   assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
   assert.deepEqual(leaf.snapshot().progress_receipts, []);
@@ -1647,22 +1863,31 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   const barSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceDemoBar.tsx', import.meta.url), 'utf8');
   const formalProps = source.slice(
     source.indexOf('const formalLiveVoiceDemoProps'),
-    source.indexOf('const liveVoiceDemoProps'),
+    source.indexOf('const liveVoiceDemoBar'),
   );
 
   assert.match(source, /FEATURE_LIVE_VOICE_INTEGRATED_WEB\s*&&\s*FEATURE_LIVE_VOICE_INTEGRATED_P1/);
-  assert.match(source, /const liveVoiceDemoProps = formalProductVoiceEnabled \? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps/);
-  assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
+  assert.match(source, /formalProductVoiceEnabled\s*\?\s*\(\s*<FormalProductLiveVoiceDemoBar/);
+  assert.match(source, /surfaceState=\{productVoiceState\}/);
+  assert.match(source, /onTaskRefresh=/);
+  assert.match(source, /onTaskSelect=/);
+  assert.match(source, /onTaskMutation=/);
+  assert.match(source, /onTaskConfirm=/);
+  assert.match(source, /startProductVoiceWithBrowserOwnership/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
   assert.match(source, /addMessageIfAbsent\(event\.session_id/);
   assert.match(source, /recoveryFailedWithReason/);
   assert.match(source, /formalVoiceErrorReason/);
   assert.match(source, /productVoiceState\?\.text_status === 'failed'/);
   assert.match(formalProps, /handsFree:\s*true/);
+  assert.match(formalProps, /onInterruptAndSpeak:[\s\S]*?productVoiceControlRef\.current\?\.stop\(\)/);
+  assert.match(formalProps, /onStopPlayback:[\s\S]*?productVoiceControlRef\.current\?\.stop\(\)/);
   assert.doesNotMatch(formalProps, /commandCenter:|editableTranscript:|setCommandRoute|setTaskOperation|setTaskId|submitCommand/);
   assert.match(barSource, /data-testid="live-voice-command-center"/);
   assert.match(barSource, /data-testid="live-voice-command-task-confirmation"/);
   assert.match(barSource, /!handsFree/);
+  assert.match(barSource, /handsFree\s*&&\s*status === 'speaking'\s*&&\s*onInterruptAndSpeak/);
+  assert.match(barSource, /handsFree\s*&&\s*status === 'speaking'\s*&&\s*onStopPlayback/);
 });
 
 test('integrated route diagnostics remain vertically reachable in a bounded panel', async () => {
@@ -1692,10 +1917,137 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   assert.match(source, /'failed', 'cleanup_pending', 'closed'/);
   assert.match(source, /PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED/);
   assert.match(source, /setP2RecoveryEpoch\(epoch => epoch \+ 1\)/);
+  assert.match(source, /isStaleProductResponseError\(error\)/);
   assert.match(
     source,
-    /isStaleProductResponseError\(error\)[\s\S]{0,300}setProductTextReason\(null\)[\s\S]{0,120}setProductTextStatus\('waiting'\)/,
+    /setProductTextReason\(null\)[\s\S]{0,160}setProductTextStatus\(pendingForegroundPresentationRef\.current !== null \? 'waiting' : 'acknowledged'\)/,
   );
+});
+
+test('foreground presentation fence keeps exact activation and response identity without superseded generation residue', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const fence = source.match(
+    /type PendingForegroundPresentationFence = Readonly<\{(?<fields>[\s\S]*?)\}>;/,
+  )?.groups?.fields;
+
+  assert.ok(fence);
+  for (const field of [
+    'session_id',
+    'correlation_id',
+    'interaction_id',
+    'activation_id',
+    'activation_generation',
+    'response_id',
+    'response_generation',
+  ]) {
+    assert.match(fence, new RegExp(`\\b${field}:`));
+  }
+  assert.doesNotMatch(fence, /\bturn_id:|\bcommit_id:|\borigin_voice_loop_generation:/);
+  assert.doesNotMatch(source, /\bcrossesExitedVoiceLoopGeneration\b/);
+  assert.match(source, /voiceLoopCaptureTimerRef/);
+  assert.match(source, /pendingForegroundPresentationRef\.current = null/);
+  assert.match(source, /retirePendingPresentationAck/);
+});
+
+test('ChatPanel mounts the production browser-ownership lifecycle used by the timing oracle', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
+  const lifecycleSource = await readFile(
+    new URL('../src/components/ChatPanel/useProductVoiceBrowserOwnership.ts', import.meta.url),
+    'utf8',
+  );
+  const panelSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const lifecycleCall = source.slice(
+    source.indexOf('useProductVoiceBrowserOwnership({'),
+    source.indexOf('let formalVoiceVisualState'),
+  );
+  const start = lifecycleSource.slice(
+    lifecycleSource.indexOf('const start ='),
+    lifecycleSource.indexOf('const stop ='),
+  );
+  const sessionStop = lifecycleSource.slice(
+    lifecycleSource.indexOf('const stopSessionAndReleaseBrowserOwnership'),
+    lifecycleSource.indexOf('useEffect(() => {', lifecycleSource.indexOf('const stopSessionAndReleaseBrowserOwnership')),
+  );
+  const sessionCleanup = lifecycleSource.slice(
+    lifecycleSource.indexOf('const closeSessionForBrowserOwnership'),
+    lifecycleSource.indexOf('const closeForBrowserOwnership'),
+  );
+  const unmountCleanup = lifecycleSource.slice(lifecycleSource.lastIndexOf('useEffect(() => {'));
+  const formalProps = source.slice(
+    source.indexOf('const formalLiveVoiceDemoProps'),
+    source.indexOf('const liveVoiceDemoBar'),
+  );
+  const sessionReplacement = lifecycleSource.match(
+    /useEffect\(\(\) => \{(?<body>[\s\S]*?sessionRef\.current = options\.activeSessionId;[\s\S]*?)\n  \}, \[options\.activeSessionId,/,
+  )?.groups?.body;
+
+  assert.match(source, /useProductVoiceBrowserOwnership/);
+  assert.match(lifecycleCall, /activeSessionId/);
+  assert.match(lifecycleCall, /controlRef: productVoiceControlRef/);
+  assert.match(lifecycleCall, /getActiveSessionId: getActiveProductVoiceSessionId/);
+  assert.match(lifecycleSource, /createBrowserLiveVoiceOwnership/);
+  assert.match(lifecycleSource, /createBrowserLiveVoiceOwnershipBarrier/);
+  assert.match(lifecycleSource, /cleanupControlRef/);
+  assert.match(lifecycleSource, /unmountedRef/);
+  assert.match(panelSource, /closeSession\(sessionId: string\): Promise<void>/);
+  assert.match(start, /await browserOwnership\.acquire/);
+  assert.match(start, /await ownershipBarrier\.wait\(\)/);
+  assert.match(start, /await ownershipBarrier\.run\(async \(\) => \{/);
+  assert.equal(start.indexOf('await ownershipBarrier.wait()') < start.indexOf('await browserOwnership.acquire'), true);
+  assert.match(start, /const cleanupControl = options\.controlRef\.current/);
+  assert.match(start, /cleanupControlRef\.current = cleanupControl/);
+  assert.equal(start.indexOf('await browserOwnership.acquire') < start.indexOf('setActive(true)'), true);
+  assert.equal(start.indexOf('setActive(true)') < start.indexOf('await control.start()'), true);
+  assert.match(start, /setActive\(false\)[\s\S]*?await closeForBrowserOwnership\(\)/);
+  assert.match(start, /await closeSessionForBrowserOwnership\(cleanupSessionId\)[\s\S]*?await browserOwnership\.release\(\)/);
+  assert.match(sessionCleanup, /await control\.closeSession\(cleanupSessionId\)/);
+  assert.match(sessionCleanup, /return control/);
+  assert.doesNotMatch(sessionCleanup, /control\?\./);
+  assert.doesNotMatch(sessionCleanup, /cleanupControlRef\.current = null/);
+  assert.match(
+    sessionStop,
+    /await ownershipBarrier\.run\(async \(\) => \{[\s\S]*?const cleanedControl =[\s\S]*?await closeSessionForBrowserOwnership\(sessionId\)[\s\S]*?await browserOwnership\?\.release\(\)[\s\S]*?cleanupControlRef\.current === cleanedControl[\s\S]*?cleanupControlRef\.current = null[\s\S]*?\}\);/,
+  );
+  assert.match(formalProps, /onEnable:[\s\S]*?startProductVoiceWithBrowserOwnership/);
+  assert.match(formalProps, /onExit:[\s\S]*?stopProductVoiceAndReleaseBrowserOwnership/);
+  assert.match(formalProps, /onRetryListening:[\s\S]*?startProductVoiceWithBrowserOwnership/);
+  assert.doesNotMatch(formalProps, /productVoiceControlRef\.current\?\.start\(\)/);
+  assert.match(unmountCleanup, /unmountedRef\.current = true/);
+  assert.match(unmountCleanup, /cleanupControlRef\.current \?\? options\.controlRef\.current/);
+  assert.match(unmountCleanup, /browserOwnership\?\.disposeAfterRelease\(\)/);
+  assert.doesNotMatch(unmountCleanup, /catch \{\s*return;\s*\}/);
+  assert.ok(sessionReplacement);
+  assert.match(sessionReplacement, /const previousSessionId = sessionRef\.current/);
+  assert.match(sessionReplacement, /stopSessionAndReleaseBrowserOwnership\(previousSessionId\)/);
+  assert.doesNotMatch(sessionReplacement, /void stop\(\)/);
+});
+
+test('successor capture admission uses the authoritative activation owner instead of lagging rendered state', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const admission = source.match(
+    /const startProductVoiceCaptureOwned = async \(\) => \{(?<body>[\s\S]*?)\n  const startProductVoiceCapture =/,
+  )?.groups?.body;
+
+  assert.ok(admission);
+  assert.match(admission, /activationOwnerRef\.current\?\.snapshot\(\)/);
+  assert.match(admission, /activation\?\.status === 'active'/);
+  assert.match(admission, /current\.activation_generation === binding\.activation_generation/);
+  assert.doesNotMatch(
+    admission,
+    /p2Activation\.status/,
+    'an already-active successor owner must not lose its only scheduled capture to a lagging React publication',
+  );
+});
+
+test('formal P1 receives the exact Web request function without an option-dropping panel adapter', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const admission = source.match(
+    /const startProductVoiceCaptureOwned = async \(\) => \{(?<body>[\s\S]*?)\n  const startProductVoiceCapture =/,
+  )?.groups?.body;
+
+  assert.ok(admission);
+  assert.match(admission, /new ProductP1VoiceRouteOwner\([\s\S]*?request: productRequest,/);
+  assert.doesNotMatch(admission, /request: \(method, params\) => productRequest\(method, params\)/);
 });
 
 test('voice Task origin is exact-session and exact-committed-text only', () => {
@@ -1786,6 +2138,17 @@ test('overlap capture publishes its exact binding before playout EOT can race co
   assert.match(handler, /voiceLoopGenerationRef\.current === loopGeneration/);
   assert.match(handler, /p1VoiceOwnerRef\.current === owner/);
   assert.match(handler, /p1VoiceCaptureBindingRef\.current = binding/);
+});
+
+test('explicit Live Voice exit fences old playout settlement without blocking its visible-text ACK', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('const playoutLoopGeneration = voiceLoopGenerationRef.current;');
+  const end = source.indexOf('const settleRetainedP2Operations', start);
+  const handler = source.slice(start, end);
+
+  assert.equal(start >= 0 && end > start, true);
+  assert.match(handler, /const isCurrentVoicePlayout = \(\) =>[\s\S]*?voiceLoopEnabledRef\.current[\s\S]*?voiceLoopGenerationRef\.current === playoutLoopGeneration/);
+  assert.match(handler, /if \(!isCurrentVoicePlayout\(\)\) \{[\s\S]*?if \(isCurrentPresentationAttempt\(\)\) retainAck\(\)/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

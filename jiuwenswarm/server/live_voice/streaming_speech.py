@@ -165,6 +165,15 @@ class RecognitionTurnDetection:
     def server_vad_default(cls) -> "RecognitionTurnDetection":
         return cls(RecognitionTurnDetectionMode.SERVER_VAD, ServerVadConfig())
 
+    @classmethod
+    def server_vad_barge_in(cls) -> "RecognitionTurnDetection":
+        """Retain a wider speech prefix only for capture overlapping TTS."""
+
+        return cls(
+            RecognitionTurnDetectionMode.SERVER_VAD,
+            ServerVadConfig(prefix_padding_ms=800),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RecognitionProviderSupport:

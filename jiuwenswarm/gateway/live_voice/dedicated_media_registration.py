@@ -119,9 +119,6 @@ MEDIA_CLOSE_METHOD = "live_voice.media.close"
 MEDIA_PLAYOUT_RECEIPT_METHOD = "live_voice.media.playout_receipt"
 STREAMING_RECOGNITION_RESULT_METHOD = "live_voice.speech.recognize_streaming_result"
 MEDIA_ROUTE_PATH = "/ws/live-voice/media"
-# Legacy W2 ticket-in-path routing is available only to explicitly constructed
-# compatibility registries. Alpha product construction never enables it.
-MEDIA_ROUTE_PREFIX = "/ws/live-voice/media/"
 MEDIA_SUBPROTOCOL = "live-voice.media.v1"
 MEDIA_FEATURE_ENV = "JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED"
 MEDIA_END_OF_TURN_FEATURE_ENV = "JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED"
@@ -560,6 +557,7 @@ class _MediaAuthority:
     issued_at: float
     ticket_expires_at: float
     authority_expires_at: float
+    barge_in_capture: bool = False
     ticket_consumed: bool = False
     route_completed: bool = False
     accepted_frames: int = 0
@@ -814,7 +812,6 @@ class DedicatedMediaProductRegistry:
         ticket_ttl_seconds: float = _DEFAULT_TICKET_TTL_SECONDS,
         authority_ttl_seconds: float = _DEFAULT_AUTHORITY_TTL_SECONDS,
         capacity: int = _MAX_RECORDS,
-        legacy_path_ticket_compat: bool = False,
         end_of_turn_enabled: bool = False,
         streaming_observability: LiveVoiceObservabilityCollector | None = None,
         latency_probe_runtime: LatencyProbeRuntime | None = None,
@@ -825,7 +822,6 @@ class DedicatedMediaProductRegistry:
         self._ticket_ttl = ticket_ttl_seconds
         self._authority_ttl = authority_ttl_seconds
         self._capacity = max(1, min(capacity, _MAX_RECORDS))
-        self.legacy_path_ticket_compat = legacy_path_ticket_compat is True
         self.end_of_turn_enabled = end_of_turn_enabled is True
         self._records: OrderedDict[str, _MediaAuthority] = OrderedDict()
         # One-use credentials exist only in this pre-authentication index.  All
@@ -1307,14 +1303,26 @@ class DedicatedMediaProductRegistry:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
+            # Product P1 opens the replacement uplink after the authoritative
+            # response downlink exists and before playout begins. That exact
+            # overlap is the only capture profile that receives the wider VAD
+            # prefix; ordinary turns keep the provider default.
+            record.barge_in_capture = any(
+                candidate.binding.direction is MediaDirection.DOWNLINK
+                and not candidate.route_completed
+                and candidate.binding.session_id == session_id
+                and candidate.binding.interaction_id == interaction_id
+                and candidate.binding.correlation_id == correlation_id
+                and candidate.product_activation_id == activation_id
+                and candidate.product_activation_generation == activation_generation
+                and candidate.downlink_response is not None
+                and now <= candidate.authority_expires_at
+                for candidate in self._records.values()
+            )
             self._records[record_id] = record
             self._pending_tickets[ticket] = record_id
             self._subjects[(session_id, subject_id)] = record_id
-        route_descriptor = (
-            {"endpoint_path": f"{MEDIA_ROUTE_PREFIX}{ticket}"}
-            if self.legacy_path_ticket_compat
-            else {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
-        )
+        route_descriptor = {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
         streaming_descriptor = (
             {}
             if self._streaming_recognition_owner is None
@@ -1470,7 +1478,11 @@ class DedicatedMediaProductRegistry:
             handle, fallback = await owner.begin(
                 record.binding,
                 turn_detection=(
-                    RecognitionTurnDetection.server_vad_default()
+                    (
+                        RecognitionTurnDetection.server_vad_barge_in()
+                        if record.barge_in_capture
+                        else RecognitionTurnDetection.server_vad_default()
+                    )
                     if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
                     else RecognitionTurnDetection.manual()
                 ),
@@ -3022,11 +3034,7 @@ class DedicatedMediaProductRegistry:
             )
             self._records[record_id] = record
             self._pending_tickets[ticket] = record_id
-        route_descriptor = (
-            {"endpoint_path": f"{MEDIA_ROUTE_PREFIX}{ticket}"}
-            if self.legacy_path_ticket_compat
-            else {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
-        )
+        route_descriptor = {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
         transformed_audio = {
             "format": "pcm_f32_mono_20ms",
             "sample_rate_hz": sample_rate_hz,
@@ -3623,37 +3631,28 @@ async def _authenticate_registered_media_socket(
 ) -> _MediaAuthority | None:
     """Consume one capability without retaining its bytes in the media coroutine."""
 
-    fixed_route = request_path == MEDIA_ROUTE_PATH
     first_frame: object = None
     parsed_auth: tuple[str, MediaAuthorityBinding] | None = None
     ticket: str | None = None
     claimed_binding: MediaAuthorityBinding | None = None
     try:
-        if fixed_route:
-            try:
-                first_frame = await asyncio.wait_for(
-                    ws.recv(), timeout=_MEDIA_AUTH_TIMEOUT_SECONDS
-                )
-            except Exception:
-                return None
-            parsed_auth = _parse_media_auth_frame(first_frame)
-            if parsed_auth is None:
-                return None
-            ticket, claimed_binding = parsed_auth
-            return registry.consume_ticket(
-                ticket,
-                request_origin=_request_origin(ws),
-                claimed_binding=claimed_binding,
-            )
-        if not registry.legacy_path_ticket_compat:
+        if request_path != MEDIA_ROUTE_PATH:
             return None
-        ticket = request_path.removeprefix(MEDIA_ROUTE_PREFIX)
-        if 32 <= len(ticket) <= 128 and all(
-            character.isascii() and (character.isalnum() or character in "_-")
-            for character in ticket
-        ):
-            return registry.consume_ticket(ticket, request_origin=_request_origin(ws))
-        return None
+        try:
+            first_frame = await asyncio.wait_for(
+                ws.recv(), timeout=_MEDIA_AUTH_TIMEOUT_SECONDS
+            )
+        except Exception:
+            return None
+        parsed_auth = _parse_media_auth_frame(first_frame)
+        if parsed_auth is None:
+            return None
+        ticket, claimed_binding = parsed_auth
+        return registry.consume_ticket(
+            ticket,
+            request_origin=_request_origin(ws),
+            claimed_binding=claimed_binding,
+        )
     finally:
         # These references must die before the caller awaits a long-lived media
         # leaf; traceback capture from a later route failure cannot recover the
@@ -3671,18 +3670,13 @@ async def handle_registered_media_socket(
 ) -> bool:
     """Authenticate the fixed Alpha path before entering the existing leaf."""
 
-    fixed_route = request_path == MEDIA_ROUTE_PATH
-    legacy_route = request_path.startswith(MEDIA_ROUTE_PREFIX)
-    if not fixed_route and not legacy_route:
+    if request_path != MEDIA_ROUTE_PATH:
         return False
     if getattr(ws, "subprotocol", None) != MEDIA_SUBPROTOCOL:
         await ws.close(code=1008, reason="invalid live-voice media route")
         return True
 
     record = await _authenticate_registered_media_socket(registry, ws, request_path)
-    # Legacy compatibility paths may contain a credential.  Rebind the caller
-    # local before any leaf await so later tracebacks retain only the fixed path.
-    request_path = MEDIA_ROUTE_PATH
     if record is None:
         try:
             await ws.close(code=1008, reason="invalid live-voice media route")
@@ -3873,7 +3867,6 @@ __all__ = [
     "MEDIA_FEATURE_ENV",
     "MEDIA_END_OF_TURN_FEATURE_ENV",
     "MEDIA_ROUTE_PATH",
-    "MEDIA_ROUTE_PREFIX",
     "MEDIA_SUBPROTOCOL",
     "handle_registered_media_socket",
     "register_dedicated_media_rpc_handlers",

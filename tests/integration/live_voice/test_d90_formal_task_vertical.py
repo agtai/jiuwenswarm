@@ -631,6 +631,12 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Selected admission compares its durable deadline with the Store claim
+    # clock.  Keep this deterministic joint scenario on one frozen instant.
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        lambda: NOW,
+    )
     project = tmp_path / "joint-project"
     revision = _project(project)
     database = tmp_path / "joint-isolated-data" / "formal-task.sqlite3"
@@ -691,6 +697,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=3600,
         clock=lambda: NOW,
+        executor_profiles=(executor.capability_profile(),),
     )
     pushed: list[dict[str, object]] = []
 
@@ -788,6 +795,16 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     assert create_result["origin_kind"] == "voice"
     assert create_result["origin_id"] == "interaction-joint"
     task_id = cast(str, create_result["task_id"])
+    selected_attempt = store.get_attempt(store.get_task(task_id, _scope()).attempt_id)
+    assert selected_attempt.selection is not None
+    assert (
+        selected_attempt.selection.capability_profile_digest
+        == executor.capability_profile().digest_sha256()
+    )
+    assert (
+        selected_attempt.selection.adapter_id
+        == executor.capability_profile().adapter_id
+    )
     assert registry._voice_task_origins[task_id].interaction_id == ("interaction-joint")
     await _wait(lambda: task_facade.started.get("joint", asyncio.Event()).is_set())
 

@@ -509,16 +509,14 @@ from the reference materials:
 ## 10. Status relationship
 
 This plan is queued under the `Observability, benchmark and latency` capability
-and dependency route to feature complete in [STATUS](../STATUS.md). The current
-execution packet remains the higher-priority authoritative product-truth defect
-repair. Latency implementation starts as its own P1/P2 quality packet when the
-dependency route has a clean candidate and has migrated the applicable test
-oracles; compatible instrumentation may be included earlier in an affected
-defect packet only when its ownership and acceptance are explicit.
-
-The P2 causal lane does not require a rebase onto Hongxing's divergent
-`hx/0819_live_voice_p1p2` line. Run it first on the reviewed current source and,
-when useful, independently on Hongxing's tested source. Before physical product
-credit, compare Hongxing's three functional P1/P2 fixes in a clean worktree and
-integrate them as reviewed coherent packets if they are not already equivalent.
-A blind rebase of the active dirty W3 worktree is not part of this route.
+and dependency route to feature complete in [STATUS](../STATUS.md). The
+2026-08-23 lifecycle repair packet is closed. The accepted P2 bounded-pull
+candidate is now composed on that source; remaining product work is atomic
+batch observation and deployed Gate C. The `e1df8b452` physical run supplies a
+scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
+fixed-corpus baseline required by this plan. The
+[latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
+owns the dated causal/deployed evidence. Compatible instrumentation may be
+included in an affected packet only when its ownership and acceptance are
+explicit; this preparatory plan never outranks or activates the current STATUS
+route by itself.

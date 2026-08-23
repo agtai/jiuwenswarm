@@ -46,7 +46,11 @@ from .agent_conversation_runtime import (
 )
 from .conversation_runtime_loop import BargeInResult
 from .interaction_engine import InteractionAction, InteractionEnginePort
-from .presentation_ledger import PresentationAck
+from .presentation_ledger import (
+    PresentationAck,
+    PresentationSurface,
+    TaskPresentationRuntimeReceipt,
+)
 from .product_authority import (
     AuthorityRouteContext,
     P2AuthenticatedContext,
@@ -767,6 +771,8 @@ class P2ActivationLease:
         commit: TurnCommit,
         text: str,
         channel_id: str = "web",
+        presentation_surface: PresentationSurface = PresentationSurface.TEXT,
+        publish_notification: bool = True,
         before_publish: Callable[[AuthoritativePresentationHandle], Awaitable[None]]
         | None = None,
     ) -> AuthoritativePresentationHandle:
@@ -801,6 +807,8 @@ class P2ActivationLease:
                 before_publish=before_publish,
                 _persist_user_history=False,
                 _source_provenance="server.task_notification",
+                _presentation_surface=presentation_surface,
+                _publish_notification=publish_notification,
             )
             if not isinstance(outcome, AuthoritativePresentationHandle):
                 raise _violation(
@@ -809,6 +817,89 @@ class P2ActivationLease:
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
+
+    def task_notification_foreground_safe(self, binding: P2InteractionBinding) -> bool:
+        """Return the exact retained Runtime foreground fence for Task audio."""
+
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+        foreground_safe = getattr(
+            self._runtime, "task_notification_foreground_safe", None
+        )
+        return callable(foreground_safe) and foreground_safe() is True
+
+    def task_presentation_runtime_authority(
+        self,
+        binding: P2InteractionBinding,
+        response_ref: ResponseRef,
+        reservation_id: str | None,
+        phase: str,
+    ) -> TaskPresentationRuntimeReceipt:
+        """Forward one exact active Task-presentation phase to Runtime ownership."""
+
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+        if (
+            not isinstance(response_ref, ResponseRef)
+            or response_ref.interaction_id != binding.interaction_id
+        ):
+            raise _violation(
+                "PRODUCT_TASK_PRESENTATION_BINDING_MISMATCH",
+                "Task presentation must bind the active interaction response",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        authorize = getattr(self._runtime, "task_presentation_runtime_authority", None)
+        if not callable(authorize):
+            raise _violation(
+                "PRODUCT_TASK_PRESENTATION_AUTHORITY_UNAVAILABLE",
+                "retained Runtime has no Task presentation authority",
+                ErrorCode.UNAVAILABLE,
+            )
+        receipt = authorize(response_ref, reservation_id, phase)
+        if (
+            not isinstance(receipt, TaskPresentationRuntimeReceipt)
+            or receipt.response_ref != response_ref
+            or receipt.phase != phase
+            or (reservation_id is not None and receipt.reservation_id != reservation_id)
+        ):
+            raise _violation(
+                "PRODUCT_TASK_PRESENTATION_AUTHORITY_UNAVAILABLE",
+                "retained Runtime returned no exact Task presentation receipt",
+                ErrorCode.UNAVAILABLE,
+            )
+        return receipt
+
+    async def fail_task_presentation(
+        self,
+        binding: P2InteractionBinding,
+        response_ref: ResponseRef,
+        reservation_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Forward one exact browser playout failure to the Runtime owner."""
+
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+        fail = getattr(self._runtime, "fail_task_presentation", None)
+        if not callable(fail):
+            raise _violation(
+                "PRODUCT_TASK_NOTIFICATION_UNAVAILABLE",
+                "retained Runtime has no Task presentation failure owner",
+                ErrorCode.UNAVAILABLE,
+            )
+        outcome = await fail(
+            response_ref,
+            reservation_id,
+            reason=reason,
+        )
+        if type(outcome) is not bool:
+            raise _violation(
+                "PRODUCT_TASK_NOTIFICATION_UNAVAILABLE",
+                "Runtime returned no canonical Task presentation failure result",
+                ErrorCode.UNAVAILABLE,
+            )
+        return outcome
 
     async def deliver_task_progress(
         self,
@@ -1404,10 +1495,15 @@ class ProductP2InteractionAdapter:
                     replayed=True,
                 )
             if (
-                existing_state is P2LeaseState.CLOSED
+                existing_state in {P2LeaseState.CLOSING, P2LeaseState.CLOSED}
                 and binding.activation_generation
                 > existing.binding.activation_generation
             ):
+                # Close publishes its lifecycle fence synchronously before the
+                # retained Runtime waits for an already accepted Agent turn.
+                # A newer transport generation may therefore allocate without
+                # reviving or polling the predecessor.  Its shielded close
+                # coordinator remains the sole owner of predecessor teardown.
                 self._leases.pop(lease_key)
                 return await self._allocate(context, binding, lease_key)
             return P2ActivationResult(

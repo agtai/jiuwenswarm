@@ -15,7 +15,6 @@ import asyncio
 import functools
 import inspect
 import math
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -28,6 +27,7 @@ from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservation,
     RouteDescriptor,
     TraceBinding,
+    contains_private_observability_content,
     create_metric,
     create_observation,
 )
@@ -54,11 +54,6 @@ from jiuwenswarm.server.live_voice.product_composition_root import (
 
 ObservationExporter = Callable[[ExportRecord], Awaitable[None]]
 _CONSTRUCTION_TOKEN = object()
-_SCHEME_URL = re.compile(r"[a-z][a-z0-9+.-]{0,31}://", re.IGNORECASE)
-_SCHEME_VALUE = re.compile(r"^[a-z][a-z0-9+.-]{0,31}:", re.IGNORECASE)
-_NON_HIERARCHICAL_URL = re.compile(
-    r"\b(?:blob|data|file|javascript|mailto|sftp|ssh|tel|urn):", re.IGNORECASE
-)
 
 
 class ProductObservabilityReason(StrEnum):
@@ -312,17 +307,6 @@ class ActiveProductObservabilityActivation:
             )
 
 
-_PRIVATE_CONTENT_PATTERN = re.compile(
-    r"\bbearer\s+[a-z0-9._~+/-]+"
-    r"|\b(?:sk|ghp|glpat)-?[a-z0-9_-]{8,}\b"
-    r"|\beyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+\b"
-    r"|(?:^|[._:@/-])(?:transcript|raw[-_]?audio|audio[-_]?bytes|data[-_]?base64"
-    r"|authorization|credential|password|passwd|secret|api[-_]?key"
-    r"|device[-_]?id|hardware[-_]?id|microphone[-_]?id)(?:$|[._:@/=?#-])",
-    re.IGNORECASE,
-)
-
-
 def _disabled_route_fact() -> ProductRouteFact:
     return ProductRouteFact(
         segment=ProductSegment.OBSERVABILITY,
@@ -343,33 +327,6 @@ def _package_only_route_fact() -> ProductRouteFact:
             ProductEvidenceId.NO_RUNTIME_EVIDENCE,
         ),
     )
-
-
-def _contains_private_content(value: object, *, field_name: str | None = None) -> bool:
-    if isinstance(value, str):
-        # Governed tokens, opaque IDs, timestamps, and closed facts need none of
-        # these free-text carriers.  Reject them before the injected exporter.
-        return (
-            any(delimiter in value for delimiter in ("=", "?", "#"))
-            or _SCHEME_URL.search(value) is not None
-            or _NON_HIERARCHICAL_URL.search(value) is not None
-            or (
-                field_name == "contract_version"
-                and _SCHEME_VALUE.search(value) is not None
-            )
-            or _PRIVATE_CONTENT_PATTERN.search(value) is not None
-        )
-    if isinstance(value, dict):
-        return any(
-            _contains_private_content(key)
-            or _contains_private_content(
-                item, field_name=key if isinstance(key, str) else None
-            )
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_private_content(item) for item in value)
-    return False
 
 
 class ProductObservabilityAdapter:
@@ -459,7 +416,7 @@ class ProductObservabilityAdapter:
             ):
                 return self._reject(ProductObservabilityReason.INVALID_PUBLIC_FACT)
             raw_fact = fact.to_dict()
-            if _contains_private_content(raw_fact):
+            if contains_private_observability_content(raw_fact):
                 return self._reject(ProductObservabilityReason.PRIVATE_CONTENT_REJECTED)
             public_fact: LiveVoiceObservation | LiveVoiceMetric
             if type(fact) is LiveVoiceObservation:
