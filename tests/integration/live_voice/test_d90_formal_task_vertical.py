@@ -36,7 +36,7 @@ from jiuwenswarm.server.live_voice.persistent_task_core import (
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     P3AuthenticatedComposition,
-    P3_OPERATIONS,
+    P3_PRODUCT_AUTHORITY_OPERATIONS,
     ResolvedAuthority,
     StaticBearerAuthenticator,
 )
@@ -229,7 +229,12 @@ class _DirectAgentFacade:
         self.requests = []
 
     async def process_background_code_task_stream(self, request):
-        suffix = request.params["query"].split("RESULT-", 1)[1].split(".md", 1)[0]
+        query = request.params["query"]
+        suffix = (
+            "joint"
+            if query == "Draft a synthetic dependency release note."
+            else query.split("RESULT-", 1)[1].split(".md", 1)[0]
+        )
         self.requests.append(request)
         self.started.setdefault(suffix, asyncio.Event()).set()
         await self.release.setdefault(suffix, asyncio.Event()).wait()
@@ -637,6 +642,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         "jiuwenswarm.server.live_voice.task_store.utc_now",
         lambda: NOW,
     )
+    product_clock = {"now": NOW}
     project = tmp_path / "joint-project"
     revision = _project(project)
     database = tmp_path / "joint-isolated-data" / "formal-task.sqlite3"
@@ -684,7 +690,8 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
             principal=AuthenticatedPrincipal(
                 principal_id="principal-1",
                 allowed_project_ids=frozenset({"project-1"}),
-                allowed_operations=P3_OPERATIONS | {"agent.chat"},
+                allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS
+                | {"agent.chat"},
                 expires_at=EXPIRY,
             ),
         ),
@@ -696,7 +703,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         model_resolver=_ProductModelResolver(),
         policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=3600,
-        clock=lambda: NOW,
+        clock=lambda: product_clock["now"],
         executor_profiles=(executor.capability_profile(),),
     )
     pushed: list[dict[str, object]] = []
@@ -747,7 +754,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         conversation_adapter.entered["request-joint-text"].wait(), timeout=1
     )
 
-    create_text = "create task: Create RESULT-joint.md with one bounded result."
+    create_text = "请新建任务，整理一份合成依赖发布说明。"
     create_origin = await registry.handle_p2_submit(
         params=_joint_product_task_commit(
             stem="joint-task-create",
@@ -795,6 +802,11 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     assert create_result["origin_kind"] == "voice"
     assert create_result["origin_id"] == "interaction-joint"
     task_id = cast(str, create_result["task_id"])
+    created_task = store.get_task(task_id, _scope())
+    assert created_task.spec.name == "Synthetic release notes"
+    assert created_task.spec.instruction == (
+        "Draft a synthetic dependency release note."
+    )
     selected_attempt = store.get_attempt(store.get_task(task_id, _scope()).attempt_id)
     assert selected_attempt.selection is not None
     assert (
@@ -822,6 +834,17 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     )
     assert second_activated.ok is True, second_activated.payload
 
+    # ``accepted`` -> ``running`` is owned by the dispatch worker, so the query
+    # commit must bind only after that transition rather than relying on an
+    # incidental scheduling gap somewhere else in the activation path.
+    def _task_is_running() -> bool:
+        probe = _structured("task.status", task_id=task_id)
+        observed = core.query(probe.envelope, probe.authorization, now=NOW)
+        return bool(
+            observed.ok and observed.result["task"]["state"] == "running"
+        )
+
+    await _wait(_task_is_running)
     status_text = f"task status {task_id}"
     status_origin = await registry.handle_p2_submit(
         params=_joint_product_task_commit(
@@ -833,17 +856,6 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         channel_id="web",
     )
     assert status_origin.ok is True, status_origin.payload
-    # ``accepted`` -> ``running`` is owned by the dispatch worker, so the query
-    # must wait for that transition instead of relying on an incidental
-    # scheduling gap somewhere else in the activation path.
-    def _task_is_running() -> bool:
-        probe = _structured("task.status", task_id=task_id)
-        observed = core.query(probe.envelope, probe.authorization, now=NOW)
-        return bool(
-            observed.ok and observed.result["task"]["state"] == "running"
-        )
-
-    await _wait(_task_is_running)
     status = await registry.handle_p3_intent(
         params=_joint_product_voice_intent(
             stem="joint-task-status",
@@ -920,28 +932,16 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         int, revised_response["response_generation"]
     )
 
-    progress = await registry.handle_p3_progress_activate(
-        params={
-            "auth_token": PRODUCT_TOKEN,
-            "session_id": "session-1",
-            "task_id": task_id,
-            "correlation_id": "correlation-joint",
-            "origin_id": "interaction-joint",
-            "generation_id": "joint-task-progress-generation",
-            "generation": 1,
-            "origin_kind": "voice",
-        },
-        request_id="request-joint-task-progress",
+    # Retire the switched interaction after its response settles.  The original
+    # foreground conversation remains live, so text Task presentation has one
+    # exact Runtime owner without cancelling either the Task or that dialogue.
+    conversation_adapter.release["request-joint-post-barge"].set()
+    closed_second = await registry.handle_p2_close(
+        params=second_route,
+        request_id="request-joint-response-close",
         session_id="session-1",
-        channel_id="web",
     )
-    assert progress.ok is True, progress.payload
-    progress_result = cast(dict[str, object], progress.payload["result"])
-    assert progress_result["requested_origin_kind"] == "voice"
-    assert progress_result["origin_kind"] == "text"
-    assert progress_result["fallback_reason"] == (
-        "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
-    )
+    assert closed_second.ok is True, closed_second.payload
 
     counts_before_rejections = store.counts()
     stale = await registry.handle_p3_intent(
@@ -987,7 +987,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     )
     assert store.counts() == counts_before_rejections
 
-    cancel_text = f"cancel task {task_id}"
+    cancel_text = f"cancel {task_id}"
     cancel_origin = await registry.handle_p2_submit(
         params=_joint_product_task_commit(
             stem="joint-task-cancel",
@@ -1036,36 +1036,17 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     await _wait(
         lambda: store.get_task(task_id, _scope()).outcome is TerminalOutcome.CANCELLED
     )
-    assert conversation_adapter.release["request-joint-post-barge"].is_set() is False
+    assert conversation_adapter.release["request-joint-text"].is_set() is False
+    product_clock["now"] = "2026-08-24T00:00:00Z"
+    conversation_adapter.release["request-joint-text"].set()
 
-    def terminal_progress() -> dict[str, Any] | None:
-        for message in reversed(pushed):
-            payload = message.get("payload")
-            if not isinstance(payload, dict) or payload.get("event_type") != (
-                "live_voice.task.progress"
-            ):
-                continue
-            progress_event = payload.get("progress_event")
-            if isinstance(progress_event, dict):
-                projected = WorkProgressEventV2.from_dict(
-                    cast(dict[str, object], progress_event["payload"])
-                )
-                if projected.state.value == "terminal":
-                    return cast(dict[str, Any], payload)
-        return None
-
-    await _wait(lambda: terminal_progress() is not None)
-    terminal_payload = cast(dict[str, Any], terminal_progress())
-    returned = WorkProgressEventV2.from_dict(
-        cast(dict[str, object], terminal_payload["progress_event"])["payload"]
+    retained_origin = registry._p2_routes[("session-1", "interaction-joint")]
+    await _wait(
+        lambda: retained_origin.activation_lease.task_notification_foreground_safe(
+            retained_origin.binding
+        )
     )
-    assert returned.work_ref.id == task_id
-    assert returned.state.value == "terminal"
-    assert returned.outcome is TerminalOutcome.CANCELLED
-    assert create_text not in repr(pushed)
-    source_event = cast(dict[str, object], terminal_payload["source_event"])
-    progress_event = cast(dict[str, object], terminal_payload["progress_event"])
-    acknowledged = await registry.handle_p3_progress_ack(
+    progress = await registry.handle_p3_progress_activate(
         params={
             "auth_token": PRODUCT_TOKEN,
             "session_id": "session-1",
@@ -1074,19 +1055,95 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
             "origin_id": "interaction-joint",
             "generation_id": "joint-task-progress-generation",
             "generation": 1,
-            "delivery_id": terminal_payload["delivery_id"],
-            "source_event_id": source_event["event_id"],
-            "progress_event_id": progress_event["event_id"],
-            "seq": source_event["seq"],
-            "evidence_id": terminal_payload["evidence_id"],
+            "origin_kind": "text",
         },
-        request_id="request-joint-task-progress-ack",
+        request_id="request-joint-task-progress",
         session_id="session-1",
         channel_id="web",
     )
-    assert acknowledged.ok is True, acknowledged.payload
+    assert progress.ok is True, progress.payload
+    progress_result = cast(dict[str, object], progress.payload["result"])
+    assert progress_result["requested_origin_kind"] == "text"
+    assert progress_result["origin_kind"] == "text"
+    assert progress_result["fallback_reason"] is None
 
-    conversation_adapter.release["request-joint-text"].set()
+    acknowledged_delivery_ids: set[str] = set()
+
+    def next_progress() -> dict[str, Any] | None:
+        for message in pushed:
+            payload = message.get("payload")
+            if not isinstance(payload, dict) or payload.get("event_type") != (
+                "live_voice.task.progress"
+            ):
+                continue
+            delivery_id = payload.get("delivery_id")
+            if isinstance(delivery_id, str) and delivery_id not in (
+                acknowledged_delivery_ids
+            ):
+                return cast(dict[str, Any], payload)
+        return None
+
+    terminal_payload: dict[str, Any] | None = None
+    for ack_index in range(16):
+        await _wait(lambda: next_progress() is not None)
+        current_payload = cast(dict[str, Any], next_progress())
+        source_event = cast(dict[str, object], current_payload["source_event"])
+        progress_event = cast(dict[str, object], current_payload["progress_event"])
+        delivery_key = (
+            "session-1",
+            task_id,
+            "interaction-joint",
+            "joint-task-progress-generation",
+        )
+        delivery = registry._progress_deliveries[delivery_key][
+            cast(str, current_payload["delivery_id"])
+        ]
+        assert delivery.presentation_binding is not None
+        acknowledged = await registry.handle_p3_progress_ack(
+            params={
+                "auth_token": PRODUCT_TOKEN,
+                "session_id": "session-1",
+                "task_id": task_id,
+                "correlation_id": "correlation-joint",
+                "origin_id": "interaction-joint",
+                "generation_id": "joint-task-progress-generation",
+                "generation": 1,
+                "delivery_id": current_payload["delivery_id"],
+                "source_event_id": source_event["event_id"],
+                "progress_event_id": progress_event["event_id"],
+                "seq": source_event["seq"],
+                "evidence_id": current_payload["evidence_id"],
+                "presentation_class": current_payload["presentation_class"],
+                "response_ref": current_payload["response_ref"],
+                "unit_id": current_payload["unit_id"],
+                "expected_event_head": current_payload["expected_event_head"],
+                "result_source_event_id": current_payload[
+                    "result_source_event_id"
+                ],
+                "presentation_binding": delivery.presentation_binding,
+            },
+            request_id=f"request-joint-task-progress-ack-{ack_index}",
+            session_id="session-1",
+            channel_id="web",
+        )
+        assert acknowledged.ok is True, acknowledged.payload
+        acknowledged_delivery_ids.add(cast(str, current_payload["delivery_id"]))
+        projected = WorkProgressEventV2.from_dict(
+            cast(dict[str, object], progress_event["payload"])
+        )
+        if projected.state.value == "terminal":
+            terminal_payload = current_payload
+            break
+
+    assert terminal_payload is not None
+    returned = WorkProgressEventV2.from_dict(
+        cast(dict[str, object], terminal_payload["progress_event"])["payload"]
+    )
+    assert returned.work_ref.id == task_id
+    assert returned.state.value == "terminal"
+    assert returned.outcome is TerminalOutcome.CANCELLED
+    assert create_text not in repr(pushed)
+
     conversation_adapter.release["request-joint-voice-revision"].set()
     conversation_adapter.release["request-joint-post-barge"].set()
     await registry.stop()
