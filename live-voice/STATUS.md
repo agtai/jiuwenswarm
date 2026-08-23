@@ -129,6 +129,15 @@ These rows are evidence-based planning judgements, now grounded in the
 audit is documentation, not product progress: it grants no new module-completion
 credit and does not repair defects.
 
+The current [OpenJiuwen reuse and Hermes Voice mirror audit](reviews/OPENJIUWEN_REUSE_AND_HERMES_VOICE_MIRROR_AUDIT_2026-08-23.md)
+finds reusable AgentCore/JiuwenSwarm foundations but no complete direct
+replacement for the frozen P3 outcome contracts. It proposes bounded generic
+AgentCore PRs plus a thin JiuwenSwarm Facade; current Live Voice authority stays
+canonical and no deletion is credited until the new composition passes isolated
+L2/L3/L4, a quiesced single-writer migration and post-cutover canary Gate.
+Hermes remains an architecture-only reference with no copied code or dependency.
+This audit does not change capability status, priority or acceptance.
+
 The detailed complete-P3 workload, P3alpha inheritance, package acceptance,
 critical path and parallel collision rules are defined in the
 [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md). That
