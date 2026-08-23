@@ -27,8 +27,17 @@ from .p3_model_resolution import ResolvedP3Model
 P3_CONFIRMATION_MAX_TTL = timedelta(minutes=2)
 P3_CONFIRMATION_MAX_CAPACITY = 4_096
 _P3_MUTATION_OPERATIONS = frozenset(
-    {"task.create", "task.adjust", "task.cancel", "task.retry"}
+    {
+        "task.create",
+        "task.update",
+        "task.adjust",
+        "task.reprioritize",
+        "task.cancel",
+        "task.retry",
+        "task.create_successor",
+    }
 )
+_P3_TARGETED_MUTATION_OPERATIONS = _P3_MUTATION_OPERATIONS - {"task.create"}
 _P3_RETRY_ELIGIBLE_OUTCOMES = frozenset({"cancelled", "completed"})
 
 
@@ -931,7 +940,7 @@ class BoundedP3ConfirmationOwner:
                 ErrorCode.INVALID_ARGUMENT,
             )
         if (
-            binding.operation in {"task.adjust", "task.cancel", "task.retry"}
+            binding.operation in _P3_TARGETED_MUTATION_OPERATIONS
             and binding.target_task_id is None
         ):
             raise FormalTaskViolation(

@@ -22,6 +22,10 @@ import {
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/latencyProbe.js';
 
 const captureProcessorSource = readFileSync(new URL('../src/features/live-voice/formal/adapters/liveVoiceCaptureProcessor.js', import.meta.url), 'utf8');
+const productP1VoiceRouteSource = readFileSync(
+  new URL('../src/features/live-voice/formal/productP1VoiceRoute.ts', import.meta.url),
+  'utf8',
+);
 const MANUAL_EOT_FALLBACK = Object.freeze({
   status: 'fallback',
   requested_capability: 'media.end_of_turn.v1',
@@ -420,6 +424,48 @@ async function sendFirstFrameToNextWorklet(environment, priorWorklet, overrides 
       ...overrides,
     },
   });
+}
+
+async function sendCaptureToDurationBoundary(
+  environment,
+  samples,
+  { exceed = false, extraFrames = 0, afterBoundary = null } = {},
+) {
+  const worklet = environment.worklet;
+  const handler = worklet?.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  for (let seq = 1; seq < frameCount; seq += 1) {
+    handler({
+      data: {
+        kind: 'frame',
+        capture_generation: worklet.captureGeneration,
+        seq,
+        sample_rate_hz: 48_000,
+        sample_cursor: seq * 960,
+        context_time_s: seq * 0.02,
+        samples,
+      },
+    });
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  afterBoundary?.(worklet);
+  if (exceed) {
+    for (let offset = 0; offset <= extraFrames; offset += 1) {
+      handler({
+        data: {
+          kind: 'frame',
+          capture_generation: worklet.captureGeneration,
+          seq: frameCount + offset,
+          sample_rate_hz: 48_000,
+          sample_cursor: (frameCount + offset) * 960,
+          context_time_s: (frameCount + offset) * 0.02,
+          samples,
+        },
+      });
+    }
+  }
+  return worklet;
 }
 
 function wavBase64(sampleRate = 48_000, sampleCount = 960) {
@@ -2222,8 +2268,8 @@ test('formal P1 consumes the streaming STT final without replaying batch audio',
       queueMicrotask(() => socket.open(binding));
       return socket;
     },
-    request: async (method, params) => {
-      calls.push([method, params]);
+    request: async (method, params, options) => {
+      calls.push([method, params, options]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return streamingMediaActivation(binding);
       if (method === 'live_voice.speech.recognize_streaming_result') {
         return streamingRecognitionResult(params);
@@ -2255,6 +2301,7 @@ test('formal P1 consumes the streaming STT final without replaying batch audio',
     calls.map(([method]) => method),
     [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_streaming_result']
   );
+  assert.deepEqual(calls[1][2], { timeoutMs: 38_000, signal: undefined });
   assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
 });
 
@@ -3711,8 +3758,11 @@ function realLatencyProbeHarness({ profile = 'dialogue_no_tool', inputCase = 'ov
 
 async function runConcurrentCaptureJourney(options = {}) {
   const calls = [];
+  const requestOptions = [];
   const statuses = [];
+  const statusSnapshots = [];
   const sockets = [];
+  const socketOpenTasks = [];
   let activationCount = 0;
   let concurrentFailureSnapshot = null;
   let concurrentAudioReleased = false;
@@ -3736,6 +3786,16 @@ async function runConcurrentCaptureJourney(options = {}) {
   let bargeInEotCalls = 0;
   let bargeInStopped = null;
   let captureRotationSnapshot = null;
+  let overlapRotationRaceSnapshot = null;
+  let staleSpeechStartSnapshot = null;
+  let notificationPauseOutcome = null;
+  let notificationPausedFrameHandler = null;
+  let staleCaptureFrameHandler = null;
+  let staleUplinkMessageHandler = null;
+  let staleDownlinkMessageHandler = null;
+  let socketFactory = null;
+  let request = null;
+  let receiptSubjectId = null;
   let captureAttachBeforeFirstAckSnapshot = null;
   let captureLastFrameBeforeAckSnapshot = null;
   let captureBeforeControlAttachSnapshot = null;
@@ -3823,7 +3883,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
         if (options.ackSecondCapture !== false || this.serverBinding.generation.id !== 'capture-2') {
           const throughSeq = decodeAudioFrame(this.serverBinding, value).seq;
-          queueMicrotask(() => {
+          const acknowledge = () => {
             if (
               options.observeCaptureLatencyBoundaries === true
               && this.serverBinding.generation.id === 'capture-1'
@@ -3842,7 +3902,16 @@ async function runConcurrentCaptureJourney(options = {}) {
                 through_seq: throughSeq,
               }),
             });
-          });
+          };
+          if (
+            this.serverBinding.generation.id === 'capture-2'
+            && Number.isFinite(options.secondCaptureAckDelayMs)
+            && options.secondCaptureAckDelayMs > 0
+          ) {
+            setTimeout(acknowledge, options.secondCaptureAckDelayMs);
+          } else {
+            queueMicrotask(acknowledge);
+          }
         }
       } else if (this.serverBinding.direction === 'uplink' && typeof value === 'string') {
         const control = JSON.parse(value);
@@ -3896,7 +3965,13 @@ async function runConcurrentCaptureJourney(options = {}) {
       ? {}
       : { latency_monotonic_ms: options.latencyMonotonicMs ?? (() => 100) }),
     expected_origin: 'https://voice.example.test',
-    on_status: status => statuses.push(status),
+    on_status: status => {
+      statuses.push(status);
+      statusSnapshots.push({
+        status,
+        source_start_count: environment.contexts[0]?.sourceStartCount ?? 0,
+      });
+    },
     on_concurrent_capture_started: () => {
       concurrentCaptureStartedCalls += 1;
     },
@@ -3916,11 +3991,11 @@ async function runConcurrentCaptureJourney(options = {}) {
         }
       : {}),
     audio_environment: environment,
-    socket_factory: url => {
+    socket_factory: (socketFactory = url => {
       assert.equal(new URL(url).pathname, '/ws/live-voice/media');
       const socket = new DuplexSocket();
       sockets.push(socket);
-      queueMicrotask(() => {
+      const openTask = Promise.resolve().then(async () => {
         socket.protocol = 'live-voice.media.v1';
         socket.readyState = 1;
         socket.onopen?.({});
@@ -3941,6 +4016,23 @@ async function runConcurrentCaptureJourney(options = {}) {
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
         if (binding.direction === 'downlink') {
+          if (options.useRealProcessorForSecondCapture === true) {
+            for (let turn = 0; turn < 500 && realProcessorHarness === null; turn += 1) {
+              await new Promise(resolve => setImmediate(resolve));
+            }
+            assert.notEqual(realProcessorHarness, null);
+            for (let turn = 0; turn < 500 && concurrentCaptureStartedCalls === 0; turn += 1) {
+              await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            assert.equal(concurrentCaptureStartedCalls, 1);
+          }
+          if (
+            options.exerciseRenderRegressionDuringDownlink === true
+            || options.exerciseRenderStallDuringDownlink === true
+          ) {
+            socket.pumpDownlink();
+            assert.equal(owner.status().status, 'playing');
+          }
           if (options.exerciseDuplicateRenderFrameAtFinalPlayout === true) {
             assert.notEqual(realProcessorHarness, null);
             environment.contexts[0].onSourceEnded = ({ sourceStartCount, sourceEndCount }) => {
@@ -4002,25 +4094,16 @@ async function runConcurrentCaptureJourney(options = {}) {
             assert.equal(processor.process(quantum()), false);
             concurrentFailureSnapshot = owner.status();
           }
-          const captureFailureReason =
-            typeof options.failSecondCaptureDuringDownlinkReason === 'string'
-              ? options.failSecondCaptureDuringDownlinkReason
-              : options.failSecondCaptureDuringDownlink === true
-                ? 'input_gap_exceeded'
-                : null;
-          if (captureFailureReason !== null) {
-            environment.worklet.port.onmessage?.({
-              data: { kind: 'error', reason: captureFailureReason },
-            });
-            concurrentFailureSnapshot = owner.status();
-          }
           socket.pumpDownlink();
         }
       });
+      void openTask.catch(() => undefined);
+      socketOpenTasks.push(openTask);
       return socket;
-    },
-    request: async (method, params) => {
+    }),
+    request: (request = async (method, params, transportOptions) => {
       calls.push([method, params]);
+      requestOptions.push([method, transportOptions]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
         activationCount += 1;
         const binding = makeUplinkBinding(params, activationCount);
@@ -4060,9 +4143,18 @@ async function runConcurrentCaptureJourney(options = {}) {
                   interrupt_response: false,
                 }
               : MANUAL_EOT_FALLBACK,
+          ...(options.streamingRecognition === true
+            ? {
+                streaming_recognition: true,
+                streaming_degradation: null,
+              }
+            : {}),
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
+      }
+      if (method === 'live_voice.speech.recognize_streaming_result') {
+        return streamingRecognitionResult(params, 'duplex streaming text');
       }
       if (method === 'live_voice.speech.recognize_batch') {
         return {
@@ -4096,6 +4188,7 @@ async function runConcurrentCaptureJourney(options = {}) {
         };
       }
       if (method === 'live_voice.speech.synthesize_batch') {
+        receiptSubjectId = `media-subject-${activationCount}`;
         playoutReceiptSubjectId = `media-subject-${activationCount}`;
         const path = '/ws/live-voice/media';
         return {
@@ -4136,13 +4229,14 @@ async function runConcurrentCaptureJourney(options = {}) {
         };
       }
       if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) {
+        assert.equal(params.subject_id, receiptSubjectId);
         assert.equal(params.subject_id, playoutReceiptSubjectId);
         assert.equal(params.rendered_chunks, downlinkFrameCount);
         return {
           status: 'media_playout_acknowledged',
           reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
           receipt_id: 'media-playout-duplex-1',
-          duplex_media_observed: true,
+          duplex_media_observed: options.serverDuplexMediaObserved ?? true,
           ...params,
         };
       }
@@ -4154,7 +4248,7 @@ async function runConcurrentCaptureJourney(options = {}) {
         return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
       }
       throw new Error(`unexpected method ${method}`);
-    },
+    }),
   });
 
   await startCaptureWithFirstFrame(owner, environment, {
@@ -4164,6 +4258,15 @@ async function runConcurrentCaptureJourney(options = {}) {
     activation_id: 'activation-1',
     activation_generation: 7,
     locale: 'zh-CN',
+  }, options.pauseForNotificationBeforePlayout === true
+    ? { samples: new Float32Array(960) }
+    : {});
+  if (options.pauseForNotificationBeforePlayout === true) {
+    notificationPausedFrameHandler = environment.worklet.port.onmessage;
+    notificationPauseOutcome = await owner.pauseIdleCaptureForNotification();
+  } else {
+    await owner.stopAndRecognize();
+  }
   });
   if (options.firstCaptureEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-1');
@@ -4317,7 +4420,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       assert.equal(processor.process([[]]), true);
       sandbox.currentFrame = 384;
       assert.equal(processor.process(quantum()), true);
-      for (let index = 0; index < 4; index += 1) {
+      for (let index = 0; index < 5; index += 1) {
         sandbox.currentFrame += 128;
         assert.equal(processor.process(quantum()), true);
       }
@@ -4330,6 +4433,39 @@ async function runConcurrentCaptureJourney(options = {}) {
           : {},
       );
     }
+  }
+  const activeCaptureFailureReason =
+    typeof options.failSecondCaptureDuringDownlinkReason === 'string'
+      ? options.failSecondCaptureDuringDownlinkReason
+      : options.failSecondCaptureDuringDownlink === true
+        ? 'input_gap_exceeded'
+        : null;
+  if (activeCaptureFailureReason !== null) {
+    for (let turn = 0; turn < 500 && concurrentCaptureStartedCalls === 0; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(concurrentCaptureStartedCalls, 1);
+    environment.worklet.port.onmessage?.({
+      data: { kind: 'error', reason: activeCaptureFailureReason },
+    });
+    concurrentFailureSnapshot = owner.status();
+  }
+  if (options.closeDuringActivePlayout === true) {
+    for (let turn = 0; turn < 500; turn += 1) {
+      const downlink = sockets.find(socket => socket.serverBinding?.direction === 'downlink');
+      if (owner.status().status === 'playing' && downlink !== undefined && environment.contexts[0].sourceStartCount > 0) break;
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    const uplink = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+    const downlink = sockets.find(socket => socket.serverBinding?.direction === 'downlink');
+    assert.equal(owner.status().status, 'playing');
+    assert.ok(uplink);
+    assert.ok(downlink);
+    staleCaptureFrameHandler = environment.worklet.port.onmessage;
+    staleUplinkMessageHandler = uplink.onmessage;
+    staleDownlinkMessageHandler = downlink.onmessage;
+    concurrentClosePromise = owner.close();
+    concurrentCloseSnapshot = owner.status();
   }
   if (options.triggerBargeInEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
@@ -4373,11 +4509,37 @@ async function runConcurrentCaptureJourney(options = {}) {
     });
     await Promise.resolve();
   }
+  if (options.signalProviderSpeechStartBeforeOverlapDuration === true) {
+    const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+    assert.ok(uplinkSocket);
+    uplinkSocket.onmessage?.({
+      data: serializeMediaControl({
+        type: 'media.speech_start',
+        capability_version: 'media.end_of_turn.v1',
+        lease_id: uplinkSocket.serverBinding.lease_id,
+        generation: uplinkSocket.serverBinding.generation.value,
+        detector: 'server_vad',
+        provider_start_ms: 100,
+        timing_basis: 'provider_time',
+        timing_provenance: 'adapter_derived',
+        create_response: false,
+        interrupt_response: false,
+        business_cancel_count_delta: 0,
+      }),
+    });
+    await Promise.resolve();
+  }
   if (options.exerciseSilentCaptureRotationDuringActivePlayout === true) {
+    for (let turn = 0; turn < 500 && concurrentCaptureStartedCalls === 0; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(concurrentCaptureStartedCalls, 1);
     const rotatingWorklet = environment.worklet;
     const retainedFrameHandler = rotatingWorklet.port.onmessage;
     assert.equal(typeof retainedFrameHandler, 'function');
-    const samples = new Float32Array(960);
+    const samples = new Float32Array(960).fill(
+      options.localEnergyDuringOverlapRotation === true ? 0.125 : 0,
+    );
     const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
     environment.nextWorkletFirstFrameSamples = samples;
     retainedFrameHandler({
@@ -4414,6 +4576,34 @@ async function runConcurrentCaptureJourney(options = {}) {
       });
       if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
     }
+    const rotatedUplink = sockets.find(
+      socket => socket.serverBinding?.generation?.id === 'capture-2',
+    );
+    assert.ok(rotatedUplink);
+    if (options.signalProviderSpeechStartDuringOverlapRotation === true) {
+      rotatedUplink.onmessage?.({
+        data: serializeMediaControl({
+          type: 'media.speech_start',
+          capability_version: 'media.end_of_turn.v1',
+          lease_id: rotatedUplink.serverBinding.lease_id,
+          generation: rotatedUplink.serverBinding.generation.value,
+          detector: 'server_vad',
+          provider_start_ms: 250,
+          timing_basis: 'provider_time',
+          timing_provenance: 'adapter_derived',
+          create_response: false,
+          interrupt_response: false,
+          business_cancel_count_delta: 0,
+        }),
+      });
+      for (let turn = 0; turn < 500 && owner.status().status !== 'failed'; turn += 1) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      overlapRotationRaceSnapshot = {
+        status: owner.status(),
+        activation_count: activationCount,
+      };
+    } else {
     for (let turn = 0; turn < 3_500 && (activationCount !== 3 || environment.worklet === rotatingWorklet); turn += 1) {
       await new Promise(resolve => setTimeout(resolve, 1));
     }
@@ -4431,9 +4621,6 @@ async function runConcurrentCaptureJourney(options = {}) {
       ) break;
       await new Promise(resolve => setTimeout(resolve, 1));
     }
-    const rotatedUplink = sockets.find(
-      socket => socket.serverBinding?.generation?.id === 'capture-2',
-    );
     captureRotationSnapshot = {
       old_frame_count: rotatedUplink.sent.filter(value => typeof value !== 'string').length,
       status: owner.status(),
@@ -4442,6 +4629,32 @@ async function runConcurrentCaptureJourney(options = {}) {
           && params.subject_id === 'media-subject-2',
       ),
     };
+    if (options.signalStaleProviderSpeechStartAfterOverlapRotation === true) {
+      const callsBefore = calls.length;
+      const activationCountBefore = activationCount;
+      rotatedUplink.onmessage?.({
+        data: serializeMediaControl({
+          type: 'media.speech_start',
+          capability_version: 'media.end_of_turn.v1',
+          lease_id: rotatedUplink.serverBinding.lease_id,
+          generation: rotatedUplink.serverBinding.generation.value,
+          detector: 'server_vad',
+          provider_start_ms: 200,
+          timing_basis: 'provider_time',
+          timing_provenance: 'adapter_derived',
+          create_response: false,
+          interrupt_response: false,
+          business_cancel_count_delta: 0,
+        }),
+      });
+      await Promise.resolve();
+      staleSpeechStartSnapshot = {
+        status: owner.status(),
+        calls_delta: calls.length - callsBefore,
+        activation_count_delta: activationCount - activationCountBefore,
+        barge_in_speech_start_calls: bargeInSpeechStartCalls,
+      };
+    }
     const downlinkSocket = sockets.find(
       socket => socket.serverBinding?.direction === 'downlink',
     );
@@ -4456,6 +4669,7 @@ async function runConcurrentCaptureJourney(options = {}) {
         business_cancel_count_delta: 0,
       }),
     });
+    }
   }
   if (options.deferSourceEndsUntilTransportAck === true) {
     let downlinkSocket = null;
@@ -4499,17 +4713,24 @@ async function runConcurrentCaptureJourney(options = {}) {
       });
     }
     captureDurationBoundarySnapshot = owner.status();
-    retainedFrameHandler({
-      data: {
-        kind: 'frame',
-        capture_generation: environment.worklet.captureGeneration,
-        seq: frameCount,
-        sample_rate_hz: 48_000,
-        sample_cursor: frameCount * 960,
-        context_time_s: frameCount * 0.02,
-        samples,
-      },
-    });
+    // The 30-second budget now bounds the authoritative utterance from its
+    // provider speech-start (successor frame index 1), not the lease age, so
+    // the exact failure lands one frame past the former lease-age bound.
+    let failedSeq = frameCount;
+    for (; failedSeq <= frameCount + 2; failedSeq += 1) {
+      retainedFrameHandler({
+        data: {
+          kind: 'frame',
+          capture_generation: environment.worklet.captureGeneration,
+          seq: failedSeq,
+          sample_rate_hz: 48_000,
+          sample_cursor: failedSeq * 960,
+          context_time_s: failedSeq * 0.02,
+          samples,
+        },
+      });
+      if (owner.status().status !== 'playing') break;
+    }
     concurrentFailureSnapshot = owner.status();
     const uplinkSocket = sockets.find(socket => socket.serverBinding.generation.id === 'capture-2');
     captureDurationLateFrameUplinkCount = uplinkSocket.sent.filter(value => typeof value !== 'string').length;
@@ -4519,10 +4740,10 @@ async function runConcurrentCaptureJourney(options = {}) {
       data: {
         kind: 'frame',
         capture_generation: environment.worklet.captureGeneration,
-        seq: frameCount + 1,
+        seq: failedSeq + 1,
         sample_rate_hz: 48_000,
-        sample_cursor: (frameCount + 1) * 960,
-        context_time_s: (frameCount + 1) * 0.02,
+        sample_cursor: (failedSeq + 1) * 960,
+        context_time_s: (failedSeq + 1) * 0.02,
         samples,
       },
     });
@@ -4535,10 +4756,10 @@ async function runConcurrentCaptureJourney(options = {}) {
       data: {
         kind: 'frame',
         capture_generation: environment.worklet.captureGeneration,
-        seq: frameCount + 2,
+        seq: failedSeq + 2,
         sample_rate_hz: 48_000,
-        sample_cursor: (frameCount + 2) * 960,
-        context_time_s: (frameCount + 2) * 0.02,
+        sample_cursor: (failedSeq + 2) * 960,
+        context_time_s: (failedSeq + 2) * 0.02,
         samples,
       },
     });
@@ -4595,6 +4816,30 @@ async function runConcurrentCaptureJourney(options = {}) {
     const samples = new Float32Array(960).fill(0.125);
     const retainedFrameHandler = environment.worklet.port.onmessage;
     assert.equal(typeof retainedFrameHandler, 'function');
+    if (options.exerciseCaptureDurationAfterReceipt === true) {
+      // Without an authoritative utterance the successor lease now rotates
+      // transparently, so anchor this duration-failure journey to a real
+      // provider speech-start: the utterance budget expires one frame past
+      // the former lease-age bound. Requires the negotiated EOT capability.
+      const speechStartUplink = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+      assert.ok(speechStartUplink);
+      speechStartUplink.onmessage?.({
+        data: serializeMediaControl({
+          type: 'media.speech_start',
+          capability_version: 'media.end_of_turn.v1',
+          lease_id: speechStartUplink.serverBinding.lease_id,
+          generation: speechStartUplink.serverBinding.generation.value,
+          detector: 'server_vad',
+          provider_start_ms: 150,
+          timing_basis: 'provider_time',
+          timing_provenance: 'adapter_derived',
+          create_response: false,
+          interrupt_response: false,
+          business_cancel_count_delta: 0,
+        }),
+      });
+      await Promise.resolve();
+    }
     for (let seq = 1; seq < frameCount; seq += 1) {
       retainedFrameHandler({
         data: {
@@ -4612,17 +4857,21 @@ async function runConcurrentCaptureJourney(options = {}) {
     if (options.stopAtCaptureDurationBoundaryAfterReceipt === true) {
       captureDurationBoundaryRecognition = await owner.stopAndRecognize();
     } else {
-      retainedFrameHandler({
-        data: {
-          kind: 'frame',
-          capture_generation: environment.worklet.captureGeneration,
-          seq: frameCount,
-          sample_rate_hz: 48_000,
-          sample_cursor: frameCount * 960,
-          context_time_s: frameCount * 0.02,
-          samples,
-        },
-      });
+      let failedSeq = frameCount;
+      for (; failedSeq <= frameCount + 2; failedSeq += 1) {
+        retainedFrameHandler({
+          data: {
+            kind: 'frame',
+            capture_generation: environment.worklet.captureGeneration,
+            seq: failedSeq,
+            sample_rate_hz: 48_000,
+            sample_cursor: failedSeq * 960,
+            context_time_s: failedSeq * 0.02,
+            samples,
+          },
+        });
+        if (owner.status().status !== 'capturing') break;
+      }
       concurrentFailureSnapshot = owner.status();
       const uplinkSocket = sockets.find(socket => socket.serverBinding.generation.id === 'capture-2');
       captureDurationLateFrameUplinkCount = uplinkSocket.sent.filter(value => typeof value !== 'string').length;
@@ -4630,10 +4879,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         data: {
           kind: 'frame',
           capture_generation: environment.worklet.captureGeneration,
-          seq: frameCount + 1,
+          seq: failedSeq + 1,
           sample_rate_hz: 48_000,
-          sample_cursor: (frameCount + 1) * 960,
-          context_time_s: (frameCount + 1) * 0.02,
+          sample_cursor: (failedSeq + 1) * 960,
+          context_time_s: (failedSeq + 1) * 0.02,
           samples,
         },
       });
@@ -4646,10 +4895,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         data: {
           kind: 'frame',
           capture_generation: environment.worklet.captureGeneration,
-          seq: frameCount + 2,
+          seq: failedSeq + 2,
           sample_rate_hz: 48_000,
-          sample_cursor: (frameCount + 2) * 960,
-          context_time_s: (frameCount + 2) * 0.02,
+          sample_cursor: (failedSeq + 2) * 960,
+          context_time_s: (failedSeq + 2) * 0.02,
           samples,
         },
       });
@@ -4658,11 +4907,14 @@ async function runConcurrentCaptureJourney(options = {}) {
     }
   }
   if (concurrentClosePromise !== null) await concurrentClosePromise;
+  await Promise.all(socketOpenTasks);
 
   return {
     owner,
     calls,
+    requestOptions,
     statuses,
+    statusSnapshots,
     sockets,
     activationCount,
     playError,
@@ -4686,6 +4938,16 @@ async function runConcurrentCaptureJourney(options = {}) {
     bargeInEotCalls,
     bargeInStopped,
     captureRotationSnapshot,
+    overlapRotationRaceSnapshot,
+    staleSpeechStartSnapshot,
+    notificationPauseOutcome,
+    notificationPausedFrameHandler,
+    staleCaptureFrameHandler,
+    staleUplinkMessageHandler,
+    staleDownlinkMessageHandler,
+    socketFactory,
+    request,
+    response,
     captureAttachBeforeFirstAckSnapshot,
     captureLastFrameBeforeAckSnapshot,
     captureBeforeControlAttachSnapshot,
@@ -4695,6 +4957,75 @@ async function runConcurrentCaptureJourney(options = {}) {
   };
 }
 
+async function runFirstRecoveredRetry(journey, afterCaptureStarted = async () => undefined) {
+  const statuses = [];
+  journey.environment.deferSourceEnds = false;
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    on_status: status => statuses.push(status),
+    audio_environment: journey.environment,
+    socket_factory: journey.socketFactory,
+    request: journey.request,
+  });
+  const capture = {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-retry-1',
+    activation_generation: 8,
+    locale: 'zh-CN',
+  };
+  await startCaptureWithFirstFrame(owner, journey.environment, capture);
+  await afterCaptureStarted(owner);
+  const recognition = await owner.stopAndRecognize();
+  const priorWorklet = journey.environment.worklet;
+  const playing = owner.playAgentText({
+    response: journey.response,
+    unit_id: 'unit-duplex-1',
+    text: 'first retry response',
+  });
+  void playing.catch(() => undefined);
+  await sendFirstFrameToNextWorklet(journey.environment, priorWorklet);
+  await playing;
+  return { owner, recognition, statuses };
+}
+
+test('formal P1 preserves the streaming finalize budget for initial and successor captures', async () => {
+  const journey = await runConcurrentCaptureJourney({ streamingRecognition: true });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  const successorRecognition = await journey.owner.stopAndRecognize();
+  assert.deepEqual(successorRecognition, {
+    text: 'duplex streaming text',
+    voice_commit_receipt: 'streaming-voice-receipt-1',
+  });
+  assert.deepEqual(
+    journey.requestOptions
+      .filter(([method]) => method === 'live_voice.speech.recognize_streaming_result')
+      .map(([, options]) => options),
+    [
+      { timeoutMs: 38_000, signal: undefined },
+      { timeoutMs: 38_000, signal: undefined },
+    ],
+  );
+  assert.equal(
+    journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    0,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 initial and successor Speech adapters forward the exact request options object', () => {
+  const exactSpeechRequestAdapter =
+    /request: async <T = unknown>\(\s*method: string,\s*params\?: Record<string, unknown>,\s*options\?: Readonly<\{ timeoutMs\?: number; signal\?: AbortSignal \}>,\s*\) => \(await this\.#request\(method, params \?\? \{\}, options\)\) as T,/g;
+
+  assert.equal(
+    [...productP1VoiceRouteSource.matchAll(exactSpeechRequestAdapter)].length,
+    2,
+    'initial and successor Gateway Speech adapters must pass the same timeout/signal options object unchanged',
+  );
 test('capture latency separates owned media attach, first ACK, final send, and final ACK boundaries', async () => {
   const latency = latencyProbeHarness();
   const journey = await runConcurrentCaptureJourney({
@@ -5068,7 +5399,7 @@ test('capture/playout failure terminalizes each active diagnostic round without 
 
 test('formal P1 dedicated downlink ACKs scheduled audio and receipts only rendered audio', async () => {
   const journey = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });
-  const { owner, calls, sockets, activationCount, playError, environment } = journey;
+  const { owner, calls, sockets, activationCount, playError, environment, statusSnapshots } = journey;
 
   assert.equal(playError, null);
   assert.equal(owner.status().status, 'capturing');
@@ -5076,6 +5407,7 @@ test('formal P1 dedicated downlink ACKs scheduled audio and receipts only render
   assert.equal(activationCount, 2);
   assert.equal(environment.contexts.length, 1);
   assert.equal(environment.contexts[0].state, 'running');
+  assert.ok(statusSnapshots.find(snapshot => snapshot.status === 'playing')?.source_start_count > 0);
   const downlinkSocket = sockets.find(socket => socket.serverBinding.direction === 'downlink');
   assert.ok(downlinkSocket);
   const downlinkControls = downlinkSocket.sent.filter(value => typeof value === 'string').map(JSON.parse);
@@ -5091,6 +5423,7 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     negotiatedEot: true,
     triggerBargeInEot: true,
     holdDownlinkDetachAfterFinalRender: true,
+    deferSourceEndsUntilTransportAck: true,
   });
   assert.equal(journey.bargeInSpeechStartCalls, 1);
   assert.equal(journey.bargeInEotCalls, 0);
@@ -5117,6 +5450,7 @@ test('server speech-start/EOT interrupts an answer estimated beyond twenty secon
     negotiatedEot: true,
     triggerBargeInEot: true,
     holdDownlinkDetachAfterFinalRender: true,
+    deferSourceEndsUntilTransportAck: true,
     agentText:
       '实时语音系统会依次完成录音采集、前端处理、语音识别、Agent 推理、语音合成和浏览器播放。'.repeat(8),
   });
@@ -5152,7 +5486,7 @@ test('formal P1 advances the eight-frame downlink window before browser render c
   await owner.close();
 });
 
-test('formal P1 opens one bounded successor capture before a long answer can be interrupted', async () => {
+test('formal P1 starts one bounded successor capture without gating a long-answer downlink', async () => {
   const journey = await runConcurrentCaptureJourney({
     agentText:
       '实时语音系统会依次完成录音采集、前端处理、语音识别、Agent 推理、语音合成和浏览器播放。'.repeat(8),
@@ -5161,7 +5495,7 @@ test('formal P1 opens one bounded successor capture before a long answer can be 
   const { owner, calls, activationCount, activationCountAtFinalDownlinkAck, playError, environment } = journey;
 
   assert.equal(playError, null);
-  assert.equal(activationCountAtFinalDownlinkAck, 2);
+  assert.equal(activationCountAtFinalDownlinkAck, 1);
   assert.equal(activationCount, 2);
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
@@ -5197,6 +5531,458 @@ test('formal P1 rotates thirty seconds of silent overlap during active long play
     false,
   );
   assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.close();
+});
+
+test('formal P1 rotates TTS echo energy without provider speech-start and fences a stale prior-lease speech-start', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
+    agentText:
+      '实时语音系统会持续朗读较长回答，同时只以当前媒体租约的权威语音开始事件保护真实用户讲话。'.repeat(8),
+    streamingDownlink: true,
+    downlinkFrameCount: 16,
+    downlinkFramesToSend: 16,
+    deferSourceEndsUntilTransportAck: true,
+    holdDownlinkDetachAfterFinalRender: true,
+    localEnergyDuringOverlapRotation: true,
+    exerciseSilentCaptureRotationDuringActivePlayout: true,
+    signalStaleProviderSpeechStartAfterOverlapRotation: true,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.equal(journey.activationCount, 3);
+  assert.deepEqual(journey.captureRotationSnapshot, {
+    old_frame_count: PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20,
+    status: { status: 'playing', reason: null },
+    old_authority_closed: true,
+  });
+  assert.deepEqual(journey.staleSpeechStartSnapshot, {
+    status: { status: 'playing', reason: null },
+    calls_delta: 0,
+    activation_count_delta: 0,
+    barge_in_speech_start_calls: 0,
+  });
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.close();
+});
+
+test('formal P1 fails closed at the overlap duration bound after current provider speech-start', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
+    holdDownlinkDetachAfterFinalRender: true,
+    deferCaptureDurationUntilDetachWait: true,
+    signalProviderSpeechStartBeforeOverlapDuration: true,
+    exerciseCaptureDurationBeforeReceipt: true,
+  });
+
+  assert.notEqual(journey.playError, null);
+  assert.deepEqual(journey.captureDurationBoundarySnapshot, { status: 'playing', reason: null });
+  assert.deepEqual(journey.concurrentFailureSnapshot, {
+    status: 'cleanup_pending',
+    reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+  });
+  assert.deepEqual(journey.owner.status(), {
+    status: 'failed',
+    reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+  });
+  assert.equal(journey.activationCount, 2);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 0);
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 ignores a closed owner provider speech-start with zero side effects', async () => {
+  const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
+  const closedUplink = journey.sockets.find(
+    socket => socket.serverBinding?.generation?.id === 'capture-2',
+  );
+  assert.ok(closedUplink);
+  await journey.owner.close();
+  const callsBefore = journey.calls.length;
+
+  closedUplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: closedUplink.serverBinding.lease_id,
+      generation: closedUplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 300,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  await Promise.resolve();
+
+  assert.deepEqual(journey.owner.status(), { status: 'closed', reason: null });
+  assert.equal(journey.calls.length, callsBefore);
+  assert.equal(journey.bargeInSpeechStartCalls, 0);
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+});
+
+test('formal P1 protects a current provider speech-start after playout and bounds its utterance', async () => {
+  const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
+  const uplink = journey.sockets.find(
+    socket => socket.serverBinding?.generation?.id === 'capture-2',
+  );
+  assert.ok(uplink);
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 400,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  // The utterance budget starts at the provider speech-start (successor frame
+  // index 1), so the exact failure lands just past the former lease-age bound.
+  await sendCaptureToDurationBoundary(
+    journey.environment,
+    new Float32Array(960),
+    { exceed: true, extraFrames: 2 },
+  );
+  for (let turn = 0; turn < 200 && journey.owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(journey.owner.status(), {
+    status: 'failed',
+    reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+  });
+  assert.equal(journey.activationCount, 2);
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 does not carry short-playout echo energy into later idle rotation', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const priorWorklet = await sendCaptureToDurationBoundary(
+    journey.environment,
+    new Float32Array(960),
+  );
+  for (let turn = 0; turn < 3_500 && journey.environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(journey.environment.worklet, priorWorklet);
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 decays one post-playout energy frame and rotates the silent lease boundary', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, environment } = journey;
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameAt = (seq, samples) => ({
+    data: {
+      kind: 'frame',
+      capture_generation: priorWorklet.captureGeneration,
+      seq,
+      sample_rate_hz: 48_000,
+      sample_cursor: seq * 960,
+      context_time_s: seq * 0.02,
+      samples,
+    },
+  });
+  // One post-playout frame crosses the local energy floor (a TTS tail, echo
+  // or environmental sound); the room then stays silent through the 30-second
+  // lease boundary. The lease must rotate transparently with no visible error
+  // and zero forbidden Agent/Tool/Task/history effects.
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+  handler(frameAt(1, new Float32Array(960).fill(0.125)));
+  const silent = new Float32Array(960);
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  for (let seq = 2; seq <= frameCount + 2; seq += 1) {
+    handler(frameAt(seq, silent));
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  const rotationDiagnostics = owner.captureDiagnostics();
+  assert.equal(rotationDiagnostics.provider_speech_start_observed, false);
+  assert.equal(rotationDiagnostics.actual_processing?.echo_cancellation, true);
+  assert.equal(rotationDiagnostics.actual_processing?.noise_suppression, true);
+  assert.equal(rotationDiagnostics.actual_processing?.auto_gain_control, true);
+  await owner.close();
+});
+
+test('formal P1 defers the boundary rotation for recent local energy and rotates when it decays', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, environment } = journey;
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const silent = new Float32Array(960);
+  const energetic = new Float32Array(960).fill(0.125);
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+  // Local energy lands just before the boundary. The rotation defers inside
+  // its bounded grace and fires as soon as the recency hint decays; it must
+  // not fail the lease.
+  for (let seq = 1; seq <= frameCount + 110; seq += 1) {
+    // A real worklet stops producing once the rotation stops its capture;
+    // stop driving as soon as the rotation dispatches.
+    if (owner.captureDiagnostics().rotation_in_flight || environment.worklet !== priorWorklet) break;
+    const samples = seq >= frameCount - 6 && seq <= frameCount - 5 ? energetic : silent;
+    handler({
+      data: {
+        kind: 'frame',
+        capture_generation: priorWorklet.captureGeneration,
+        seq,
+        sample_rate_hz: 48_000,
+        sample_cursor: seq * 960,
+        context_time_s: seq * 0.02,
+        samples,
+      },
+    });
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  for (let turn = 0; turn < 500; turn += 1) {
+    if (calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2')) break;
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  for (let turn = 0; turn < 200 && owner.captureDiagnostics().last_rotation?.completed !== true; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const deferredRotation = owner.captureDiagnostics().last_rotation;
+  assert.equal(deferredRotation?.completed, true);
+  assert.equal(deferredRotation?.trigger, 'silent_boundary');
+  assert.equal(deferredRotation?.at_frame_count > frameCount, true);
+  await owner.close();
+});
+
+test('formal P1 rotates a lease with sustained unconfirmed energy at the bounded grace end', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, environment } = journey;
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const energetic = new Float32Array(960).fill(0.125);
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+  // Every frame crosses the local floor but the Provider never confirms
+  // speech. Sustained unconfirmed energy must rotate at the bounded grace end
+  // instead of expiring the lease.
+  for (let seq = 1; seq <= frameCount + 110; seq += 1) {
+    // A real worklet stops producing once the rotation stops its capture;
+    // stop driving as soon as the rotation dispatches.
+    if (owner.captureDiagnostics().rotation_in_flight || environment.worklet !== priorWorklet) break;
+    handler({
+      data: {
+        kind: 'frame',
+        capture_generation: priorWorklet.captureGeneration,
+        seq,
+        sample_rate_hz: 48_000,
+        sample_cursor: seq * 960,
+        context_time_s: seq * 0.02,
+        samples: energetic,
+      },
+    });
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  for (let turn = 0; turn < 500; turn += 1) {
+    if (calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2')) break;
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  for (let turn = 0; turn < 200 && owner.captureDiagnostics().last_rotation?.completed !== true; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const graceRotation = owner.captureDiagnostics().last_rotation;
+  assert.equal(graceRotation?.completed, true);
+  assert.equal(graceRotation?.trigger, 'local_activity_grace_elapsed');
+  assert.equal(graceRotation?.at_frame_count > frameCount, true);
+  await owner.close();
+});
+
+test('formal P1 keeps an authoritative utterance alive past the lease bound and recognizes it', async () => {
+  const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
+  const { owner, calls, environment, sockets } = journey;
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const silent = new Float32Array(960);
+  const sendSilent = seq => handler({
+    data: {
+      kind: 'frame',
+      capture_generation: priorWorklet.captureGeneration,
+      seq,
+      sample_rate_hz: 48_000,
+      sample_cursor: seq * 960,
+      context_time_s: seq * 0.02,
+      samples: silent,
+    },
+  });
+  for (let seq = 1; seq <= 800; seq += 1) {
+    sendSilent(seq);
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  const uplink = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+  assert.ok(uplink);
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 16_000,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  await Promise.resolve();
+  // The utterance began late in the lease; its own 30-second budget keeps the
+  // capture alive past the former lease-age bound without rotation.
+  for (let seq = 801; seq <= frameCount + 200; seq += 1) {
+    sendSilent(seq);
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.activationCount, 2);
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  const recognition = await owner.stopAndRecognize();
+  assert.deepEqual(recognition, {
+    text: 'duplex text',
+    voice_commit_receipt: 'voice-receipt-duplex-1',
+  });
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
+  const recognitionCalls = calls.filter(([method]) => method === 'live_voice.speech.recognize_batch');
+  assert.equal(recognitionCalls.length, 2);
+  // Batch fallback uploads the complete lease audio (the Speech client
+  // requires recognition input to start at the first captured frame), so the
+  // extended lease produces a WAV longer than the former 30-second ceiling.
+  assert.equal(
+    Buffer.from(recognitionCalls[1][1].audio.data_base64, 'base64').length,
+    44 + (frameCount + 201) * 960 * 2,
+  );
+  await owner.close();
+});
+
+test('formal P1 aborts an in-flight overlap rotation when current provider speech-start arrives', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
+    streamingDownlink: true,
+    downlinkFrameCount: 16,
+    downlinkFramesToSend: 16,
+    holdDownlinkDetachAfterFinalRender: true,
+    exerciseSilentCaptureRotationDuringActivePlayout: true,
+    signalProviderSpeechStartDuringOverlapRotation: true,
+  });
+
+  assert.notEqual(journey.playError, null);
+  assert.deepEqual(journey.overlapRotationRaceSnapshot, {
+    status: {
+      status: 'failed',
+      reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+    },
+    activation_count: 2,
+  });
+  assert.deepEqual(journey.owner.status(), {
+    status: 'failed',
+    reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+  });
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
   await journey.owner.close();
 });
 
@@ -5268,11 +6054,297 @@ test('formal P1 rotates consecutive silent idle captures and pauses without reco
 
 test('formal P1 notification pause preserves a capture after real speech energy', async () => {
   const journey = await runConcurrentCaptureJourney();
+  const worklet = journey.environment.worklet;
+  assert.equal(typeof worklet?.port.onmessage, 'function');
+  worklet.port.onmessage({
+    data: {
+      kind: 'frame',
+      capture_generation: worklet.captureGeneration,
+      seq: 1,
+      sample_rate_hz: 48_000,
+      sample_cursor: 960,
+      context_time_s: 0.02,
+      samples: new Float32Array(960).fill(0.25),
+    },
+  });
   const recognitionCallsBeforePause = journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length;
 
   assert.equal(await journey.owner.pauseIdleCaptureForNotification(), 'speech_active');
   assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
   assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, recognitionCallsBeforePause);
+  await journey.owner.close();
+});
+
+test('formal P1 notification pause preserves current provider speech-start without capture side effects', async () => {
+  const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
+  const uplink = journey.sockets.find(
+    socket => socket.serverBinding?.generation?.id === 'capture-2',
+  );
+  assert.ok(uplink);
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 500,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  const worklet = journey.environment.worklet;
+  const handler = worklet.port.onmessage;
+  const callsBefore = journey.calls.length;
+  const recognitionCallsBefore = journey.calls.filter(
+    ([method]) => method === 'live_voice.speech.recognize_batch',
+  ).length;
+
+  assert.equal(await journey.owner.pauseIdleCaptureForNotification(), 'speech_active');
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.environment.worklet, worklet);
+  assert.equal(worklet.port.onmessage, handler);
+  assert.equal(journey.calls.length, callsBefore);
+  assert.equal(
+    journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    recognitionCallsBefore,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 terminal announcement settles the paused lease and fences its stale capture callback', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    pauseForNotificationBeforePlayout: true,
+  });
+
+  assert.equal(journey.notificationPauseOutcome, 'paused');
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    0,
+  );
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    1,
+  );
+  assert.ok(
+    journey.calls.some(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD
+        && params.subject_id === 'media-subject-1',
+    ),
+  );
+
+  const callsBeforeStaleCallback = journey.calls.length;
+  const statusesBeforeStaleCallback = journey.statuses.length;
+  journey.notificationPausedFrameHandler?.({
+    data: { kind: 'error', reason: 'input_gap_exceeded' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(journey.calls.length, callsBeforeStaleCallback);
+  assert.equal(journey.statuses.length, statusesBeforeStaleCallback);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+
+  await journey.owner.stopAndRecognize();
+  await startCaptureWithFirstFrame(journey.owner, journey.environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-after-announcement-1',
+    activation_generation: 8,
+    locale: 'zh-CN',
+  });
+  journey.notificationPausedFrameHandler?.({
+    data: {
+      kind: 'frame',
+      capture_generation: 1,
+      seq: PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20,
+      sample_rate_hz: 48_000,
+      sample_cursor: PRODUCT_P1_CAPTURE_MAX_DURATION_MS * 48,
+      context_time_s: PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 1_000,
+      samples: new Float32Array(960).fill(0.75),
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 terminal announcement failure releases both leases and first retry recovers', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    pauseForNotificationBeforePlayout: true,
+    failSecondCaptureDuringDownlink: true,
+    deferSourceEndsUntilTransportAck: true,
+  });
+
+  assert.equal(journey.notificationPauseOutcome, 'paused');
+  assert.equal(journey.playError?.reason, 'AUDIO_INPUT_GAP_EXCEEDED');
+  assert.deepEqual(journey.owner.status(), {
+    status: 'failed',
+    reason: 'AUDIO_INPUT_GAP_EXCEEDED',
+  });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    0,
+  );
+  assert.ok(
+    journey.calls.some(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD
+        && params.subject_id === 'media-subject-1',
+    ),
+  );
+  assert.ok(
+    journey.calls.some(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD
+        && params.subject_id === 'media-subject-2',
+    ),
+  );
+  await journey.owner.close();
+
+  const recovered = await runFirstRecoveredRetry(journey);
+  assert.equal(recovered.recognition.text, 'duplex text');
+  assert.deepEqual(recovered.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(recovered.statuses.includes('failed'), false);
+  await recovered.owner.close();
+});
+
+test('formal P1 close during terminal announcement fences old audio and first successor recovers', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    pauseForNotificationBeforePlayout: true,
+    closeDuringActivePlayout: true,
+    deferSourceEndsUntilTransportAck: true,
+    downlinkFrameCount: 16,
+    downlinkFramesToSend: 16,
+  });
+
+  assert.equal(journey.notificationPauseOutcome, 'paused');
+  assert.deepEqual(journey.concurrentCloseSnapshot, {
+    status: 'cleanup_pending',
+    reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+  });
+  assert.equal(journey.playError?.reason, 'FORMAL_P1_CLOSED');
+  assert.equal(journey.statuses.includes('failed'), false);
+  assert.deepEqual(journey.owner.status(), { status: 'closed', reason: null });
+
+  const oldUplink = journey.sockets.find(
+    socket => socket.serverBinding?.generation?.id === 'capture-2',
+  );
+  const oldDownlink = journey.sockets.find(
+    socket => socket.serverBinding?.direction === 'downlink',
+  );
+  assert.ok(oldUplink);
+  assert.ok(oldDownlink);
+  const recovered = await runFirstRecoveredRetry(journey, async recoveredOwner => {
+    const callsBeforeStaleCallbacks = journey.calls.length;
+    const successorContext = journey.environment.contexts.at(-1);
+    const successorSourceStarts = successorContext.sourceStartCount;
+    journey.staleCaptureFrameHandler?.({
+      data: { kind: 'error', reason: 'input_gap_exceeded' },
+    });
+    journey.staleUplinkMessageHandler?.({
+      data: serializeMediaControl({
+        type: 'media.speech_start',
+        capability_version: 'media.end_of_turn.v1',
+        lease_id: oldUplink.serverBinding.lease_id,
+        generation: oldUplink.serverBinding.generation.value,
+        detector: 'server_vad',
+        provider_start_ms: 100,
+        timing_basis: 'provider_time',
+        timing_provenance: 'adapter_derived',
+        create_response: false,
+        interrupt_response: false,
+        business_cancel_count_delta: 0,
+      }),
+    });
+    journey.staleDownlinkMessageHandler?.({
+      data: serializeMediaControl({
+        type: 'media.detach',
+        lease_id: oldDownlink.serverBinding.lease_id,
+        generation: oldDownlink.serverBinding.generation.value,
+        reason_id: 'MEDIA_LOCAL_CLOSE',
+        through_seq: 15,
+        business_cancel_count_delta: 0,
+      }),
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(journey.calls.length, callsBeforeStaleCallbacks);
+    assert.equal(successorContext.sourceStartCount, successorSourceStarts);
+    assert.deepEqual(recoveredOwner.status(), { status: 'capturing', reason: null });
+    assert.deepEqual(journey.owner.status(), { status: 'closed', reason: null });
+  });
+
+  assert.equal(recovered.recognition.text, 'duplex text');
+  assert.deepEqual(recovered.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(recovered.statuses.includes('failed'), false);
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  await recovered.owner.close();
+});
+
+test('formal P1 aborts an in-flight idle rotation when current provider speech-start arrives', async () => {
+  const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
+  const uplink = journey.sockets.find(
+    socket => socket.serverBinding?.generation?.id === 'capture-2',
+  );
+  assert.ok(uplink);
+  const priorWorklet = journey.environment.worklet;
+
+  await sendCaptureToDurationBoundary(
+    journey.environment,
+    new Float32Array(960),
+    {
+      afterBoundary: () => {
+        uplink.onmessage?.({
+          data: serializeMediaControl({
+            type: 'media.speech_start',
+            capability_version: 'media.end_of_turn.v1',
+            lease_id: uplink.serverBinding.lease_id,
+            generation: uplink.serverBinding.generation.value,
+            detector: 'server_vad',
+            provider_start_ms: 550,
+            timing_basis: 'provider_time',
+            timing_provenance: 'adapter_derived',
+            create_response: false,
+            interrupt_response: false,
+            business_cancel_count_delta: 0,
+          }),
+        });
+      },
+    },
+  );
+  for (let turn = 0; turn < 500 && journey.owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(journey.owner.status(), {
+    status: 'failed',
+    reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+  });
+  assert.equal(journey.environment.worklet, priorWorklet);
+  assert.equal(journey.activationCount, 2);
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
   await journey.owner.close();
 });
 
@@ -5344,6 +6416,7 @@ test('formal P1 rejects a prefix-only downlink completion without receipt or bus
     downlinkFramesToSend: 1,
     earlyDownlinkDetachThroughSeq: 0,
     requireBoundedPlayoutSettlement: true,
+    sendSecondFrame: false,
   });
   const { owner, calls, sockets, playError, environment } = journey;
 
@@ -5435,8 +6508,8 @@ test('formal P1 preserves multi-frame playout, receipt, and successor PCM across
     sourceStartCount: 3,
     sourceEndCount: 3,
     duplicateRenderFrameCount: 1,
-    pendingLengthBefore: 64,
-    pendingLengthAfter: 64,
+    pendingLengthBefore: 192,
+    pendingLengthAfter: 192,
     seqBefore: 1,
     seqAfter: 1,
     sampleCursorBefore: 960,
@@ -5471,11 +6544,11 @@ test('formal P1 preserves multi-frame playout, receipt, and successor PCM across
     ]
   );
   assert.equal(
-    uplinkFrames[1].samples.slice(0, 64).every(sample => Math.abs(sample - 0.25) < 1e-6),
+    uplinkFrames[1].samples.slice(0, 192).every(sample => Math.abs(sample - 0.25) < 1e-6),
     true
   );
   assert.equal(
-    uplinkFrames[1].samples.slice(64).every(sample => Math.abs(sample - 0.625) < 1e-6),
+    uplinkFrames[1].samples.slice(192).every(sample => Math.abs(sample - 0.625) < 1e-6),
     true
   );
   await owner.close();
@@ -5548,8 +6621,10 @@ test('formal P1 fails only the retained capture when the render clock stalls aft
 
 test('formal P1 duration expiry after final render is fenced before playout receipt dispatch', async () => {
   const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
     downlinkFrameCount: 3,
     holdDownlinkDetachAfterFinalRender: true,
+    signalProviderSpeechStartBeforeOverlapDuration: true,
     exerciseCaptureDurationBeforeReceipt: true,
     deferCaptureDurationUntilDetachWait: true,
   });
@@ -5583,7 +6658,7 @@ test('formal P1 duration expiry after final render is fenced before playout rece
     [0, 1, 2]
   );
   const uplinkSocket = sockets.find(socket => socket.serverBinding.generation.id === 'capture-2');
-  assert.equal(captureDurationLateFrameUplinkCount <= PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20, true);
+  assert.equal(captureDurationLateFrameUplinkCount <= PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20 + 1, true);
   assert.equal(uplinkSocket.sent.filter(value => typeof value !== 'string').length, captureDurationLateFrameUplinkCount);
   assert.equal(
     sockets.every(socket => socket.readyState === 3),
@@ -5598,6 +6673,7 @@ test('formal P1 duration expiry after final render is fenced before playout rece
 
 test('formal P1 reports the exact 30-second successor-capture bound after preserving the accepted receipt', async () => {
   const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
     useRealProcessorForSecondCapture: true,
     downlinkFrameCount: 3,
     exerciseDuplicateRenderFrameAtFinalPlayout: true,
@@ -5657,6 +6733,7 @@ test('formal P1 reports the exact 30-second successor-capture bound after preser
 
 test('formal P1 duration expiry releases local capture before an exact authority close retry', async () => {
   const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
     downlinkFrameCount: 3,
     exerciseCaptureDurationAfterReceipt: true,
     failSecondMediaCloseOnce: true,
@@ -5740,7 +6817,7 @@ test('a real processor render-clock regression fails exact P1 playout with zero 
     environment.contexts.every(context => context.state === 'closed'),
     true
   );
-  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 0);
+  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 1);
   assert.equal(
     sockets.every(socket => socket.readyState === 3),
     true
@@ -5755,29 +6832,115 @@ test('a real processor render-clock regression fails exact P1 playout with zero 
 
 test('formal P1 concurrent capture cannot publish readiness without a real frame', async () => {
   const journey = await runConcurrentCaptureJourney({ sendSecondFrame: false });
-  const { owner, calls, statuses, playError, capturingBeforeConcurrent } = journey;
+  const { owner, calls, statuses, playError, capturingBeforeConcurrent, environment } = journey;
 
-  assert.equal(playError?.reason, 'AUDIO_CAPTURE_NO_FRAMES');
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_NO_FRAMES' });
+  assert.equal(playError, null);
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: 'AUDIO_CAPTURE_NO_FRAMES' });
+  assert.equal(environment.contexts[0].sourceStartCount, 1);
   assert.equal(statuses.filter(status => status === 'capturing').length, capturingBeforeConcurrent);
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
   await owner.close();
 });
 
-test('formal P1 concurrent capture cannot publish readiness without the Gateway ACK', async () => {
+test('formal P1 concurrent capture without a Gateway ACK degrades barge-in without discarding TTS', async () => {
   const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
-  const { owner, calls, statuses, playError, capturingBeforeConcurrent } = journey;
+  const { owner, calls, statuses, playError, capturingBeforeConcurrent, environment } = journey;
 
-  assert.equal(playError?.reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+  assert.equal(playError, null);
   assert.deepEqual(owner.status(), {
-    status: 'failed',
+    status: 'recognized',
     reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
   });
+  assert.equal(environment.contexts[0].sourceStartCount, 1);
   assert.equal(statuses.filter(status => status === 'capturing').length, capturingBeforeConcurrent);
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+  assert.equal(calls.some(([method]) => method.includes('task.') || method.includes('tool.')), false);
+  assert.equal(owner.captureDiagnostics().successor_readiness, 'degraded');
+  assert.equal(owner.captureDiagnostics().successor_readiness_reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+  assert.ok(owner.captureDiagnostics().successor_readiness_elapsed_ms >= 1_000);
   await owner.close();
+});
+
+test('formal P1 restarts listening after degraded successor capture without replaying the response', async () => {
+  const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
+  const priorWorklet = journey.environment.worklet;
+  const restarting = journey.owner.startCapture({
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-restart-after-degradation',
+    activation_generation: 8,
+    locale: 'zh-CN',
+  });
+  await sendFirstFrameToNextWorklet(journey.environment, priorWorklet);
+  await restarting;
+
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 3);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length, 1);
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(journey.calls.some(([method]) => method.includes('task.') || method.includes('tool.')), false);
+  await journey.owner.close();
+});
+
+test('formal P1 accepts a delayed successor ACK inside the readiness window', async () => {
+  const journey = await runConcurrentCaptureJourney({ secondCaptureAckDelayMs: 500 });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.concurrentCaptureStartedCalls, 1);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(journey.owner.captureDiagnostics().successor_readiness, 'ready');
+  assert.equal(journey.owner.captureDiagnostics().successor_readiness_reason, null);
+  assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms >= 450);
+  assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms < 1_000);
+  await journey.owner.close();
+});
+
+test('formal P1 keeps completed TTS when the Gateway reports no early duplex media', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    secondCaptureAckDelayMs: 500,
+    serverDuplexMediaObserved: false,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.environment.contexts[0].sourceStartCount, 1);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(
+    journey.calls.some(([method]) => method.includes('agent') || method.includes('tool') || method.includes('task') || method.includes('history')),
+    false,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 late successor ACK after the readiness window cannot cancel scheduled TTS', async () => {
+  const journey = await runConcurrentCaptureJourney({ secondCaptureAckDelayMs: 1_100 });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), {
+    status: 'recognized',
+    reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+  });
+  assert.equal(journey.environment.contexts[0].sourceStartCount, 1);
+  assert.equal(journey.concurrentCaptureStartedCalls, 0);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.ok(journey.calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+  const callsBeforeLateAck = journey.calls.length;
+  const sourceStartsBeforeLateAck = journey.environment.contexts[0].sourceStartCount;
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.deepEqual(journey.owner.status(), {
+    status: 'recognized',
+    reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+  });
+  assert.equal(journey.calls.length, callsBeforeLateAck);
+  assert.equal(journey.environment.contexts[0].sourceStartCount, sourceStartsBeforeLateAck);
+  await journey.owner.close();
 });
 
 test('formal P1 concurrent playing-window mute releases audio and compensates exact authority', async () => {
@@ -5787,26 +6950,21 @@ test('formal P1 concurrent playing-window mute releases audio and compensates ex
   });
   const { owner, calls, sockets, statuses, playError, capturingBeforeConcurrent, concurrentFailureSnapshot, concurrentAudioReleased } = journey;
 
-  assert.deepEqual(concurrentFailureSnapshot, {
-    status: 'cleanup_pending',
-    reason: 'AUDIO_INPUT_MUTED',
-  });
-  assert.equal(concurrentAudioReleased, true);
-  assert.equal(playError?.reason, 'AUDIO_INPUT_MUTED');
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_MUTED' });
+  assert.deepEqual(concurrentFailureSnapshot, { status: 'playing', reason: 'AUDIO_INPUT_MUTED' });
+  assert.equal(concurrentAudioReleased, false);
+  assert.equal(playError, null);
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: 'AUDIO_INPUT_MUTED' });
   assert.equal(statuses.filter(status => status === 'capturing').length, capturingBeforeConcurrent);
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
-  assert.equal(
-    sockets.some(socket => socket.serverBinding?.generation.id === 'capture-2'),
-    false
-  );
+  assert.equal(sockets.some(socket => socket.serverBinding?.direction === 'downlink'), true);
   await owner.close();
 });
 
 test('formal P1 persistent concurrent input gap stops playout with the exact stable reason', async () => {
   const journey = await runConcurrentCaptureJourney({
     failSecondCaptureDuringDownlink: true,
+    deferSourceEndsUntilTransportAck: true,
   });
   const { owner, calls, sockets, statuses, playError, capturingBeforeConcurrent, concurrentFailureSnapshot, environment } = journey;
 
@@ -5860,10 +7018,10 @@ test('formal P1 non-advancing concurrent render clock stops playout with the exa
     environment.contexts.every(context => context.state === 'closed'),
     true
   );
-  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 0);
+  assert.equal(Math.max(...environment.contexts.map(context => context.peakSources)), 1);
   assert.equal(
     environment.contexts.reduce((count, context) => count + context.sourceStartCount, 0),
-    0
+    1
   );
   assert.equal(
     sockets.every(socket => socket.readyState === 3),
@@ -5914,14 +7072,15 @@ test('formal P1 concurrent close waits for pending activation and revokes both e
     sendSecondFrame: false,
     closeSecondCaptureWhilePending: true,
   });
-  const { owner, calls, sockets, playError, concurrentCloseSnapshot, concurrentCloseAudioReleased } = journey;
+  const { owner, calls, statuses, sockets, playError, concurrentCloseSnapshot, concurrentCloseAudioReleased } = journey;
 
   assert.deepEqual(concurrentCloseSnapshot, {
     status: 'cleanup_pending',
     reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
   });
   assert.equal(concurrentCloseAudioReleased, true);
-  assert.notEqual(playError, null);
+  assert.equal(playError?.reason, 'FORMAL_P1_CLOSED');
+  assert.equal(statuses.includes('failed'), false);
   assert.deepEqual(owner.status(), { status: 'closed', reason: null });
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'));
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));

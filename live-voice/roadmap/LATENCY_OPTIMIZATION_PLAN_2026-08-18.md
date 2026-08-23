@@ -36,6 +36,18 @@
 > STT, TTS, WebAudio, playout or Production credit. A clean physical Browser
 > validation remains mandatory before claiming a product-path improvement.
 
+> **2026-08-21 P2 causal decision:** bounded pull was accepted at component
+> scope after an exact A1/B/A2 run. The corrected harness/reference commit is
+> `31f9209d66682d19745acd1d2c15a16b59fc75e2`; candidate B is
+> `c1b4a47f51b0b200b12e2e544617577d7f307c69`. For 10/50/100 notifications,
+> total RPCs changed from A1 50/250/500 to B 5/20/35 and returned to A2
+> 50/250/500. B reduced p50 by 90.0–92.9% against both baselines with every
+> forbidden Agent/Tool/Task/history/audio effect at zero. This accepts the P2
+> transport candidate only; physical Browser validation and all other
+> optimization layers below remain open.
+> Full method, result and limitation evidence is recorded in the
+> [P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -207,14 +219,15 @@ tested source, not a baseline for this branch, but the current source retains
 the same structural one-request/one-notification owner and needs the causal A1
 defined in §3.3.
 
-The first implementation candidate should be **bounded batch pull**. One
+The first implementation candidate, **bounded batch pull**, passed its causal
+A1/B/A2 gate on 2026-08-21. One
 request may return a closed, ordered batch up to an explicit limit. The client
 processes the batch in order; final, error and Task notifications remain
 reliable and may not be dropped, coalesced behind lower-value deltas or reordered
 across presentation/ACK authority. Replay identity, activation generation,
 bounded ledgers and one in-flight poll remain fail closed.
 
-Server-side coalescing of non-critical reasoning/delta notifications is a
+Server-side coalescing of non-critical reasoning/delta notifications remains a
 possible later complement, but it changes observation semantics and must not
 hide final/error/Task truth. Server push is deferred for the first candidate
 because reconnect, replay, backpressure and single-writer ownership make it a
@@ -362,9 +375,11 @@ project files.
 
 Work should be packetized in this dependency order:
 
-1. current-source no-Browser P2 A1 with the deterministic 10/50/100 backlog;
-2. one named bounded P2 transport candidate B, followed by unchanged-source
-   A2 and an A1/B/A2 accept/revise/discard decision;
+1. ~~current-source no-Browser P2 A1 with the deterministic 10/50/100
+   backlog;~~ **DONE — causal component evidence only**
+2. ~~one named bounded P2 transport candidate B, followed by unchanged-source
+   A2 and an A1/B/A2 accept/revise/discard decision;~~ **ACCEPTED — causal
+   component evidence only**
 3. clean physical Browser confirmation of an accepted P2 candidate, without
    retroactively relabelling the causal run as E2E evidence;
 4. physical fixed-corpus baseline for capture/STT/TTS/playout work, then
@@ -456,16 +471,14 @@ from the reference materials:
 ## 10. Status relationship
 
 This plan is queued under the `Observability, benchmark and latency` capability
-and dependency route to feature complete in [STATUS](../STATUS.md). The current
-execution packet remains the higher-priority authoritative product-truth defect
-repair. Latency implementation starts as its own P1/P2 quality packet when the
-dependency route has a clean candidate and has migrated the applicable test
-oracles; compatible instrumentation may be included earlier in an affected
-defect packet only when its ownership and acceptance are explicit.
-
-The P2 causal lane does not require a rebase onto Hongxing's divergent
-`hx/0819_live_voice_p1p2` line. Run it first on the reviewed current source and,
-when useful, independently on Hongxing's tested source. Before physical product
-credit, compare Hongxing's three functional P1/P2 fixes in a clean worktree and
-integrate them as reviewed coherent packets if they are not already equivalent.
-A blind rebase of the active dirty W3 worktree is not part of this route.
+and dependency route to feature complete in [STATUS](../STATUS.md). The
+2026-08-23 lifecycle repair packet is closed. The accepted P2 bounded-pull
+candidate is now composed on that source; remaining product work is atomic
+batch observation and deployed Gate C. The `e1df8b452` physical run supplies a
+scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
+fixed-corpus baseline required by this plan. The
+[latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
+owns the dated causal/deployed evidence. Compatible instrumentation may be
+included in an affected packet only when its ownership and acceptance are
+explicit; this preparatory plan never outranks or activates the current STATUS
+route by itself.

@@ -156,6 +156,10 @@ CURRENT = CurrentBackgroundTaskContext(
             UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
         ),
         (
+            "第二天下午改成西湖，晚上给我留出自由时间。",
+            UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
+        ),
+        (
             "Please change the current itinerary so day two visits West Lake.",
             UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
         ),
@@ -164,10 +168,18 @@ CURRENT = CurrentBackgroundTaskContext(
             UnifiedCommittedInputRoute.BACKGROUND_STATUS,
         ),
         (
+            "可以了，刚才的修改加进去了吗？",
+            UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        ),
+        (
             "第一天晚上给我留出的自由时间是几点？",
             UnifiedCommittedInputRoute.BACKGROUND_QUERY,
         ),
         ("后台现在做到哪了？", UnifiedCommittedInputRoute.BACKGROUND_STATUS),
+        (
+            "顺便问一下，后台现在做到哪了？",
+            UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        ),
         (
             "当前后台任务情况如何？",
             UnifiedCommittedInputRoute.BACKGROUND_STATUS,
@@ -196,6 +208,34 @@ def test_unified_semantic_routes_cover_closed_protocol(
     }:
         assert resolved.task_id == CURRENT.task_id
         assert resolved.target_binding == "current_background_task"
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        (
+            "可以了，刚才的修改加进去了吗？",
+            "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED",
+        ),
+        (
+            "可以了,刚才的修改加进去了吗?",
+            "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED",
+        ),
+        (
+            "顺便问一下，后台现在做到哪了？",
+            "CURRENT_BACKGROUND_STATUS_RESOLVED",
+        ),
+    ],
+)
+def test_unified_prefixed_status_preserves_authoritative_status_kind(
+    text: str, reason: str
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is UnifiedCommittedInputRoute.BACKGROUND_STATUS
+    assert resolved.reason == reason
+    assert resolved.task_id == CURRENT.task_id
+    assert resolved.source_span == TaskIntentSourceSpan(0, len(text))
+    assert resolved.target_binding == "current_background_task"
 
 
 @pytest.mark.parametrize(
@@ -249,8 +289,56 @@ def test_unified_low_confidence_or_negated_update_has_zero_task_route(
     assert resolved.instruction is None
 
 
-def test_unified_update_binds_exact_current_task_and_instruction_span() -> None:
-    text = "把第二天下午改成西湖，晚上给我留出自由时间。"
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("第二天下午不要改成西湖。", "NEGATED_UPDATE_KEEP_RUNNING"),
+        (
+            "第二天下午改成西湖还是灵隐寺。",
+            "AMBIGUOUS_OR_INCOMPLETE_UPDATE",
+        ),
+        (
+            "把第二天下午改成西湖还是灵隐寺。",
+            "AMBIGUOUS_OR_INCOMPLETE_UPDATE",
+        ),
+        (
+            "把当前行程改成西湖还是灵隐寺。",
+            "AMBIGUOUS_OR_INCOMPLETE_UPDATE",
+        ),
+        (
+            "把这个任务改成西湖吗？",
+            "AMBIGUOUS_OR_INCOMPLETE_UPDATE",
+        ),
+        ("将当前行程不要改成西湖。", "NEGATED_UPDATE_KEEP_RUNNING"),
+        ("第二天下午可以改成西湖吗？", "AMBIGUOUS_OR_INCOMPLETE_UPDATE"),
+        ("第二天下午改成西湖怎么样。", "AMBIGUOUS_OR_INCOMPLETE_UPDATE"),
+        ("第二天下午改成。", "AMBIGUOUS_OR_INCOMPLETE_UPDATE"),
+        ("第二天下午增加一下。", "AMBIGUOUS_OR_INCOMPLETE_UPDATE"),
+        ("第二天下午改一下。", "AMBIGUOUS_OR_INCOMPLETE_UPDATE"),
+    ],
+)
+def test_unified_implicit_update_rejects_non_actionable_forms(
+    text: str, reason: str
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is UnifiedCommittedInputRoute.DIALOGUE
+    assert resolved.reason == reason
+    assert resolved.task_id is None
+    assert resolved.instruction is None
+    assert resolved.source_span is None
+    assert resolved.target_binding is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "把第二天下午改成西湖，晚上给我留出自由时间。",
+        "第二天下午改成西湖，晚上给我留出自由时间。",
+    ],
+)
+def test_unified_update_binds_exact_current_task_and_instruction_span(
+    text: str,
+) -> None:
     resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
     assert resolved.route is UnifiedCommittedInputRoute.BACKGROUND_UPDATE
     assert resolved.task_id == CURRENT.task_id

@@ -3,6 +3,7 @@ export const PRODUCT_P2_CLOSE_METHOD = 'live_voice.composition.p2.close' as cons
 export const PRODUCT_P2_SUBMIT_METHOD = 'live_voice.composition.p2.submit' as const;
 export const PRODUCT_P2_NOTIFICATION_NEXT_METHOD = 'live_voice.composition.p2.notification.next' as const;
 export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.presentation.ack' as const;
+export const PRODUCT_P2_PRESENTATION_FAILED_METHOD = 'live_voice.composition.p2.presentation.failed' as const;
 export const PRODUCT_P2_BARGE_IN_METHOD = 'live_voice.composition.p2.barge_in' as const;
 export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
 export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
@@ -422,7 +423,13 @@ function requireResult(value: unknown, expectedStatus: 'active' | 'closed', bind
 
 function requireP2BoundOperationResult(
   value: unknown,
-  expectedStatus: 'round_accepted' | 'task_origin_accepted' | 'notification' | 'presentation_acknowledged' | 'barge_in_applied',
+  expectedStatus:
+    | 'round_accepted'
+    | 'task_origin_accepted'
+    | 'notification'
+    | 'presentation_acknowledged'
+    | 'presentation_failed_fallback_text'
+    | 'barge_in_applied',
   binding: Readonly<ProductWebP2ActivationBinding>,
 ): JsonObject {
   const payload = objectValue(value);
@@ -439,6 +446,121 @@ function requireP2BoundOperationResult(
     throw new Error(`product P2 ${expectedStatus} binding mismatch`);
   }
   return Object.freeze({ ...result });
+}
+
+const PRODUCT_P2_NOTIFICATION_BATCH_MAX = 16;
+const PRODUCT_P2_NOTIFICATION_BATCH_KEYS = Object.freeze([
+  'status',
+  'notifications',
+  'session_id',
+  'correlation_id',
+  'interaction_id',
+  'activation_id',
+  'activation_generation',
+] as const);
+const PRODUCT_P2_NOTIFICATION_ITEM_KEYS = Object.freeze([
+  'status',
+  'kind',
+  'request_id',
+  'round_id',
+  'response',
+  'agent_event',
+  'source_event',
+  'progress_event',
+  'presentation_unit',
+  'error_reason',
+  'publish_seq',
+  'session_id',
+  'correlation_id',
+  'interaction_id',
+  'activation_id',
+  'activation_generation',
+] as const);
+
+function isP2BatchObserver(notification: Readonly<Record<string, unknown>>): boolean {
+  const agentEvent = objectValue(notification.agent_event);
+  return (
+    agentEvent !== null &&
+    (agentEvent.event_type === 'chat.delta' || agentEvent.event_type === 'chat.reasoning') &&
+    agentEvent.error_reason === null &&
+    notification.source_event === null &&
+    notification.progress_event === null &&
+    notification.presentation_unit === null &&
+    notification.error_reason === null
+  );
+}
+
+function requireP2NotificationResult(
+  value: unknown,
+  binding: Readonly<ProductWebP2ActivationBinding>,
+  batchSize: number,
+  priorBatchPublishSeq: number | null,
+): readonly JsonObject[] {
+  const payload = objectValue(value);
+  const looseResult = objectValue(payload?.result);
+  if (payload?.ok !== true || looseResult === null) {
+    throw new Error('product P2 notification response is unavailable');
+  }
+  if (looseResult.status === 'notification') {
+    return Object.freeze([requireP2BoundOperationResult(value, 'notification', binding)]);
+  }
+  let result: Record<string, unknown>;
+  try {
+    result = exactRecord(looseResult, PRODUCT_P2_NOTIFICATION_BATCH_KEYS, 'product P2 notification batch');
+  } catch {
+    throw new Error('product P2 notification batch is invalid');
+  }
+  if (
+    result.status !== 'notification_batch' ||
+    result.session_id !== binding.session_id ||
+    result.correlation_id !== binding.correlation_id ||
+    result.interaction_id !== binding.interaction_id ||
+    result.activation_id !== binding.activation_id ||
+    result.activation_generation !== binding.activation_generation ||
+    !Array.isArray(result.notifications) ||
+    result.notifications.length < 1 ||
+    result.notifications.length > batchSize ||
+    result.notifications.length > PRODUCT_P2_NOTIFICATION_BATCH_MAX
+  ) {
+    throw new Error('product P2 notification batch binding is invalid');
+  }
+  const notifications: JsonObject[] = [];
+  let priorPublishSeq = priorBatchPublishSeq;
+  for (let index = 0; index < result.notifications.length; index += 1) {
+    let notification: Record<string, unknown>;
+    try {
+      notification = exactRecord(result.notifications[index], PRODUCT_P2_NOTIFICATION_ITEM_KEYS, 'product P2 notification batch item');
+    } catch {
+      throw new Error('product P2 notification batch item is invalid');
+    }
+    if (
+      notification.status !== 'notification' ||
+      notification.session_id !== binding.session_id ||
+      notification.correlation_id !== binding.correlation_id ||
+      notification.interaction_id !== binding.interaction_id ||
+      notification.activation_id !== binding.activation_id ||
+      notification.activation_generation !== binding.activation_generation
+    ) {
+      throw new Error('product P2 notification batch item binding is invalid');
+    }
+    const publishSeq = notification.publish_seq;
+    if (publishSeq !== null && (!Number.isSafeInteger(publishSeq) || (publishSeq as number) < 0)) {
+      throw new Error('product P2 notification batch order is invalid');
+    }
+    if (publishSeq === null) {
+      if (result.notifications.length !== 1) throw new Error('product P2 notification batch order is invalid');
+    } else {
+      if (priorPublishSeq !== null && (publishSeq as number) <= priorPublishSeq) {
+        throw new Error('product P2 notification batch order is invalid');
+      }
+      priorPublishSeq = publishSeq as number;
+    }
+    if (index < result.notifications.length - 1 && !isP2BatchObserver(notification)) {
+      throw new Error('product P2 notification batch barrier is invalid');
+    }
+    notifications.push(Object.freeze({ ...notification }));
+  }
+  return Object.freeze(notifications);
 }
 
 function requireDurableP2Envelope(operation: Readonly<ProductP2DurableOperation>, value: unknown): JsonObject {
@@ -754,6 +876,7 @@ export class ProductWebP2ActivationOwner {
   private readonly request: ProductWebRequest;
   private readonly durableOperationJournal?: ProductP2DurableOperationJournal;
   private readonly onSnapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
+  private readonly notificationBatchSize: number;
   private binding: ProductWebP2ActivationBinding | null = null;
   private status: ProductWebP2ActivationStatus;
   private reason: string | null = null;
@@ -769,23 +892,33 @@ export class ProductWebP2ActivationOwner {
   private readonly closeRetryObservers = new Set<ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>>();
   private readonly submissions = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly presentationAcks = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
+  private readonly presentationFailures = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly bargeIns = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly submissionReplayFence = new ProductReplayFence();
   private readonly presentationAckReplayFence = new ProductReplayFence();
+  private readonly presentationFailureReplayFence = new ProductReplayFence();
   private readonly bargeInReplayFence = new ProductReplayFence();
   private notificationRequestId: string | null = null;
   private notificationPromise: Promise<JsonObject> | null = null;
   private notificationSequence = 0;
+  private notificationQueue: JsonObject[] = [];
+  private lastNotificationPublishSeq: number | null = null;
 
   constructor(input: {
     enabled: boolean;
     request: ProductWebRequest;
     on_snapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
     durable_operation_journal?: ProductP2DurableOperationJournal;
+    notification_batch_size?: number;
   }) {
     if (typeof input.request !== 'function') throw new Error('product request owner is required');
+    const notificationBatchSize = input.notification_batch_size ?? 1;
+    if (!Number.isSafeInteger(notificationBatchSize) || notificationBatchSize < 1 || notificationBatchSize > PRODUCT_P2_NOTIFICATION_BATCH_MAX) {
+      throw new Error('product notification batch size is invalid');
+    }
     this.enabled = input.enabled;
     this.request = input.request;
+    this.notificationBatchSize = notificationBatchSize;
     this.durableOperationJournal = input.durable_operation_journal;
     this.onSnapshot = input.on_snapshot;
     this.status = input.enabled ? 'idle' : 'disabled';
@@ -947,6 +1080,10 @@ export class ProductWebP2ActivationOwner {
     return [...this.presentationAcks.values()].some(entry => entry.result === undefined);
   }
 
+  hasPendingPresentationFailure(): boolean {
+    return [...this.presentationFailures.values()].some(entry => entry.result === undefined);
+  }
+
   hasPendingBargeIn(): boolean {
     return [...this.bargeIns.values()].some(entry => entry.result === undefined);
   }
@@ -1031,16 +1168,36 @@ export class ProductWebP2ActivationOwner {
 
   async nextNotification(): Promise<JsonObject> {
     const binding = this.requireActiveBinding();
+    const queued = this.notificationQueue.shift();
+    if (queued !== undefined) return queued;
     if (this.notificationPromise) return this.notificationPromise;
     if (this.notificationRequestId === null) {
       this.notificationRequestId = allocateProductRequestId('live-voice-p2-notification');
       this.notificationSequence += 1;
     }
     const requestId = this.notificationRequestId;
+    const params = {
+      ...binding,
+      notification_sequence: this.notificationSequence,
+      ...(this.notificationBatchSize > 1 ? { max_notifications: this.notificationBatchSize } : {}),
+    };
     let promise: Promise<JsonObject>;
-    promise = this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, { ...binding, notification_sequence: this.notificationSequence }, requestId)
+    promise = this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, params, requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(value, 'notification', binding);
+        if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
+          throw new Error('product P2 notification owner is no longer current');
+        }
+        const notifications = requireP2NotificationResult(value, binding, this.notificationBatchSize, this.lastNotificationPublishSeq);
+        const [result, ...tail] = notifications;
+        if (result === undefined) throw new Error('product P2 notification batch is empty');
+        for (let index = notifications.length - 1; index >= 0; index -= 1) {
+          const publishSeq = notifications[index].publish_seq;
+          if (typeof publishSeq === 'number') {
+            this.lastNotificationPublishSeq = publishSeq;
+            break;
+          }
+        }
+        this.notificationQueue.push(...tail);
         this.notificationRequestId = null;
         return result;
       })
@@ -1141,7 +1298,7 @@ export class ProductWebP2ActivationOwner {
       if (this.presentationAckReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed presentation ACK replay has expired'));
       }
-      if (this.hasPendingPresentationAck()) {
+      if (this.hasPendingPresentationAck() || this.hasPendingPresentationFailure()) {
         return Promise.reject(new Error('a previous presentation ACK is still unresolved'));
       }
       if (this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.presentationAcks, this.presentationAckReplayFence)) {
@@ -1175,11 +1332,90 @@ export class ProductWebP2ActivationOwner {
     return promise;
   }
 
+  async failTaskPresentation(input: {
+    response_id: string;
+    response_generation: number;
+    surface: 'audio';
+    unit_id: string;
+    failure_reason: 'task_audio_playout_failed' | 'task_audio_owner_unavailable';
+  }): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    if (
+      !Number.isSafeInteger(input.response_generation) ||
+      input.response_generation < 0 ||
+      input.surface !== 'audio' ||
+      (input.failure_reason !== 'task_audio_playout_failed' && input.failure_reason !== 'task_audio_owner_unavailable')
+    ) {
+      return Promise.reject(new Error('presentation failure binding is invalid'));
+    }
+    const params = {
+      ...binding,
+      response_id: requiredText(input.response_id, 'response_id'),
+      response_generation: input.response_generation,
+      surface: input.surface,
+      unit_id: requiredText(input.unit_id, 'unit_id'),
+      failure_reason: input.failure_reason,
+    };
+    const fingerprint = JSON.stringify(params);
+    let retained = this.presentationFailures.get(fingerprint);
+    if (retained?.result) return Promise.resolve(retained.result);
+    if (retained?.promise) return retained.promise;
+    if (!retained) {
+      if (this.presentationFailureReplayFence.has(fingerprint)) {
+        return Promise.reject(new Error('completed presentation failure replay has expired'));
+      }
+      if (this.hasPendingPresentationAck() || this.hasPendingPresentationFailure()) {
+        return Promise.reject(new Error('a previous presentation settlement is still unresolved'));
+      }
+      if (
+        this.presentationFailures.size >= PRODUCT_OPERATION_CAPACITY &&
+        !evictCompletedProductOperation(this.presentationFailures, this.presentationFailureReplayFence)
+      ) {
+        return Promise.reject(new Error('bounded presentation failure ledger is full'));
+      }
+      retained = { requestId: allocateProductRequestId('live-voice-p2-presentation-failed') };
+      this.presentationFailures.set(fingerprint, retained);
+    }
+    const entry = retained;
+    let promise: Promise<JsonObject>;
+    promise = this.request(PRODUCT_P2_PRESENTATION_FAILED_METHOD, params, entry.requestId)
+      .then(value => {
+        const result = requireP2BoundOperationResult(value, 'presentation_failed_fallback_text', binding);
+        if (
+          result.response_id !== params.response_id ||
+          result.response_generation !== params.response_generation ||
+          result.surface !== 'audio' ||
+          result.unit_id !== params.unit_id ||
+          result.failure_reason !== params.failure_reason ||
+          result.fallback !== 'text' ||
+          typeof result.replayed !== 'boolean'
+        ) {
+          throw new Error('product P2 presentation failure result binding is invalid');
+        }
+        entry.result = result;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) this.presentationFailures.delete(fingerprint);
+        throw error;
+      })
+      .finally(() => {
+        if (entry.promise === promise) entry.promise = undefined;
+      });
+    entry.promise = promise;
+    return promise;
+  }
+
   close(): Promise<ProductWebP2ActivationSnapshot> {
     if (!this.enabled) {
+      this.notificationQueue = [];
+      this.lastNotificationPublishSeq = null;
       this.status = 'disabled';
       return Promise.resolve(this.publish());
     }
+    this.notificationQueue = [];
+    this.lastNotificationPublishSeq = null;
+    this.notificationRequestId = null;
     if (this.closePromise) return this.closePromise;
     // Publish the lifecycle fence synchronously. Awaited activation/authority
     // work may settle later, but no continuation may start a new media effect.

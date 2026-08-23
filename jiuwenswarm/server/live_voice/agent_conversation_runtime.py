@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import threading
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -73,6 +74,7 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationState,
     PresentationSurface,
     PresentationUnit,
+    TaskPresentationRuntimeReceipt,
 )
 from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressNotificationIntent,
@@ -86,6 +88,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 
 _MAX_NOTIFICATION_CONSUMER_ID_CHARS = 256
 _MAX_NOTIFICATION_CONSUMER_ID_UTF8_BYTES = 1024
+_MAX_NOTIFICATION_BATCH = 16
 _MAX_EFFECT_ID_CHARS = 256
 _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
@@ -119,6 +122,7 @@ class AuthoritativePresentationHandle:
     request_id: str
     round_id: str
     response_ref: ResponseRef
+    presentation_unit: PresentationUnit
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +281,24 @@ class _BoundedNotificationBuffer:
                     return_exceptions=True,
                 )
 
+    def get_nowait(
+        self,
+        *,
+        lease_active: Callable[[], bool] | None = None,
+        detached: asyncio.Event | None = None,
+    ) -> AgentConversationNotification | None:
+        if (
+            (lease_active is not None and not lease_active())
+            or (detached is not None and detached.is_set())
+        ):
+            raise _NotificationConsumerDetached
+        queued = self._pop_next()
+        if queued is None:
+            return None
+        self._delivered_total += 1
+        self._last_delivered_seq = queued.publish_seq
+        return queued.notification
+
     def close(self) -> None:
         self._closed = True
         self._ready.set()
@@ -291,6 +313,24 @@ class _BoundedNotificationBuffer:
         )
         discarded = len(self._critical) - len(retained)
         self._critical = retained
+        if not self._observer and not self._critical:
+            self._ready.clear()
+        return discarded
+
+    def discard_presentation(self, ref: ResponseRef) -> int:
+        """Remove only the queued notice for one invalidated response."""
+
+        discarded = 0
+        for name in ("_critical", "_observer"):
+            source = getattr(self, name)
+            retained = deque(
+                queued
+                for queued in source
+                if queued.notification.response_ref != ref
+                or queued.notification.presentation_unit is None
+            )
+            discarded += len(source) - len(retained)
+            setattr(self, name, retained)
         if not self._observer and not self._critical:
             self._ready.clear()
         return discarded
@@ -431,6 +471,22 @@ class _AdmissionOutcome:
 
 
 @dataclass(slots=True)
+class _TaskPresentationReservation:
+    reservation_id: str
+    unit: PresentationUnit
+    active: bool = True
+    failure_reason: str | None = None
+    failure_pending: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ClosedTaskPresentationReservation:
+    reservation_id: str
+    unit: PresentationUnit
+    failure_reason: str | None
+
+
+@dataclass(slots=True)
 class _AdmissionEntry:
     fingerprint: bytes
     harness_reservation: HarnessRoundReservation
@@ -490,6 +546,7 @@ class _ResponseOutputState:
     handle: HarnessRoundHandle | None
     unit_contents: dict[str, bytes]
     source_provenance: str = "server.agent"
+    notification_published: bool = True
     total_utf8: int = 0
     usable_finals: int = 0
     terminal_outcome: TerminalOutcome | None = None
@@ -651,6 +708,13 @@ class AgentConversationRuntime:
             tuple[PresentationHistoryIntent, str, str],
         ] = {}
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
+        self._task_presentation_reservations: dict[
+            ResponseRef, _TaskPresentationReservation
+        ] = {}
+        self._closed_task_presentation_reservations: dict[
+            ResponseRef, _ClosedTaskPresentationReservation
+        ] = {}
+        self._closed_task_presentation_order: deque[ResponseRef] = deque()
         self._history_tasks: set[asyncio.Task[None]] = set()
         self._notification_consumer_epochs: dict[str, int] = {}
         self._active_notification_lease: _NotificationLeaseRecord | None = None
@@ -666,6 +730,7 @@ class AgentConversationRuntime:
         self._max_effect_batch = _MAX_EFFECTS_PER_REQUEST * max_requests
         self._start_lock = asyncio.Lock()
         self._identity_claim_lock = asyncio.Lock()
+        self._task_presentation_lock = threading.RLock()
         self._close_requested = False
         self._ack_lock = asyncio.Lock()
         self._effect_lock = asyncio.Lock()
@@ -742,8 +807,9 @@ class AgentConversationRuntime:
 
         The formal Agent route deliberately has no implicit Session History.  This
         selector therefore exposes only prior committed user text paired with an
-        assistant TEXT span that CR has actually marked presented.  Tool events,
-        reasoning, raw audio and unacknowledged output never enter the snapshot.
+        Agent-produced assistant TEXT span that CR has actually marked presented.
+        Authoritative Task/control presentations, Tool events, reasoning, raw audio
+        and unacknowledged output never enter the snapshot.
         """
 
         self._require_admission()
@@ -795,6 +861,8 @@ class AgentConversationRuntime:
                 response_ref.interaction_id != interaction_id
                 or state.commit.interaction_id != interaction_id
                 or state.commit.scope != self._scope
+                or state.handle is None
+                or state.source_provenance != "server.agent"
             ):
                 continue
             units = sorted(
@@ -1281,6 +1349,8 @@ class AgentConversationRuntime:
         latency_probe: object | None = None,
         _persist_user_history: bool = True,
         _source_provenance: str = "server.authoritative",
+        _presentation_surface: PresentationSurface = PresentationSurface.TEXT,
+        _publish_notification: bool = True,
     ) -> AuthoritativePresentationHandle:
         """Publish bounded server truth through the normal presentation owner."""
 
@@ -1296,6 +1366,27 @@ class AgentConversationRuntime:
             raise AgentConversationRuntimeViolation(
                 "INVALID_AUTHORITATIVE_PRESENTATION",
                 "authoritative presentation text must be non-empty",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if not isinstance(_presentation_surface, PresentationSurface):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AUTHORITATIVE_PRESENTATION_SURFACE",
+                "authoritative presentation surface must be text or audio",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(_publish_notification) is not bool:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AUTHORITATIVE_PRESENTATION",
+                "authoritative presentation publish mode must be exact",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            _presentation_surface is PresentationSurface.AUDIO
+            and _source_provenance != "server.task_notification"
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AUTHORITATIVE_PRESENTATION_SURFACE",
+                "audio authoritative presentation is reserved for Task notifications",
                 ErrorCode.INVALID_ARGUMENT,
             )
         try:
@@ -1340,7 +1431,7 @@ class AgentConversationRuntime:
                         record
                         for record in loop_snapshot.presentation.records
                         if record.unit.ref == prior_response.ref
-                        and record.unit.surface is PresentationSurface.TEXT
+                        and record.unit.surface is _presentation_surface
                     )
                 )
                 exact_replay = (
@@ -1360,6 +1451,7 @@ class AgentConversationRuntime:
                     and prior_output.channel_id == channel_id
                     and prior_output.handle is None
                     and prior_output.source_provenance == _source_provenance
+                    and prior_output.notification_published is _publish_notification
                     and prior_output.terminal_outcome is TerminalOutcome.COMPLETED
                     and tuple(prior_output.unit_contents.values()) == (content,)
                     and len(prior_units) == 1
@@ -1374,6 +1466,7 @@ class AgentConversationRuntime:
                         request_id=request_id,
                         round_id=f"authoritative:{request_id}",
                         response_ref=prior_response.ref,
+                        presentation_unit=prior_units[0].unit,
                     )
                 raise AgentConversationRuntimeViolation(
                     "AUTHORITATIVE_PRESENTATION_IDENTITY_CONFLICT",
@@ -1394,7 +1487,7 @@ class AgentConversationRuntime:
                 response_ref, _event = await self._cr.accept_response(
                     commit.turn_id,
                     response_id,
-                    history_policy=HistorySurfacePolicy.TEXT,
+                    history_policy=HistorySurfacePolicy(_presentation_surface.value),
                     response_generation=response_generation,
                 )
                 await self._cr.transition_response(
@@ -1403,8 +1496,15 @@ class AgentConversationRuntime:
                 digest = hashlib.sha256(content).hexdigest()
                 unit = PresentationUnit(
                     ref=response_ref,
-                    surface=PresentationSurface.TEXT,
-                    unit_id=f"authoritative-final:{request_id.encode('utf-8').hex()}:0",
+                    surface=_presentation_surface,
+                    unit_id=(
+                        f"authoritative-final:{request_id.encode('utf-8').hex()}:0"
+                        if _presentation_surface is PresentationSurface.TEXT
+                        else (
+                            "authoritative-audio-final:"
+                            f"{request_id.encode('utf-8').hex()}:0"
+                        )
+                    ),
                     seq=0,
                     source_start_utf8=0,
                     source_end_utf8=len(content),
@@ -1417,6 +1517,7 @@ class AgentConversationRuntime:
                     handle=None,
                     unit_contents={unit.unit_id: content},
                     source_provenance=_source_provenance,
+                    notification_published=_publish_notification,
                     total_utf8=len(content),
                     usable_finals=1,
                     terminal_outcome=TerminalOutcome.COMPLETED,
@@ -1425,13 +1526,14 @@ class AgentConversationRuntime:
                 self._outputs[response_ref] = state
                 await self._cr.produce_unit(unit)
                 await self._cr.enqueue_unit(
-                    response_ref, PresentationSurface.TEXT, unit.unit_id
+                    response_ref, _presentation_surface, unit.unit_id
                 )
                 _mark_output_latency(state, "agent.presentation_produced")
                 presentation_handle = AuthoritativePresentationHandle(
                     request_id=request_id,
                     round_id=f"authoritative:{request_id}",
                     response_ref=response_ref,
+                    presentation_unit=unit,
                 )
                 if before_publish is not None:
                     await before_publish(presentation_handle)
@@ -1445,19 +1547,20 @@ class AgentConversationRuntime:
                     source_provenance=_source_provenance,
                     text=text,
                 )
-                self._publish(
-                    AgentConversationNotification(
-                        kind="agent.output",
-                        request_id=request_id,
-                        round_id=f"authoritative:{request_id}",
-                        response_ref=response_ref,
-                        agent_event=event,
-                        presentation_unit=unit,
-                    ),
-                    critical_key=("presentation", request_id),
-                )
-                _mark_output_latency(state, "agent.presentation_dispatched")
-                _finish_output_latency(state, "completed")
+                if _publish_notification:
+                    self._publish(
+                        AgentConversationNotification(
+                            kind="agent.output",
+                            request_id=request_id,
+                            round_id=f"authoritative:{request_id}",
+                            response_ref=response_ref,
+                            agent_event=event,
+                            presentation_unit=unit,
+                        ),
+                        critical_key=("presentation", request_id),
+                    )
+                    _mark_output_latency(state, "agent.presentation_dispatched")
+                    _finish_output_latency(state, "completed")
                 await self._cr.transition_response(
                     response_ref,
                     ResponseState.TERMINAL,
@@ -1476,7 +1579,344 @@ class AgentConversationRuntime:
                 _finish_latency_probe(latency_probe, "failed")
                 if response_ref is None:
                     self._release_product_identity(claim)
+                else:
+                    try:
+                        response = next(
+                            (
+                                item
+                                for item in self._cr.snapshot().conversation.responses
+                                if item.ref == response_ref
+                            ),
+                            None,
+                        )
+                        if (
+                            response is not None
+                            and response.state is not ResponseState.TERMINAL
+                        ):
+                            await self._cr.transition_response(
+                                response_ref,
+                                ResponseState.TERMINAL,
+                                outcome=TerminalOutcome.INTERRUPTED,
+                            )
+                    except BaseException:
+                        # The original failure remains authoritative.  A failed
+                        # settlement keeps the identity claimed so it can never
+                        # be reused as a successful presentation.
+                        pass
                 raise
+
+    def _close_task_presentation_reservation(
+        self,
+        response_ref: ResponseRef,
+        retained: _TaskPresentationReservation,
+        *,
+        failure_reason: str | None = None,
+    ) -> _ClosedTaskPresentationReservation:
+        """Move one settled reservation into the bounded closed fence."""
+
+        active = self._task_presentation_reservations.get(response_ref)
+        if active is retained:
+            self._task_presentation_reservations.pop(response_ref)
+        retained.active = False
+        retained.failure_pending = False
+        if failure_reason is not None:
+            retained.failure_reason = failure_reason
+        closed = _ClosedTaskPresentationReservation(
+            reservation_id=retained.reservation_id,
+            unit=retained.unit,
+            failure_reason=retained.failure_reason,
+        )
+        if response_ref not in self._closed_task_presentation_reservations:
+            self._closed_task_presentation_order.append(response_ref)
+        self._closed_task_presentation_reservations[response_ref] = closed
+        while len(self._closed_task_presentation_order) > self._max_requests:
+            evicted = self._closed_task_presentation_order.popleft()
+            self._closed_task_presentation_reservations.pop(evicted, None)
+            self._outputs.pop(evicted, None)
+        return closed
+
+    def task_presentation_runtime_authority(
+        self,
+        response_ref: ResponseRef,
+        reservation_id: str | None,
+        phase: str,
+    ) -> TaskPresentationRuntimeReceipt:
+        """Own one exact Task-notification response reservation and close fence."""
+
+        if not isinstance(response_ref, ResponseRef):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_TASK_PRESENTATION_RESPONSE",
+                "Task presentation authority requires an exact response tuple",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if phase not in {
+            "reserve",
+            "text_adopt",
+            "voice_presented",
+            "consume",
+            "close",
+        }:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_TASK_PRESENTATION_PHASE",
+                "Task presentation phase is not closed",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._task_presentation_lock:
+            retained = self._task_presentation_reservations.get(response_ref)
+            closed = self._closed_task_presentation_reservations.get(response_ref)
+            if phase == "reserve":
+                if reservation_id is not None:
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESERVATION_CONFLICT",
+                        "a new reservation cannot supply its own identity",
+                        ErrorCode.CONFLICT,
+                    )
+                if self._close_requested or self._shutdown is not None or self._closed:
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESERVATION_CLOSED",
+                        "a closing Runtime cannot reserve Task presentation",
+                        ErrorCode.CONFLICT,
+                    )
+                if closed is not None:
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESERVATION_CLOSED",
+                        "Task presentation reservation cannot be rebound or revived",
+                        ErrorCode.CONFLICT,
+                    )
+                state = self._outputs.get(response_ref)
+                snapshot = self._cr.snapshot()
+                units = tuple(
+                    record.unit
+                    for record in snapshot.presentation.records
+                    if record.unit.ref == response_ref
+                    and record.state
+                    in {PresentationState.ENQUEUED, PresentationState.PRESENTED}
+                )
+                if (
+                    state is None
+                    or state.source_provenance != "server.task_notification"
+                    or len(units) != 1
+                    or units[0].unit_id not in state.unit_contents
+                ):
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESPONSE_UNAVAILABLE",
+                        "reservation requires one exact Runtime-owned Task presentation",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                unit = units[0]
+                if retained is None:
+                    if len(self._task_presentation_reservations) >= self._max_requests:
+                        raise AgentConversationRuntimeViolation(
+                            "TASK_PRESENTATION_RESERVATION_CAPACITY_EXHAUSTED",
+                            "the bounded Task presentation reserve is exhausted",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    digest = hashlib.sha256(
+                        canonical_json_bytes(
+                            {
+                                "runtime_instance_id": self._instance_id,
+                                "response": {
+                                    "interaction_id": response_ref.interaction_id,
+                                    "response_id": response_ref.response_id,
+                                    "response_generation": (
+                                        response_ref.response_generation
+                                    ),
+                                },
+                                "surface": unit.surface.value,
+                                "unit_id": unit.unit_id,
+                            }
+                        )
+                    ).hexdigest()
+                    retained = _TaskPresentationReservation(
+                        reservation_id=f"task-presentation-{digest}",
+                        unit=unit,
+                    )
+                    self._task_presentation_reservations[response_ref] = retained
+                elif retained.unit != unit or not retained.active:
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESERVATION_CLOSED",
+                        "Task presentation reservation cannot be rebound or revived",
+                        ErrorCode.CONFLICT,
+                    )
+                return TaskPresentationRuntimeReceipt(
+                    response_ref=response_ref,
+                    reservation_id=retained.reservation_id,
+                    phase=phase,
+                    active=True,
+                )
+
+            if retained is None:
+                if (
+                    closed is not None
+                    and isinstance(reservation_id, str)
+                    and reservation_id == closed.reservation_id
+                ):
+                    if phase == "close":
+                        return TaskPresentationRuntimeReceipt(
+                            response_ref=response_ref,
+                            reservation_id=closed.reservation_id,
+                            phase=phase,
+                            active=False,
+                        )
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESERVATION_CLOSED",
+                        "Task presentation reservation is closed",
+                        ErrorCode.CONFLICT,
+                    )
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_RESERVATION_MISMATCH",
+                    "Task presentation phase requires the exact Runtime reservation",
+                    ErrorCode.STALE,
+                )
+            if (
+                not isinstance(reservation_id, str)
+                or reservation_id != retained.reservation_id
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_RESERVATION_MISMATCH",
+                    "Task presentation phase requires the exact Runtime reservation",
+                    ErrorCode.STALE,
+                )
+            if retained.failure_pending:
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_FAILURE_PENDING",
+                    "Task presentation failure already owns settlement",
+                    ErrorCode.CONFLICT,
+                )
+            if phase == "close":
+                closed = self._close_task_presentation_reservation(
+                    response_ref, retained
+                )
+                return TaskPresentationRuntimeReceipt(
+                    response_ref=response_ref,
+                    reservation_id=closed.reservation_id,
+                    phase=phase,
+                    active=False,
+                )
+            if (
+                not retained.active
+                or self._close_requested
+                or self._shutdown is not None
+                or self._closed
+            ):
+                retained.active = False
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_RESERVATION_CLOSED",
+                    "Task presentation reservation is closed",
+                    ErrorCode.CONFLICT,
+                )
+            if (
+                phase == "text_adopt"
+                and retained.unit.surface is not PresentationSurface.TEXT
+            ) or (
+                phase == "voice_presented"
+                and retained.unit.surface is not PresentationSurface.AUDIO
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_SURFACE_MISMATCH",
+                    "Task presentation phase does not match the Runtime surface",
+                    ErrorCode.CONFLICT,
+                )
+            return TaskPresentationRuntimeReceipt(
+                response_ref=response_ref,
+                reservation_id=retained.reservation_id,
+                phase=phase,
+                active=True,
+            )
+
+    async def fail_task_presentation(
+        self,
+        response_ref: ResponseRef,
+        reservation_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Invalidate one failed Task playout without accepting presentation."""
+
+        if reason not in {
+            "task_audio_playout_failed",
+            "task_audio_owner_unavailable",
+        }:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_TASK_PRESENTATION_FAILURE",
+                "Task presentation failure reason is not closed",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._task_presentation_lock:
+            retained = self._task_presentation_reservations.get(response_ref)
+            closed = self._closed_task_presentation_reservations.get(response_ref)
+            if retained is None:
+                if (
+                    closed is not None
+                    and closed.reservation_id == reservation_id
+                    and closed.unit.surface is PresentationSurface.AUDIO
+                ):
+                    if closed.failure_reason is not None:
+                        if closed.failure_reason != reason:
+                            raise AgentConversationRuntimeViolation(
+                                "TASK_PRESENTATION_FAILURE_REWRITE",
+                                "Task presentation failure reason cannot be rewritten",
+                                ErrorCode.CONFLICT,
+                            )
+                        return False
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_RESERVATION_CLOSED",
+                        "Task presentation failure lost the close race",
+                        ErrorCode.STALE,
+                    )
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_RESERVATION_MISMATCH",
+                    "Task presentation failure requires the exact audio reservation",
+                    ErrorCode.STALE,
+                )
+            if (
+                retained.reservation_id != reservation_id
+                or retained.unit.surface is not PresentationSurface.AUDIO
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_RESERVATION_MISMATCH",
+                    "Task presentation failure requires the exact audio reservation",
+                    ErrorCode.STALE,
+                )
+            if retained.failure_reason is not None:
+                if retained.failure_reason != reason:
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_PRESENTATION_FAILURE_REWRITE",
+                        "Task presentation failure reason cannot be rewritten",
+                        ErrorCode.CONFLICT,
+                    )
+                return False
+            if not retained.active or retained.failure_pending:
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_RESERVATION_CLOSED",
+                    "Task presentation failure lost the close race",
+                    ErrorCode.STALE,
+                )
+            retained.failure_pending = True
+        try:
+            await self._cr.invalidate_presentation(response_ref, reason=reason)
+        except BaseException:
+            with self._task_presentation_lock:
+                retained.failure_pending = False
+            raise
+        with self._task_presentation_lock:
+            if (
+                self._task_presentation_reservations.get(response_ref) is not retained
+                or not retained.active
+                or not retained.failure_pending
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "TASK_PRESENTATION_FAILURE_SETTLEMENT_LOST",
+                    "Task presentation failure lost its exact settlement claim",
+                    ErrorCode.STALE,
+                )
+            self._close_task_presentation_reservation(
+                response_ref,
+                retained,
+                failure_reason=reason,
+            )
+        self._notifications.discard_presentation(response_ref)
+        return True
 
     def task_notification_foreground_safe(self) -> bool:
         """Report whether a new Task notification response may be allocated.
@@ -2029,6 +2469,55 @@ class AgentConversationRuntime:
                 "the notification producer is closed and its retained buffer is empty",
                 ErrorCode.UNAVAILABLE,
             ) from error
+
+    async def drain_notifications_for(
+        self,
+        lease: AgentConversationNotificationLease,
+        *,
+        limit: int,
+    ) -> tuple[AgentConversationNotification, ...]:
+        """Drain only notifications already queued for one exact lease."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_NOTIFICATION_BATCH:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NOTIFICATION_BATCH_LIMIT",
+                "notification batch limit must be an integer from 1 to 16",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        record = self._require_notification_lease(
+            lease,
+            require_active=not (
+                self._notifications.closed
+                and self._active_notification_lease is not None
+                and self._active_notification_lease.drain_after_close
+            ),
+        )
+        drained: list[AgentConversationNotification] = []
+        try:
+            for _ in range(limit):
+                notification = self._notifications.get_nowait(
+                    lease_active=lambda: (
+                        self._active_notification_lease is record
+                        and (
+                            record.active
+                            or (
+                                self._notifications.closed
+                                and record.drain_after_close
+                            )
+                        )
+                    ),
+                    detached=record.detached,
+                )
+                if notification is None:
+                    break
+                drained.append(notification)
+        except _NotificationConsumerDetached as error:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_DETACHED",
+                "notification consumer lease is detached or superseded",
+                ErrorCode.STALE,
+            ) from error
+        return tuple(drained)
 
     async def claim_conversation_effects(
         self,

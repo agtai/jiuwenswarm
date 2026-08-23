@@ -1164,7 +1164,7 @@ async def test_media_handshake_rejects_wrong_origin_even_when_general_check_is_o
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
 
     response = await channel._process_request(
-        "/ws/live-voice/media/private-ticket",
+        "/ws/live-voice/media",
         {"Origin": "https://attacker.example.test"},
     )
 
@@ -1180,7 +1180,7 @@ async def test_media_handshake_rejects_missing_origin_even_when_general_check_is
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
 
     response = await channel._process_request(
-        "/ws/live-voice/media/private-ticket",
+        "/ws/live-voice/media",
         {},
     )
 
@@ -1188,23 +1188,10 @@ async def test_media_handshake_rejects_missing_origin_even_when_general_check_is
     assert int(response[0]) == 403
 
 
-@pytest.mark.parametrize(
-    "request_path",
-    ["/ws/live-voice/media", "/ws/live-voice/media/private-ticket"],
-)
 @pytest.mark.asyncio
-async def test_dispatcher_routes_every_accepted_media_path_to_the_media_leaf(
+async def test_dispatcher_routes_only_the_fixed_media_path_to_the_media_leaf(
     monkeypatch: pytest.MonkeyPatch,
-    request_path: str,
 ) -> None:
-    """The dispatcher must accept exactly what the handshake accepted.
-
-    ``activate`` returns the fixed ``/ws/live-voice/media`` path with a
-    first-frame ticket unless legacy path compatibility is on. A dispatcher
-    that matches only the legacy trailing-slash prefix passes the handshake and
-    then closes every real media socket with ``unsupported path``.
-    """
-
     monkeypatch.setenv("JIUWENSWARM_ENABLE_ORIGIN_CHECK", "0")
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
     channel.live_voice_media_registry = _active_registry()
@@ -1222,6 +1209,7 @@ async def test_dispatcher_routes_every_accepted_media_path_to_the_media_leaf(
     async def record_close(code: int = 1000, reason: str = "") -> None:
         closed.append((code, reason))
 
+    request_path = "/ws/live-voice/media"
     socket = SimpleNamespace(close=record_close, path=request_path)
 
     assert (await channel._process_request(request_path, {"Origin": ORIGIN})) is None
@@ -1229,6 +1217,73 @@ async def test_dispatcher_routes_every_accepted_media_path_to_the_media_leaf(
 
     assert routed == [request_path]
     assert closed == []
+
+
+@pytest.mark.asyncio
+async def test_ticket_like_media_path_is_not_route_authority_or_registry_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_ENABLE_ORIGIN_CHECK", "0")
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    registry = _active_registry()
+    channel.live_voice_media_registry = registry
+    routed: list[str] = []
+    closed: list[tuple[int, str]] = []
+
+    async def fake_leaf(_registry: object, _ws: object, path: str) -> bool:
+        routed.append(path)
+        return True
+
+    monkeypatch.setattr(
+        dedicated_media_registration, "handle_registered_media_socket", fake_leaf
+    )
+
+    async def record_close(code: int = 1000, reason: str = "") -> None:
+        closed.append((code, reason))
+
+    request_path = "/ws/live-voice/media/private-ticket"
+    before = (len(registry._records), len(registry._pending_tickets))
+    socket = SimpleNamespace(close=record_close, path=request_path)
+
+    assert (await channel._process_request(request_path, {"Origin": ORIGIN})) is None
+    await channel._connection_handler(socket, request_path)
+
+    assert routed == []
+    assert closed == [(1008, "unsupported path: /ws/live-voice/media/<redacted>")]
+    assert "private-ticket" not in repr(closed)
+    assert (len(registry._records), len(registry._pending_tickets)) == before
+
+
+@pytest.mark.asyncio
+async def test_media_handler_rejects_ticket_path_before_any_effect() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    ticket = _media_ticket(activation)
+    before = (len(registry._records), len(registry._pending_tickets))
+
+    class _PoisonSocket:
+        @property
+        def subprotocol(self) -> str:
+            raise AssertionError("rejected path must not inspect the socket")
+
+        async def recv(self) -> object:
+            raise AssertionError("rejected path must not read credentials")
+
+        async def close(self, _code: int = 1000, _reason: str = "") -> None:
+            raise AssertionError("rejected path is not an accepted media socket")
+
+    assert not await handle_registered_media_socket(
+        registry,
+        _PoisonSocket(),
+        f"/ws/live-voice/media/{ticket}",
+    )
+    assert (len(registry._records), len(registry._pending_tickets)) == before
+    assert registry.consume_ticket(ticket, request_origin=ORIGIN) is not None
 
 
 @pytest.mark.asyncio
@@ -1477,11 +1532,11 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
 
 
 @pytest.mark.parametrize(
-    ("accept_real_frame", "expected_duplex"),
-    ((False, False), (True, True)),
+    ("successor_frame_timing", "expected_duplex"),
+    (("none", False), ("before_downlink_complete", True), ("after_downlink_complete", False)),
 )
-def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_receipt(
-    accept_real_frame: bool, expected_duplex: bool
+def test_synthesis_downlink_receipt_reports_early_duplex_without_rejecting_playout(
+    successor_frame_timing: str, expected_duplex: bool
 ) -> None:
     registry = _active_registry()
     activation = _activate(
@@ -1600,34 +1655,38 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
     next_ticket = _media_ticket(next_activation)
     next_uplink = registry.consume_ticket(next_ticket, request_origin=ORIGIN)
     assert next_uplink is not None
+    assert parent.barge_in_capture is False
+    assert next_uplink.barge_in_capture is True
     registry.mark_downlink_started(downlink)
     assert downlink.downlink_overlap_record_id == next_uplink.record_id
     assert downlink.downlink_overlap_observed is False
-    if accept_real_frame:
+    if successor_frame_timing == "before_downlink_complete":
         registry.accept_frame(
             next_uplink,
             MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
         )
-    assert (
-        registry.complete_downlink(
-            downlink,
-            DedicatedMediaSocketLeafResult(
-                activated=True,
-                socket_touched=True,
-                attach_sent=True,
-                accepted_frames=0,
-                close_result=None,
-                reason_id=MediaDetachReason.LOCAL_CLOSE,
-                sent_frames=1,
-                acknowledged_through_seq=0,
-                configured_max_pending_frames=8,
-                configured_max_pending_bytes=131_072,
-                peak_pending_frames=1,
-                peak_pending_bytes=1_320,
-            ),
-        )
-        is expected_duplex
+    assert registry.complete_downlink(
+        downlink,
+        DedicatedMediaSocketLeafResult(
+            activated=True,
+            socket_touched=True,
+            attach_sent=True,
+            accepted_frames=0,
+            close_result=None,
+            reason_id=MediaDetachReason.LOCAL_CLOSE,
+            sent_frames=1,
+            acknowledged_through_seq=0,
+            configured_max_pending_frames=8,
+            configured_max_pending_bytes=131_072,
+            peak_pending_frames=1,
+            peak_pending_bytes=1_320,
+        ),
     )
+    if successor_frame_timing == "after_downlink_complete":
+        registry.accept_frame(
+            next_uplink,
+            MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+        )
     assert downlink.downlink_overlap_observed is expected_duplex
     receipt_params = {
         "session_id": "session-1",
@@ -1645,26 +1704,15 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
         "capture_control_ack": "capture_flush_acked",
         "playout_state": "render_completed",
     }
-    if expected_duplex:
-        receipt = registry.acknowledge_playout(
-            params=receipt_params,
-            routed_session_id="session-1",
-            connection_id="connection-1",
-            user_id="user-1",
-            request_origin=ORIGIN,
-        )
-        assert receipt["duplex_media_observed"] is True
-    else:
-        with pytest.raises(MediaTransportViolation) as caught:
-            registry.acknowledge_playout(
-                params=receipt_params,
-                routed_session_id="session-1",
-                connection_id="connection-1",
-                user_id="user-1",
-                request_origin=ORIGIN,
-            )
-        assert caught.value.reason_id == "MEDIA_PLAYOUT_RECEIPT_UNTRUSTED"
-        assert parent.playout_receipts == {}
+    receipt = registry.acknowledge_playout(
+        params=receipt_params,
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+        request_origin=ORIGIN,
+    )
+    assert receipt["duplex_media_observed"] is expected_duplex
+    assert tuple(parent.playout_receipts) == ((ref, "unit-1"),)
     assert next_uplink.route_completed is False
 
 

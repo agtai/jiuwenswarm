@@ -743,3 +743,27 @@ def test_retry_confirmation_owner_requires_an_exact_target_task() -> None:
             owner_context,
         )
     assert unsupported.value.reason == "INVALID_P3_CONFIRMATION_OPERATION"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["task.update", "task.reprioritize", "task.create_successor"],
+)
+def test_production_confirmation_owner_accepts_exact_targeted_mutations(
+    operation: str,
+) -> None:
+    owner_context = _owner_context()
+
+    BoundedP3ConfirmationOwner._validate_binding_owner(
+        _binding(operation=operation, target_task_id="task-1"),
+        owner_context,
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        BoundedP3ConfirmationOwner._validate_binding_owner(
+            _binding(operation=operation, target_task_id=None),
+            owner_context,
+        )
+
+    assert raised.value.reason == "INVALID_P3_CONFIRMATION"
+    assert operation in str(raised.value)

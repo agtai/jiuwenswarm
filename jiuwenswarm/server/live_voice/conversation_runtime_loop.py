@@ -594,6 +594,23 @@ class ConversationRuntimeLoop:
     ) -> tuple[PresentedHistorySpan, ...]:
         return await self._submit(lambda: self._presentation.presented_history(ref))
 
+    async def invalidate_presentation(self, ref: ResponseRef, *, reason: str) -> int:
+        """Fence one exact response presentation without inventing an ACK."""
+
+        reason = self._require_id(reason, "reason")
+
+        def apply() -> int:
+            self._response_record(ref)
+            invalidated = self._presentation.invalidate_response(ref, reason=reason)
+            self._invalidate_pending_output(
+                ref,
+                set(PresentationSurface),
+                reason=reason,
+            )
+            return len(invalidated)
+
+        return await self._submit(apply, control=True)
+
     def snapshot(self) -> ConversationRuntimeLoopSnapshot:
         worker_running = self._worker is not None and not self._worker.done()
         return ConversationRuntimeLoopSnapshot(

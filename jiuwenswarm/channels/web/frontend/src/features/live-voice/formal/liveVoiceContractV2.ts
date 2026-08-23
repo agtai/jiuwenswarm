@@ -668,6 +668,14 @@ export class IdentityRegistry {
 
 const COMMAND_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.create': 'task',
+  'task.adjust': 'task',
+  'task.update': 'task',
+  'task.provide_input': 'task',
+  'task.pause': 'task',
+  'task.resume': 'task',
+  'task.reprioritize': 'task',
+  'task.create_successor': 'task',
+  'task.ack_events': 'task',
   'playback.stop': 'response',
   'response.cancel': 'response',
   'round.cancel': 'round',
@@ -679,6 +687,39 @@ const QUERY_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.list': 'task',
   'task.status': 'task',
   'task.events': 'task',
+  'task.result': 'task',
+  'task.unread_events': 'task',
+});
+const WAVE2_COMMAND_TYPES = new Set([
+  'task.update',
+  'task.provide_input',
+  'task.pause',
+  'task.resume',
+  'task.reprioritize',
+  'task.create_successor',
+  'task.ack_events',
+]);
+const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
+const PRESENTATION_CLASSES = new Set(['text', 'voice']);
+const TASK_EVENT_STATES = ['accepted', 'running', 'blocked', 'decision_required', 'terminal'] as const;
+const TASK_TERMINAL_EVENT_TYPES = new Set(['attempt.terminal', 'task.terminal']);
+const TASK_SIDE_EFFECT_CLASSES = new Set(['read_only', 'project_mutation']);
+const COMMAND_DISPOSITIONS = new Set([
+  'accepted',
+  'applied',
+  'rejected',
+  'unsupported',
+  'conflict',
+  'timeout',
+  'unknown',
+]);
+const POSITIVE_COMMAND_DISPOSITIONS = new Set(['accepted', 'applied']);
+const COMMAND_DISPOSITION_ERROR_CODES: Readonly<Record<string, ReadonlySet<ErrorCode>>> = Object.freeze({
+  rejected: new Set<ErrorCode>(['INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED', 'NOT_FOUND']),
+  unsupported: new Set<ErrorCode>(['UNSUPPORTED', 'CAPABILITY_UNAVAILABLE']),
+  conflict: new Set<ErrorCode>(['CONFLICT', 'STALE']),
+  timeout: new Set<ErrorCode>(['TIMEOUT']),
+  unknown: new Set<ErrorCode>(['RESULT_UNKNOWN']),
 });
 const CORE_CAPABILITIES = new Set([
   ...Object.keys(COMMAND_TARGETS),
@@ -724,6 +765,90 @@ function capabilityList(value: unknown, fieldName: string): readonly string[] {
   return Object.freeze(result);
 }
 
+function requireOperationCapability(values: readonly string[], operation: string, fieldName: string): void {
+  if (values.length !== 1 || values[0] !== operation) {
+    throw violation(
+      'REQUIRED_CAPABILITY_MISMATCH',
+      `${fieldName} must contain only ${operation}`,
+      'PERMISSION_DENIED'
+    );
+  }
+}
+
+function boundedText(value: unknown, fieldName: string, maxUtf8Bytes: number | null): string {
+  const text = requiredText(value, fieldName);
+  if (
+    text.includes('\0')
+    || (maxUtf8Bytes !== null && new TextEncoder().encode(text).byteLength > maxUtf8Bytes)
+  ) {
+    throw violation(
+      'INVALID_BOUNDED_TEXT',
+      `${fieldName} contains NUL or exceeds its UTF-8 byte bound`,
+      'INVALID_ARGUMENT'
+    );
+  }
+  return text;
+}
+
+function optionalBoundedText(value: unknown, fieldName: string, maxUtf8Bytes: number): string | null {
+  return value === null ? null : boundedText(value, fieldName, maxUtf8Bytes);
+}
+
+function constraintList(value: unknown, fieldName: string, nullable: boolean): readonly string[] | null {
+  if (value === null) {
+    if (nullable) return null;
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} must be an array`, 'INVALID_ARGUMENT');
+  }
+  const values = strictArray(value, fieldName);
+  if (values.length > 16) {
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} cannot contain more than 16 entries`, 'INVALID_ARGUMENT');
+  }
+  const parsed = values.map((item, index) => boundedText(item, `${fieldName}[${index}]`, 1_024));
+  if (new Set(parsed).size !== parsed.length) {
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} entries must be unique`, 'INVALID_ARGUMENT');
+  }
+  const byteLength = parsed.reduce((total, item) => total + new TextEncoder().encode(item).byteLength, 0);
+  if (byteLength > 4_096) {
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} exceeds its aggregate UTF-8 byte bound`, 'INVALID_ARGUMENT');
+  }
+  return Object.freeze(parsed);
+}
+
+function closedStringMap(value: unknown, fieldName: string): void {
+  const data = strictRecord(value, fieldName);
+  for (const [key, item] of Object.entries(data)) {
+    boundedText(key, `${fieldName} key`, null);
+    boundedText(item, `${fieldName}.${key}`, null);
+  }
+}
+
+function closedValue(value: unknown, fieldName: string, values: ReadonlySet<string>): string {
+  if (typeof value !== 'string' || !values.has(value)) {
+    throw violation('INVALID_ENUM', `unknown ${fieldName} ${String(value)}`, 'INVALID_ARGUMENT');
+  }
+  return value;
+}
+
+function successorOutcomeAndDigest(data: Record<string, unknown>): void {
+  const outcome = enumeration(TERMINAL_OUTCOMES, data.predecessor_outcome, 'command.payload.predecessor_outcome');
+  const digest = data.predecessor_result_sha256;
+  if (outcome === 'completed') {
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw violation(
+        'INVALID_PREDECESSOR_RESULT_DIGEST',
+        'completed predecessor requires a lowercase SHA-256 digest',
+        'INVALID_ARGUMENT'
+      );
+    }
+  } else if (digest !== null) {
+    throw violation(
+      'INVALID_PREDECESSOR_RESULT_DIGEST',
+      'non-completed predecessor forbids a result digest',
+      'INVALID_ARGUMENT'
+    );
+  }
+}
+
 function commandPayload(commandType: string, value: unknown): Readonly<JsonObject> {
   const data = strictRecord(value, 'command.payload');
   if (commandType === 'playback.stop' || commandType === 'response.cancel') {
@@ -747,8 +872,104 @@ function commandPayload(commandType: string, value: unknown): Readonly<JsonObjec
     if (number !== 2 && number !== 3) {
       throw violation('TASK_RETRY_ATTEMPT_NUMBER_INVALID', 'task.retry attempt_number must be 2 or 3', 'INVALID_ARGUMENT');
     }
+  } else if (commandType === 'task.adjust') {
+    exactKeys(data, ['adjustment'], 'command.payload');
+    const adjustment = requiredText(data.adjustment, 'command.payload.adjustment');
+    if (adjustment.includes('\0') || new TextEncoder().encode(adjustment).byteLength > 4_096) {
+      throw violation(
+        'INVALID_TASK_ADJUSTMENT',
+        'task.adjust payload exceeds its closed content bound',
+        'INVALID_ARGUMENT'
+      );
+    }
+  } else if (commandType === 'task.update') {
+    exactKeys(data, ['attempt_id', 'expected_event_head', 'instruction', 'constraints'], 'command.payload');
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    if (data.instruction === null && data.constraints === null) {
+      throw violation('EMPTY_TASK_UPDATE', 'task.update requires instruction or constraints', 'INVALID_ARGUMENT');
+    }
+    if (data.instruction !== null) {
+      boundedText(data.instruction, 'command.payload.instruction', 4_096);
+    }
+    constraintList(data.constraints, 'command.payload.constraints', true);
+  } else if (commandType === 'task.provide_input') {
+    exactKeys(
+      data,
+      ['attempt_id', 'expected_event_head', 'responds_to_event_id', 'text'],
+      'command.payload'
+    );
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    requiredText(data.responds_to_event_id, 'command.payload.responds_to_event_id');
+    boundedText(data.text, 'command.payload.text', 4_096);
+  } else if (commandType === 'task.pause' || commandType === 'task.resume') {
+    exactKeys(data, ['attempt_id', 'expected_event_head', 'reason'], 'command.payload');
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    optionalBoundedText(data.reason, 'command.payload.reason', 1_024);
+  } else if (commandType === 'task.reprioritize') {
+    exactKeys(data, ['attempt_id', 'expected_event_head', 'priority', 'reason'], 'command.payload');
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    closedValue(data.priority, 'command.payload.priority', TASK_PRIORITIES);
+    optionalBoundedText(data.reason, 'command.payload.reason', 1_024);
+  } else if (commandType === 'task.create_successor') {
+    exactKeys(
+      data,
+      [
+        'expected_predecessor_revision_number',
+        'expected_predecessor_event_head',
+        'predecessor_terminal_event_id',
+        'predecessor_outcome',
+        'predecessor_result_sha256',
+        'name',
+        'instruction',
+        'constraints',
+        'executor_id',
+        'side_effect_class',
+        'attributes',
+      ],
+      'command.payload'
+    );
+    unsignedInteger(
+      data.expected_predecessor_revision_number,
+      'command.payload.expected_predecessor_revision_number'
+    );
+    unsignedInteger(data.expected_predecessor_event_head, 'command.payload.expected_predecessor_event_head');
+    requiredText(data.predecessor_terminal_event_id, 'command.payload.predecessor_terminal_event_id');
+    successorOutcomeAndDigest(data);
+    boundedText(data.name, 'command.payload.name', null);
+    boundedText(data.instruction, 'command.payload.instruction', 4_096);
+    constraintList(data.constraints, 'command.payload.constraints', false);
+    boundedText(data.executor_id, 'command.payload.executor_id', null);
+    closedValue(data.side_effect_class, 'command.payload.side_effect_class', TASK_SIDE_EFFECT_CLASSES);
+    closedStringMap(data.attributes, 'command.payload.attributes');
+  } else if (commandType === 'task.ack_events') {
+    exactKeys(
+      data,
+      ['presentation_class', 'acked_through_seq', 'acked_event_id', 'expected_event_head'],
+      'command.payload'
+    );
+    closedValue(data.presentation_class, 'command.payload.presentation_class', PRESENTATION_CLASSES);
+    unsignedInteger(data.acked_through_seq, 'command.payload.acked_through_seq');
+    requiredText(data.acked_event_id, 'command.payload.acked_event_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
   }
   return cloneObject(data, 'command.payload');
+}
+
+function queryPayload(queryType: string, value: unknown): Readonly<JsonObject> {
+  const data = strictRecord(value, 'query.payload');
+  if (queryType === 'task.unread_events') {
+    exactKeys(data, ['presentation_class', 'limit'], 'query.payload');
+    closedValue(data.presentation_class, 'query.payload.presentation_class', PRESENTATION_CLASSES);
+    const limit = unsignedInteger(data.limit, 'query.payload.limit');
+    if (limit < 1 || limit > 500) {
+      throw violation('INVALID_UNREAD_LIMIT', 'query.payload.limit must be between 1 and 500', 'INVALID_ARGUMENT');
+    }
+  }
+  return cloneObject(data, 'query.payload');
 }
 
 interface EnvelopeBase {
@@ -804,6 +1025,10 @@ export function parseCommandEnvelope(value: unknown, identities?: IdentityRegist
   const scope = parseScopeRef(data.scope);
   const origin = parseOriginRef(data.origin);
   const targetRef = parseIdentityRef(data.target_ref, expectedKind);
+  const requiredCapabilities = capabilityList(data.required_capabilities, 'command.required_capabilities');
+  if (WAVE2_COMMAND_TYPES.has(commandType)) {
+    requireOperationCapability(requiredCapabilities, commandType, 'command.required_capabilities');
+  }
   const result = Object.freeze({
     contract_version: CONTRACT_VERSION,
     request_id: requiredText(data.request_id, 'command.request_id'),
@@ -816,7 +1041,7 @@ export function parseCommandEnvelope(value: unknown, identities?: IdentityRegist
     origin,
     target_ref: targetRef,
     context_refs: contextRefs(data.context_refs, 'command.context_refs', scope),
-    required_capabilities: capabilityList(data.required_capabilities, 'command.required_capabilities'),
+    required_capabilities: requiredCapabilities,
     payload: commandPayload(commandType, data.payload),
     extensions: extensions(data.extensions, 'command.extensions'),
   });
@@ -881,6 +1106,10 @@ export function parseQueryEnvelope(value: unknown, identities?: IdentityRegistry
   }
   const scope = parseScopeRef(data.scope);
   const targetRef = parseIdentityRef(data.target_ref, expectedKind);
+  const requiredCapabilities = capabilityList(data.required_capabilities, 'query.required_capabilities');
+  if (queryType === 'task.unread_events') {
+    requireOperationCapability(requiredCapabilities, queryType, 'query.required_capabilities');
+  }
   const result = Object.freeze({
     contract_version: CONTRACT_VERSION,
     request_id: requiredText(data.request_id, 'query.request_id'),
@@ -891,8 +1120,8 @@ export function parseQueryEnvelope(value: unknown, identities?: IdentityRegistry
     causation_id: optionalId(data.causation_id, 'query.causation_id'),
     target_ref: targetRef,
     context_refs: contextRefs(data.context_refs, 'query.context_refs', scope),
-    required_capabilities: capabilityList(data.required_capabilities, 'query.required_capabilities'),
-    payload: cloneObject(data.payload, 'query.payload'),
+    required_capabilities: requiredCapabilities,
+    payload: queryPayload(queryType, data.payload),
     extensions: extensions(data.extensions, 'query.extensions'),
   });
   if (identities !== undefined) identities.require(targetRef, { scope });
@@ -934,6 +1163,69 @@ function errorToWire(error: Readonly<ContractErrorValue>): Readonly<JsonObject> 
   });
 }
 
+function resultExtensions(
+  value: unknown,
+  commandResult: boolean,
+  ok: boolean,
+  error: Readonly<ContractErrorValue> | null,
+): Readonly<JsonObject> {
+  const fieldName = 'result.extensions';
+  const data = strictRecord(value, fieldName);
+  for (const key of Object.keys(data)) namespaced(key, `${fieldName} key`);
+  if (!Object.prototype.hasOwnProperty.call(data, 'live_voice.command')) {
+    return cloneObject(data, fieldName);
+  }
+  if (!commandResult) {
+    throw violation(
+      'COMMAND_RESULT_EXTENSION_FORBIDDEN',
+      'query results cannot carry a command disposition',
+      'PROTOCOL_VIOLATION'
+    );
+  }
+  const command = strictRecord(data['live_voice.command'], 'result.extensions.live_voice.command');
+  exactKeys(
+    command,
+    ['disposition', 'admission_event_id', 'settlement_event_id'],
+    'result.extensions.live_voice.command'
+  );
+  const dispositionValue = command.disposition;
+  if (typeof dispositionValue !== 'string' || !COMMAND_DISPOSITIONS.has(dispositionValue)) {
+    throw violation(
+      'INVALID_COMMAND_DISPOSITION',
+      'result command disposition is unknown',
+      'PROTOCOL_VIOLATION'
+    );
+  }
+  optionalId(command.admission_event_id, 'result.extensions.live_voice.command.admission_event_id');
+  optionalId(command.settlement_event_id, 'result.extensions.live_voice.command.settlement_event_id');
+  if (POSITIVE_COMMAND_DISPOSITIONS.has(dispositionValue)) {
+    if (!ok || error !== null) {
+      throw violation(
+        'COMMAND_DISPOSITION_RESULT_MISMATCH',
+        'accepted/applied command disposition requires ok=true',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+  } else {
+    if (ok || error === null) {
+      throw violation(
+        'COMMAND_DISPOSITION_RESULT_MISMATCH',
+        'negative command disposition requires ok=false',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+    const allowedCodes = COMMAND_DISPOSITION_ERROR_CODES[dispositionValue];
+    if (allowedCodes === undefined || !allowedCodes.has(error.code)) {
+      throw violation(
+        'COMMAND_DISPOSITION_ERROR_MISMATCH',
+        'command disposition does not match its error family',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+  }
+  return cloneObject(data, fieldName);
+}
+
 export function parseResultEnvelope(value: unknown, owner?: Readonly<CommandEnvelope | QueryEnvelope>): Readonly<ResultEnvelope> {
   const normalizedOwner = owner === undefined ? undefined : normalizeOwner(owner);
   const data = strictRecord(value, 'result');
@@ -947,15 +1239,20 @@ export function parseResultEnvelope(value: unknown, owner?: Readonly<CommandEnve
   if (ok ? resultValue === null || errorValue !== null : resultValue !== null || errorValue === null) {
     throw violation('INVALID_RESULT_EXCLUSIVITY', 'success requires result only; failure requires error only', 'PROTOCOL_VIOLATION');
   }
+  const requestId = requiredText(data.request_id, 'result.request_id');
+  const commandId = optionalId(data.command_id, 'result.command_id');
+  const commandResult = normalizedOwner === undefined
+    ? commandId !== null
+    : Object.prototype.hasOwnProperty.call(normalizedOwner, 'command_id');
   const parsed = Object.freeze({
     contract_version: CONTRACT_VERSION,
-    request_id: requiredText(data.request_id, 'result.request_id'),
-    command_id: optionalId(data.command_id, 'result.command_id'),
+    request_id: requestId,
+    command_id: commandId,
     ok,
     result: resultValue,
     error: errorValue,
     observed_at: timestamp(data.observed_at, 'result.observed_at'),
-    extensions: extensions(data.extensions, 'result.extensions'),
+    extensions: resultExtensions(data.extensions, commandResult, ok, errorValue),
   });
   if (normalizedOwner !== undefined) {
     const expectedCommandId = 'command_id' in normalizedOwner ? normalizedOwner.command_id : null;
@@ -971,7 +1268,274 @@ function normalizeOwner(owner: Readonly<CommandEnvelope | QueryEnvelope>): Reado
   return Object.prototype.hasOwnProperty.call(data, 'command_id') ? parseCommandEnvelope(data) : parseQueryEnvelope(data);
 }
 
-export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, result: JsonObject, observedAt: string): Readonly<ResultEnvelope> {
+export type PresentationClass = 'text' | 'voice';
+
+export interface TaskUnreadEvent {
+  readonly event_id: string;
+  readonly task_id: string;
+  readonly attempt_id: string;
+  readonly scope: Readonly<ScopeRef>;
+  readonly seq: number;
+  readonly event_type: string;
+  readonly state: (typeof TASK_EVENT_STATES)[number];
+  readonly outcome: TerminalOutcome | null;
+  readonly producer: string;
+  readonly source_event_id: string | null;
+  readonly causation_id: string;
+  readonly correlation_id: string;
+  readonly occurred_at: string;
+  readonly details: Readonly<JsonObject>;
+}
+
+export interface TaskUnreadEventsPage {
+  readonly task_id: string;
+  readonly presentation_class: PresentationClass;
+  readonly watermark: number;
+  readonly acked_event_id: string | null;
+  readonly head_seq: number;
+  readonly events: readonly Readonly<TaskUnreadEvent>[];
+  readonly next_after_seq: number | null;
+  readonly has_more: boolean;
+}
+
+export interface TaskUnreadEventsResultEnvelope extends Omit<ResultEnvelope, 'command_id' | 'ok' | 'result' | 'error'> {
+  readonly command_id: null;
+  readonly ok: true;
+  readonly result: Readonly<TaskUnreadEventsPage>;
+  readonly error: null;
+}
+
+export interface TaskUnreadEventsAckSeed {
+  readonly request_id: string;
+  readonly command_id: string;
+  readonly issued_at: string;
+  readonly correlation_id: string;
+  readonly causation_id: string | null;
+  readonly origin: Readonly<OriginRef>;
+}
+
+function taskUnreadOwner(owner: Readonly<QueryEnvelope>): Readonly<QueryEnvelope> {
+  const normalized = parseQueryEnvelope(owner);
+  if (normalized.query_type !== 'task.unread_events') {
+    throw violation('UNREAD_RESULT_OWNER_REQUIRED', 'task unread results require a task.unread_events owner', 'PROTOCOL_VIOLATION');
+  }
+  if (normalized.scope.assurance !== 'authenticated') {
+    throw violation('AUTHENTICATED_CONSUMER_REQUIRED', 'task unread results require an authenticated consumer scope', 'UNAUTHENTICATED');
+  }
+  return normalized;
+}
+
+function taskUnreadWatermark(value: unknown, fieldName: string): number {
+  if (value === -1) return -1;
+  return unsignedInteger(value, fieldName);
+}
+
+function taskUnreadDetails(value: unknown, fieldName: string): Readonly<JsonObject> {
+  const data = strictRecord(value, fieldName);
+  for (const [key, item] of Object.entries(data)) {
+    requiredText(key, `${fieldName} key`);
+    if (typeof item === 'string') {
+      validUnicode(item, `${fieldName}.${key}`);
+    } else if (typeof item === 'number') {
+      if (!Number.isSafeInteger(item)) {
+        throw violation('INVALID_SAFE_INTEGER', `${fieldName}.${key} must be a safe integer`, 'PROTOCOL_VIOLATION');
+      }
+    } else if (item !== null && typeof item !== 'boolean') {
+      throw violation('INVALID_TASK_EVENT_DETAILS', `${fieldName}.${key} must be a scalar JSON fact`, 'PROTOCOL_VIOLATION');
+    }
+  }
+  return cloneObject(data, fieldName);
+}
+
+function parseTaskUnreadEvent(value: unknown, owner: Readonly<QueryEnvelope>, expectedSeq: number, index: number): Readonly<TaskUnreadEvent> {
+  const fieldName = `result.result.events[${index}]`;
+  const data = strictRecord(value, fieldName);
+  exactKeys(
+    data,
+    [
+      'event_id',
+      'task_id',
+      'attempt_id',
+      'scope',
+      'seq',
+      'event_type',
+      'state',
+      'outcome',
+      'producer',
+      'source_event_id',
+      'causation_id',
+      'correlation_id',
+      'occurred_at',
+      'details',
+    ],
+    fieldName,
+  );
+  const taskId = requiredText(data.task_id, `${fieldName}.task_id`);
+  if (taskId !== owner.target_ref.id) {
+    throw violation('TASK_UNREAD_IDENTITY_MISMATCH', 'unread event belongs to another Task', 'PERMISSION_DENIED');
+  }
+  const scope = parseScopeRef(data.scope);
+  if (scope.assurance !== 'authenticated' || scope.subject_id !== owner.scope.subject_id || scope.project_id !== owner.scope.project_id) {
+    throw violation('TASK_UNREAD_SCOPE_MISMATCH', 'unread event belongs to another authenticated consumer scope', 'PERMISSION_DENIED');
+  }
+  const seq = unsignedInteger(data.seq, `${fieldName}.seq`);
+  if (seq !== expectedSeq) {
+    throw violation('TASK_UNREAD_PREFIX_GAP', 'unread events must be one contiguous prefix', 'PROTOCOL_VIOLATION');
+  }
+  const eventType = requiredText(data.event_type, `${fieldName}.event_type`);
+  const state = enumeration(TASK_EVENT_STATES, data.state, `${fieldName}.state`);
+  const outcome = data.outcome === null ? null : enumeration(TERMINAL_OUTCOMES, data.outcome, `${fieldName}.outcome`);
+  if ((state === 'terminal') !== (outcome !== null)) {
+    throw violation('INVALID_TASK_EVENT_OUTCOME', 'terminal task events require an outcome and nonterminal events forbid it', 'PROTOCOL_VIOLATION');
+  }
+  if (TASK_TERMINAL_EVENT_TYPES.has(eventType) !== (state === 'terminal')) {
+    throw violation(
+      'INVALID_TASK_TERMINAL_EVENT',
+      'only canonical attempt.terminal/task.terminal events may carry terminal state',
+      'PROTOCOL_VIOLATION',
+    );
+  }
+  return Object.freeze({
+    event_id: requiredText(data.event_id, `${fieldName}.event_id`),
+    task_id: taskId,
+    attempt_id: requiredText(data.attempt_id, `${fieldName}.attempt_id`),
+    scope,
+    seq,
+    event_type: eventType,
+    state,
+    outcome,
+    producer: requiredText(data.producer, `${fieldName}.producer`),
+    source_event_id: optionalId(data.source_event_id, `${fieldName}.source_event_id`),
+    causation_id: requiredText(data.causation_id, `${fieldName}.causation_id`),
+    correlation_id: requiredText(data.correlation_id, `${fieldName}.correlation_id`),
+    occurred_at: timestamp(data.occurred_at, `${fieldName}.occurred_at`),
+    details: taskUnreadDetails(data.details, `${fieldName}.details`),
+  });
+}
+
+function parseTaskUnreadEventsPage(value: unknown, owner: Readonly<QueryEnvelope>): Readonly<TaskUnreadEventsPage> {
+  const fieldName = 'result.result';
+  const data = strictRecord(value, fieldName);
+  exactKeys(data, ['task_id', 'presentation_class', 'watermark', 'acked_event_id', 'head_seq', 'events', 'next_after_seq', 'has_more'], fieldName);
+  const taskId = requiredText(data.task_id, `${fieldName}.task_id`);
+  if (taskId !== owner.target_ref.id) {
+    throw violation('TASK_UNREAD_IDENTITY_MISMATCH', 'unread page belongs to another Task', 'PERMISSION_DENIED');
+  }
+  const presentationClass = closedValue(data.presentation_class, `${fieldName}.presentation_class`, PRESENTATION_CLASSES) as PresentationClass;
+  if (presentationClass !== owner.payload.presentation_class) {
+    throw violation('TASK_UNREAD_PRESENTATION_CLASS_MISMATCH', 'unread page belongs to another presentation class', 'PERMISSION_DENIED');
+  }
+  const watermark = taskUnreadWatermark(data.watermark, `${fieldName}.watermark`);
+  const headSeq = unsignedInteger(data.head_seq, `${fieldName}.head_seq`);
+  if (watermark > headSeq) {
+    throw violation('INVALID_TASK_UNREAD_PAGE', 'unread watermark exceeds its frozen head', 'PROTOCOL_VIOLATION');
+  }
+  const ackedEventId = optionalId(data.acked_event_id, `${fieldName}.acked_event_id`);
+  if ((watermark === -1) !== (ackedEventId === null)) {
+    throw violation('INVALID_TASK_UNREAD_PAGE', 'only the logical initial watermark may omit an acknowledged event', 'PROTOCOL_VIOLATION');
+  }
+  const rawEvents = strictArray(data.events, `${fieldName}.events`);
+  const limit = owner.payload.limit;
+  if (typeof limit !== 'number' || rawEvents.length > limit || rawEvents.length > 500) {
+    throw violation('INVALID_TASK_UNREAD_PAGE', 'unread page exceeds the requested limit', 'PROTOCOL_VIOLATION');
+  }
+  const events = rawEvents.map((event, index) => parseTaskUnreadEvent(event, owner, watermark + index + 1, index));
+  if (new Set(events.map(event => event.event_id)).size !== events.length) {
+    throw violation('TASK_UNREAD_EVENT_DUPLICATE', 'unread page contains a duplicate event identity', 'PROTOCOL_VIOLATION');
+  }
+  const nextAfterSeq = data.next_after_seq === null ? null : unsignedInteger(data.next_after_seq, `${fieldName}.next_after_seq`);
+  const hasMore = requiredBoolean(data.has_more, `${fieldName}.has_more`);
+  const lastSeq = events.length === 0 ? undefined : events[events.length - 1].seq;
+  if (hasMore) {
+    if (lastSeq === undefined || nextAfterSeq !== lastSeq || lastSeq >= headSeq) {
+      throw violation('INVALID_TASK_UNREAD_PAGE', 'truncated unread page lacks its next prefix position', 'PROTOCOL_VIOLATION');
+    }
+  } else if (nextAfterSeq !== null || (lastSeq === undefined ? watermark !== headSeq : lastSeq !== headSeq)) {
+    throw violation('INVALID_TASK_UNREAD_PAGE', 'complete unread page does not reach its frozen head', 'PROTOCOL_VIOLATION');
+  }
+  return Object.freeze({
+    task_id: taskId,
+    presentation_class: presentationClass,
+    watermark,
+    acked_event_id: ackedEventId,
+    head_seq: headSeq,
+    events: Object.freeze(events),
+    next_after_seq: nextAfterSeq,
+    has_more: hasMore,
+  });
+}
+
+export function parseTaskUnreadEventsResult(value: unknown, owner: Readonly<QueryEnvelope>): Readonly<TaskUnreadEventsResultEnvelope> {
+  const normalizedOwner = taskUnreadOwner(owner);
+  const envelope = parseResultEnvelope(value, normalizedOwner);
+  if (!envelope.ok || envelope.result === null || envelope.error !== null || envelope.command_id !== null) {
+    throw violation('UNREAD_RESULT_SUCCESS_REQUIRED', 'task unread parser accepts only a successful query result', 'PROTOCOL_VIOLATION');
+  }
+  return Object.freeze({
+    ...envelope,
+    command_id: null,
+    ok: true,
+    result: parseTaskUnreadEventsPage(envelope.result, normalizedOwner),
+    error: null,
+  });
+}
+
+function parseTaskUnreadEventsAckSeed(value: unknown): Readonly<TaskUnreadEventsAckSeed> {
+  const data = strictRecord(value, 'task_ack_seed');
+  exactKeys(data, ['request_id', 'command_id', 'issued_at', 'correlation_id', 'causation_id', 'origin'], 'task_ack_seed');
+  const origin = strictRecord(data.origin, 'task_ack_seed.origin');
+  return Object.freeze({
+    request_id: requiredText(data.request_id, 'task_ack_seed.request_id'),
+    command_id: requiredText(data.command_id, 'task_ack_seed.command_id'),
+    issued_at: timestamp(data.issued_at, 'task_ack_seed.issued_at'),
+    correlation_id: requiredText(data.correlation_id, 'task_ack_seed.correlation_id'),
+    causation_id: optionalId(data.causation_id, 'task_ack_seed.causation_id'),
+    origin: cloneObject(origin, 'task_ack_seed.origin') as unknown as Readonly<OriginRef>,
+  });
+}
+
+/**
+ * Serializes a canonical ACK candidate for a validated unread prefix.
+ *
+ * This pure wire helper neither records presentation nor authorizes dispatch.
+ * P3-5B composition must call it only after class-local text DOM adoption or
+ * audio PresentationAck evidence has been accepted for the same final event.
+ */
+export function buildTaskUnreadEventsAck(unreadResult: unknown, owner: Readonly<QueryEnvelope>, seed: unknown): Readonly<CommandEnvelope> | null {
+  const normalizedOwner = taskUnreadOwner(owner);
+  const parsedResult = parseTaskUnreadEventsResult(unreadResult, normalizedOwner);
+  const parsedSeed = parseTaskUnreadEventsAckSeed(seed);
+  const lastEvent = parsedResult.result.events.length === 0 ? undefined : parsedResult.result.events[parsedResult.result.events.length - 1];
+  if (lastEvent === undefined) return null;
+  return parseCommandEnvelope({
+    contract_version: CONTRACT_VERSION,
+    request_id: parsedSeed.request_id,
+    command_id: parsedSeed.command_id,
+    command_type: 'task.ack_events',
+    issued_at: parsedSeed.issued_at,
+    scope: normalizedOwner.scope,
+    correlation_id: parsedSeed.correlation_id,
+    causation_id: parsedSeed.causation_id,
+    origin: parsedSeed.origin,
+    target_ref: normalizedOwner.target_ref,
+    context_refs: normalizedOwner.context_refs,
+    required_capabilities: ['task.ack_events'],
+    payload: {
+      presentation_class: parsedResult.result.presentation_class,
+      acked_through_seq: lastEvent.seq,
+      acked_event_id: lastEvent.event_id,
+      expected_event_head: parsedResult.result.head_seq,
+    },
+    extensions: {},
+  });
+}
+
+export function successResult(
+  owner: Readonly<CommandEnvelope | QueryEnvelope>,
+  result: JsonObject,
+  observedAt: string,
+  resultExtensionValue: JsonObject = {},
+): Readonly<ResultEnvelope> {
   const normalizedOwner = normalizeOwner(owner);
   return parseResultEnvelope(
     {
@@ -982,7 +1546,7 @@ export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, 
       result,
       error: null,
       observed_at: observedAt,
-      extensions: {},
+      extensions: resultExtensionValue,
     },
     normalizedOwner
   );
@@ -991,7 +1555,8 @@ export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, 
 export function failureResult(
   owner: Readonly<CommandEnvelope | QueryEnvelope>,
   error: Readonly<ContractErrorValue>,
-  observedAt: string
+  observedAt: string,
+  resultExtensionValue: JsonObject = {},
 ): Readonly<ResultEnvelope> {
   const normalizedOwner = normalizeOwner(owner);
   return parseResultEnvelope(
@@ -1003,7 +1568,7 @@ export function failureResult(
       result: null,
       error: errorToWire(error),
       observed_at: observedAt,
-      extensions: {},
+      extensions: resultExtensionValue,
     },
     normalizedOwner
   );

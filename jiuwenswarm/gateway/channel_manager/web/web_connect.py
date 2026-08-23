@@ -62,19 +62,27 @@ _websocket_transport_logger.addFilter(_MediaSafeTransportLogFilter())
 
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
-# The fixed Alpha route carries its one-use ticket in the first frame; the
-# legacy prefix carries it in the path. Both the handshake gate and the path
-# dispatcher must accept exactly the same set as
-# ``handle_registered_media_socket``, so they share one predicate: an
-# accepted handshake whose path the dispatcher then rejects closes every real
-# media socket with "unsupported path".
+# The dedicated route accepts only the fixed path and carries its one-use
+# ticket in the first frame. Ticket-shaped historical paths have no route
+# authority, but their suffix remains redacted if a hostile request supplies
+# credential-like bytes there.
 _DEDICATED_MEDIA_ROUTE_PATH = "/ws/live-voice/media"
-_DEDICATED_MEDIA_ROUTE_PREFIX = "/ws/live-voice/media/"
+_DEDICATED_MEDIA_REDACTION_PREFIX = "/ws/live-voice/media/"
 
 
 def _is_dedicated_media_route(request_path: str) -> bool:
-    return request_path == _DEDICATED_MEDIA_ROUTE_PATH or request_path.startswith(
-        _DEDICATED_MEDIA_ROUTE_PREFIX
+    return request_path == _DEDICATED_MEDIA_ROUTE_PATH
+
+
+def _is_ticket_like_media_path_for_redaction(request_path: str) -> bool:
+    return request_path.startswith(_DEDICATED_MEDIA_REDACTION_PREFIX)
+
+
+def _redacted_websocket_path(request_path: str) -> str:
+    return (
+        "/ws/live-voice/media/<redacted>"
+        if _is_ticket_like_media_path_for_redaction(request_path)
+        else request_path
     )
 
 
@@ -838,11 +846,7 @@ class WebChannel(BaseWsChannel):
         parsed_path = urlparse(path)
         handshake_path = parsed_path.path or path
         is_dedicated_media_path = _is_dedicated_media_route(handshake_path)
-        logged_path = (
-            "/ws/live-voice/media/<redacted>"
-            if handshake_path.startswith(_DEDICATED_MEDIA_ROUTE_PREFIX)
-            else handshake_path
-        )
+        logged_path = _redacted_websocket_path(handshake_path)
         if is_dedicated_media_path and (
             origin is None or not is_allowed_browser_origin(origin)
         ):
@@ -1327,7 +1331,10 @@ class WebChannel(BaseWsChannel):
             return
 
         if request_path != self.config.path:
-            await ws.close(code=1008, reason=f"unsupported path: {request_path}")
+            await ws.close(
+                code=1008,
+                reason=f"unsupported path: {_redacted_websocket_path(request_path)}",
+            )
             return
 
         connection_user_id, _user_id = self._resolve_ws_identity(

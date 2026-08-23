@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +24,25 @@ from jiuwenswarm.server.live_voice import product_composition_registry as produc
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
 from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservabilityCollector,
+)
+from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
+    LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+    AuthenticationMode,
+    DurabilityLevel,
+    ExecutorCapability,
+    LiveVoiceCapability,
+    LiveVoiceDeploymentProfile,
+    ValidatedAuthenticationConfiguration,
+    ValidatedExecutorConfiguration,
+    ValidatedLiveVoiceConfiguration,
+)
+from jiuwenswarm.server.live_voice.product_observability_runtime import (
+    PRODUCT_OBSERVABILITY_BACKEND_ENV,
+    PRODUCT_OBSERVABILITY_BACKEND_ID,
+    PRODUCT_OBSERVABILITY_ENABLE_ENV,
+    PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV,
+    ProductObservabilityRuntime,
+    ProductObservabilityRuntimeState,
 )
 
 
@@ -58,8 +78,6 @@ class _Composition:
     async def handle(self, **kwargs):
         self.calls.append(kwargs)
         return P3RouteResult(True, {"ok": True, "result": {"task_id": "task-1"}})
-
-
 
 
 class _LifecycleComposition:
@@ -133,6 +151,10 @@ class _ProductRegistry:
 
     async def handle_p2_presentation_ack(self, **kwargs):
         self.calls.append(("p2.presentation.ack", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
+    async def handle_p2_presentation_failed(self, **kwargs):
+        self.calls.append(("p2.presentation.failed", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
 
     async def handle_p2_barge_in(self, **kwargs):
@@ -318,8 +340,6 @@ class _RoundAcceptedRegistry(_ProductRegistry):
         )
 
 
-
-
 class _ConnectionCleanupRegistry:
     def __init__(self) -> None:
         self.calls = 0
@@ -447,8 +467,6 @@ async def test_formal_route_passes_only_rpc_context_to_composition() -> None:
     assert wire["body"]["result"]["result"]["task_id"] == "task-1"
 
 
-
-
 @pytest.mark.asyncio
 async def test_formal_route_is_fail_closed_when_composition_is_not_ready() -> None:
     server = _server(None)
@@ -504,6 +522,7 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p2.presentation.failed",
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",
@@ -600,15 +619,155 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
     )
 
     await server._start_live_voice_product_composition()
-    collector = server._live_voice_product_observability
     await server._stop_live_voice_product_composition()
     await server._stop_live_voice_product_composition()
 
     assert registry.stop_calls == 1
     assert server._live_voice_product_composition is None
-    assert isinstance(collector, LiveVoiceObservabilityCollector)
     assert server._live_voice_product_observability is None
     assert captured[0]["commit_ledger"] is commit_ledger
+    assert captured[0]["observability_runtime"] is None
+
+
+@pytest.mark.asyncio
+async def test_observability_flag_off_does_not_import_or_touch_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._agent_manager = object()
+    monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
+    monkeypatch.delenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, raising=False)
+    monkeypatch.setattr(
+        product_module,
+        "create_product_composition_registry_from_environment",
+        lambda **_kwargs: registry,
+    )
+    original_import = builtins.__import__
+
+    def poison_runtime_import(name: str, *args: object, **kwargs: object):
+        if name == "jiuwenswarm.server.live_voice.product_observability_runtime":
+            raise AssertionError("flag-off imported the product observability runtime")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", poison_runtime_import)
+
+    await server._start_live_voice_product_composition()
+
+    assert server._live_voice_product_composition is registry
+    assert server._live_voice_product_observability is None
+    await server._stop_live_voice_product_composition()
+
+
+@pytest.mark.asyncio
+async def test_agentserver_composes_only_owner_validated_ready_observability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _ProductRegistry()
+    captured: list[dict[str, object]] = []
+
+    class ConfigurationOwner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def validated_live_voice_configuration(self, *, provider):
+            self.calls += 1
+            digest = hashlib.sha256(b"agentserver-config-owner").hexdigest()
+            return ValidatedLiveVoiceConfiguration(
+                contract_version=LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
+                configuration_id="test.agentserver.owner.v1",
+                configuration_digest=digest,
+                profile=LiveVoiceDeploymentProfile.FORMAL_LIVE_VOICE,
+                enabled=True,
+                ordinary_production_default_off=True,
+                authentication=ValidatedAuthenticationConfiguration(
+                    mode=AuthenticationMode.SCOPED_BEARER,
+                    validation_receipt_id="test-auth-owner.v1",
+                    scope_digest=hashlib.sha256(b"scope").hexdigest(),
+                ),
+                executor=ValidatedExecutorConfiguration(
+                    executor_id="direct-project-code",
+                    adapter_id="live-voice.direct-project-code",
+                    durability_level=DurabilityLevel.D2,
+                    capabilities=tuple(
+                        sorted(ExecutorCapability, key=lambda item: item.value)
+                    ),
+                    validation_receipt_id="test-executor-owner.v1",
+                    configuration_digest=hashlib.sha256(b"executor").hexdigest(),
+                ),
+                providers=(provider,),
+                capabilities=tuple(
+                    sorted(
+                        (
+                            LiveVoiceCapability.AUTHENTICATED,
+                            LiveVoiceCapability.EXECUTOR_D2,
+                            LiveVoiceCapability.FORMAL_WEB,
+                            LiveVoiceCapability.TASK_MUTATION,
+                            LiveVoiceCapability.TASK_QUERY,
+                            LiveVoiceCapability.TELEMETRY_EXPORT,
+                        ),
+                        key=lambda item: item.value,
+                    )
+                ),
+            )
+
+    owner = ConfigurationOwner()
+    server = _server(owner)
+    server._agent_manager = object()
+    server._live_voice_turn_commit_ledger = object()
+    monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "4b" * 32)
+    monkeypatch.setattr(
+        product_module,
+        "create_product_composition_registry_from_environment",
+        lambda **kwargs: captured.append(kwargs) or registry,
+    )
+
+    await server._start_live_voice_product_composition()
+
+    runtime = server._live_voice_product_observability
+    assert type(runtime) is ProductObservabilityRuntime
+    assert runtime.health().ready is True
+    assert captured[0]["observability_runtime"] is runtime
+    assert "observability_exporter" not in captured[0]
+    assert owner.calls == 1
+
+    assert await server._stop_live_voice_product_composition() is True
+    assert runtime.health().state is ProductObservabilityRuntimeState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_enabled_observability_without_configuration_owner_stays_unregistered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _ProductRegistry()
+    captured: list[dict[str, object]] = []
+    server = _server(object())
+    server._agent_manager = object()
+    monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_ENABLE_ENV, "1")
+    monkeypatch.setenv(
+        PRODUCT_OBSERVABILITY_BACKEND_ENV,
+        PRODUCT_OBSERVABILITY_BACKEND_ID,
+    )
+    monkeypatch.setenv(PRODUCT_OBSERVABILITY_TOKEN_KEY_ENV, "4c" * 32)
+    monkeypatch.setattr(
+        product_module,
+        "create_product_composition_registry_from_environment",
+        lambda **kwargs: captured.append(kwargs) or registry,
+    )
+
+    await server._start_live_voice_product_composition()
+
+    assert server._live_voice_product_composition is registry
+    assert server._live_voice_product_observability is None
+    assert captured[0]["observability_runtime"] is None
+    await server._stop_live_voice_product_composition()
 
 
 @pytest.mark.asyncio
@@ -712,7 +871,7 @@ async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds()
 
 
 @pytest.mark.asyncio
-async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> None:
+async def test_central_registry_owns_queries_but_not_mutations() -> None:
     composition = _Composition()
     registry = _ProductRegistry()
     server = _server(composition)
@@ -737,8 +896,21 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
         req_method=ReqMethod.LIVE_VOICE_TASK_CREATE,
         params={"auth_token": "opaque", "session_id": "session-1"},
     )
+    result_query = AgentRequest(
+        request_id="request-result",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_TASK_RESULT,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "task_id": "task-1",
+            "agent_ref": {"mode": "agent", "id": "default"},
+        },
+    )
 
     await server._handle_live_voice_p3_request(ws, query, asyncio.Lock())
+    await server._handle_live_voice_p3_request(ws, result_query, asyncio.Lock())
     await server._handle_live_voice_p3_request(ws, mutation, asyncio.Lock())
 
     assert registry.calls == [
@@ -750,7 +922,20 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
                 "request_id": "request-query",
                 "session_id": "session-1",
             },
-        )
+        ),
+        (
+            "query",
+            {
+                "operation": "task.result",
+                "params": {
+                    "auth_token": "opaque",
+                    "session_id": "session-1",
+                    "task_id": "task-1",
+                },
+                "request_id": "request-result",
+                "session_id": "session-1",
+            },
+        ),
     ]
     assert composition.calls == [
         {
@@ -895,6 +1080,11 @@ async def test_unified_probe_context_is_stripped_before_business_dispatch(
             False,
         ),
         (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED,
+            "p2.presentation.failed",
+            False,
+        ),
+        (
             ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
             "p2.barge_in",
             False,
@@ -1006,7 +1196,9 @@ def _intent_observation_route_result(
 
 
 @pytest.mark.asyncio
-async def test_product_intent_observation_uses_validated_result_not_client_hint() -> None:
+async def test_product_intent_observation_uses_validated_result_not_client_hint() -> (
+    None
+):
     request_id = "request-observed-intent"
     registry = _ProductRegistry(
         intent_result=_intent_observation_route_result(
@@ -1210,7 +1402,9 @@ async def test_product_text_intent_and_voice_activation_fallback_are_explicit() 
 
 
 @pytest.mark.asyncio
-async def test_task_observability_does_not_relabel_rejection_or_query_as_fallback_command() -> None:
+async def test_task_observability_does_not_relabel_rejection_or_query_as_fallback_command() -> (
+    None
+):
     request_id = "request-observed-non-fallback"
     server = _server(object())
     observer = LiveVoiceObservabilityCollector()
@@ -1388,12 +1582,6 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
     assert json.loads(ws.sent[0])["status"] == "succeeded"
 
 
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_product_route_is_fail_closed_when_registry_is_disabled() -> None:
     server = _server(object())
@@ -1445,8 +1633,6 @@ async def test_agentserver_owns_formal_composition_start_and_stop(
     assert server._live_voice_p3_confirmation_owner is None
     assert server._live_voice_p3_confirmation_forwarder is None
     assert server._live_voice_turn_commit_ledger is None
-
-
 
 
 @pytest.mark.asyncio

@@ -376,6 +376,7 @@ def test_no_projection_capability_is_internal_and_cannot_be_directly_minted() ->
         arbiter_module._VerifiedNoProjectionAdvance(
             advance.source_event,
             expected,
+            consumer_scope=False,
             _token=object(),
         )
     assert forged.value.reason == "INVALID_NO_PROJECTION_CAPABILITY"
@@ -517,6 +518,7 @@ def test_retry_epoch_capability_is_private_and_cannot_regress() -> None:
         arbiter_module._VerifiedAttemptEpochBaseline(
             boundary_b,
             binding_b,
+            consumer_scope=False,
             _token=object(),
         )
     assert forged.value.reason == "INVALID_ATTEMPT_EPOCH_CAPABILITY"

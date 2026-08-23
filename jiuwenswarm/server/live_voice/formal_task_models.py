@@ -8,10 +8,13 @@ They contain only stable, non-secret facts that the formal Task Core can persist
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
@@ -22,6 +25,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
     ContractViolation,
     ErrorCode,
+    MAX_SAFE_INTEGER,
     OriginRef,
     ResultEnvelope,
     ScopeRef,
@@ -64,6 +68,19 @@ class OutboxState(StrEnum):
     SUPPRESSED = "suppressed"
 
 
+class AdmissionPriority(StrEnum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+class AdmissionDisposition(StrEnum):
+    DEFERRED = "deferred"
+    TIMED_OUT = "timed_out"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+
+
 class ReconciliationState(StrEnum):
     REQUIRED = "required"
     IN_PROGRESS = "in_progress"
@@ -93,6 +110,16 @@ class TaskAdjustmentState(StrEnum):
     PENDING = "pending"
     APPLIED = "applied"
     REJECTED = "rejected"
+
+
+class TaskCommandDisposition(StrEnum):
+    ACCEPTED = "accepted"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    UNSUPPORTED = "unsupported"
+    CONFLICT = "conflict"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
 
 
 _MAX_TASK_ADJUSTMENT_BYTES = 4096
@@ -156,6 +183,287 @@ def _parse_utc(value: object, field_name: str) -> datetime:
             ErrorCode.INVALID_ARGUMENT,
         )
     return parsed.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionPolicy:
+    """Runtime admission bounds; only derived absolute facts are persisted."""
+
+    deadline_seconds: float = 3_600
+    initial_backoff_seconds: float = 1
+    max_backoff_seconds: float = 60
+    max_attempts: int = 120
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("deadline_seconds", self.deadline_seconds),
+            ("initial_backoff_seconds", self.initial_backoff_seconds),
+            ("max_backoff_seconds", self.max_backoff_seconds),
+        ):
+            if type(value) not in {int, float} or value <= 0:
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    f"admission policy {field_name} must be positive",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                if not math.isfinite(value):
+                    raise ValueError("admission policy bound must be finite")
+                duration = timedelta(seconds=value)
+            except (OverflowError, TypeError, ValueError) as error:
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    f"admission policy {field_name} is not representable",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from error
+            if duration <= timedelta(0):
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_POLICY",
+                    f"admission policy {field_name} is below timestamp precision",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_POLICY",
+                "admission policy maximum backoff cannot be below its initial value",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(self.max_attempts) is not int or self.max_attempts <= 0:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_POLICY",
+                "admission policy max_attempts must be a positive integer",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedExecutorSelection:
+    """Executor-independent canonical selection facts owned by Core/Store."""
+
+    adapter_id: str
+    capability_profile_json: bytes
+    capability_profile_digest: str
+    execution_requirements_json: bytes
+    admission_priority: AdmissionPriority = AdmissionPriority.NORMAL
+
+    def __post_init__(self) -> None:
+        adapter_id = _require_text(self.adapter_id, "executor_selection.adapter_id")
+        if (
+            "\x00" in adapter_id
+            or len(adapter_id) > 256
+            or _utf8_size(adapter_id, "executor_selection.adapter_id") > 1_024
+        ):
+            raise FormalTaskViolation(
+                "INVALID_EXECUTOR_SELECTION",
+                "executor selection adapter identity exceeds its closed bound",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        try:
+            priority = AdmissionPriority(self.admission_priority)
+        except (TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PRIORITY",
+                "executor selection priority must be low, normal, high, or urgent",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        object.__setattr__(self, "admission_priority", priority)
+        for field_name, encoded in (
+            ("capability_profile_json", self.capability_profile_json),
+            ("execution_requirements_json", self.execution_requirements_json),
+        ):
+            if type(encoded) is not bytes or not encoded or len(encoded) > 262_144:
+                raise FormalTaskViolation(
+                    "INVALID_EXECUTOR_SELECTION",
+                    f"executor selection {field_name} must be bounded UTF-8 bytes",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                decoded = encoded.decode("utf-8")
+                value = json.loads(decoded)
+                canonical = canonical_json_bytes(value)
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                ContractViolation,
+            ) as error:
+                raise FormalTaskViolation(
+                    "INVALID_EXECUTOR_SELECTION",
+                    f"executor selection {field_name} is not canonical JSON",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from error
+            if type(value) is not dict or canonical != encoded:
+                raise FormalTaskViolation(
+                    "EXECUTOR_SELECTION_JSON_NOT_CANONICAL",
+                    f"executor selection {field_name} must use exact canonical JSON",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        digest = self.capability_profile_digest
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or hashlib.sha256(self.capability_profile_json).hexdigest() != digest
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_DIGEST_MISMATCH",
+                "executor selection digest does not match its canonical profile",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    @classmethod
+    def from_values(
+        cls,
+        *,
+        adapter_id: str,
+        capability_profile: Mapping[str, object],
+        execution_requirements: Mapping[str, object],
+        admission_priority: AdmissionPriority | str = AdmissionPriority.NORMAL,
+    ) -> PersistedExecutorSelection:
+        profile = canonical_json_bytes(dict(capability_profile))
+        requirements = canonical_json_bytes(dict(execution_requirements))
+        return cls(
+            adapter_id=adapter_id,
+            capability_profile_json=profile,
+            capability_profile_digest=hashlib.sha256(profile).hexdigest(),
+            execution_requirements_json=requirements,
+            admission_priority=admission_priority,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentAdmissionRecord:
+    task_id: str
+    attempt_id: str
+    priority: AdmissionPriority
+    reason: str | None
+    attempt_count: int
+    next_eligible_at: str
+    deadline_at: str
+    enqueued_at: str
+    queued: bool
+    reconciliation_required: bool = False
+    reconciliation_reason: str | None = None
+    manual_action: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "admission.task_id")
+        _require_text(self.attempt_id, "admission.attempt_id")
+        if not isinstance(self.priority, AdmissionPriority):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PRIORITY",
+                "persisted admission priority is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.reason not in {
+            None,
+            "EXECUTOR_PROJECT_BUSY",
+            "EXECUTOR_CAPACITY_EXHAUSTED",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_REASON",
+                "persisted admission reason is not a closed pre-effect defer reason",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if type(self.attempt_count) is not int or self.attempt_count < 0:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_ATTEMPT_COUNT",
+                "persisted admission attempt count must be non-negative",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (self.attempt_count == 0) != (self.reason is None):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_HISTORY",
+                "persisted admission reason must exactly prove deferred deliveries",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        next_eligible = _parse_utc(self.next_eligible_at, "admission.next_eligible_at")
+        deadline = _parse_utc(self.deadline_at, "admission.deadline_at")
+        enqueued = _parse_utc(self.enqueued_at, "admission.enqueued_at")
+        if next_eligible < enqueued or deadline < enqueued:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_TIMELINE",
+                "persisted admission times precede immutable enqueue time",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if type(self.queued) is not bool:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PROJECTION",
+                "admission queued projection must be boolean",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if type(self.reconciliation_required) is not bool or (
+            self.reconciliation_required != (self.reconciliation_reason is not None)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PROJECTION",
+                "admission reconciliation projection is incomplete",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.reconciliation_required:
+            _require_text(
+                self.reconciliation_reason,
+                "admission.reconciliation_reason",
+            )
+            if (
+                len(self.reconciliation_reason) > 1_000
+                or self.manual_action != "verify_external_ownership_and_settle"
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_ADMISSION_PROJECTION",
+                    "admission reconciliation requires one bounded manual action",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif self.manual_action is not None:
+            raise FormalTaskViolation(
+                "INVALID_ADMISSION_PROJECTION",
+                "healthy admission cannot request manual settlement",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "queued": self.queued,
+            "priority": self.priority.value,
+            "reason": self.reason,
+            "attempt_count": self.attempt_count,
+            "next_eligible_at": self.next_eligible_at,
+            "deadline_at": self.deadline_at,
+            "enqueued_at": self.enqueued_at,
+            "reconciliation_required": self.reconciliation_required,
+            "reconciliation_reason": self.reconciliation_reason,
+            "manual_action": self.manual_action,
+        }
+
+
+def command_result_extensions(
+    disposition: TaskCommandDisposition,
+    *,
+    admission_event_id: str | None = None,
+    settlement_event_id: str | None = None,
+) -> dict[str, object]:
+    """Return the closed command result carrier without command content."""
+
+    if not isinstance(disposition, TaskCommandDisposition):
+        raise FormalTaskViolation(
+            "INVALID_TASK_COMMAND_DISPOSITION",
+            "task command disposition is not canonical",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    for field_name, event_id in (
+        ("admission_event_id", admission_event_id),
+        ("settlement_event_id", settlement_event_id),
+    ):
+        if event_id is not None:
+            _require_text(event_id, f"command_result.{field_name}")
+    return {
+        "live_voice.command": {
+            "disposition": disposition.value,
+            "admission_event_id": admission_event_id,
+            "settlement_event_id": settlement_event_id,
+        }
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,7 +740,11 @@ class TaskAuthorizationGrant:
                 "authorization confirmed flag must be boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if self.policy_bypass not in {None, "trusted_demo_live_voice_v1"}:
+        if self.policy_bypass not in {
+            None,
+            "trusted_demo_live_voice_v1",
+            "server_task_presentation_v1",
+        }:
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_AUTHORIZATION",
                 "authorization policy bypass is unsupported",
@@ -444,6 +756,15 @@ class TaskAuthorizationGrant:
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_AUTHORIZATION",
                 "policy bypass cannot impersonate user confirmation",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            self.policy_bypass == "server_task_presentation_v1"
+            and self.operation != "task.ack_events"
+        ):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "server presentation authority is limited to task.ack_events",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if type(self.allowed_capabilities) is not frozenset or any(
@@ -508,7 +829,13 @@ class TaskAuthorizationGrant:
         bypass_boundary = (
             not self.confirmed
             and self.confirmation_id is None
-            and self.policy_bypass == "trusted_demo_live_voice_v1"
+            and (
+                self.policy_bypass == "trusted_demo_live_voice_v1"
+                or (
+                    self.policy_bypass == "server_task_presentation_v1"
+                    and operation == "task.ack_events"
+                )
+            )
         )
         if destructive and not (confirmed_boundary or bypass_boundary):
             raise FormalTaskViolation(
@@ -527,6 +854,7 @@ class FormalTaskSpec:
     executor_id: str
     required_capabilities: tuple[str, ...]
     side_effect_class: str
+    constraints: tuple[str, ...] = ()
     attributes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -578,6 +906,39 @@ class FormalTaskSpec:
             "required_capabilities",
             tuple(sorted(self.required_capabilities)),
         )
+        if type(self.constraints) is not tuple or any(
+            type(constraint) is not str or not constraint.strip()
+            for constraint in self.constraints
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONSTRAINTS",
+                "task constraints must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if len(set(self.constraints)) != len(self.constraints):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONSTRAINTS",
+                "task constraints must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        constraint_sizes = tuple(
+            _utf8_size(constraint, "task.constraint") for constraint in self.constraints
+        )
+        if (
+            len(self.constraints) > 16
+            or any(
+                "\x00" in constraint or size > 1_024
+                for constraint, size in zip(
+                    self.constraints, constraint_sizes, strict=True
+                )
+            )
+            or sum(constraint_sizes) > 4_096
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONSTRAINTS",
+                "task constraints exceed their closed UTF-8 bounds",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         if type(self.attributes) is not tuple:
             raise FormalTaskViolation(
                 "INVALID_TASK_ATTRIBUTES",
@@ -614,12 +975,13 @@ class FormalTaskSpec:
             "executor_id": self.executor_id,
             "required_capabilities": list(self.required_capabilities),
             "side_effect_class": self.side_effect_class,
+            "constraints": list(self.constraints),
             "attributes": dict(self.attributes),
         }
 
     @classmethod
     def from_dict(cls, payload: object) -> FormalTaskSpec:
-        if type(payload) is not dict or set(payload) != {
+        required_fields = {
             "name",
             "instruction",
             "origin",
@@ -628,7 +990,12 @@ class FormalTaskSpec:
             "required_capabilities",
             "side_effect_class",
             "attributes",
-        }:
+        }
+        payload_fields = set(payload) if type(payload) is dict else set()
+        if type(payload) is not dict or payload_fields not in (
+            required_fields,
+            required_fields | {"constraints"},
+        ):
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_SPEC",
                 "formal task spec fields are incomplete or unknown",
@@ -636,7 +1003,12 @@ class FormalTaskSpec:
             )
         capabilities = payload["required_capabilities"]
         attributes = payload["attributes"]
-        if type(capabilities) is not list or type(attributes) is not dict:
+        constraints = payload.get("constraints", [])
+        if (
+            type(capabilities) is not list
+            or type(constraints) is not list
+            or type(attributes) is not dict
+        ):
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_SPEC",
                 "task capabilities and attributes have invalid types",
@@ -660,6 +1032,7 @@ class FormalTaskSpec:
             side_effect_class=_require_text(
                 payload["side_effect_class"], "task.side_effect_class"
             ),
+            constraints=tuple(constraints),
             attributes=tuple(sorted(attributes.items())),
         )
 
@@ -680,7 +1053,53 @@ class PersistentTaskRecord:
     outcome: TerminalOutcome | None
     reconciliation_state: ReconciliationState | None
     reconciliation_reason: str | None
+    create_command_id: str
+    predecessor_task_id: str | None
+    revision_number: int
     event_head: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("task.task_id", self.task_id),
+            ("task.create_command_id", self.create_command_id),
+        ):
+            identity = _require_text(value, field_name)
+            if (
+                "\x00" in identity
+                or len(identity) > 256
+                or _utf8_size(identity, field_name) > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_FORMAL_TASK_IDENTITY",
+                    "formal Task identity exceeds its closed bound",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if self.predecessor_task_id is not None:
+            predecessor = _require_text(
+                self.predecessor_task_id, "task.predecessor_task_id"
+            )
+            if (
+                predecessor == self.task_id
+                or "\x00" in predecessor
+                or len(predecessor) > 256
+                or _utf8_size(predecessor, "task.predecessor_task_id") > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_REVISION_LINEAGE",
+                    "formal Task predecessor identity is invalid",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if (
+            type(self.revision_number) is not int
+            or self.revision_number < 1
+            or self.revision_number > 1_000_000
+            or (self.revision_number == 1) != (self.predecessor_task_id is None)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_REVISION_LINEAGE",
+                "formal Task revision must bind one canonical predecessor chain",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -701,6 +1120,11 @@ class PersistentTaskRecord:
                     "reason": self.reconciliation_reason,
                 }
             ),
+            "revision": {
+                "number": self.revision_number,
+                "predecessor_task_id": self.predecessor_task_id,
+                "create_command_id": self.create_command_id,
+            },
             "event_head": self.event_head,
         }
 
@@ -715,6 +1139,7 @@ class PersistentAttemptRecord:
     outcome: TerminalOutcome | None
     source_seq: int
     attempt_number: int = 1
+    selection: PersistedExecutorSelection | None = None
 
     def __post_init__(self) -> None:
         if type(self.attempt_number) is not int or not 1 <= self.attempt_number <= 3:
@@ -725,7 +1150,7 @@ class PersistentAttemptRecord:
             )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "attempt_id": self.attempt_id,
             "task_id": self.task_id,
             "executor_id": self.executor_id,
@@ -735,6 +1160,19 @@ class PersistentAttemptRecord:
             "source_seq": self.source_seq,
             "attempt_number": self.attempt_number,
         }
+        if self.selection is not None:
+            payload["executor_selection"] = {
+                "adapter_id": self.selection.adapter_id,
+                "capability_profile": json.loads(
+                    self.selection.capability_profile_json
+                ),
+                "capability_profile_digest": (self.selection.capability_profile_digest),
+                "execution_requirements": json.loads(
+                    self.selection.execution_requirements_json
+                ),
+                "admission_priority": self.selection.admission_priority.value,
+            }
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -964,6 +1402,73 @@ class TaskRetryPrecondition:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskMutationPrecondition:
+    """Trusted exact Task/Attempt/head facts for one targeted mutation.
+
+    This value is deliberately out-of-band from the client command payload.
+    Product composition derives it from freshly reread Store authority, while
+    the Store compares it inside the same transaction that would append the
+    mutation event or outbox item.
+    """
+
+    task_id: str
+    attempt_id: str
+    expected_event_head: int
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("task.mutation_precondition.task_id", self.task_id),
+            ("task.mutation_precondition.attempt_id", self.attempt_id),
+        ):
+            identity = _require_text(value, field_name)
+            if (
+                "\x00" in identity
+                or len(identity) > 256
+                or _utf8_size(identity, field_name) > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "TASK_MUTATION_PRECONDITION_INVALID",
+                    "task mutation precondition identity exceeds its closed bound",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        if (
+            type(self.expected_event_head) is not int
+            or self.expected_event_head < 0
+            or self.expected_event_head > MAX_SAFE_INTEGER
+        ):
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition event head is outside its closed bound",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "expected_event_head": self.expected_event_head,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TaskMutationPrecondition:
+        if type(payload) is not dict or set(payload) != {
+            "task_id",
+            "attempt_id",
+            "expected_event_head",
+        }:
+            raise FormalTaskViolation(
+                "TASK_MUTATION_PRECONDITION_INVALID",
+                "task mutation precondition is not canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return cls(
+            task_id=payload["task_id"],  # type: ignore[arg-type]
+            attempt_id=payload["attempt_id"],  # type: ignore[arg-type]
+            expected_event_head=payload["expected_event_head"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskRetryAuthoritySnapshot:
     """Read-only retry admission snapshot; Store must re-check it when applying."""
 
@@ -985,6 +1490,35 @@ class TaskRetryAuthoritySnapshot:
             raise FormalTaskViolation(
                 "TASK_RETRY_PRECONDITION_STALE",
                 "retry snapshot does not bind the exact current terminal attempt",
+                ErrorCode.STALE,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DurableRecoveryAuthoritySnapshot:
+    """Store-read authority facts for D1/D2; never a user retry request."""
+
+    task: PersistentTaskRecord
+    producer_attempt: PersistentAttemptRecord
+    recovery_generation: int
+    recovery_budget_remaining: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.task.task_id != self.producer_attempt.task_id
+            or self.task.attempt_id != self.producer_attempt.attempt_id
+            or self.task.state is not FormalTaskState.TERMINAL
+            or self.producer_attempt.state is not FormalAttemptState.TERMINAL
+            or self.task.outcome is not TerminalOutcome.INTERRUPTED
+            or self.producer_attempt.outcome is not TerminalOutcome.INTERRUPTED
+            or self.recovery_generation != self.producer_attempt.attempt_number
+            or self.recovery_budget_remaining
+            != 3 - self.producer_attempt.attempt_number
+            or self.recovery_budget_remaining <= 0
+        ):
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_PRECONDITION_STALE",
+                "recovery snapshot does not bind one interrupted producer and budget",
                 ErrorCode.STALE,
             )
 
@@ -1174,6 +1708,334 @@ class PersistentTaskEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskUnreadPage:
+    """One prefix-bounded unread page against a frozen consumer snapshot."""
+
+    task_id: str
+    presentation_class: str
+    watermark: int
+    acked_event_id: str | None
+    head_seq: int
+    events: tuple[PersistentTaskEvent, ...]
+    next_after_seq: int | None
+    has_more: bool
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task_unread.task_id")
+        if type(self.presentation_class) is not str or self.presentation_class not in {
+            "text",
+            "voice",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_PRESENTATION_CLASS",
+                "task unread presentation class must be text or voice",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            type(self.watermark) is not int
+            or self.watermark < -1
+            or type(self.head_seq) is not int
+            or self.head_seq < 0
+            or self.watermark > self.head_seq
+            or type(self.events) is not tuple
+            or len(self.events) > 500
+            or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
+            or type(self.has_more) is not bool
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_UNREAD_PAGE",
+                "task unread page bounds are not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.watermark == -1:
+            if self.acked_event_id is not None:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_UNREAD_PAGE",
+                    "logical initial watermark cannot bind an event",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            _require_text(self.acked_event_id, "task_unread.acked_event_id")
+        for expected_seq, event in enumerate(self.events, self.watermark + 1):
+            if event.task_id != self.task_id or event.seq != expected_seq:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_UNREAD_PAGE",
+                    "task unread page is not one contiguous Task prefix",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if self.has_more:
+            if (
+                not self.events
+                or self.next_after_seq != self.events[-1].seq
+                or self.events[-1].seq >= self.head_seq
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_UNREAD_PAGE",
+                    "truncated task unread page lacks its next prefix position",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif (
+            self.next_after_seq is not None
+            or (self.events and self.events[-1].seq != self.head_seq)
+            or (not self.events and self.watermark != self.head_seq)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_UNREAD_PAGE",
+                "complete task unread page does not reach its frozen head",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    @property
+    def acked_through_seq(self) -> int:
+        return self.watermark
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "presentation_class": self.presentation_class,
+            "watermark": self.watermark,
+            "acked_event_id": self.acked_event_id,
+            "head_seq": self.head_seq,
+            "events": [event.to_dict() for event in self.events],
+            "next_after_seq": self.next_after_seq,
+            "has_more": self.has_more,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEventConsumerCursorBaseline:
+    """Store-owned lifecycle/Attempt facts at one durable consumer watermark."""
+
+    task_id: str
+    scope: ScopeRef
+    correlation_id: str
+    watermark: int
+    acked_event_id: str | None
+    lifecycle_event: PersistentTaskEvent | None
+    attempt_boundary: PersistentTaskEvent | None
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task_event_consumer_cursor.task_id")
+        if (
+            not isinstance(self.scope, ScopeRef)
+            or self.scope.assurance is not Assurance.AUTHENTICATED
+            or self.scope.project_id is None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor requires one authenticated project scope",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        _require_text(
+            self.correlation_id,
+            "task_event_consumer_cursor.correlation_id",
+        )
+        if type(self.watermark) is not int or self.watermark < -1:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor watermark is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.watermark == -1:
+            if (
+                self.acked_event_id is not None
+                or self.lifecycle_event is not None
+                or self.attempt_boundary is not None
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                    "initial consumer cursor cannot carry prior lifecycle facts",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            return
+        _require_text(
+            self.acked_event_id,
+            "task_event_consumer_cursor.acked_event_id",
+        )
+        lifecycle = self.lifecycle_event
+        boundary = self.attempt_boundary
+        if (
+            not isinstance(lifecycle, PersistentTaskEvent)
+            or not isinstance(boundary, PersistentTaskEvent)
+            or not 0 <= boundary.seq <= lifecycle.seq <= self.watermark
+            or lifecycle.task_id != boundary.task_id
+            or lifecycle.task_id != self.task_id
+            or lifecycle.attempt_id != boundary.attempt_id
+            or lifecycle.scope != boundary.scope
+            or lifecycle.scope != self.scope
+            or lifecycle.correlation_id != boundary.correlation_id
+            or lifecycle.correlation_id != self.correlation_id
+            or lifecycle.event_type
+            not in {
+                "task.accepted",
+                "task.retry_accepted",
+                "task.recovery_accepted",
+                "task.running",
+                "task.blocked",
+                "task.decision_required",
+                "task.terminal",
+            }
+            or boundary.event_type
+            not in {
+                "task.accepted",
+                "task.retry_accepted",
+                "task.recovery_accepted",
+            }
+            or boundary.state != FormalTaskState.ACCEPTED.value
+            or boundary.outcome is not None
+            or boundary.producer != "task_core"
+            or boundary.source_event_id is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_CURSOR_BASELINE",
+                "consumer cursor lacks one exact lifecycle and Attempt boundary",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEventConsumerAuthorityPage:
+    """One Store-verified consumer cursor and bounded Task-wide suffix."""
+
+    task: PersistentTaskRecord
+    attempt: PersistentAttemptRecord
+    presentation_class: str
+    watermark: int
+    acked_event_id: str | None
+    cursor_baseline: TaskEventConsumerCursorBaseline
+    segment_start_seq: int
+    page_after_seq: int
+    start_seq: int
+    head_seq: int
+    events: tuple[PersistentTaskEvent, ...]
+    next_after_seq: int | None
+    has_more: bool
+    terminal_head_event: PersistentTaskEvent | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.task, PersistentTaskRecord)
+            or not isinstance(self.attempt, PersistentAttemptRecord)
+            or self.attempt.task_id != self.task.task_id
+            or self.attempt.attempt_id != self.task.attempt_id
+            or self.presentation_class not in {"text", "voice"}
+            or not isinstance(self.cursor_baseline, TaskEventConsumerCursorBaseline)
+            or self.cursor_baseline.watermark != self.watermark
+            or self.cursor_baseline.acked_event_id != self.acked_event_id
+            or self.cursor_baseline.task_id != self.task.task_id
+            or self.cursor_baseline.scope != self.task.scope
+            or self.cursor_baseline.correlation_id != self.task.correlation_id
+            or type(self.watermark) is not int
+            or self.watermark < -1
+            or type(self.segment_start_seq) is not int
+            or type(self.page_after_seq) is not int
+            or type(self.start_seq) is not int
+            or type(self.head_seq) is not int
+            or not 0 <= self.segment_start_seq <= self.head_seq + 1
+            or self.watermark > self.head_seq
+            or not max(self.segment_start_seq - 1, self.watermark)
+            <= self.page_after_seq
+            <= self.head_seq
+            or self.start_seq != self.page_after_seq + 1
+            or not self.segment_start_seq <= self.start_seq <= self.head_seq + 1
+            or self.task.event_head < self.head_seq
+            or type(self.events) is not tuple
+            or len(self.events) > 500
+            or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
+            or type(self.has_more) is not bool
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "consumer TaskEvent authority page is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        cursor_lifecycle = self.cursor_baseline.lifecycle_event
+        cursor_boundary = self.cursor_baseline.attempt_boundary
+        if self.watermark >= 0 and (
+            cursor_lifecycle is None
+            or cursor_boundary is None
+            or cursor_lifecycle.task_id != self.task.task_id
+            or cursor_lifecycle.scope != self.task.scope
+            or cursor_lifecycle.correlation_id != self.task.correlation_id
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "consumer cursor baseline crosses its Task authority",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        terminal = self.terminal_head_event
+        if self.task.state is FormalTaskState.TERMINAL:
+            if (
+                not isinstance(terminal, PersistentTaskEvent)
+                or terminal.event_type != "task.terminal"
+                or terminal.seq != self.task.event_head
+                or terminal.task_id != self.task.task_id
+                or terminal.attempt_id != self.task.attempt_id
+                or terminal.scope != self.task.scope
+                or terminal.correlation_id != self.task.correlation_id
+                or terminal.state != FormalTaskState.TERMINAL.value
+                or terminal.outcome
+                != (None if self.task.outcome is None else self.task.outcome.value)
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "terminal Task page lacks its canonical head event",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif terminal is not None:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "nonterminal Task page cannot carry terminal-head authority",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.watermark == -1:
+            if self.acked_event_id is not None:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "initial consumer cursor cannot bind an acknowledged event",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            _require_text(
+                self.acked_event_id,
+                "task_event_consumer_authority.acked_event_id",
+            )
+        for expected_seq, event in enumerate(self.events, self.start_seq):
+            if (
+                event.seq != expected_seq
+                or event.task_id != self.task.task_id
+                or event.scope != self.task.scope
+                or event.correlation_id != self.task.correlation_id
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "consumer TaskEvent page is not one exact Task suffix",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if self.has_more:
+            if (
+                not self.events
+                or self.next_after_seq != self.events[-1].seq
+                or self.events[-1].seq >= self.head_seq
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                    "truncated consumer TaskEvent page lacks its exact cursor",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif (
+            self.next_after_seq is not None
+            or (self.events and self.events[-1].seq != self.head_seq)
+            or (not self.events and self.start_seq != self.head_seq + 1)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_CONSUMER_AUTHORITY_PAGE",
+                "complete consumer TaskEvent page does not reach its frozen head",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskMutationResult:
     """Atomic mutation receipt pinned to one durable attempt epoch."""
 
@@ -1264,12 +2126,12 @@ class TaskEventAuthoritySnapshot:
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
         boundary = self.events[0]
-        expected_boundary = (
-            "task.accepted"
+        expected_boundaries = (
+            {"task.accepted"}
             if self.attempt.attempt_number == 1
-            else "task.retry_accepted"
+            else {"task.retry_accepted", "task.recovery_accepted"}
         )
-        if boundary.event_type != expected_boundary:
+        if boundary.event_type not in expected_boundaries:
             raise FormalTaskViolation(
                 "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
                 "TaskEvent authority segment lacks its canonical attempt boundary",
@@ -1284,29 +2146,52 @@ class TaskEventAuthoritySnapshot:
                 )
         else:
             details = boundary.details
-            retry_of_attempt_id = details.get("retry_of_attempt_id")
+            is_recovery = boundary.event_type == "task.recovery_accepted"
+            predecessor_key = (
+                "producer_attempt_id" if is_recovery else "retry_of_attempt_id"
+            )
+            outcome_key = "producer_outcome" if is_recovery else "previous_outcome"
+            authority_key = "recovery_id" if is_recovery else "command_id"
+            predecessor_attempt_id = details.get(predecessor_key)
+            expected_keys = {
+                authority_key,
+                predecessor_key,
+                outcome_key,
+                "attempt_number",
+            }
+            if is_recovery:
+                expected_keys.update(
+                    {"recovery_generation", "recovery_budget_remaining"}
+                )
             if (
-                set(details)
-                != {
-                    "command_id",
-                    "retry_of_attempt_id",
-                    "previous_outcome",
-                    "attempt_number",
-                }
-                or details.get("command_id") != boundary.causation_id
+                set(details) != expected_keys
+                or details.get(authority_key) != boundary.causation_id
                 or details.get("attempt_number") != self.attempt.attempt_number
-                or type(retry_of_attempt_id) is not str
-                or not retry_of_attempt_id.strip()
-                or retry_of_attempt_id == self.attempt.attempt_id
-                or details.get("previous_outcome")
-                not in {
-                    TerminalOutcome.CANCELLED.value,
-                    TerminalOutcome.COMPLETED.value,
-                }
+                or type(predecessor_attempt_id) is not str
+                or not predecessor_attempt_id.strip()
+                or predecessor_attempt_id == self.attempt.attempt_id
+                or details.get(outcome_key)
+                not in (
+                    {TerminalOutcome.INTERRUPTED.value}
+                    if is_recovery
+                    else {
+                        TerminalOutcome.CANCELLED.value,
+                        TerminalOutcome.COMPLETED.value,
+                    }
+                )
+                or (
+                    is_recovery
+                    and (
+                        details.get("recovery_generation")
+                        != self.attempt.attempt_number - 1
+                        or details.get("recovery_budget_remaining")
+                        != 3 - self.attempt.attempt_number
+                    )
+                )
             ):
                 raise FormalTaskViolation(
                     "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
-                    "retry segment boundary does not bind exact predecessor lineage",
+                    "successor segment boundary does not bind exact predecessor lineage",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
 
@@ -1444,6 +2329,8 @@ class PersistentOutboxItem:
     delivery_count: int
     claim_token: str | None = None
     adjustment: TaskAdjustmentRequest | None = None
+    selection: PersistedExecutorSelection | None = None
+    admission: PersistentAdmissionRecord | None = None
 
     def __post_init__(self) -> None:
         if (self.kind is OutboxKind.ATTEMPT_ADJUST) != (self.adjustment is not None):
@@ -1480,6 +2367,8 @@ class ExecutorObservation:
     error: str | None = None
     result_text: str | None = None
     result_artifacts: tuple[TaskResultArtifact, ...] = ()
+    adapter_id: str | None = None
+    capability_profile_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolution, ExecutorResolution):
@@ -1499,9 +2388,32 @@ class ExecutorObservation:
             ("executor_observation.summary", self.summary),
             ("executor_observation.error", self.error),
             ("executor_observation.result_text", self.result_text),
+            ("executor_observation.adapter_id", self.adapter_id),
+            (
+                "executor_observation.capability_profile_digest",
+                self.capability_profile_digest,
+            ),
         ):
             if value is not None:
                 _require_text(value, field_name)
+        if (self.adapter_id is None) != (self.capability_profile_digest is None):
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_BINDING_INCOMPLETE",
+                "Executor callback selection binding must be all-null or complete",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.capability_profile_digest is not None and (
+            len(self.capability_profile_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.capability_profile_digest
+            )
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_SELECTION_BINDING_INVALID",
+                "Executor callback profile digest must be lowercase SHA-256",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
         if self.result_text is not None and (
             "\x00" in self.result_text
             or len(self.result_text) > 32_768
@@ -1592,7 +2504,7 @@ class ExecutorObservation:
             )
 
     def canonical_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "resolution": self.resolution.value,
             "executor_id": self.executor_id,
             "executor_ref": self.executor_ref,
@@ -1615,6 +2527,10 @@ class ExecutorObservation:
                 artifact.to_dict() for artifact in self.result_artifacts
             ],
         }
+        if self.adapter_id is not None:
+            payload["adapter_id"] = self.adapter_id
+            payload["capability_profile_digest"] = self.capability_profile_digest
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1667,7 +2583,11 @@ def safe_json_value(value: Any) -> Any:
 
 
 __all__ = [
+    "AdmissionDisposition",
+    "AdmissionPolicy",
+    "AdmissionPriority",
     "AppliedTaskRetryReplay",
+    "DurableRecoveryAuthoritySnapshot",
     "ExecutorDeliveryResult",
     "ExecutorObservation",
     "ExecutorResolution",
@@ -1678,6 +2598,8 @@ __all__ = [
     "FormalTaskViolation",
     "OutboxKind",
     "OutboxState",
+    "PersistedExecutorSelection",
+    "PersistentAdmissionRecord",
     "PersistentAttemptRecord",
     "PersistentOutboxItem",
     "PersistentTaskEvent",
@@ -1689,17 +2611,23 @@ __all__ = [
     "TaskAdjustmentRequest",
     "TaskAdjustmentSettlement",
     "TaskAdjustmentState",
+    "TaskCommandDisposition",
     "TaskEventAuthoritySnapshot",
+    "TaskEventConsumerAuthorityPage",
+    "TaskEventConsumerCursorBaseline",
     "TaskMutationDisposition",
+    "TaskMutationPrecondition",
     "TaskMutationResult",
     "TaskResultArtifact",
     "TaskResultAvailability",
     "TaskResultRecord",
+    "TaskUnreadPage",
     "TaskRetryAuthoritySnapshot",
     "TaskRetryPrecondition",
     "TaskRetryProductRequestFingerprint",
     "TASK_RETRY_PRODUCT_REQUEST_EXTENSION",
     "canonical_task_adjustment_rejection_reason",
+    "command_result_extensions",
     "require_exact_payload",
     "safe_json_value",
     "utc_now",

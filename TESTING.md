@@ -49,8 +49,11 @@ never a substitute for command output from the current worktree.
   state or another scope must assert every forbidden side effect as zero.
 - Test count and line coverage help discover gaps; neither proves semantic
   closure.
-- Fake, mock and deterministic corpus evidence cannot replace a required real
-  Provider, browser/device, Agent/Tool, Executor or human-perception journey.
+- Fake, mock and deterministic corpus evidence cannot replace a real boundary
+  when that boundary is part of the changed contract or its acceptance.
+  Physical Provider, browser/device and human-perception journeys are normally
+  candidate-level evidence; require one for a module batch only when that batch
+  claims behaviour at the actual physical or Provider boundary.
 - Record the exact tested source and relevant private-environment labels without
   credentials. A later source or behavioural-input change invalidates only the
   affected evidence and requires affected reruns.
@@ -63,18 +66,27 @@ Live Voice uses the D-046 risk tiers, the D-032 safety invariants and the D-074
 review cadence. This section is their stable operational authority; dated plans
 and reviews preserve history only.
 
+Assign risk per coherent changed boundary after recording its intended
+behaviour, owned source/tests, exclusions and applicable evidence. An umbrella
+packet or product-candidate tier does not automatically upgrade each child
+repair. A child that changes shared protocol, authority, security or durability
+still takes the corresponding higher tier on its own merits. Scope discovered
+during implementation may be re-recorded and re-tiered deliberately; it must not
+expand silently.
+
 | Tier | Typical scope | Required verification | Review boundary |
 |---|---|---|---|
 | 0 | Documentation, mechanical moves/removals, formatting and behaviour-preserving refactors | Affected links, formatting, characterization and repository checks | Scoped diff review; no artificial scenario matrix |
 | 1 | Ordinary feature, Port, Adapter and UI work | Positive journey, key negative and flag-off paths, affected integration and regressions | Complete scoped diff review at coherent module/group closure |
 | 2 | State, concurrency, mutation, cancel/fence and recovery-sensitive work | Every applicable scenario dimension below, including explicit zero forbidden effects | Design checkpoint only for a new/changed high-risk contract; cold complete-diff review and one independent review at module/group closure |
-| 3 | Shared protocol, authority, security, durability and release/product-candidate boundaries | Complete applicable scenario matrix, fault/recovery, real-path evidence and candidate-level cumulative verification | Independent module-boundary review plus cumulative candidate/integration-seam review and required human product acceptance |
+| 3 | Shared protocol, authority, security, durability and release/product-candidate boundaries | Complete applicable scenario matrix plus fault/recovery and real-path evidence for the owned boundary; cumulative verification only at candidate closure | Independent module-boundary review; cumulative integration-seam review and required human product acceptance only at candidate closure |
 
 ### D-032 scenario dimensions
 
 Tier 2 uses every applicable dimension; Tier 3 records the complete applicable
 matrix. Inapplicable dimensions are briefly scoped out rather than filled with
-ceremonial rows.
+ceremonial rows. One test may prove several dimensions, and no rule requires a
+separate suite, file or test case for every matrix cell.
 
 | Code | Dimension | Required question |
 |---|---|---|
@@ -113,6 +125,15 @@ At a coherent module or related-package boundary:
 3. for Tier 2/3, run one independent `/review` or equivalent and record any
    unavailable-tool substitute and limitation;
 4. fix findings and repeat only the materially affected verification/review.
+
+Triage review findings against the recorded acceptance and exclusions. Fix a
+finding in the current batch when the batch introduced it, it violates the
+recorded acceptance, or it demonstrates an immediate security, data-loss or
+cross-scope safety risk in the touched boundary. Record and route a pre-existing
+adjacent or excluded finding to its owner; it does not automatically expand the
+current batch. If a proposed fix would add a new product policy or classifier,
+shared protocol/schema/migration or another module owner, perform a scope and
+risk checkpoint before implementing it.
 
 At a product candidate:
 

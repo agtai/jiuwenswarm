@@ -15,8 +15,17 @@ import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea, type InputAreaHandle } from './InputArea';
-import { LiveVoiceDemoBar, type LiveVoiceDemoBarProps, type LiveVoiceVisualState } from './LiveVoiceDemoBar';
-import { LiveVoiceIntegratedRoutePanel, type ProductLiveVoiceSurfaceControl, type ProductLiveVoiceSurfaceState } from './LiveVoiceIntegratedRoutePanel';
+import {
+  FormalProductLiveVoiceDemoBar,
+  LiveVoiceDemoBar,
+  type LiveVoiceDemoBarProps,
+  type LiveVoiceVisualState,
+} from './LiveVoiceDemoBar';
+import {
+  LiveVoiceIntegratedRoutePanel,
+  type ProductLiveVoiceSurfaceControl,
+  type ProductLiveVoiceSurfaceState,
+} from './LiveVoiceIntegratedRoutePanel';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -57,6 +66,7 @@ import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
+import { useProductVoiceBrowserOwnership } from './useProductVoiceBrowserOwnership';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -1245,7 +1255,6 @@ export function ChatPanel({
   const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
   const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
   const addMessageIfAbsent = useChatStore((state) => state.addMessageIfAbsent);
-  const [productVoiceActive, setProductVoiceActive] = useState(false);
   const adoptProductVoiceState = useCallback((next: Readonly<ProductLiveVoiceSurfaceState>) => {
     setProductVoiceState(previous => {
       if (
@@ -1253,6 +1262,7 @@ export function ChatPanel({
         previous.available === next.available &&
         previous.p1_status === next.p1_status &&
         previous.p1_reason === next.p1_reason &&
+        previous.interruption_degraded_reason === next.interruption_degraded_reason &&
         previous.input === next.input &&
         previous.output === next.output &&
         previous.text_status === next.text_status &&
@@ -1270,22 +1280,40 @@ export function ChatPanel({
         previous.task_progress_task_id === next.task_progress_task_id &&
         previous.task_progress_state === next.task_progress_state &&
         previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
+        previous.task_unread_delivery === next.task_unread_delivery &&
+        previous.terminal_announcement_state === next.terminal_announcement_state &&
+        previous.recovery_diagnostic === next.recovery_diagnostic &&
         previous.terminal_notification === next.terminal_notification &&
         previous.adjustment_notification === next.adjustment_notification &&
-        previous.task_controls_locked === next.task_controls_locked
+        previous.task_controls_locked === next.task_controls_locked &&
+        previous.task_experience === next.task_experience
       ) {
         return previous;
       }
       return next;
     });
   }, []);
+  const getActiveProductVoiceSessionId = useCallback(
+    () => useChatStore.getState().activeSessionId,
+    [],
+  );
+  const {
+    active: productVoiceActive,
+    start: startProductVoiceWithBrowserOwnership,
+    stop: stopProductVoiceAndReleaseBrowserOwnership,
+  } = useProductVoiceBrowserOwnership({
+    activeSessionId,
+    controlRef: productVoiceControlRef,
+    getActiveSessionId: getActiveProductVoiceSessionId,
+  });
   useEffect(() => {
-    setProductVoiceActive(false);
     setProductVoiceState(null);
   }, [activeSessionId]);
 
   let formalVoiceVisualState: LiveVoiceVisualState = 'idle';
-  if (productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting') {
+  if (productVoiceState?.recovery_diagnostic !== null && productVoiceState?.recovery_diagnostic !== undefined) {
+    formalVoiceVisualState = productVoiceState.recovery_diagnostic.disposition === 'retrying' ? 'recovering' : 'error';
+  } else if (productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting') {
     formalVoiceVisualState = 'thinking';
   } else if (productVoiceState?.text_status === 'failed') {
     formalVoiceVisualState = 'error';
@@ -1311,23 +1339,37 @@ export function ChatPanel({
         formalVoiceVisualState = 'idle';
     }
   }
-  const formalStatusLabel = t(`liveVoice.status.${formalVoiceVisualState}`);
+  const recoveryDiagnostic = productVoiceState?.recovery_diagnostic ?? null;
+  const recoveryGeneration = recoveryDiagnostic?.response_generation ?? recoveryDiagnostic?.activation_generation ?? '-';
+  const formalStatusLabel = recoveryDiagnostic
+    ? t(
+        recoveryDiagnostic.disposition === 'retrying'
+          ? 'liveVoice.formal.recoveryRetryingWithContext'
+          : 'liveVoice.formal.recoveryTerminalWithContext',
+        {
+          seam: t(`liveVoice.formal.recoverySeam.${recoveryDiagnostic.seam}`),
+          correlationId: recoveryDiagnostic.correlation_id,
+          generation: recoveryGeneration,
+          reason: recoveryDiagnostic.reason,
+        },
+      )
+    : productVoiceState?.interruption_degraded_reason
+      ? t('liveVoice.formal.interruptionDegraded', {
+          reason: productVoiceState.interruption_degraded_reason,
+        })
+    : t(`liveVoice.status.${formalVoiceVisualState}`);
   const formalVoiceErrorReason =
-    productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
+    recoveryDiagnostic?.disposition === 'terminal'
+      ? recoveryDiagnostic.reason
+      : productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
       ? productVoiceState.text_reason
       : productVoiceState?.p1_reason ?? productVoiceState?.text_reason ?? null;
-  const formalVoiceErrorPhase = productVoiceState?.text_status === 'failed' && productVoiceState.text_reason ? 'text' : productVoiceState?.p1_status;
-  const formalTaskDetail =
-    productVoiceState?.terminal_notification ??
-    productVoiceState?.adjustment_notification ??
-    (productVoiceState?.task_progress_state ? t('liveVoice.formal.taskState', { state: productVoiceState.task_progress_state }) : null);
-  const formalTaskActivity: LiveVoiceDemoBarProps['taskActivity'] = formalTaskDetail
-    ? {
-        level: formalVoiceVisualState === 'error' ? 'error' : 'info',
-        title: t('liveVoice.formal.taskTitle'),
-        detail: formalTaskDetail,
-      }
-    : null;
+  const formalVoiceErrorPhase =
+    recoveryDiagnostic?.disposition === 'terminal'
+      ? recoveryDiagnostic.seam
+      : productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
+        ? 'text'
+        : productVoiceState?.p1_status;
   const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
     active: productVoiceActive,
     available: Boolean(productVoiceState?.available),
@@ -1344,25 +1386,43 @@ export function ChatPanel({
           : t('liveVoice.formal.recoveryFailed')
         : '',
     statusLabel: formalStatusLabel,
-    taskActivity: formalTaskActivity,
     handsFree: true,
     onEnable: () => {
-      setProductVoiceActive(true);
-      void productVoiceControlRef.current?.start();
+      void startProductVoiceWithBrowserOwnership();
     },
     onExit: () => {
-      setProductVoiceActive(false);
-      void productVoiceControlRef.current?.close();
+      void stopProductVoiceAndReleaseBrowserOwnership();
     },
     onPrimaryAction: () => {
       // Hands-free mode has no primary control after the first enable click.
     },
     onRetryListening: () => {
-      setProductVoiceActive(true);
-      void productVoiceControlRef.current?.start();
+      void startProductVoiceWithBrowserOwnership();
+    },
+    onInterruptAndSpeak: () => {
+      // Formal playout already owns a concurrent successor capture. Stopping
+      // the exact response leaves that capture authoritative for the utterance
+      // the user is about to speak.
+      void productVoiceControlRef.current?.stop();
+    },
+    onStopPlayback: () => {
+      // Stop only the exact foreground response. Live Voice stays enabled and
+      // the formal route continues with its existing successor capture.
+      void productVoiceControlRef.current?.stop();
     },
   };
-  const liveVoiceDemoProps = formalProductVoiceEnabled ? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps;
+  const liveVoiceDemoBar = formalProductVoiceEnabled ? (
+    <FormalProductLiveVoiceDemoBar
+      {...formalLiveVoiceDemoProps}
+      surfaceState={productVoiceState}
+      onTaskRefresh={async () => { await productVoiceControlRef.current?.refreshTasks(); }}
+      onTaskSelect={async taskId => { await productVoiceControlRef.current?.selectTask(taskId); }}
+      onTaskMutation={async input => { await productVoiceControlRef.current?.issueTaskMutation(input); }}
+      onTaskConfirm={async () => { await productVoiceControlRef.current?.confirmTaskMutation(); }}
+    />
+  ) : (
+    <LiveVoiceDemoBar {...legacyLiveVoiceDemoProps} />
+  );
 
   return (
     <div
@@ -1502,7 +1562,7 @@ export function ChatPanel({
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
-                {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
+                {FEATURE_LIVE_VOICE_DEMO && liveVoiceDemoBar}
                 <InputArea
                   ref={inputAreaRef}
                   onSubmit={handleSendMessage}
@@ -1564,7 +1624,7 @@ export function ChatPanel({
               onClearGoal={onClearGoal}
             />
           )}
-          {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
+          {FEATURE_LIVE_VOICE_DEMO && liveVoiceDemoBar}
           <InputArea
             ref={inputAreaRef}
             onSubmit={handleSendMessage}

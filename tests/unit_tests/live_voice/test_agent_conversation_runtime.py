@@ -17,6 +17,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ProducerRef,
     ResponseRef,
     ScopeRef,
+    TerminalOutcome,
     TurnCommit,
     WorkProgressEventV2,
     canonical_json_bytes,
@@ -37,6 +38,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
 )
 from jiuwenswarm.server.live_voice.conversation_runtime import (
     ConversationRuntimeViolation,
+    ResponseState,
 )
 from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessReservationState,
@@ -47,6 +49,7 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
     PresentationLedgerViolation,
+    PresentationState,
     PresentationSurface,
     PresentationUnit,
 )
@@ -518,13 +521,13 @@ async def test_task_notification_allocates_current_generation_and_waits_for_ack(
     await current.start()
     await current.open_interaction("interaction-1")
 
-    dialogue = commit(text="ordinary dialogue")
+    dialogue = commit(text="帮我在后台创建巴黎一日行程.md")
     first = await current.present_authoritative_text(
         request_id="authoritative-request-1",
         response_id="authoritative-response-1",
         correlation_id="correlation-authoritative-1",
         commit=dialogue,
-        text="ordinary answer",
+        text="后台任务已受理，正在等待执行。",
         channel_id="web",
     )
     first_notification = await asyncio.wait_for(current.next_notification(), timeout=1)
@@ -541,6 +544,7 @@ async def test_task_notification_allocates_current_generation_and_waits_for_ack(
     )
     assert first_ack.accepted is True
     assert current.task_notification_foreground_safe() is True
+    assert current.select_formal_context(dialogue.interaction_id).entries == ()
 
     terminal_commit = commit(
         turn_id="turn-task-notification-1",
@@ -587,6 +591,402 @@ async def test_task_notification_allocates_current_generation_and_waits_for_ack(
     )
     assert terminal_ack.accepted is True
     assert current.task_notification_foreground_safe() is True
+    assert current.select_formal_context(dialogue.interaction_id).entries == ()
+    assert lower.calls == 0
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_task_notification_audio_unit_owns_exact_runtime_reservation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    await current.start()
+    await current.open_interaction("interaction-1")
+    notification_commit = commit(
+        turn_id="turn-task-audio-1",
+        commit_id="commit-task-audio-1",
+        text="Task audio notification for task-1",
+    )
+
+    handle = await current.present_authoritative_text(
+        request_id="task-audio-request-1",
+        response_id="task-audio-response-1",
+        correlation_id="task-audio-correlation-1",
+        commit=notification_commit,
+        text="The background task is running.",
+        channel_id="web",
+        _persist_user_history=False,
+        _source_provenance="server.task_notification",
+        _presentation_surface=PresentationSurface.AUDIO,
+    )
+
+    unit = handle.presentation_unit
+    assert unit.ref == handle.response_ref
+    assert unit.surface is PresentationSurface.AUDIO
+    reserved = current.task_presentation_runtime_authority(
+        handle.response_ref, None, "reserve"
+    )
+    assert reserved.active is True
+    assert reserved.reservation_id
+    consuming = current.task_presentation_runtime_authority(
+        handle.response_ref, reserved.reservation_id, "consume"
+    )
+    assert consuming.active is True
+
+    acknowledged = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=handle.response_ref,
+            surface=PresentationSurface.AUDIO,
+            unit_id=unit.unit_id,
+            contiguous_cursor=unit.seq,
+            presented_at="2026-08-05T08:00:03Z",
+        )
+    )
+    assert acknowledged.accepted is True
+    presented = current.task_presentation_runtime_authority(
+        handle.response_ref, reserved.reservation_id, "voice_presented"
+    )
+    assert presented.active is True
+    closed = current.task_presentation_runtime_authority(
+        handle.response_ref, reserved.reservation_id, "close"
+    )
+    assert closed.active is False
+    with pytest.raises(AgentConversationRuntimeViolation) as late:
+        current.task_presentation_runtime_authority(
+            handle.response_ref, reserved.reservation_id, "consume"
+        )
+    assert late.value.reason == "TASK_PRESENTATION_RESERVATION_CLOSED"
+    assert lower.calls == 0
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_task_presentation_close_releases_active_and_bounds_closed_fences() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    max_requests = 2
+    current = runtime(lower, history, max_requests=max_requests)
+    await current.start()
+    await current.open_interaction("interaction-1")
+    settled: list[tuple[ResponseRef, str]] = []
+
+    for ordinal in range(max_requests + 1):
+        handle = await current.present_authoritative_text(
+            request_id=f"task-close-request-{ordinal}",
+            response_id=f"task-close-response-{ordinal}",
+            correlation_id=f"task-close-correlation-{ordinal}",
+            commit=commit(
+                turn_id=f"turn-task-close-{ordinal}",
+                commit_id=f"commit-task-close-{ordinal}",
+                text=f"Task close notification {ordinal}",
+            ),
+            text="The background task is running.",
+            channel_id="web",
+            _persist_user_history=False,
+            _source_provenance="server.task_notification",
+            _presentation_surface=PresentationSurface.AUDIO,
+            _publish_notification=False,
+        )
+        reserved = current.task_presentation_runtime_authority(
+            handle.response_ref, None, "reserve"
+        )
+        settled.append((handle.response_ref, reserved.reservation_id))
+        closed = current.task_presentation_runtime_authority(
+            handle.response_ref, reserved.reservation_id, "close"
+        )
+        assert closed.active is False
+        assert current._task_presentation_reservations == {}
+
+    assert len(current._closed_task_presentation_reservations) == max_requests
+    assert len(current._closed_task_presentation_order) == max_requests
+    oldest_ref, oldest_reservation_id = settled[0]
+    newest_ref, newest_reservation_id = settled[-1]
+    with pytest.raises(AgentConversationRuntimeViolation) as old_reserve:
+        current.task_presentation_runtime_authority(oldest_ref, None, "reserve")
+    assert old_reserve.value.reason == "TASK_PRESENTATION_RESPONSE_UNAVAILABLE"
+    with pytest.raises(AgentConversationRuntimeViolation) as old_phase:
+        current.task_presentation_runtime_authority(
+            oldest_ref, oldest_reservation_id, "consume"
+        )
+    assert old_phase.value.reason == "TASK_PRESENTATION_RESERVATION_MISMATCH"
+    with pytest.raises(AgentConversationRuntimeViolation) as recent_reserve:
+        current.task_presentation_runtime_authority(newest_ref, None, "reserve")
+    assert recent_reserve.value.reason == "TASK_PRESENTATION_RESERVATION_CLOSED"
+    replayed_close = current.task_presentation_runtime_authority(
+        newest_ref, newest_reservation_id, "close"
+    )
+    assert replayed_close.active is False
+    with pytest.raises(AgentConversationRuntimeViolation) as recent_phase:
+        current.task_presentation_runtime_authority(
+            newest_ref, newest_reservation_id, "voice_presented"
+        )
+    assert recent_phase.value.reason == "TASK_PRESENTATION_RESERVATION_CLOSED"
+    assert current._task_presentation_reservations == {}
+    assert len(current._closed_task_presentation_reservations) == max_requests
+    assert len(current._closed_task_presentation_order) == max_requests
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_task_presentation_failure_releases_active_and_bounds_replay_fences() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    max_requests = 2
+    current = runtime(lower, history, max_requests=max_requests)
+    await current.start()
+    await current.open_interaction("interaction-1")
+    settled: list[tuple[ResponseRef, str]] = []
+
+    for ordinal in range(max_requests + 1):
+        handle = await current.present_authoritative_text(
+            request_id=f"task-fail-request-{ordinal}",
+            response_id=f"task-fail-response-{ordinal}",
+            correlation_id=f"task-fail-correlation-{ordinal}",
+            commit=commit(
+                turn_id=f"turn-task-fail-{ordinal}",
+                commit_id=f"commit-task-fail-{ordinal}",
+                text=f"Task failure notification {ordinal}",
+            ),
+            text="The background task is running.",
+            channel_id="web",
+            _persist_user_history=False,
+            _source_provenance="server.task_notification",
+            _presentation_surface=PresentationSurface.AUDIO,
+            _publish_notification=False,
+        )
+        reserved = current.task_presentation_runtime_authority(
+            handle.response_ref, None, "reserve"
+        )
+        settled.append((handle.response_ref, reserved.reservation_id))
+        assert await current.fail_task_presentation(
+            handle.response_ref,
+            reserved.reservation_id,
+            reason="task_audio_playout_failed",
+        )
+        assert current._task_presentation_reservations == {}
+
+    assert len(current._closed_task_presentation_reservations) == max_requests
+    assert len(current._closed_task_presentation_order) == max_requests
+    oldest_ref, oldest_reservation_id = settled[0]
+    newest_ref, newest_reservation_id = settled[-1]
+    with pytest.raises(AgentConversationRuntimeViolation) as old_reserve:
+        current.task_presentation_runtime_authority(oldest_ref, None, "reserve")
+    assert old_reserve.value.reason == "TASK_PRESENTATION_RESPONSE_UNAVAILABLE"
+    with pytest.raises(AgentConversationRuntimeViolation) as old_failure:
+        await current.fail_task_presentation(
+            oldest_ref,
+            oldest_reservation_id,
+            reason="task_audio_playout_failed",
+        )
+    assert old_failure.value.reason == "TASK_PRESENTATION_RESERVATION_MISMATCH"
+    assert (
+        await current.fail_task_presentation(
+            newest_ref,
+            newest_reservation_id,
+            reason="task_audio_playout_failed",
+        )
+        is False
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as rewritten:
+        await current.fail_task_presentation(
+            newest_ref,
+            newest_reservation_id,
+            reason="task_audio_owner_unavailable",
+        )
+    assert rewritten.value.reason == "TASK_PRESENTATION_FAILURE_REWRITE"
+    with pytest.raises(AgentConversationRuntimeViolation) as late_phase:
+        current.task_presentation_runtime_authority(
+            newest_ref, newest_reservation_id, "consume"
+        )
+    assert late_phase.value.reason == "TASK_PRESENTATION_RESERVATION_CLOSED"
+    assert current._task_presentation_reservations == {}
+    assert len(current._closed_task_presentation_reservations) == max_requests
+    assert len(current._closed_task_presentation_order) == max_requests
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_task_presentation_failure_claim_fences_concurrent_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    await current.start()
+    await current.open_interaction("interaction-1")
+    handle = await current.present_authoritative_text(
+        request_id="task-fail-race-request",
+        response_id="task-fail-race-response",
+        correlation_id="task-fail-race-correlation",
+        commit=commit(
+            turn_id="turn-task-fail-race",
+            commit_id="commit-task-fail-race",
+            text="Task failure race notification",
+        ),
+        text="The background task is running.",
+        channel_id="web",
+        _persist_user_history=False,
+        _source_provenance="server.task_notification",
+        _presentation_surface=PresentationSurface.AUDIO,
+        _publish_notification=False,
+    )
+    reserved = current.task_presentation_runtime_authority(
+        handle.response_ref, None, "reserve"
+    )
+    invalidation_entered = asyncio.Event()
+    release_invalidation = asyncio.Event()
+    original_invalidate = current._cr.invalidate_presentation
+    invalidation_calls = 0
+
+    async def delayed_invalidate(
+        response_ref: ResponseRef,
+        *,
+        reason: str,
+    ) -> object:
+        nonlocal invalidation_calls
+        invalidation_calls += 1
+        invalidation_entered.set()
+        await release_invalidation.wait()
+        return await original_invalidate(response_ref, reason=reason)
+
+    monkeypatch.setattr(current._cr, "invalidate_presentation", delayed_invalidate)
+    failure = asyncio.create_task(
+        current.fail_task_presentation(
+            handle.response_ref,
+            reserved.reservation_id,
+            reason="task_audio_playout_failed",
+        )
+    )
+    await asyncio.wait_for(invalidation_entered.wait(), timeout=1)
+
+    for phase in ("consume", "voice_presented", "close"):
+        with pytest.raises(AgentConversationRuntimeViolation) as concurrent_phase:
+            current.task_presentation_runtime_authority(
+                handle.response_ref,
+                reserved.reservation_id,
+                phase,
+            )
+        assert concurrent_phase.value.reason == "TASK_PRESENTATION_FAILURE_PENDING"
+    release_invalidation.set()
+    assert await asyncio.wait_for(failure, timeout=1) is True
+    assert current._task_presentation_reservations == {}
+    settled = current._closed_task_presentation_reservations[handle.response_ref]
+    assert settled.failure_reason == "task_audio_playout_failed"
+    assert invalidation_calls == 1
+
+    close_first = await current.present_authoritative_text(
+        request_id="task-close-first-request",
+        response_id="task-close-first-response",
+        correlation_id="task-close-first-correlation",
+        commit=commit(
+            turn_id="turn-task-close-first",
+            commit_id="commit-task-close-first",
+            text="Task close first notification",
+        ),
+        text="The background task is running.",
+        channel_id="web",
+        _persist_user_history=False,
+        _source_provenance="server.task_notification",
+        _presentation_surface=PresentationSurface.AUDIO,
+        _publish_notification=False,
+    )
+    close_first_reservation = current.task_presentation_runtime_authority(
+        close_first.response_ref, None, "reserve"
+    )
+    current.task_presentation_runtime_authority(
+        close_first.response_ref,
+        close_first_reservation.reservation_id,
+        "close",
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as late_failure:
+        await current.fail_task_presentation(
+            close_first.response_ref,
+            close_first_reservation.reservation_id,
+            reason="task_audio_playout_failed",
+        )
+    assert late_failure.value.reason == "TASK_PRESENTATION_RESERVATION_CLOSED"
+    assert invalidation_calls == 1
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_failed_task_notification_publish_fences_partial_response() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    await current.start()
+    await current.open_interaction("interaction-1")
+
+    async def fail_before_publish(_handle: object) -> None:
+        raise RuntimeError("injected reservation failure")
+
+    with pytest.raises(RuntimeError, match="injected reservation failure"):
+        await current.present_authoritative_text(
+            request_id="task-audio-failed-request",
+            response_id="task-audio-failed-response",
+            correlation_id="task-audio-failed-correlation",
+            commit=commit(
+                turn_id="turn-task-audio-failed",
+                commit_id="commit-task-audio-failed",
+                text="Failed Task audio notification",
+            ),
+            text="The background task is running.",
+            channel_id="web",
+            before_publish=fail_before_publish,
+            _persist_user_history=False,
+            _source_provenance="server.task_notification",
+            _presentation_surface=PresentationSurface.AUDIO,
+        )
+
+    failed = next(
+        item
+        for item in current.snapshot().conversation.conversation.responses
+        if item.ref.response_id == "task-audio-failed-response"
+    )
+    assert failed.state is ResponseState.TERMINAL
+    assert failed.outcome is TerminalOutcome.INTERRUPTED
+    assert all(
+        record.state is PresentationState.INVALIDATED
+        for record in current.snapshot().conversation.presentation.records
+        if record.unit.ref == failed.ref
+    )
+    assert current.snapshot().queued_notifications == 0
+    assert current.task_notification_foreground_safe() is True
+    assert history.users == []
+    assert history.assistant_intents == []
+
+    succeeded = await current.present_authoritative_text(
+        request_id="task-audio-next-request",
+        response_id="task-audio-next-response",
+        correlation_id="task-audio-next-correlation",
+        commit=commit(
+            turn_id="turn-task-audio-next",
+            commit_id="commit-task-audio-next",
+            text="Next Task audio notification",
+        ),
+        text="The background task is still running.",
+        channel_id="web",
+        _persist_user_history=False,
+        _source_provenance="server.task_notification",
+        _presentation_surface=PresentationSurface.AUDIO,
+    )
+    assert succeeded.presentation_unit.surface is PresentationSurface.AUDIO
+    assert current.snapshot().queued_notifications == 1
+    assert lower.calls == 0
     await current.close(timeout_seconds=1)
 
 
@@ -2843,6 +3243,43 @@ def test_invalid_composition_notification_bounds_fail_before_runtime_effects() -
             )
         assert invalid.value.reason == "INVALID_COMPOSITION_CAPACITY"
     assert lower.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_exact_notification_lease_drains_only_currently_queued_items_with_closed_bounds() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    selected = await prepare(current)
+    lease = current.attach_notification_consumer(
+        consumer_id="bounded-pull-owner", connection_epoch=0
+    )
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(handle.completion, timeout=1)
+
+    async def wait_for_four() -> None:
+        while current.snapshot().queued_notifications < 4:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_four(), timeout=1)
+    before = current.snapshot()
+    for invalid in (False, 0, 17):
+        with pytest.raises(AgentConversationRuntimeViolation) as rejected:
+            await current.drain_notifications_for(lease, limit=invalid)
+        assert rejected.value.reason == "INVALID_NOTIFICATION_BATCH_LIMIT"
+        assert current.snapshot().delivered_notifications == before.delivered_notifications
+
+    drained = await current.drain_notifications_for(lease, limit=3)
+    assert [item.publish_seq for item in drained] == [0, 1, 2]
+    assert current.snapshot().queued_notifications == 1
+    last = await current.drain_notifications_for(lease, limit=16)
+    assert [item.publish_seq for item in last] == [3]
+    assert await current.drain_notifications_for(lease, limit=16) == ()
+
+    assert current.detach_notification_consumer(lease) is True
+    with pytest.raises(AgentConversationRuntimeViolation) as detached:
+        await current.drain_notifications_for(lease, limit=1)
+    assert detached.value.reason == "NOTIFICATION_CONSUMER_DETACHED"
+    assert current.snapshot().harness.cancel_effects == 0
+    await current.close(timeout_seconds=1)
 
 
 def test_duplicate_or_exhausted_critical_reserve_fails_closed_without_growth() -> None:

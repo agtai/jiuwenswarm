@@ -13,22 +13,81 @@ from jiuwenswarm.agents.harness.common.auto_harness.task_store import (
 )
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    ErrorCode,
     OriginRef,
     ScopeRef,
 )
+from jiuwenswarm.server.live_voice.executor_capabilities import (
+    TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+    TaskExecutionRequirements,
+    select_executor,
+)
 from jiuwenswarm.server.live_voice.formal_task_models import (
     FormalTaskSpec,
+    FormalTaskViolation,
     OutboxKind,
     OutboxState,
     PersistentOutboxItem,
     ResolvedTaskContext,
 )
 from jiuwenswarm.server.live_voice.project_code_executor import (
+    DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
     PROJECT_CODE_PIPELINE,
     ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
+
+
+def _direct_requirements(*, dispatch_version: str = "v1") -> TaskExecutionRequirements:
+    return TaskExecutionRequirements(
+        schema_version=TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+        executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+        operation_versions=(
+            ("dispatch", dispatch_version),
+            ("status", "v1"),
+            ("cancel", "v1"),
+            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("reconcile.d0", "v1"),
+        ),
+        durability_level="D0",
+        side_effect_class="project_mutation",
+        project_serialization="exclusive",
+    )
+
+
+def test_real_direct_adapter_profile_selects_exact_current_operations() -> None:
+    profile = DirectProjectCodeExecutorAdapter.capability_profile()
+
+    selection = select_executor((profile,), _direct_requirements())
+
+    assert selection.profile is profile
+    assert selection.profile_digest == profile.digest_sha256()
+    assert selection.requirements.operation_versions == (
+        ("adjust.demo-itinerary-checkpoint", "v1"),
+        ("cancel", "v1"),
+        ("dispatch", "v1"),
+        ("reconcile.d0", "v1"),
+        ("status", "v1"),
+    )
+
+
+def test_static_version_mismatch_precedes_direct_adapter_and_project_effect(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "must-not-exist.sqlite3"
+    project = tmp_path / "must-not-be-created"
+
+    with pytest.raises(FormalTaskViolation) as unsupported:
+        select_executor(
+            (DirectProjectCodeExecutorAdapter.capability_profile(),),
+            _direct_requirements(dispatch_version="v2"),
+        )
+
+    assert unsupported.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+    assert unsupported.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert not database.exists()
+    assert not project.exists()
 
 
 class _ProjectExecutor:

@@ -6,12 +6,14 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 import runpy
 import sqlite3
 import subprocess
 import sys
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -40,12 +42,19 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     OutboxKind,
     OutboxState,
     PersistentAttemptRecord,
+    PersistedExecutorSelection,
     PersistentOutboxItem,
     PersistentTaskRecord,
     ResolvedTaskContext,
     TaskAdjustmentRequest,
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
+)
+from jiuwenswarm.server.live_voice.executor_capabilities import (
+    TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+    ExecutorCapabilityProfile,
+    TaskExecutionRequirements,
+    select_executor,
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
@@ -62,6 +71,7 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
+from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 from scripts.live_voice.w2_rehearsal.w2_d069_runtime_diagnostic import (
@@ -91,6 +101,33 @@ class _DirectProjectExecutor:
         project = Path(request.params["project_dir"]).resolve()
         try:
             if self.behavior == "wait":
+                await asyncio.Event().wait()
+            elif self.behavior == "observe_wait":
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={
+                        "event_type": "chat.tool_call",
+                        "tool_call": {
+                            "tool_name": "read_file",
+                            "tool_call_id": f"call-{request.request_id}",
+                            "arguments": {"path": "PRIVATE_PATH_SENTINEL"},
+                        },
+                    },
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={
+                        "event_type": "chat.tool_result",
+                        "tool_name": "read_file",
+                        "tool_call_id": f"call-{request.request_id}",
+                        "result": "PRIVATE_RESULT_SENTINEL",
+                        "success": True,
+                    },
+                    is_complete=False,
+                )
                 await asyncio.Event().wait()
             elif self.behavior == "agent_error":
                 yield AgentResponseChunk(
@@ -195,6 +232,64 @@ class _AdjustableItineraryProjectExecutor(_DirectProjectExecutor):
             request.request_id,
             request.channel_id,
             payload={"event_type": "chat.final", "content": content},
+            is_complete=True,
+        )
+
+
+class _ObservedAdjustableProjectExecutor(_DirectProjectExecutor):
+    """Emit realistic private tool payloads without crediting a real Agent/Tool."""
+
+    sentinel = "PRIVATE_STREAM_SENTINEL"
+
+    def __init__(self, project: Path) -> None:
+        super().__init__(project)
+        self.initial_complete = asyncio.Event()
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        project = Path(request.params["project_dir"]).resolve()
+        initial = request.params["source"] == "live_voice.formal_task.d0"
+        tool_name = "write_file" if initial else "edit_file"
+        call_id = f"call-{self.sentinel}-{'initial' if initial else 'adjustment'}"
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={
+                "event_type": "chat.tool_call",
+                "tool_call": {
+                    "tool_name": tool_name,
+                    "tool_call_id": call_id,
+                    "arguments": {
+                        "path": f"C:/private/{self.sentinel}.txt",
+                        "content": self.sentinel,
+                    },
+                },
+            },
+            is_complete=False,
+        )
+        if initial:
+            (project / "result.txt").write_text("initial\n", encoding="utf-8")
+            self.initial_complete.set()
+        else:
+            (project / "result.txt").write_text("adjusted\n", encoding="utf-8")
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={
+                "event_type": "chat.tool_result",
+                "tool_name": tool_name,
+                "tool_call_id": call_id,
+                "result": self.sentinel,
+                "raw_output": self.sentinel,
+                "success": True,
+            },
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={"event_type": "chat.final", "content": self.sentinel},
             is_complete=True,
         )
 
@@ -392,6 +487,18 @@ class _Resolver:
         return self.binding
 
 
+class _MappedResolver:
+    def __init__(self, bindings: dict[Path, ProjectExecutionBinding]) -> None:
+        self.bindings = bindings
+        self.calls: list[Path] = []
+
+    async def resolve(self, spec, *, for_dispatch: bool):
+        assert for_dispatch is True
+        root = Path(spec.context.file_path).resolve()
+        self.calls.append(root)
+        return self.bindings[root]
+
+
 async def _clean_dispatch_fence() -> None:
     return None
 
@@ -470,6 +577,73 @@ def _item(project: Path, *, kind=OutboxKind.ATTEMPT_DISPATCH, source_seq=-1):
     )
 
 
+def _direct_selection(
+    profile: ExecutorCapabilityProfile | None = None,
+) -> PersistedExecutorSelection:
+    selected_profile = profile or DirectProjectCodeExecutorAdapter.capability_profile()
+    requirements = TaskExecutionRequirements(
+        schema_version=TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+        executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+        operation_versions=(
+            ("dispatch", "v1"),
+            ("status", "v1"),
+            ("cancel", "v1"),
+            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("reconcile.d0", "v1"),
+        ),
+        durability_level="D0",
+        side_effect_class="project_mutation",
+        project_serialization="exclusive",
+    )
+    selection = select_executor((selected_profile,), requirements)
+    return PersistedExecutorSelection(
+        adapter_id=selection.profile.adapter_id,
+        capability_profile_json=selection.profile.canonical_bytes(),
+        capability_profile_digest=selection.profile_digest,
+        execution_requirements_json=selection.requirements.canonical_bytes(),
+    )
+
+
+def _foreign_adapter_selection() -> PersistedExecutorSelection:
+    """Return a valid selection which is deliberately not owned by Direct."""
+
+    foreign = replace(
+        DirectProjectCodeExecutorAdapter.capability_profile(),
+        profile_id="other.product-code.d0.v1",
+        adapter_id="other.product-code",
+        adapter_protocol_version="other.product-code.v1",
+    )
+    return _direct_selection(foreign)
+
+
+def _forged_direct_capability_selection() -> PersistedExecutorSelection:
+    """Return a self-consistent Direct identity with capabilities it never emitted."""
+
+    direct = DirectProjectCodeExecutorAdapter.capability_profile()
+    forged = replace(
+        direct,
+        operation_versions=direct.operation_versions + (("pause", "v1"),),
+        enforcement_facts=direct.enforcement_facts + ("control.pause",),
+    )
+    return _direct_selection(forged)
+
+
+def _store_effect_counts(database: Path) -> tuple[int, ...]:
+    """Count every Store surface forbidden to a rejected Direct control."""
+
+    with sqlite3.connect(database) as connection:
+        return tuple(
+            int(connection.execute(statement).fetchone()[0])
+            for statement in (
+                "SELECT COUNT(*) FROM tasks",
+                "SELECT COUNT(*) FROM attempts",
+                "SELECT COUNT(*) FROM task_events",
+                "SELECT COUNT(*) FROM executor_events",
+                "SELECT COUNT(*) FROM outbox",
+            )
+        )
+
+
 def _adjustment_item(
     project: Path,
     *,
@@ -504,6 +678,7 @@ def _direct_task_attempt(
     source_seq: int = 1,
     task_id: str = "task-1",
     attempt_id: str = "attempt-1",
+    selection: PersistedExecutorSelection | None = None,
 ) -> tuple[PersistentTaskRecord, PersistentAttemptRecord]:
     task = PersistentTaskRecord(
         task_id,
@@ -517,6 +692,9 @@ def _direct_task_attempt(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         attempt_id,
@@ -526,6 +704,7 @@ def _direct_task_attempt(
         FormalAttemptState.RUNNING,
         None,
         source_seq,
+        selection=selection,
     )
     return task, attempt
 
@@ -541,6 +720,18 @@ async def _wait_direct_settled(
             return
         await asyncio.sleep(0.01)
     raise AssertionError("direct Executor worker did not settle")
+
+
+async def _wait_direct_terminal(
+    adapter: DirectProjectCodeExecutorAdapter,
+    attempt_id: str = "attempt-1",
+):
+    for _ in range(500):
+        record = adapter._journal.get(attempt_id)
+        if record is not None and record.state is FormalAttemptState.TERMINAL:
+            return record
+        await asyncio.sleep(0.01)
+    raise AssertionError("direct Executor attempt did not become terminal")
 
 
 @pytest.mark.asyncio
@@ -602,6 +793,9 @@ async def test_reconciliation_reports_unchanged_lost_and_unavailable_without_ret
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -805,6 +999,9 @@ async def test_status_uses_immutable_binding_after_revision_and_path_change(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -882,6 +1079,9 @@ async def test_status_rejects_a_different_legacy_attempt_reference(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -922,6 +1122,9 @@ async def test_status_rejects_mismatched_persisted_attempt_provenance(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -971,6 +1174,672 @@ def test_chat_final_with_nul_is_never_publishable_result_content() -> None:
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "profile-project"
+    _git_project(project)
+    first = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        tmp_path / "first-private.sqlite3",
+    )
+    second = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        tmp_path / "second-private.sqlite3",
+        attempt_timeout=60,
+        demo_itinerary_fixture_enabled=True,
+        demo_itinerary_adjustment_checkpoint_enabled=True,
+    )
+
+    try:
+        first_profile = first.capability_profile()
+        second_profile = second.capability_profile()
+
+        assert first_profile is second_profile
+        assert first_profile.profile_id == "live-voice.direct-project-code.d0.v1"
+        assert first_profile.executor_id == "jiuwenswarm_code_agent.project_code"
+        assert first_profile.adapter_id == "live-voice.direct-project-code"
+        assert (
+            first_profile.adapter_protocol_version
+            == "live-voice.direct-project-code.v1"
+        )
+        assert first_profile.operation_versions == (
+            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("cancel", "v1"),
+            ("dispatch", "v1"),
+            ("reconcile.d0", "v1"),
+            ("status", "v1"),
+        )
+        assert first_profile.durability_level == "D0"
+        assert first_profile.durability_version == "live-voice.direct-d0.v1"
+        assert first_profile.project_serialization == "exclusive"
+        assert first_profile.max_live_attempts == 32
+        assert first_profile.enforcement_facts == (
+            "direct-journal.d0",
+            "direct-lease.generation",
+            "direct-runtime-deadline.absolute",
+            "os-ownership-lock.cross-process",
+            "side-effect.project-mutation",
+        )
+        unsupported = {
+            "checkpoint.d1",
+            "pause",
+            "provide_input",
+            "reconcile.d2",
+            "reprioritize.running",
+            "resume",
+            "update.generic-running",
+        }
+        assert unsupported.isdisjoint(
+            operation for operation, _version in first_profile.operation_versions
+        )
+        assert not hasattr(ProjectCodeExecutorAdapter, "capability_profile")
+        canonical = first_profile.canonical_bytes().decode("ascii")
+        assert tmp_path.name not in canonical
+        assert "sqlite" not in canonical
+        assert first._owner_id not in canonical
+        assert second._owner_id not in canonical
+        assert "secret" not in canonical.casefold()
+        assert len(first_profile.digest_sha256()) == 64
+    finally:
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_d2_is_an_explicit_store_backed_candidate_only(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "candidate-project"
+    _git_project(project)
+    database = tmp_path / "candidate.sqlite3"
+    resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
+    legacy = DirectProjectCodeExecutorAdapter(resolver, database)
+    store = SqliteTaskStore(database)
+    durable = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+        durability_store=store,
+    )
+
+    try:
+        assert legacy.capability_profiles() == (legacy.capability_profile(),)
+        candidates = durable.capability_profiles()
+        assert candidates[0] is durable.capability_profile()
+        assert tuple(profile.durability_level for profile in candidates) == (
+            "D0",
+            "D2",
+        )
+        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v1"
+        with pytest.raises(ValueError, match="same canonical"):
+            DirectProjectCodeExecutorAdapter(
+                resolver,
+                database,
+                durability_store=SqliteTaskStore(tmp_path / "foreign.sqlite3"),
+            )
+    finally:
+        await legacy.close()
+        await durable.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_candidates_derive_d0_from_current_profile_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "candidate-profile-authority-project"
+    _git_project(project)
+    database = tmp_path / "candidate-profile-authority.sqlite3"
+    resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
+    changed_legacy = replace(
+        DirectProjectCodeExecutorAdapter.capability_profile(),
+        profile_id="live-voice.direct-project-code.d0.v2",
+    )
+    monkeypatch.setattr(
+        DirectProjectCodeExecutorAdapter,
+        "capability_profile",
+        classmethod(lambda cls: changed_legacy),
+    )
+    legacy = DirectProjectCodeExecutorAdapter(resolver, database)
+    durable = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+        durability_store=SqliteTaskStore(database),
+    )
+
+    try:
+        assert legacy.capability_profiles() == (changed_legacy,)
+        candidates = durable.capability_profiles()
+        assert candidates[0] is changed_legacy
+        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v1"
+    finally:
+        await legacy.close()
+        await durable.close()
+
+
+def test_direct_stream_observer_defaults_off_and_never_changes_profile(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "observer-profile-project"
+    _git_project(project)
+    resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
+    baseline = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "baseline.sqlite3")
+    observed = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "observed.sqlite3",
+        stream_observer=lambda _observation: None,
+    )
+
+    assert baseline._stream_observer is None
+    assert baseline.stream_observer_failure_count == 0
+    assert baseline.capability_profile() is observed.capability_profile()
+    assert (
+        baseline.capability_profile().digest_sha256()
+        == observed.capability_profile().digest_sha256()
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_observer_is_content_free_immutable_and_pairs_each_stream(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "observed-adjustable-project"
+    _git_project(project)
+    executor = _ObservedAdjustableProjectExecutor(project)
+    checkpoint_open = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+    observations: list[object] = []
+    observer_health_reads: list[int] = []
+    adapter: DirectProjectCodeExecutorAdapter | None = None
+
+    async def checkpoint_barrier(_attempt_id: str) -> None:
+        checkpoint_open.set()
+        await release_checkpoint.wait()
+
+    def observe(observation: object) -> None:
+        assert adapter is not None
+        observer_health_reads.append(adapter.stream_observer_failure_count)
+        observations.append(observation)
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "observed.sqlite3",
+        clock=lambda: "2026-08-05T12:00:00Z",
+        adjustment_checkpoint_barrier=checkpoint_barrier,
+        stream_observer=observe,
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await asyncio.wait_for(checkpoint_open.wait(), timeout=2)
+        adjustment = _adjustment_item(
+            project,
+            command_id="adjust-1",
+            adjustment="Apply one bounded private adjustment.",
+            requested_seq=4,
+        )
+        delivery_task = asyncio.create_task(adapter.adjust(adjustment))
+        await asyncio.wait_for(
+            adapter._adjustment_checkpoints["attempt-1"].changed.wait(), timeout=2
+        )
+        release_checkpoint.set()
+        delivery = await asyncio.wait_for(delivery_task, timeout=2)
+        assert delivery.state is TaskAdjustmentState.APPLIED
+        await adapter.settle_adjustment(
+            adjustment,
+            TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False),
+        )
+        await _wait_direct_settled(adapter)
+
+        assert all(
+            isinstance(item, project_code_executor.DirectStreamObservation)
+            for item in observations
+        )
+        assert [item.sequence for item in observations] == [1, 2, 1, 2]
+        assert [item.stream_kind for item in observations] == [
+            "initial",
+            "initial",
+            "adjustment",
+            "adjustment",
+        ]
+        assert [item.event_kind for item in observations] == [
+            "tool_call",
+            "tool_result",
+            "tool_call",
+            "tool_result",
+        ]
+        assert [item.file_tool_kind for item in observations] == [
+            "write",
+            "write",
+            "edit",
+            "edit",
+        ]
+        assert [item.result_status for item in observations] == [
+            "not_applicable",
+            "success",
+            "not_applicable",
+            "success",
+        ]
+        assert {item.task_ref for item in observations} == {"task-1"}
+        assert {item.attempt_ref for item in observations} == {"attempt-1"}
+        assert [item.run_ref for item in observations] == [
+            "d0-project:attempt-1",
+            "d0-project:attempt-1",
+            "d0-project:attempt-1:adjust:adjust-1",
+            "d0-project:attempt-1:adjust:adjust-1",
+        ]
+        assert {item.observed_at for item in observations} == {"2026-08-05T12:00:00Z"}
+        assert observer_health_reads == [0, 0, 0, 0]
+        assert all(item.tool_name_digest.startswith("sha256:") for item in observations)
+        assert all(item.call_id_digest.startswith("sha256:") for item in observations)
+        assert observations[0].tool_name_digest == observations[1].tool_name_digest
+        assert observations[0].call_id_digest == observations[1].call_id_digest
+        assert observations[2].tool_name_digest == observations[3].tool_name_digest
+        assert observations[2].call_id_digest == observations[3].call_id_digest
+
+        rendered = repr(observations)
+        encoded = json.dumps([asdict(item) for item in observations])
+        assert _ObservedAdjustableProjectExecutor.sentinel not in rendered
+        assert _ObservedAdjustableProjectExecutor.sentinel not in encoded
+        with pytest.raises(FrozenInstanceError):
+            observations[0].sequence = 99
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_observer_maps_unknown_tool_and_error_without_raw_fields(
+    tmp_path: Path,
+) -> None:
+    sentinel = "PRIVATE_UNKNOWN_TOOL_SENTINEL"
+    project = tmp_path / "unknown-tool-project"
+    _git_project(project)
+
+    class UnknownToolExecutor(_DirectProjectExecutor):
+        async def process_background_code_task_stream(self, request):
+            project_root = Path(request.params["project_dir"])
+            (project_root / "result.txt").write_text("done", encoding="utf-8")
+            tool_name = f"private-{sentinel}"
+            call_id = f"call-{sentinel}"
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={
+                    "event_type": "chat.tool_call",
+                    "tool_call": {
+                        "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                        "arguments": {"private": sentinel},
+                    },
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={
+                    "event_type": "chat.tool_result",
+                    "tool_name": tool_name,
+                    "tool_call_id": call_id,
+                    "result": sentinel,
+                    "error": sentinel,
+                    "is_error": True,
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": sentinel},
+                is_complete=True,
+            )
+
+    observations: list[object] = []
+    executor = UnknownToolExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "unknown.sqlite3",
+        stream_observer=observations.append,
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await _wait_direct_settled(adapter)
+
+        assert [item.file_tool_kind for item in observations] == ["unknown", "unknown"]
+        assert [item.result_status for item in observations] == [
+            "not_applicable",
+            "error",
+        ]
+        assert sentinel not in repr(observations)
+        assert sentinel not in json.dumps([asdict(item) for item in observations])
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("invalid", [None, "", 7, "bad\x00id", "x" * 257])
+def test_direct_stream_observer_marks_every_invalid_call_identity_closed(
+    invalid: object,
+) -> None:
+    expected = (
+        "sha256:" + hashlib.sha256(b"live-voice.invalid-tool-call-id").hexdigest()
+    )
+
+    observation = project_code_executor._closed_direct_stream_observation(
+        {
+            "event_type": "chat.tool_call",
+            "tool_call": {"tool_name": "write_file", "tool_call_id": invalid},
+        },
+        task_ref="task-1",
+        attempt_ref="attempt-1",
+        run_ref="run-1",
+        sequence=1,
+        stream_kind="initial",
+        observed_at="2026-08-20T10:00:00Z",
+    )
+
+    assert observation is not None
+    assert observation.file_tool_kind == "write"
+    assert observation.call_id_digest == expected
+
+
+@pytest.mark.parametrize("invalid", [None, "", 7, "bad\x00name", "x" * 65])
+def test_direct_stream_observer_marks_every_invalid_tool_identity_unknown(
+    invalid: object,
+) -> None:
+    expected = "sha256:" + hashlib.sha256(b"live-voice.invalid-tool-name").hexdigest()
+
+    observation = project_code_executor._closed_direct_stream_observation(
+        {
+            "event_type": "chat.tool_call",
+            "tool_call": {"tool_name": invalid, "tool_call_id": "call-1"},
+        },
+        task_ref="task-1",
+        attempt_ref="attempt-1",
+        run_ref="run-1",
+        sequence=1,
+        stream_kind="initial",
+        observed_at="2026-08-20T10:00:00Z",
+    )
+
+    assert observation is not None
+    assert observation.file_tool_kind == "unknown"
+    assert observation.tool_name_digest == expected
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_observer_failure_and_awaitable_never_change_execution(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "observer-failure-project"
+    _git_project(project)
+    executor = _ObservedAdjustableProjectExecutor(project)
+    calls = 0
+
+    async def forbidden_awaitable() -> None:
+        raise AssertionError("observer awaitables must never execute")
+
+    def failing_observer(_observation):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("PRIVATE_OBSERVER_FAILURE")
+        return forbidden_awaitable()
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "observer-failure.sqlite3",
+        stream_observer=failing_observer,
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await _wait_direct_settled(adapter)
+        task, attempt = _direct_task_attempt(project)
+        terminal = await adapter.status(task, attempt)
+
+        assert calls == 2
+        assert adapter.stream_observer_failure_count == 2
+        assert isinstance(terminal, ExecutorDeliveryResult)
+        assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+        assert (project / "result.txt").read_text(encoding="utf-8") == "initial\n"
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_delivery_and_status_bind_the_persisted_selection(
+    tmp_path: Path,
+) -> None:
+    """Catches selected lifecycle observations losing their immutable profile."""
+
+    project = tmp_path / "selected-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "selected.sqlite3",
+    )
+    selection = _direct_selection()
+    item = replace(_item(project), selection=selection)
+
+    try:
+        delivered = await adapter.dispatch(item)
+        assert delivered.observations
+        assert {
+            (event.adapter_id, event.capability_profile_digest)
+            for event in delivered.observations
+        } == {(selection.adapter_id, selection.capability_profile_digest)}
+
+        await asyncio.wait_for(executor.finished.wait(), timeout=2)
+        await _wait_direct_settled(adapter)
+        task, attempt = _direct_task_attempt(project, selection=selection)
+        terminal = await adapter.status(task, attempt)
+
+        assert isinstance(terminal, ExecutorDeliveryResult)
+        assert terminal.observations
+        assert {
+            (event.adapter_id, event.capability_profile_digest)
+            for event in terminal.observations
+        } == {(selection.adapter_id, selection.capability_profile_digest)}
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_dispatch_rejects_profile_drift_before_any_effect(
+    tmp_path: Path,
+) -> None:
+    """Catches a new Attempt running under a profile other than its selection."""
+
+    project = tmp_path / "mismatched-profile-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "mismatched-profile.sqlite3",
+    )
+    changed_profile = replace(
+        DirectProjectCodeExecutorAdapter.capability_profile(),
+        profile_id="live-voice.direct-project-code.d0.v2",
+    )
+    item = replace(_item(project), selection=_direct_selection(changed_profile))
+    before_status = _git(project, "status", "--short")
+
+    try:
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.dispatch(item)
+
+        assert rejected.value.reason == "EXECUTOR_SELECTION_PROFILE_MISMATCH"
+        assert rejected.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get(item.attempt_id) is None
+        assert _git(project, "status", "--short") == before_status
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_status_reports_profile_drift_under_old_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches restart drift rewriting history or appearing as known truth."""
+
+    project = tmp_path / "status-profile-drift-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "status-profile-drift.sqlite3",
+    )
+    selection = _direct_selection()
+    item = replace(_item(project), selection=selection)
+
+    try:
+        await adapter.dispatch(item)
+        await asyncio.wait_for(executor.finished.wait(), timeout=2)
+        await _wait_direct_settled(adapter)
+        changed_profile = replace(
+            DirectProjectCodeExecutorAdapter.capability_profile(),
+            profile_id="live-voice.direct-project-code.d0.v2",
+        )
+        monkeypatch.setattr(
+            DirectProjectCodeExecutorAdapter,
+            "capability_profile",
+            classmethod(lambda cls: changed_profile),
+        )
+        task, attempt = _direct_task_attempt(project, selection=selection)
+        before_status = _git(project, "status", "--short")
+
+        observed = await adapter.status(task, attempt)
+
+        assert isinstance(observed, ExecutorObservation)
+        assert observed.resolution is ExecutorResolution.UNAVAILABLE
+        assert observed.error == "EXECUTOR_SELECTION_PROFILE_DRIFT"
+        assert observed.adapter_id == selection.adapter_id
+        assert observed.capability_profile_digest == selection.capability_profile_digest
+        assert adapter._journal.get(item.attempt_id) is not None
+        assert _git(project, "status", "--short") == before_status
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_selection",
+    (_foreign_adapter_selection, _forged_direct_capability_selection),
+    ids=("foreign-adapter", "forged-direct-capability"),
+)
+async def test_selected_direct_cancel_rejects_foreign_adapter_before_any_effect(
+    tmp_path: Path,
+    invalid_selection: Callable[[], PersistedExecutorSelection],
+) -> None:
+    """Catches a self-consistent foreign selection mutating Direct cancel truth."""
+
+    project = tmp_path / "foreign-selected-cancel"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, behavior="wait")
+    resolver = _Resolver(_direct_binding(project, executor))
+    database = tmp_path / "foreign-selected-cancel.sqlite3"
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+    )
+    SqliteTaskStore(database)
+    dispatch = replace(_item(project), selection=_direct_selection())
+
+    try:
+        await adapter.dispatch(dispatch)
+        await asyncio.wait_for(executor.started.wait(), timeout=2)
+        cancel = replace(
+            _item(
+                project,
+                kind=OutboxKind.ATTEMPT_CANCEL,
+                source_seq=1,
+            ),
+            executor_ref="d0-project:attempt-1",
+            selection=invalid_selection(),
+        )
+        before_record = adapter._journal.get("attempt-1")
+        before_requests = tuple(executor.requests)
+        before_resolves = tuple(resolver.calls)
+        before_status = _git(project, "status", "--short")
+        before_database = _journal_dump(adapter)
+        before_store = _store_effect_counts(database)
+        assert before_store == (0, 0, 0, 0, 0)
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.cancel(cancel)
+
+        assert rejected.value.reason == "EXECUTOR_SELECTION_ADAPTER_MISMATCH"
+        assert rejected.value.code is ErrorCode.PROTOCOL_VIOLATION
+        assert adapter._journal.get("attempt-1") == before_record
+        assert tuple(executor.requests) == before_requests
+        assert tuple(resolver.calls) == before_resolves
+        assert adapter._running["attempt-1"].done() is False
+        assert adapter._journal.all_adjustments("attempt-1") == ()
+        assert _git(project, "status", "--short") == before_status
+        assert _journal_dump(adapter) == before_database
+        assert _store_effect_counts(database) == before_store
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_adjust_rejects_foreign_adapter_before_any_effect(
+    tmp_path: Path,
+) -> None:
+    """Catches a self-consistent foreign selection writing Direct adjustment truth."""
+
+    project = tmp_path / "foreign-selected-adjust"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    database = tmp_path / "foreign-selected-adjust.sqlite3"
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+    )
+    SqliteTaskStore(database)
+
+    try:
+        await adapter.dispatch(replace(_item(project), selection=_direct_selection()))
+        await asyncio.wait_for(executor.finished.wait(), timeout=2)
+        await _wait_direct_settled(adapter)
+        adjustment = replace(
+            _adjustment_item(
+                project,
+                command_id="foreign-adjust",
+                adjustment="This must never reach Direct.",
+                requested_seq=4,
+            ),
+            selection=_foreign_adapter_selection(),
+        )
+        before_record = adapter._journal.get("attempt-1")
+        before_requests = tuple(executor.requests)
+        before_resolves = tuple(resolver.calls)
+        before_status = _git(project, "status", "--short")
+        before_database = _journal_dump(adapter)
+        before_store = _store_effect_counts(database)
+        assert before_store == (0, 0, 0, 0, 0)
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.adjust(adjustment)
+
+        assert rejected.value.reason == "EXECUTOR_SELECTION_ADAPTER_MISMATCH"
+        assert rejected.value.code is ErrorCode.PROTOCOL_VIOLATION
+        assert adapter._journal.get("attempt-1") == before_record
+        assert adapter._journal.all_adjustments("attempt-1") == ()
+        assert tuple(executor.requests) == before_requests
+        assert tuple(resolver.calls) == before_resolves
+        assert _git(project, "status", "--short") == before_status
+        assert _journal_dump(adapter) == before_database
+        assert _store_effect_counts(database) == before_store
+    finally:
+        await adapter.close()
 
 
 @pytest.mark.asyncio
@@ -2243,6 +3112,152 @@ async def test_direct_executor_serializes_one_project_and_cannot_borrow_another_
 
 
 @pytest.mark.asyncio
+async def test_direct_executor_runs_two_distinct_projects_concurrently(
+    tmp_path: Path,
+) -> None:
+    first_project = tmp_path / "first-project"
+    second_project = tmp_path / "second-project"
+    _git_project(first_project)
+    _git_project(second_project)
+    first_executor = _DirectProjectExecutor(first_project, behavior="observe_wait")
+    second_executor = _DirectProjectExecutor(second_project, behavior="observe_wait")
+    first_binding = _direct_binding(first_project, first_executor)
+    second_binding = replace(
+        _direct_binding(second_project, second_executor),
+        execution_target={
+            "project_dir": str(second_project.resolve()),
+            "project_id": "project-2",
+            "origin_session_id": "session-1",
+            "origin_channel_id": "web",
+        },
+    )
+    resolver = _MappedResolver(
+        {
+            first_project.resolve(): first_binding,
+            second_project.resolve(): second_binding,
+        }
+    )
+    observations: list[object] = []
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,  # type: ignore[arg-type]
+        tmp_path / "p3.sqlite3",
+        stream_observer=observations.append,
+    )
+    first_item = _item(first_project)
+    second_scope = ScopeRef(
+        "user-1",
+        "project-2",
+        "session-1",
+        Assurance.AUTHENTICATED,
+    )
+    second_spec = _spec(second_project)
+    second_spec = replace(
+        second_spec,
+        context=replace(
+            second_spec.context,
+            stable_id="project-2",
+            scope=second_scope,
+        ),
+    )
+    second_item = replace(
+        _item(second_project),
+        outbox_id="outbox-2",
+        task_id="task-2",
+        attempt_id="attempt-2",
+        command_id="command-2",
+        scope=second_scope,
+        spec=second_spec,
+    )
+
+    first_delivery = await adapter.dispatch(first_item)
+    second_delivery = await adapter.dispatch(second_item)
+    await asyncio.wait_for(first_executor.started.wait(), timeout=2)
+    await asyncio.wait_for(second_executor.started.wait(), timeout=2)
+    for _ in range(100):
+        if len(observations) == 4:
+            break
+        await asyncio.sleep(0.01)
+
+    assert set(adapter._running) == {"attempt-1", "attempt-2"}
+    assert resolver.calls == [first_project.resolve(), second_project.resolve()]
+    assert len(first_executor.requests) == 1
+    assert len(second_executor.requests) == 1
+    assert {
+        (item.task_ref, item.attempt_ref, item.run_ref) for item in observations
+    } == {
+        ("task-1", "attempt-1", "d0-project:attempt-1"),
+        ("task-2", "attempt-2", "d0-project:attempt-2"),
+    }
+    assert [
+        item.sequence for item in observations if item.attempt_ref == "attempt-1"
+    ] == [1, 2]
+    assert [
+        item.sequence for item in observations if item.attempt_ref == "attempt-2"
+    ] == [1, 2]
+    assert "PRIVATE_PATH_SENTINEL" not in repr(observations)
+    assert "PRIVATE_RESULT_SENTINEL" not in repr(observations)
+
+    await adapter.cancel(
+        replace(
+            first_item,
+            outbox_id="outbox-cancel-1",
+            kind=OutboxKind.ATTEMPT_CANCEL,
+            executor_ref=first_delivery.executor_ref,
+            source_seq=1,
+        )
+    )
+    await adapter.cancel(
+        replace(
+            second_item,
+            outbox_id="outbox-cancel-2",
+            kind=OutboxKind.ATTEMPT_CANCEL,
+            executor_ref=second_delivery.executor_ref,
+            source_seq=1,
+        )
+    )
+    await _wait_direct_settled(adapter)
+
+    assert _git(first_project, "status", "--porcelain") == ""
+    assert _git(second_project, "status", "--porcelain") == ""
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_capacity_exhaustion_precedes_resolver_and_project_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "capacity-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    blocker = asyncio.Event()
+    retained = {
+        f"retained-{index}": asyncio.create_task(blocker.wait())
+        for index in range(adapter.capability_profile().max_live_attempts)
+    }
+    adapter._running.update(retained)
+    before = _git(project, "status", "--porcelain")
+
+    try:
+        with pytest.raises(FormalTaskViolation) as exhausted:
+            await adapter.dispatch(_item(project))
+
+        assert exhausted.value.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+        assert exhausted.value.code is ErrorCode.UNAVAILABLE
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get("attempt-1") is None
+        assert _git(project, "status", "--porcelain") == before
+    finally:
+        for worker in retained.values():
+            worker.cancel()
+        await asyncio.gather(*retained.values(), return_exceptions=True)
+        adapter._running.clear()
+        await adapter.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["cancel", "close"])
 async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isolated(
     tmp_path: Path,
@@ -2308,6 +3323,84 @@ async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isol
 
 
 @pytest.mark.asyncio
+async def test_attempt_deadline_terminalizes_noncooperative_agent_without_target_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    before_tree = _git(project, "status", "--porcelain=v2")
+    executor = _NonCooperativeExecutor()
+    release_failsafe = asyncio.get_running_loop().call_later(2, executor.release.set)
+    resolver = _Resolver(_direct_binding(project, executor))  # type: ignore[arg-type]
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "p3.sqlite3",
+        heartbeat_interval=0.005,
+        attempt_timeout=0.5,
+        clock=lambda: (
+            "2026-08-18T10:00:01Z"
+            if executor.started.is_set()
+            else "2026-08-18T10:00:00Z"
+        ),
+    )
+
+    delivered = await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    timed_out = await _wait_direct_terminal(adapter)
+    for _ in range(100):
+        if executor.cancel_signals:
+            break
+        await asyncio.sleep(0.001)
+    target_head_at_timeout = _git(project, "rev-parse", "HEAD")
+    target_tree_at_timeout = _git(project, "status", "--porcelain=v2")
+    target_effect_at_timeout = (project / "late-effect.txt").exists()
+    executor.release.set()
+    await _wait_direct_settled(adapter)
+
+    assert delivered.executor_ref == "d0-project:attempt-1"
+    assert timed_out.outcome is TerminalOutcome.INTERRUPTED
+    assert timed_out.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert timed_out.raw_status == "attempt_timeout_cleanup_pending"
+    assert timed_out.owner_id is None
+    assert timed_out.lease_expires_at is None
+    assert timed_out.expected_tree is None
+    assert timed_out.result_text is None
+    assert timed_out.artifacts_json is None
+    assert executor.cancel_signals == 1
+    assert resolver.calls == [True]
+    assert len(executor.requests) == 1
+    assert len(adapter._journal.all_attempts()) == 1
+    assert target_head_at_timeout == before_head
+    assert target_tree_at_timeout == before_tree
+    assert not target_effect_at_timeout
+
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    observation = terminal.observations[-1]
+    assert observation.attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert observation.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert observation.result_text is None
+    assert observation.result_artifacts == ()
+    retried = await adapter.dispatch(_item(project))
+    assert retried.observations[-1].error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert resolver.calls == [True]
+    assert len(executor.requests) == 1
+
+    resolved = adapter._journal.get("attempt-1")
+    assert resolved is not None
+    assert resolved.outcome is TerminalOutcome.INTERRUPTED
+    assert resolved.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert resolved.raw_status == "attempt_timeout_cleanup_resolved"
+    assert _git(project, "rev-parse", "HEAD") == before_head
+    assert _git(project, "status", "--porcelain=v2") == before_tree
+    assert not (project / "late-effect.txt").exists()
+    await adapter.close()
+    release_failsafe.cancel()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_close", [False, True])
 async def test_close_is_bounded_and_retains_cleanup_while_patch_is_applying(
     tmp_path: Path,
@@ -2356,7 +3449,7 @@ async def test_close_is_bounded_and_retains_cleanup_while_patch_is_applying(
 
 
 @pytest.mark.asyncio
-async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
+async def test_cancel_and_deadline_cannot_interrupt_applying_itinerary_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2373,6 +3466,7 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
 
     monkeypatch.setattr(project_code_executor, "_apply_attempt_patch", blocked_apply)
     executor = _DemoItineraryProjectExecutor(project)
+    clock = {"now": "2026-08-18T10:00:00Z"}
     spec = replace(
         _spec(project),
         name="Three-day itinerary",
@@ -2384,6 +3478,8 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
         tmp_path / "p3.sqlite3",
         heartbeat_interval=0.005,
         cancel_timeout=0.01,
+        attempt_timeout=1,
+        clock=lambda: clock["now"],
         demo_itinerary_fixture_enabled=True,
     )
     delivered = await adapter.dispatch(dispatch_item)
@@ -2397,11 +3493,17 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
     with pytest.raises(FormalTaskViolation) as pending:
         await adapter.cancel(cancel_item)
     assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    clock["now"] = "2026-08-18T10:00:02Z"
     await asyncio.sleep(0.03)
     record = adapter._journal.get("attempt-1")
     assert record is not None
     assert record.raw_status == "applying"
+    assert record.state is FormalAttemptState.RUNNING
+    assert record.runtime_deadline_at == "2026-08-18T10:00:01Z"
+    assert record.owner_id == adapter._owner_id
+    assert record.lease_expires_at is not None
     assert "attempt-1" in adapter._running
+    assert not (project / "itinerary.md").exists()
 
     release.set()
     await _wait_direct_settled(adapter)
@@ -2434,6 +3536,331 @@ def test_direct_executor_cleanup_timeouts_are_closed_and_bounded(
             tmp_path / f"{field}.sqlite3",
             **{field: value},
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        False,
+        0,
+        float("inf"),
+        project_code_executor._MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS + 0.01,
+    ],
+)
+def test_direct_executor_attempt_timeout_is_closed_and_bounded(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    with pytest.raises(ValueError, match="attempt_timeout"):
+        DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+            tmp_path / "p3.sqlite3",
+            attempt_timeout=value,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("failing_pragma", "expected_statements"),
+    [
+        (1, ("PRAGMA busy_timeout=30000",)),
+        (2, ("PRAGMA busy_timeout=30000", "PRAGMA foreign_keys=ON")),
+    ],
+)
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-ok", "close-fails"])
+def test_direct_journal_setup_failure_closes_its_real_sqlite_handle_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_pragma: int,
+    expected_statements: tuple[str, ...],
+    close_fails: bool,
+) -> None:
+    """Catches a setup PRAGMA escaping the connection cleanup boundary."""
+
+    database = tmp_path / "setup-failure.sqlite3"
+    primary_failure = RuntimeError("PRIVATE_PRAGMA_PRIMARY_SENTINEL")
+    close_failure = RuntimeError("PRIVATE_SQLITE_CLOSE_SENTINEL")
+    real_connect = sqlite3.connect
+    proxies: list[RealConnectionProxy] = []
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+
+    class RealConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+            self.statements: list[str] = []
+            self.close_calls = 0
+
+        @property
+        def row_factory(self):
+            return self.connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value) -> None:
+            self.connection.row_factory = value
+
+        def execute(self, statement: str) -> sqlite3.Cursor:
+            if statement.startswith("PRAGMA"):
+                self.statements.append(statement)
+                if len(self.statements) == failing_pragma:
+                    raise primary_failure
+            return self.connection.execute(statement)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.connection.close()
+            if close_fails:
+                raise close_failure
+
+    def connect(*args, **kwargs) -> RealConnectionProxy:
+        proxy = RealConnectionProxy(real_connect(*args, **kwargs))
+        proxies.append(proxy)
+        return proxy
+
+    def capture_warning(message: str, *args: object) -> None:
+        warnings.append((message, args))
+
+    monkeypatch.setattr(
+        logging.getLogger(project_code_executor.__name__),
+        "warning",
+        capture_warning,
+    )
+    monkeypatch.setattr(project_code_executor.sqlite3, "connect", connect)
+
+    with pytest.raises(RuntimeError) as raised:
+        DirectProjectCodeExecutorAdapter(
+            object(),  # type: ignore[arg-type] -- setup never consults the resolver
+            database,
+        )
+
+    assert raised.value is primary_failure
+    assert len(proxies) == 1
+    proxy = proxies[0]
+    assert tuple(proxy.statements) == expected_statements
+    assert proxy.close_calls == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        proxy.connection.execute("SELECT 1")
+
+    assert database.exists()
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    moved_database = tmp_path / "released.sqlite3"
+    database.replace(moved_database)
+    moved_database.replace(database)
+    probe = real_connect(database, timeout=0.0)
+    try:
+        probe.execute("BEGIN EXCLUSIVE")
+        probe.rollback()
+    finally:
+        probe.close()
+
+    assert warnings == (
+        [("[LiveVoiceP3] direct journal connection cleanup failed", ())]
+        if close_fails
+        else []
+    )
+    rendered_messages = repr(warnings)
+    assert "PRIVATE_PRAGMA_PRIMARY_SENTINEL" not in rendered_messages
+    assert "PRIVATE_SQLITE_CLOSE_SENTINEL" not in rendered_messages
+
+
+def test_direct_journal_connect_failure_has_no_handle_to_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches cleanup being invented when SQLite never returned a handle."""
+
+    database = tmp_path / "connect-failure.sqlite3"
+    primary_failure = RuntimeError("connect failed before ownership")
+    connect_calls = 0
+
+    def fail_connect(*_args, **_kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        raise primary_failure
+
+    monkeypatch.setattr(project_code_executor.sqlite3, "connect", fail_connect)
+
+    with pytest.raises(RuntimeError) as raised:
+        DirectProjectCodeExecutorAdapter(
+            object(),  # type: ignore[arg-type] -- setup never consults the resolver
+            database,
+        )
+
+    assert raised.value is primary_failure
+    assert connect_calls == 1
+    assert not database.exists()
+
+
+def test_attempt_deadline_is_absolute_and_heartbeat_expires_at_exact_boundary(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    journal = project_code_executor._DirectProjectAttemptJournal(
+        tmp_path / "p3.sqlite3"
+    )
+    item = _item(project)
+    accepted_at = "2026-08-18T10:00:00Z"
+    deadline = "2026-08-18T10:00:01Z"
+    created, record = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=project_code_executor._project_tree_fingerprint(project),
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=_git(project, "rev-parse", "HEAD"),
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="owner-1",
+        now=accepted_at,
+        runtime_deadline_at=deadline,
+    )
+    assert created
+    assert record.runtime_deadline_at == deadline
+    journal.start(item.attempt_id, owner_id="owner-1", now=accepted_at)
+
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="owner-1",
+        now="2026-08-18T10:00:00.999999Z",
+    ) == (True, False, False)
+    before_boundary = journal.get(item.attempt_id)
+    assert before_boundary is not None
+    assert before_boundary.runtime_deadline_at == deadline
+    assert before_boundary.state is FormalAttemptState.RUNNING
+
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="owner-1",
+        now=deadline,
+    ) == (False, False, True)
+    terminal = journal.get(item.attempt_id)
+    assert terminal is not None
+    assert terminal.state is FormalAttemptState.TERMINAL
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+    assert terminal.runtime_deadline_at == deadline
+    assert terminal.result_text is None
+    assert terminal.artifacts_json is None
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="owner-1",
+        now="2026-08-18T10:00:02Z",
+    ) == (False, False, False)
+
+
+def test_attempt_deadline_migrates_from_last_durable_legacy_lease(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    database = tmp_path / "p3.sqlite3"
+    journal = project_code_executor._DirectProjectAttemptJournal(database)
+    item = _item(project)
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=project_code_executor._project_tree_fingerprint(project),
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=_git(project, "rev-parse", "HEAD"),
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="legacy-owner",
+        now="2026-08-18T10:00:00Z",
+    )
+    assert created
+    journal.start(
+        item.attempt_id,
+        owner_id="legacy-owner",
+        now="2026-08-18T10:00:00Z",
+    )
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="legacy-owner",
+        now="2026-08-18T10:01:00Z",
+    ) == (True, False, False)
+    legacy = journal.get(item.attempt_id)
+    assert legacy is not None
+    legacy_lease = legacy.lease_expires_at
+    assert legacy_lease == "2026-08-18T10:06:00Z"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            f"ALTER TABLE {project_code_executor._DIRECT_EXECUTOR_TABLE} "
+            "DROP COLUMN runtime_deadline_at"
+        )
+
+    migrated_journal = project_code_executor._DirectProjectAttemptJournal(database)
+    migrated = migrated_journal.get(item.attempt_id)
+    assert migrated is not None
+    assert migrated.runtime_deadline_at == legacy_lease
+    assert migrated_journal.recover_expired(now=legacy_lease) == 1
+    terminal = migrated_journal.get(item.attempt_id)
+    assert terminal is not None
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+
+
+def test_reserve_completion_at_deadline_cannot_publish_or_apply_result(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    journal = project_code_executor._DirectProjectAttemptJournal(
+        tmp_path / "p3.sqlite3"
+    )
+    item = _item(project)
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    deadline = "2026-08-18T10:00:01Z"
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=before_tree,
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=before_head,
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="owner-1",
+        now="2026-08-18T10:00:00Z",
+        runtime_deadline_at=deadline,
+    )
+    assert created
+    journal.start(
+        item.attempt_id,
+        owner_id="owner-1",
+        now="2026-08-18T10:00:00Z",
+    )
+
+    reserved, terminal = journal.reserve_completion(
+        item.attempt_id,
+        owner_id="owner-1",
+        expected_tree="late-expected-tree",
+        now=deadline,
+        result_text="late result",
+        result_artifacts=(
+            project_code_executor.TaskResultArtifact(
+                relative_path="README.md",
+                sha256=hashlib.sha256((project / "README.md").read_bytes()).hexdigest(),
+            ),
+        ),
+    )
+
+    assert not reserved
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.raw_status == "attempt_timeout_cleanup_pending"
+    assert terminal.expected_tree is None
+    assert terminal.result_text is None
+    assert terminal.artifacts_json is None
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+    assert _git(project, "rev-parse", "HEAD") == before_head
+    assert project_code_executor._project_tree_fingerprint(project) == before_tree
 
 
 @pytest.mark.asyncio
@@ -3111,6 +4538,66 @@ async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
 
 
 @pytest.mark.asyncio
+async def test_restart_reuses_deadline_even_when_heartbeat_renewed_later_lease(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    database = tmp_path / "p3.sqlite3"
+    journal = project_code_executor._DirectProjectAttemptJournal(database)
+    item = _item(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    deadline = "2026-08-18T10:00:10Z"
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=before_tree,
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=before_head,
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="dead-process",
+        now="2026-08-18T10:00:00Z",
+        runtime_deadline_at=deadline,
+    )
+    assert created
+    journal.start(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-18T10:00:00Z",
+    )
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-18T10:00:09Z",
+    ) == (True, False, False)
+    renewed = journal.get(item.attempt_id)
+    assert renewed is not None
+    assert renewed.runtime_deadline_at == deadline
+    assert renewed.lease_expires_at == "2026-08-18T10:05:09Z"
+
+    successor = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        database,
+        clock=lambda: deadline,
+    )
+    assert await successor.prepare_startup() == 1
+    terminal = successor._journal.get(item.attempt_id)
+    assert terminal is not None
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.runtime_deadline_at == deadline
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+    assert terminal.result_text is None
+    assert terminal.artifacts_json is None
+    assert _git(project, "rev-parse", "HEAD") == before_head
+    assert project_code_executor._project_tree_fingerprint(project) == before_tree
+    await successor.close()
+
+
+@pytest.mark.asyncio
 async def test_successor_never_recovers_or_deletes_while_predecessor_process_owns_lock(
     tmp_path: Path,
 ) -> None:
@@ -3124,7 +4611,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
     )
     item = _item(project)
     before_head = _git(project, "rev-parse", "HEAD")
-    created, _record = adapter._journal.create(
+    created, original = adapter._journal.create(
         item=item,
         project_root=str(project),
         before_tree=project_code_executor._project_tree_fingerprint(project),
@@ -3188,6 +4675,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         still_running = adapter._journal.get(item.attempt_id)
         assert still_running is not None
         assert still_running.state is not FormalAttemptState.TERMINAL
+        assert still_running.runtime_deadline_at == original.runtime_deadline_at
         assert checkout.exists()
 
         predecessor.stdin.write("release\n")
@@ -3203,6 +4691,10 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         assert recovered is not None
         assert recovered.state is FormalAttemptState.TERMINAL
         assert recovered.outcome is TerminalOutcome.INTERRUPTED
+        assert recovered.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+        assert recovered.runtime_deadline_at == original.runtime_deadline_at
+        assert recovered.owner_id is None
+        assert recovered.lease_expires_at is None
         assert not checkout.exists()
         await successor.close()
     finally:
@@ -3733,6 +5225,9 @@ def _cancelled_before_dispatch(
         TerminalOutcome.CANCELLED,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         attempt_id,

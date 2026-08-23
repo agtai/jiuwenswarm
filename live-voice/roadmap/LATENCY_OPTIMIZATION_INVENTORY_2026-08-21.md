@@ -1,7 +1,7 @@
 # Live Voice latency optimization inventory
 
 > Date: 2026-08-21
-> Last synchronized: 2026-08-22
+> Last synchronized: 2026-08-23
 >
 > This is a dated optimization/evidence snapshot, not the authority for current
 > project status or execution priority. `live-voice/STATUS.md` remains the
@@ -26,6 +26,12 @@ composed in optimized checkpoint source
 sequential A reference is `1b0802cae9a6718c0d3326c1292f7475fdefe08c`. The
 checkpoint evidence documentation referenced here was recorded at
 `def1dc06bf93eaf9a35a2d6af0e8a7fcd9273c36`.
+
+On 2026-08-23 the P2 bounded-pull candidate was also merged onto Hongxing
+lifecycle tip `67381193a`. That product composition lives on
+`latency/hx-optimizations`, with `latency/p2-bounded-pull-b` fast-forwarded to
+the same tip. It does not replace the checkpoint hashes above, does not close
+Gate C, and does not update `_renan` or the checkpoint branch.
 
 The later EOT/STT materiality screen is bound separately to clean source
 `8e5dab8b8c6651b2be784cf103df9239a93814a0`; its reviewed documentation closure
@@ -392,6 +398,8 @@ alone cannot justify more P2 transport work.
 
 This order applies only after the latency workstream is activated. It does not
 replace the current product-truth execution packet in `live-voice/STATUS.md`.
+On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
+`67381193a`; the remaining steps below start from that source.
 
 1. Repair the P2 Media observer: validate a complete `notification_batch`
    before effects, process valid items in order, let the final item establish

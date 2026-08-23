@@ -179,14 +179,19 @@ def _advance_running_direct(store: SqliteTaskStore, task: PersistentTaskRecord) 
     )
 
 
-def _advance_terminal(store: SqliteTaskStore, task: PersistentTaskRecord) -> None:
+def _advance_terminal(
+    store: SqliteTaskStore,
+    task: PersistentTaskRecord,
+    *,
+    outcome: TerminalOutcome = TerminalOutcome.COMPLETED,
+) -> None:
     store.apply_observations(
         (
             _observation(
                 task,
                 source_seq=2,
                 state=FormalAttemptState.TERMINAL,
-                outcome=TerminalOutcome.COMPLETED,
+                outcome=outcome,
             ),
         )
     )
@@ -300,6 +305,9 @@ def _record(
         outcome=outcome,
         reconciliation_state=None,
         reconciliation_reason=None,
+        create_command_id="command-create-1",
+        predecessor_task_id=None,
+        revision_number=1,
         event_head=event_head,
     )
 
@@ -630,7 +638,7 @@ async def test_old_epoch_feed_closes_on_its_terminal_and_never_consumes_retry(
     store = SqliteTaskStore(tmp_path / "epoch-race.sqlite")
     task_a = _create_task(store, tmp_path)
     _advance_running(store, task_a)
-    _advance_terminal(store, task_a)
+    _advance_terminal(store, task_a, outcome=TerminalOutcome.CANCELLED)
     task_b = _retry_task(
         store,
         store.get_task(task_a.task_id, task_a.scope),
@@ -656,7 +664,7 @@ async def test_old_epoch_feed_closes_on_its_terminal_and_never_consumes_retry(
     # Keep the prefix queued while both durable facts land. The tail SELECT sees
     # one SQLite state containing B terminal and C retry_accepted, but its exact
     # attempt filter must expose only B's terminal pair to this retained feed.
-    _advance_terminal(store, task_b)
+    _advance_terminal(store, task_b, outcome=TerminalOutcome.CANCELLED)
     task_c = _retry_task(
         store,
         store.get_task(task_b.task_id, task_b.scope),

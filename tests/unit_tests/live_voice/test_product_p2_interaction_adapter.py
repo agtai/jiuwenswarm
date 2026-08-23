@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+    AgentConversationNotification,
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
     AuthoritativePresentationHandle,
@@ -47,6 +48,11 @@ from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
     P2LeaseState,
     ProductP2AdapterViolation,
     ProductP2InteractionAdapter,
+)
+from jiuwenswarm.server.live_voice.presentation_ledger import (
+    PresentationSurface,
+    PresentationUnit,
+    TaskPresentationRuntimeReceipt,
 )
 from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressNotificationIntent,
@@ -122,10 +128,13 @@ class FakeRuntime:
         self.progress_responses: list[ResponseRef] = []
         self.task_notification_safe = True
         self.presentation_calls: list[dict[str, object]] = []
+        self.presentation_reservations: dict[ResponseRef, tuple[str, bool]] = {}
         self.start_calls = 0
         self.open_calls: list[str] = []
         self.close_calls = 0
         self.closed = False
+        self.notification_lease = object()
+        self.notifications: list[AgentConversationNotification] = []
 
     async def accept_task_progress_notification(
         self, intent: TaskProgressNotificationIntent, *, response_ref: ResponseRef
@@ -140,14 +149,49 @@ class FakeRuntime:
     async def present_authoritative_text(self, **kwargs: object):
         before_publish = kwargs.pop("before_publish", None)
         self.presentation_calls.append(dict(kwargs))
+        response_ref = ResponseRef("interaction-1", str(kwargs["response_id"]), 2)
+        surface = kwargs.get("_presentation_surface", PresentationSurface.TEXT)
+        assert isinstance(surface, PresentationSurface)
+        unit = PresentationUnit(
+            ref=response_ref,
+            surface=surface,
+            unit_id=f"unit-{kwargs['request_id']}",
+            seq=0,
+            source_start_utf8=0,
+            source_end_utf8=4,
+            content_ref="sha256:test",
+        )
         handle = AuthoritativePresentationHandle(
             request_id=str(kwargs["request_id"]),
             round_id=f"authoritative:{kwargs['request_id']}",
-            response_ref=ResponseRef("interaction-1", str(kwargs["response_id"]), 2),
+            response_ref=response_ref,
+            presentation_unit=unit,
         )
         if callable(before_publish):
             await before_publish(handle)
         return handle
+
+    def task_presentation_runtime_authority(
+        self, response_ref: ResponseRef, reservation_id: str | None, phase: str
+    ) -> TaskPresentationRuntimeReceipt:
+        retained = self.presentation_reservations.get(response_ref)
+        if phase == "reserve":
+            assert reservation_id is None
+            if retained is None:
+                retained = (f"reservation-{response_ref.response_id}", True)
+                self.presentation_reservations[response_ref] = retained
+        else:
+            assert retained is not None and reservation_id == retained[0]
+            if phase == "close":
+                retained = (retained[0], False)
+                self.presentation_reservations[response_ref] = retained
+        assert retained is not None
+        return TaskPresentationRuntimeReceipt(
+            response_ref=response_ref,
+            reservation_id=retained[0],
+            phase=phase,
+            active=retained[1],
+        )
 
     def attach_notification_consumer(
         self, *, consumer_id: str, connection_epoch: int
@@ -155,7 +199,24 @@ class FakeRuntime:
         del consumer_id, connection_epoch
         if self.attach_failure is not None:
             raise self.attach_failure
-        return None
+        return self.notification_lease
+
+    def detach_notification_consumer(self, lease: object) -> bool:
+        return lease is self.notification_lease
+
+    async def next_notification_for(
+        self, lease: object
+    ) -> AgentConversationNotification:
+        assert lease is self.notification_lease
+        return self.notifications.pop(0)
+
+    async def drain_notifications_for(
+        self, lease: object, *, limit: int
+    ) -> tuple[AgentConversationNotification, ...]:
+        assert lease is self.notification_lease
+        drained = tuple(self.notifications[:limit])
+        del self.notifications[:limit]
+        return drained
 
     async def start(self) -> bool:
         self.start_calls += 1
@@ -365,6 +426,43 @@ async def test_authority_succeeds_before_any_factory_or_runtime_effect() -> None
 
 
 @pytest.mark.asyncio
+async def test_activation_lease_reads_one_then_drains_a_bounded_notification_batch() -> None:
+    runtime = FakeRuntime()
+    response = ResponseRef("interaction-1", "response-batch", 0)
+    runtime.notifications = [
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id=f"request-{index}",
+            round_id="round-batch",
+            response_ref=response,
+            publish_seq=index,
+        )
+        for index in range(4)
+    ]
+    result = await adapter_for(
+        RecordingResolver((candidate(),)),
+        lambda _context, _binding: runtime,
+    ).activate(request())
+    assert result.lease is not None
+    binding = result.lease.binding
+
+    for invalid in (False, 0, 17):
+        with pytest.raises(ProductP2AdapterViolation) as rejected:
+            await result.lease.next_notifications(binding, limit=invalid)
+        assert rejected.value.reason == "INVALID_NOTIFICATION_BATCH_LIMIT"
+        assert len(runtime.notifications) == 4
+
+    batch = await result.lease.next_notifications(binding, limit=3)
+    assert [item.request_id for item in batch] == [
+        "request-0",
+        "request-1",
+        "request-2",
+    ]
+    assert [item.request_id for item in runtime.notifications] == ["request-3"]
+    await result.lease.close(binding, timeout_seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_voice_task_progress_requires_exact_open_p2_binding_and_cr_acceptance() -> (
     None
 ):
@@ -483,8 +581,41 @@ async def test_task_notification_waits_for_safe_foreground_and_skips_user_histor
             "channel_id": "web",
             "_persist_user_history": False,
             "_source_provenance": "server.task_notification",
+            "_presentation_surface": PresentationSurface.TEXT,
+            "_publish_notification": True,
         }
     ]
+
+    audio_receipts: list[TaskPresentationRuntimeReceipt] = []
+
+    async def reserve_audio(handle: AuthoritativePresentationHandle) -> None:
+        audio_receipts.append(
+            result.lease.task_presentation_runtime_authority(
+                binding, handle.response_ref, None, "reserve"
+            )
+        )
+
+    audio = await result.lease.present_task_notification(
+        binding,
+        request_id="task-notification-event-audio-1",
+        response_id="response-task-notification-event-audio-1",
+        correlation_id=binding.correlation_id,
+        commit=replace(
+            notification_commit,
+            commit_id="commit-task-notification-audio-1",
+            turn_id="turn-task-notification-audio-1",
+        ),
+        text="The background task is complete.",
+        presentation_surface=PresentationSurface.AUDIO,
+        before_publish=reserve_audio,
+    )
+    assert audio.presentation_unit.surface is PresentationSurface.AUDIO
+    assert len(audio_receipts) == 1
+    assert audio_receipts[0].response_ref == audio.response_ref
+    assert audio_receipts[0].phase == "reserve"
+    assert runtime.presentation_calls[-1]["_presentation_surface"] is (
+        PresentationSurface.AUDIO
+    )
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1301,51 @@ async def test_closed_lease_allows_only_a_newer_authorized_generation() -> None:
     assert next_generation.lease is not first.lease
     assert stale_after_replacement.status is P2ActivationStatus.DENIED
     assert len(runtimes) == 2
+
+
+@pytest.mark.asyncio
+async def test_closing_lease_fences_old_effects_without_blocking_newer_generation() -> (
+    None
+):
+    resolver = RecordingResolver((candidate(),))
+    predecessor_close = asyncio.Event()
+    runtimes: list[FakeRuntime] = []
+
+    def make_runtime(_context, _binding):
+        runtime = FakeRuntime(
+            close_gate=predecessor_close if not runtimes else None,
+        )
+        runtimes.append(runtime)
+        return runtime
+
+    adapter = adapter_for(resolver, make_runtime)
+    first = await adapter.activate(request())
+    assert first.lease is not None
+    pending = await first.lease.close(
+        first.lease.binding,
+        timeout_seconds=0.001,
+    )
+    assert pending.status is P2LeaseCloseStatus.PENDING
+    assert first.lease.snapshot().state is P2LeaseState.CLOSING
+
+    successor = await adapter.activate(
+        request(activation_id="activation-2", generation=2)
+    )
+
+    assert successor.status is P2ActivationStatus.ACTIVE
+    assert successor.lease is not None
+    assert successor.lease is not first.lease
+    assert len(runtimes) == 2
+    assert first.lease.snapshot().state is P2LeaseState.CLOSING
+
+    predecessor_close.set()
+    closed = await first.lease.close(first.lease.binding, timeout_seconds=1.0)
+    assert closed.status is P2LeaseCloseStatus.CLOSED
+    successor_closed = await successor.lease.close(
+        successor.lease.binding,
+        timeout_seconds=1.0,
+    )
+    assert successor_closed.status is P2LeaseCloseStatus.CLOSED
 
 
 @pytest.mark.asyncio

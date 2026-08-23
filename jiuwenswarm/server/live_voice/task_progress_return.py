@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -37,7 +39,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     IdentityRef,
     ProducerRef,
     ScopeRef,
-    TerminalOutcome,
     WorkProgressEventV2,
     WorkSourceAuthority,
     canonical_json_bytes,
@@ -47,6 +48,8 @@ from .formal_task_models import (
     FormalTaskViolation,
     PersistentTaskEvent,
     TaskAuthorizationGrant,
+    TaskEventConsumerAuthorityPage,
+    TaskEventConsumerCursorBaseline,
     utc_now,
 )
 from .progress_notification_arbiter import (
@@ -56,22 +59,30 @@ from .progress_notification_arbiter import (
     NotificationDisposition,
     ProgressNotificationArbiter,
     ProgressNotificationBinding,
+    _attempt_epoch_number,
     _mint_verified_attempt_epoch_baseline,
+    _mint_verified_consumer_cursor_baseline,
+    _mint_verified_consumer_projection,
     _mint_verified_no_projection_advance,
 )
-from .task_event_subscription import TaskEventSubscription
+from .task_event_subscription import (
+    TaskEventSubscription,
+    TaskEventSubscriptionSnapshot,
+    TaskEventSubscriptionState,
+)
 from .task_store import SqliteTaskStore
 
 _EVENTS_CAPABILITY = frozenset({"task.events"})
-_PROJECTABLE_EVENTS = {
+TASK_PROGRESS_PRESENTABLE_EVENTS = {
     "task.accepted": "accepted",
     "task.retry_accepted": "accepted",
+    "task.recovery_accepted": "accepted",
     "task.running": "running",
     "task.blocked": "blocked",
     "task.decision_required": "decision_required",
     "task.terminal": "terminal",
 }
-_NO_PROJECTION_EVENTS = frozenset(
+TASK_PROGRESS_NON_PRESENTABLE_EVENTS = frozenset(
     {
         "attempt.accepted",
         "attempt.running",
@@ -80,11 +91,18 @@ _NO_PROJECTION_EVENTS = frozenset(
         "task.adjust_requested",
         "task.adjust_applied",
         "task.adjust_rejected",
+        "task.update_requested",
+        "task.update_applied",
+        "task.reprioritize_requested",
+        "task.reprioritize_applied",
     }
 )
+_PROJECTABLE_EVENTS = TASK_PROGRESS_PRESENTABLE_EVENTS
+_NO_PROJECTION_EVENTS = TASK_PROGRESS_NON_PRESENTABLE_EVENTS
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.retry_accepted": frozenset({"task_core"}),
+    "task.recovery_accepted": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
     "task.blocked": frozenset({"task_core"}),
     "task.decision_required": frozenset({"task_core"}),
@@ -263,12 +281,349 @@ class PreparedTaskProgressSource(Protocol):
     async def close(self) -> None: ...
 
 
+class _ConsumerTaskEventSubscription:
+    """Bounded Store-page reader resumed from one durable presentation cursor."""
+
+    def __init__(
+        self,
+        *,
+        store: SqliteTaskStore,
+        authorization: TaskAuthorizationGrant,
+        scope: ScopeRef,
+        task_id: str,
+        presentation_class: str,
+        queue_capacity: int,
+        validation_capacity: int,
+        poll_interval: float,
+        clock: Callable[[], str],
+    ) -> None:
+        self._store = store
+        self._authorization = authorization
+        self._scope = scope
+        self._task_id = task_id
+        self._presentation_class = presentation_class
+        self._queue_capacity = queue_capacity
+        self._validation_capacity = validation_capacity
+        self._poll_interval = poll_interval
+        self._clock = clock
+        self._state = TaskEventSubscriptionState.NEW
+        self._queue: deque[PersistentTaskEvent] = deque()
+        self._seen_ids: dict[str, bytes] = {}
+        self._seen_sequences: dict[int, bytes] = {}
+        self._validation_order: deque[tuple[str, int]] = deque()
+        self._source_reads = 0
+        self._start_head_seq: int | None = None
+        self._last_read_seq: int | None = None
+        self._segment_start_seq: int | None = None
+        self._attempt_id: str | None = None
+        self._attempt_number: int | None = None
+        self._frozen_head: int | None = None
+        self._terminal_close_seq: int | None = None
+        self._cursor_baseline: TaskEventConsumerCursorBaseline | None = None
+        self._terminal_seen = False
+        self._terminal_delivered = False
+        self._close_reason: str | None = None
+        self._failure: FormalTaskViolation | None = None
+        self._discarded_events = 0
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._changed: asyncio.Event | None = None
+        self._consumer_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._close_lock = threading.RLock()
+        self._close_requested = False
+
+    def _authorize(self) -> None:
+        self._authorization.authorize(
+            scope=self._scope,
+            operation="task.events",
+            command_id=None,
+            target_task_id=self._task_id,
+            required_capabilities=_EVENTS_CAPABILITY,
+            destructive=False,
+            now=self._clock(),
+        )
+
+    def _close_was_requested(self) -> bool:
+        with self._close_lock:
+            return self._close_requested
+
+    def _request_close(self) -> None:
+        with self._close_lock:
+            self._close_requested = True
+            owner_loop = self._owner_loop
+            changed = self._changed
+        if changed is None:
+            return
+        if owner_loop is None or owner_loop is asyncio.get_running_loop():
+            changed.set()
+        elif not owner_loop.is_closed():
+            owner_loop.call_soon_threadsafe(changed.set)
+
+    def _require_owner_loop(self) -> None:
+        if self._owner_loop is not asyncio.get_running_loop():
+            raise FormalTaskViolation(
+                "TASK_EVENT_SUBSCRIPTION_LOOP_MISMATCH",
+                "consumer TaskEvent subscription belongs to another event loop",
+                ErrorCode.CONFLICT,
+            )
+
+    def _validate_page(
+        self,
+        page: TaskEventConsumerAuthorityPage,
+        *,
+        initial: bool,
+    ) -> None:
+        if (
+            type(page) is not TaskEventConsumerAuthorityPage
+            or page.task.task_id != self._task_id
+            or page.presentation_class != self._presentation_class
+            or not _stable_consumer_scope_matches(page.task.scope, self._scope)
+        ):
+            raise FormalTaskViolation(
+                "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
+                "consumer TaskEvent page does not bind its authorized Task",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if initial:
+            return
+        previous_cursor = self._cursor_baseline
+        current_cursor = page.cursor_baseline
+        # The Store page has already atomically verified the durable watermark
+        # against its exact TaskEvent identity.  This subscription therefore
+        # retains only the bounded scalar proof that it read the complete prefix;
+        # requiring the event to remain in the rolling fingerprint window would
+        # reject a legitimate delayed ACK after bounded validation eviction.
+        cursor_advanced_through_read_prefix = (
+            previous_cursor is not None
+            and current_cursor.watermark > previous_cursor.watermark
+            and self._last_read_seq is not None
+            and current_cursor.watermark <= self._last_read_seq
+        )
+        if (
+            page.page_after_seq != self._last_read_seq
+            or previous_cursor is None
+            or current_cursor.watermark < previous_cursor.watermark
+            or (
+                current_cursor.watermark == previous_cursor.watermark
+                and current_cursor != previous_cursor
+            )
+            or (
+                current_cursor.watermark > previous_cursor.watermark
+                and not cursor_advanced_through_read_prefix
+            )
+            or (self._frozen_head is not None and page.head_seq != self._frozen_head)
+        ):
+            raise FormalTaskViolation(
+                "TASK_EVENT_CONSUMER_CURSOR_STALE",
+                "consumer TaskEvent page changed its Attempt or frozen cursor",
+                ErrorCode.STALE,
+            )
+
+    def _accept_page(self, page: TaskEventConsumerAuthorityPage) -> None:
+        accepted: list[PersistentTaskEvent] = []
+        ids = dict(self._seen_ids)
+        sequences = dict(self._seen_sequences)
+        order = deque(self._validation_order)
+        for event in page.events:
+            canonical = canonical_json_bytes(event.to_dict())
+            if event.event_id in ids or event.seq in sequences:
+                raise FormalTaskViolation(
+                    "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
+                    "consumer TaskEvent page reused an accepted identity",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if len(ids) >= self._validation_capacity:
+                old_event_id, old_seq = order.popleft()
+                ids.pop(old_event_id, None)
+                sequences.pop(old_seq, None)
+            ids[event.event_id] = canonical
+            sequences[event.seq] = canonical
+            order.append((event.event_id, event.seq))
+            accepted.append(event)
+        if len(self._queue) + len(accepted) > self._queue_capacity:
+            raise FormalTaskViolation(
+                "TASK_EVENT_SUBSCRIPTION_BACKPRESSURE",
+                "consumer TaskEvent page exceeds its bounded queue",
+                ErrorCode.UNAVAILABLE,
+            )
+        self._seen_ids = ids
+        self._seen_sequences = sequences
+        self._validation_order = order
+        self._queue.extend(accepted)
+        self._cursor_baseline = page.cursor_baseline
+        self._last_read_seq = (
+            page.events[-1].seq if page.events else page.page_after_seq
+        )
+        self._frozen_head = page.head_seq if page.has_more else None
+        self._terminal_seen = self._terminal_seen or any(
+            event.event_type == "task.terminal" for event in page.events
+        )
+        terminal_head = page.terminal_head_event
+        if terminal_head is not None and terminal_head.seq == page.head_seq:
+            self._terminal_close_seq = terminal_head.seq
+
+    async def start(self) -> bool:
+        async with self._lifecycle_lock:
+            if self._state is not TaskEventSubscriptionState.NEW:
+                return self._state in {
+                    TaskEventSubscriptionState.ACTIVE,
+                    TaskEventSubscriptionState.CLOSED,
+                }
+            self._owner_loop = asyncio.get_running_loop()
+            self._authorize()
+            page = await asyncio.to_thread(
+                self._store.consumer_progress_authority_page,
+                self._task_id,
+                self._scope,
+                presentation_class=self._presentation_class,
+                limit=min(self._queue_capacity, self._validation_capacity),
+            )
+            self._source_reads += 1
+            self._authorize()
+            if self._close_was_requested():
+                self._state = TaskEventSubscriptionState.CLOSED
+                self._close_reason = "detached_before_start"
+                return False
+            self._validate_page(page, initial=True)
+            self._changed = asyncio.Event()
+            self._start_head_seq = page.head_seq
+            self._segment_start_seq = page.start_seq
+            self._attempt_id = page.attempt.attempt_id
+            self._attempt_number = page.attempt.attempt_number
+            self._last_read_seq = page.page_after_seq
+            self._cursor_baseline = page.cursor_baseline
+            self._accept_page(page)
+            if (
+                page.task.state.value == "terminal"
+                and not self._queue
+                and self._last_read_seq >= page.head_seq
+            ):
+                self._state = TaskEventSubscriptionState.CLOSED
+                self._close_reason = "already_consumed_terminal"
+            else:
+                self._state = TaskEventSubscriptionState.ACTIVE
+            return True
+
+    async def next_event(self) -> PersistentTaskEvent:
+        async with self._consumer_lock:
+            self._require_owner_loop()
+            while True:
+                if self._failure is not None:
+                    raise self._failure
+                if self._queue:
+                    self._authorize()
+                    event = self._queue.popleft()
+                    if (
+                        event.seq == self._terminal_close_seq
+                        and event.event_type == "task.terminal"
+                    ):
+                        self._terminal_delivered = True
+                        self._state = TaskEventSubscriptionState.CLOSED
+                        self._close_reason = "terminal_event_delivered"
+                    return event
+                if self._state is TaskEventSubscriptionState.CLOSED:
+                    raise StopAsyncIteration
+                if self._close_was_requested():
+                    self._state = TaskEventSubscriptionState.CLOSED
+                    self._close_reason = "consumer_detached"
+                    raise StopAsyncIteration
+                assert self._last_read_seq is not None
+                self._authorize()
+                try:
+                    page = await asyncio.to_thread(
+                        self._store.consumer_progress_authority_page,
+                        self._task_id,
+                        self._scope,
+                        presentation_class=self._presentation_class,
+                        limit=min(self._queue_capacity, self._validation_capacity),
+                        after_seq=self._last_read_seq,
+                        through_seq=self._frozen_head,
+                    )
+                    self._source_reads += 1
+                    self._authorize()
+                    if self._close_was_requested():
+                        self._state = TaskEventSubscriptionState.CLOSED
+                        self._close_reason = "consumer_detached"
+                        raise StopAsyncIteration
+                    self._validate_page(page, initial=False)
+                    self._accept_page(page)
+                except StopAsyncIteration:
+                    raise
+                except FormalTaskViolation as error:
+                    self._failure = error
+                    self._state = TaskEventSubscriptionState.FAILED
+                    raise
+                if self._queue:
+                    continue
+                if page.task.state.value == "terminal":
+                    self._state = TaskEventSubscriptionState.CLOSED
+                    self._close_reason = "already_consumed_terminal"
+                    raise StopAsyncIteration
+                changed = self._changed
+                assert changed is not None
+                changed.clear()
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=self._poll_interval)
+                except TimeoutError:
+                    pass
+
+    async def close(self) -> None:
+        self._request_close()
+        async with self._lifecycle_lock:
+            if self._owner_loop is not None:
+                self._require_owner_loop()
+            self._discarded_events += len(self._queue)
+            self._queue.clear()
+            if self._state is not TaskEventSubscriptionState.FAILED:
+                self._state = TaskEventSubscriptionState.CLOSED
+                self._close_reason = self._close_reason or "consumer_detached"
+
+    def snapshot(self) -> TaskEventSubscriptionSnapshot:
+        return TaskEventSubscriptionSnapshot(
+            enabled=True,
+            state=self._state,
+            task_id=self._task_id,
+            start_head_seq=self._start_head_seq,
+            last_seq=self._last_read_seq,
+            queue_capacity=self._queue_capacity,
+            queue_allocated=self._changed is not None,
+            queued_events=len(self._queue),
+            validation_capacity=self._validation_capacity,
+            tracked_events=len(self._seen_ids),
+            worker_pending=False,
+            source_reads=self._source_reads,
+            live_only=False,
+            cursor_replay_supported=True,
+            terminal_event_seen=self._terminal_seen,
+            terminal_event_delivered=self._terminal_delivered,
+            close_reason=self._close_reason,
+            failure_reason=None if self._failure is None else self._failure.reason,
+            failure_code=None if self._failure is None else self._failure.code,
+            discarded_events=self._discarded_events,
+            segment_start_seq=self._segment_start_seq,
+            attempt_id=self._attempt_id,
+            attempt_number=self._attempt_number,
+        )
+
+    def consumer_cursor_baseline(self) -> TaskEventConsumerCursorBaseline:
+        baseline = self._cursor_baseline
+        if baseline is None:
+            raise FormalTaskViolation(
+                "TASK_EVENT_CONSUMER_CURSOR_UNAVAILABLE",
+                "consumer cursor is unavailable before source activation",
+                ErrorCode.CONFLICT,
+            )
+        return baseline
+
+
 class TaskEventAuthorityProgressSource:
     """Concrete Store-owned atomic prefix/cursor source for formal voice progress."""
 
     __slots__ = (
         "_authorization_fingerprint",
+        "_consumer_scope",
         "_evidence_id",
+        "_presentation_class",
         "_scope",
         "_subscription",
         "_task_id",
@@ -285,6 +640,8 @@ class TaskEventAuthorityProgressSource:
         validation_capacity: int = 4096,
         poll_interval: float = 0.05,
         clock: Callable[[], str] = utc_now,
+        consumer_scope: bool = False,
+        presentation_class: str | None = None,
     ) -> None:
         if type(store) is not SqliteTaskStore:
             raise _violation(
@@ -298,26 +655,81 @@ class TaskEventAuthorityProgressSource:
                 "formal voice progress requires trusted TaskEvent authorization",
                 ErrorCode.UNAUTHENTICATED,
             )
+        if type(consumer_scope) is not bool:
+            raise _violation(
+                "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE",
+                "formal progress consumer mode must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if consumer_scope:
+            if presentation_class not in {"text", "voice"}:
+                raise _violation(
+                    "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE",
+                    "consumer progress requires an exact presentation class",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        elif presentation_class is not None:
+            raise _violation(
+                "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE",
+                "non-consumer progress cannot bind a presentation cursor",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            type(queue_capacity) is not int
+            or queue_capacity <= 0
+            or type(validation_capacity) is not int
+            or validation_capacity <= 0
+            or queue_capacity > validation_capacity
+            or not isinstance(poll_interval, (int, float))
+            or isinstance(poll_interval, bool)
+            or poll_interval <= 0
+        ):
+            raise _violation(
+                "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE",
+                "consumer progress bounds must be positive and ordered",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         self._scope = scope
         self._task_id = task_id
+        self._consumer_scope = consumer_scope
+        self._presentation_class = presentation_class
         self._authorization_fingerprint = _authorization_fingerprint(authorization)
-        self._subscription = TaskEventSubscription(
-            source=store,
-            authorization=authorization,
-            scope=scope,
-            task_id=task_id,
-            enabled=True,
-            queue_capacity=queue_capacity,
-            validation_capacity=validation_capacity,
-            poll_interval=poll_interval,
-            authority_atomic_replay=True,
-            clock=clock,
+        self._subscription = cast(
+            TaskEventSubscription,
+            (
+                _ConsumerTaskEventSubscription(
+                    store=store,
+                    authorization=authorization,
+                    scope=scope,
+                    task_id=task_id,
+                    presentation_class=cast(str, presentation_class),
+                    queue_capacity=queue_capacity,
+                    validation_capacity=validation_capacity,
+                    poll_interval=float(poll_interval),
+                    clock=clock,
+                )
+                if consumer_scope
+                else TaskEventSubscription(
+                    source=store,
+                    authorization=authorization,
+                    scope=scope,
+                    task_id=task_id,
+                    enabled=True,
+                    queue_capacity=queue_capacity,
+                    validation_capacity=validation_capacity,
+                    poll_interval=float(poll_interval),
+                    authority_atomic_replay=True,
+                    consumer_scope=False,
+                    clock=clock,
+                )
+            ),
         )
         scope_fingerprint = hashlib.sha256(
             canonical_json_bytes(scope.to_dict())
         ).hexdigest()
         self._evidence_id = (
-            f"task-event-authority:{task_id}:{scope_fingerprint}:pending"
+            f"task-event-authority:{'consumer:' if consumer_scope else ''}"
+            f"{task_id}:{scope_fingerprint}:pending"
         )
 
     @property
@@ -469,9 +881,21 @@ def _evidence_id(
     )
 
 
-def project_task_progress_event(
+def _stable_consumer_scope_matches(source: ScopeRef, consumer: ScopeRef) -> bool:
+    return (
+        source.assurance is Assurance.AUTHENTICATED
+        and consumer.assurance is Assurance.AUTHENTICATED
+        and source.project_id is not None
+        and source.subject_id == consumer.subject_id
+        and source.project_id == consumer.project_id
+    )
+
+
+def _project_task_progress_event(
     event: object,
     origin: object,
+    *,
+    consumer_scope: bool = False,
 ) -> TaskProgressProjection:
     """Map one canonical task lifecycle event without adding business facts."""
 
@@ -488,11 +912,19 @@ def project_task_progress_event(
             "attempt/control TaskEvents require a verified no-projection advance",
             ErrorCode.UNAVAILABLE,
         )
-    if (
-        event.task_id != binding.task_id
-        or event.scope != binding.scope
-        or event.correlation_id != binding.correlation_id
-    ):
+    if type(consumer_scope) is not bool:
+        raise _violation(
+            "INVALID_TASK_PROGRESS_SOURCE",
+            "consumer scope mode must be an exact boolean",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    binding_matches = (
+        _stable_consumer_scope_matches(event.scope, binding.scope)
+        if consumer_scope
+        else event.scope == binding.scope
+        and event.correlation_id == binding.correlation_id
+    )
+    if event.task_id != binding.task_id or not binding_matches:
         raise _violation(
             "TASK_PROGRESS_SOURCE_BINDING_MISMATCH",
             "TaskEvent does not match the exact origin task/scope/correlation",
@@ -503,26 +935,8 @@ def project_task_progress_event(
         or event.producer not in _TASK_EVENT_PRODUCERS[event.event_type]
         or (event.state == "terminal") != (event.outcome is not None)
         or (
-            event.event_type == "task.retry_accepted"
-            and (
-                set(event.details)
-                != {
-                    "command_id",
-                    "retry_of_attempt_id",
-                    "previous_outcome",
-                    "attempt_number",
-                }
-                or event.details.get("command_id") != event.causation_id
-                or type(event.details.get("retry_of_attempt_id")) is not str
-                or not str(event.details.get("retry_of_attempt_id")).strip()
-                or event.details.get("retry_of_attempt_id") == event.attempt_id
-                or event.details.get("attempt_number") not in {2, 3}
-                or event.details.get("previous_outcome")
-                not in {
-                    TerminalOutcome.CANCELLED.value,
-                    TerminalOutcome.COMPLETED.value,
-                }
-            )
+            event.event_type in {"task.retry_accepted", "task.recovery_accepted"}
+            and _attempt_epoch_number(event) is None
         )
     ):
         raise _violation(
@@ -544,18 +958,23 @@ def project_task_progress_event(
             "persistent_source_event_id": event.source_event_id,
         }
     }
+    envelope_scope = binding.scope if consumer_scope else event.scope
+    envelope_correlation_id = (
+        binding.correlation_id if consumer_scope else event.correlation_id
+    )
+    if consumer_scope:
+        source_extensions[_SOURCE_EXTENSION].update(
+            {
+                "persistent_scope": event.scope.to_dict(),
+                "persistent_correlation_id": event.correlation_id,
+                "consumer_scope_rebound": True,
+            }
+        )
     source_payload: dict[str, object] = {"state": event.state}
     if event.state == "terminal":
         source_payload["outcome"] = event.outcome
-    elif event.event_type == "task.retry_accepted":
-        source_payload.update(
-            {
-                "command_id": event.details.get("command_id"),
-                "retry_of_attempt_id": event.details.get("retry_of_attempt_id"),
-                "previous_outcome": event.details.get("previous_outcome"),
-                "attempt_number": event.details.get("attempt_number"),
-            }
-        )
+    elif event.event_type in {"task.retry_accepted", "task.recovery_accepted"}:
+        source_payload.update(event.details)
     try:
         source_event = EventEnvelope.from_dict(
             {
@@ -566,8 +985,8 @@ def project_task_progress_event(
                 "stream_ref": {"kind": "task", "id": event.task_id},
                 "seq": event.seq,
                 "occurred_at": event.occurred_at,
-                "scope": event.scope.to_dict(),
-                "correlation_id": event.correlation_id,
+                "scope": envelope_scope.to_dict(),
+                "correlation_id": envelope_correlation_id,
                 "causation_id": event.causation_id,
                 "required_capabilities": [],
                 "payload": source_payload,
@@ -606,7 +1025,7 @@ def project_task_progress_event(
     }
     progress_id = f"{_PROGRESS_EVENT_PREFIX}{event.event_id}"
     try:
-        progress = WorkProgressEventV2.from_dict(progress_payload, scope=event.scope)
+        progress = WorkProgressEventV2.from_dict(progress_payload, scope=envelope_scope)
         progress_event = EventEnvelope.from_dict(
             {
                 "contract_version": CONTRACT_VERSION,
@@ -616,12 +1035,25 @@ def project_task_progress_event(
                 "stream_ref": {"kind": "task", "id": event.task_id},
                 "seq": event.seq,
                 "occurred_at": event.occurred_at,
-                "scope": event.scope.to_dict(),
-                "correlation_id": event.correlation_id,
+                "scope": envelope_scope.to_dict(),
+                "correlation_id": envelope_correlation_id,
                 "causation_id": event.event_id,
                 "required_capabilities": [],
                 "payload": progress.to_dict(),
-                "extensions": {_SOURCE_EXTENSION: {"persistent_event_seq": event.seq}},
+                "extensions": {
+                    _SOURCE_EXTENSION: {
+                        "persistent_event_seq": event.seq,
+                        **(
+                            {
+                                "persistent_scope": event.scope.to_dict(),
+                                "persistent_correlation_id": event.correlation_id,
+                                "consumer_scope_rebound": True,
+                            }
+                            if consumer_scope
+                            else {}
+                        ),
+                    }
+                },
             }
         )
     except ContractViolation as error:
@@ -631,9 +1063,9 @@ def project_task_progress_event(
             error.code,
         ) from error
     notification_binding = ProgressNotificationBinding(
-        scope=event.scope,
+        scope=envelope_scope,
         work_ref=IdentityRef(IdentityKind.TASK, event.task_id),
-        correlation_id=event.correlation_id,
+        correlation_id=envelope_correlation_id,
         source_producer=source_event.producer,
         source_work_ref=source_event.stream_ref,
         source_authority=WorkSourceAuthority.TASK_CORE,
@@ -646,6 +1078,15 @@ def project_task_progress_event(
         progress_event=progress_event,
         notification_binding=notification_binding,
     )
+
+
+def project_task_progress_event(
+    event: object,
+    origin: object,
+) -> TaskProgressProjection:
+    """Project only an exact same-Session TaskEvent on the public pure surface."""
+
+    return _project_task_progress_event(event, origin, consumer_scope=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,6 +1134,7 @@ class TaskProgressReturnBridge:
         arbiter: ProgressNotificationArbiter,
         foreground: ForegroundSupplier,
         voice_sink: VoiceIntentSink,
+        deferred_voice_sink: VoiceIntentSink | None = None,
         text_sink: TextEventSink,
         allow_package_contract_handoff: bool = False,
         validation_capacity: int = 256,
@@ -722,6 +1164,13 @@ class TaskProgressReturnBridge:
         self._arbiter = arbiter
         self._foreground = foreground
         self._voice_sink = voice_sink
+        if deferred_voice_sink is not None and not callable(deferred_voice_sink):
+            raise _violation(
+                "INVALID_TASK_PROGRESS_PORT",
+                "deferred voice sink must be callable",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        self._deferred_voice_sink = deferred_voice_sink
         self._text_sink = text_sink
         self._allow_package_contract_handoff = allow_package_contract_handoff
         self._validation_capacity = validation_capacity
@@ -751,10 +1200,14 @@ class TaskProgressReturnBridge:
         self._rejected_events = 0
         self._seen_ids: dict[str, bytes] = {}
         self._seen_sequences: dict[int, bytes] = {}
+        self._validation_order: deque[tuple[str, int]] = deque()
         self._deferred_voice: dict[str, TaskProgressProjection] = {}
+        self._deferred_voice_settled = asyncio.Event()
+        self._deferred_voice_settled.set()
         self._next_seq: int | None = None
         self._authority_attempt_id: str | None = None
         self._authority_attempt_number: int | None = None
+        self._consumer_cursor_capability: object | None = None
         self._last_task_event_id: str | None = None
         self._last_task_event_seq: int | None = None
         self._last_progress_event_id: str | None = None
@@ -803,17 +1256,14 @@ class TaskProgressReturnBridge:
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.STALE_GENERATION
                 return self._inactive_activation()
-            if (
-                binding.origin_kind is TaskProgressOriginKind.TEXT
-                and not self._subscription_matches(binding)
-            ):
+            if not self._subscription_matches(binding):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.INVALID_BINDING
                 return self._inactive_activation()
             prepared = self._prepared_source
-            if binding.origin_kind is TaskProgressOriginKind.VOICE and (
-                prepared is None or not self._prepared_source_usable(prepared)
-            ):
+            if (
+                binding.origin_kind is TaskProgressOriginKind.VOICE and prepared is None
+            ) or (prepared is not None and not self._prepared_source_usable(prepared)):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE
                 return self._inactive_activation()
@@ -852,10 +1302,7 @@ class TaskProgressReturnBridge:
                 )
                 await self._close_source(binding)
                 return self._inactive_activation()
-            if (
-                binding.origin_kind is TaskProgressOriginKind.VOICE
-                and self._uses_exact_authority_source()
-            ):
+            if self._uses_exact_authority_source():
                 authority_snapshot = self._subscription.snapshot()
                 if (
                     authority_snapshot.segment_start_seq is None
@@ -869,6 +1316,28 @@ class TaskProgressReturnBridge:
                 self._next_seq = authority_snapshot.segment_start_seq
                 self._authority_attempt_id = authority_snapshot.attempt_id
                 self._authority_attempt_number = authority_snapshot.attempt_number
+                if (
+                    binding.origin_kind is TaskProgressOriginKind.VOICE
+                    and self._uses_consumer_authority_source()
+                ):
+                    subscription = self._subscription
+                    if subscription.__class__ is not _ConsumerTaskEventSubscription:
+                        self._state = TaskProgressReturnState.FAILED
+                        self._reason = TaskProgressReturnReason.HANDOFF_REJECTED
+                        await self._close_source(binding)
+                        return self._inactive_activation()
+                    try:
+                        cursor_capability = _mint_verified_consumer_cursor_baseline(
+                            subscription.consumer_cursor_baseline(),
+                            self._notification_binding(binding),
+                        )
+                        self._arbiter._resume_consumer_cursor(cursor_capability)
+                    except Exception:
+                        self._state = TaskProgressReturnState.FAILED
+                        self._reason = TaskProgressReturnReason.HANDOFF_REJECTED
+                        await self._close_source(binding)
+                        return self._inactive_activation()
+                    self._consumer_cursor_capability = cursor_capability
             if not self._authorize(binding):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.AUTHORIZATION_REJECTED
@@ -913,6 +1382,7 @@ class TaskProgressReturnBridge:
         # activation already blocked in source.start() can then observe the flag,
         # while the retained cleanup task concurrently reaches source.close().
         self._close_requested = True
+        self._deferred_voice_settled.set()
         if self._state in {
             TaskProgressReturnState.DISABLED,
             TaskProgressReturnState.UNAVAILABLE,
@@ -1029,7 +1499,11 @@ class TaskProgressReturnBridge:
                 return 0
             self._deferred_voice.pop(projection.progress_event.event_id, None)
             self._voice_drains += 1
-            if projection.task_event.event_type == "task.terminal":
+            self._deferred_voice_settled.set()
+            if (
+                projection.task_event.event_type == "task.terminal"
+                and self._consumer_terminal_closes_stream(projection.task_event)
+            ):
                 self._settle(
                     TaskProgressReturnState.CLOSED,
                     TaskProgressReturnReason.TERMINAL_DELIVERED,
@@ -1118,6 +1592,11 @@ class TaskProgressReturnBridge:
                         TaskProgressReturnState.FAILED,
                         TaskProgressReturnReason.SOURCE_FAILED,
                     )
+            finally:
+                cursor_capability = self._consumer_cursor_capability
+                if cursor_capability is not None:
+                    self._arbiter._release_consumer_cursor(cursor_capability)
+                    self._consumer_cursor_capability = None
 
     async def _consume(self, event: object) -> bool:
         binding = self._binding
@@ -1129,25 +1608,28 @@ class TaskProgressReturnBridge:
         self._last_task_event_id = event.event_id
         self._last_task_event_seq = event.seq
         self._last_source_evidence = _evidence_id(binding, event)
-        if (
-            event.task_id != binding.task_id
-            or event.scope != binding.scope
-            or event.correlation_id != binding.correlation_id
-        ):
+        consumer_scope = self._uses_consumer_authority_source()
+        binding_matches = (
+            _stable_consumer_scope_matches(event.scope, binding.scope)
+            if consumer_scope
+            else event.scope == binding.scope
+            and event.correlation_id == binding.correlation_id
+        )
+        if event.task_id != binding.task_id or not binding_matches:
             self._last_source_decision = TaskProgressSourceDecision.BINDING_REJECTED
             self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
             return False
         if (
-            binding.origin_kind is TaskProgressOriginKind.VOICE
-            and self._uses_exact_authority_source()
+            self._uses_exact_authority_source()
+            and not self._uses_consumer_authority_source()
             and event.attempt_id != self._authority_attempt_id
         ):
             self._last_source_decision = TaskProgressSourceDecision.STALE_ATTEMPT
             self._reject(TaskProgressReturnReason.STALE_ATTEMPT)
             return False
         if (
-            binding.origin_kind is TaskProgressOriginKind.VOICE
-            and self._uses_exact_authority_source()
+            self._uses_exact_authority_source()
+            and not self._uses_consumer_authority_source()
             and event.event_type == "task.retry_accepted"
             and event.details.get("attempt_number") != self._authority_attempt_number
         ):
@@ -1179,9 +1661,7 @@ class TaskProgressReturnBridge:
             self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
             return False
         if self._next_seq is None:
-            expected_seq = (
-                0 if binding.origin_kind is TaskProgressOriginKind.VOICE else event.seq
-            )
+            expected_seq = 0 if self._uses_exact_authority_source() else event.seq
         else:
             expected_seq = self._next_seq
         if event.seq != expected_seq:
@@ -1196,9 +1676,13 @@ class TaskProgressReturnBridge:
             self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
             return False
         if len(self._seen_ids) >= self._validation_capacity:
-            self._last_source_decision = TaskProgressSourceDecision.INVALID_EVENT
-            self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
-            return False
+            if not self._uses_consumer_authority_source():
+                self._last_source_decision = TaskProgressSourceDecision.INVALID_EVENT
+                self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
+                return False
+            old_event_id, old_seq = self._validation_order.popleft()
+            self._seen_ids.pop(old_event_id, None)
+            self._seen_sequences.pop(old_seq, None)
         if not self._generation_current(binding):
             self._last_source_decision = TaskProgressSourceDecision.STALE_GENERATION
             self._reject(TaskProgressReturnReason.STALE_GENERATION)
@@ -1223,12 +1707,17 @@ class TaskProgressReturnBridge:
                     return False
             self._seen_ids[event.event_id] = fingerprint
             self._seen_sequences[event.seq] = fingerprint
+            self._validation_order.append((event.event_id, event.seq))
             self._next_seq = event.seq + 1
             self._unprojected_events += 1
             self._last_source_decision = TaskProgressSourceDecision.UNPROJECTED_ADVANCE
             return True
         try:
-            projection = project_task_progress_event(event, binding)
+            projection = _project_task_progress_event(
+                event,
+                binding,
+                consumer_scope=consumer_scope,
+            )
         except TaskProgressReturnViolation as error:
             reason = (
                 TaskProgressReturnReason.SOURCE_EVENT_NOT_PROJECTABLE
@@ -1245,6 +1734,7 @@ class TaskProgressReturnBridge:
 
         self._seen_ids[event.event_id] = fingerprint
         self._seen_sequences[event.seq] = fingerprint
+        self._validation_order.append((event.event_id, event.seq))
         self._next_seq = event.seq + 1
         self._projected_events += 1
         self._last_progress_event_id = projection.progress_event.event_id
@@ -1256,16 +1746,25 @@ class TaskProgressReturnBridge:
             if not await self._deliver_text(projection):
                 return False
         if event.event_type == "task.terminal":
+            terminal_closes = self._consumer_terminal_closes_stream(event)
             if (
                 binding.origin_kind is TaskProgressOriginKind.VOICE
                 and projection.progress_event.event_id in self._deferred_voice
             ):
+                if terminal_closes:
+                    return False
+                await self._deferred_voice_settled.wait()
+                return (
+                    not self._close_requested
+                    and self._state is TaskProgressReturnState.ACTIVE
+                    and projection.progress_event.event_id not in self._deferred_voice
+                )
+            if terminal_closes:
+                self._settle(
+                    TaskProgressReturnState.CLOSED,
+                    TaskProgressReturnReason.TERMINAL_DELIVERED,
+                )
                 return False
-            self._settle(
-                TaskProgressReturnState.CLOSED,
-                TaskProgressReturnReason.TERMINAL_DELIVERED,
-            )
-            return False
         return True
 
     async def _advance_voice_without_projection(
@@ -1288,23 +1787,12 @@ class TaskProgressReturnBridge:
                 self._reject(TaskProgressReturnReason.STALE_GENERATION)
                 return False
 
-            source_producer = ProducerRef(
-                component="task_core",
-                instance_id=binding.source_instance_id,
-                authority="task_core",
+            notification_binding = self._notification_binding(binding)
+            advance = _mint_verified_no_projection_advance(
+                event,
+                notification_binding,
+                consumer_scope=self._uses_consumer_authority_source(),
             )
-            work_ref = IdentityRef(IdentityKind.TASK, binding.task_id)
-            notification_binding = ProgressNotificationBinding(
-                scope=binding.scope,
-                work_ref=work_ref,
-                correlation_id=binding.correlation_id,
-                source_producer=source_producer,
-                source_work_ref=work_ref,
-                source_authority=WorkSourceAuthority.TASK_CORE,
-                progress_producer=binding.progress_producer,
-                progress_adapter=binding.progress_adapter,
-            )
-            advance = _mint_verified_no_projection_advance(event, notification_binding)
             try:
                 decision = self._arbiter._advance_without_projection(advance)
             except Exception:
@@ -1325,6 +1813,27 @@ class TaskProgressReturnBridge:
             self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
             return False
 
+    @staticmethod
+    def _notification_binding(
+        binding: TaskProgressOriginBinding,
+    ) -> ProgressNotificationBinding:
+        source_producer = ProducerRef(
+            component="task_core",
+            instance_id=binding.source_instance_id,
+            authority="task_core",
+        )
+        work_ref = IdentityRef(IdentityKind.TASK, binding.task_id)
+        return ProgressNotificationBinding(
+            scope=binding.scope,
+            work_ref=work_ref,
+            correlation_id=binding.correlation_id,
+            source_producer=source_producer,
+            source_work_ref=work_ref,
+            source_authority=WorkSourceAuthority.TASK_CORE,
+            progress_producer=binding.progress_producer,
+            progress_adapter=binding.progress_adapter,
+        )
+
     async def _deliver_voice(self, projection: TaskProgressProjection) -> bool:
         async with self._delivery_lock:
             if (
@@ -1337,18 +1846,34 @@ class TaskProgressReturnBridge:
                 self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
                 return False
             try:
-                if projection.task_event.event_type == "task.retry_accepted":
+                if projection.task_event.event_type in {
+                    "task.retry_accepted",
+                    "task.recovery_accepted",
+                }:
                     baseline = _mint_verified_attempt_epoch_baseline(
                         projection.task_event,
                         projection.notification_binding,
+                        consumer_scope=self._uses_consumer_authority_source(),
                     )
                     self._arbiter._begin_attempt_epoch(baseline)
                 foreground = self._foreground()
-                decision = self._arbiter.offer(
-                    projection.source_event,
-                    projection.progress_event,
-                    foreground,
-                    projection.notification_binding,
+                decision = (
+                    self._arbiter._offer_consumer(
+                        _mint_verified_consumer_projection(
+                            projection.task_event,
+                            projection.source_event,
+                            projection.progress_event,
+                            projection.notification_binding,
+                        ),
+                        foreground,
+                    )
+                    if self._uses_consumer_authority_source()
+                    else self._arbiter.offer(
+                        projection.source_event,
+                        projection.progress_event,
+                        foreground,
+                        projection.notification_binding,
+                    )
                 )
             except Exception:
                 self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
@@ -1371,9 +1896,24 @@ class TaskProgressReturnBridge:
                 if retained_id == projection.progress_event.event_id:
                     self._deferred_voice.clear()
                     self._deferred_voice[retained_id] = projection
+                    self._deferred_voice_settled.clear()
                 elif retained_id not in self._deferred_voice:
                     self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
                     return False
+                if self._deferred_voice_sink is not None:
+                    intent = TaskProgressNotificationIntent(
+                        origin=binding,
+                        task_event=projection.task_event,
+                        source_event=projection.source_event,
+                        progress_event=projection.progress_event,
+                        decision=decision,
+                        evidence_id=_evidence_id(binding, projection.task_event),
+                    )
+                    try:
+                        await self._deferred_voice_sink(intent)
+                    except Exception:
+                        self._reject(TaskProgressReturnReason.VOICE_SINK_FAILED)
+                        return False
                 return True
             if decision.disposition is not NotificationDisposition.DISPLAY_NOW:
                 self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
@@ -1477,32 +2017,28 @@ class TaskProgressReturnBridge:
         )
 
     async def _start_source(self, binding: TaskProgressOriginBinding) -> bool:
-        if binding.origin_kind is TaskProgressOriginKind.TEXT:
-            return await self._subscription.start()
         prepared = self._prepared_source
-        assert prepared is not None
-        return await prepared.start()
+        if prepared is not None:
+            return await prepared.start()
+        return await self._subscription.start()
 
     async def _next_source_event(
         self, binding: TaskProgressOriginBinding
     ) -> PersistentTaskEvent:
-        if binding.origin_kind is TaskProgressOriginKind.TEXT:
-            return await self._subscription.next_event()
         prepared = self._prepared_source
-        assert prepared is not None
-        return await prepared.next_event()
+        if prepared is not None:
+            return await prepared.next_event()
+        return await self._subscription.next_event()
 
     async def _close_source(self, binding: TaskProgressOriginBinding) -> None:
         async with self._source_close_lock:
             if self._source_closed:
                 return
-            if binding.origin_kind is TaskProgressOriginKind.TEXT:
-                await self._subscription.close()
-                self._source_closed = True
-                return
             prepared = self._prepared_source
             if prepared is not None:
                 await prepared.close()
+            else:
+                await self._subscription.close()
             self._source_closed = True
 
     def _authorize(self, binding: TaskProgressOriginBinding) -> bool:
@@ -1573,6 +2109,27 @@ class TaskProgressReturnBridge:
             == _authorization_fingerprint(self._authorization)
         )
 
+    def _uses_consumer_authority_source(self) -> bool:
+        prepared = self._prepared_source
+        return (
+            self._uses_exact_authority_source()
+            and prepared is not None
+            and prepared.__class__ is TaskEventAuthorityProgressSource
+            and prepared._consumer_scope is True
+        )
+
+    def _consumer_terminal_closes_stream(self, event: PersistentTaskEvent) -> bool:
+        prepared = self._prepared_source
+        subscription = self._subscription
+        if not self._uses_consumer_authority_source():
+            return event.event_type == "task.terminal"
+        return (
+            prepared is not None
+            and prepared.__class__ is TaskEventAuthorityProgressSource
+            and subscription.__class__ is _ConsumerTaskEventSubscription
+            and subscription._terminal_close_seq == event.seq
+        )
+
     def _subscription_matches(self, binding: TaskProgressOriginBinding) -> bool:
         try:
             snapshot = self._subscription.snapshot()
@@ -1633,12 +2190,15 @@ class TaskProgressReturnBridge:
             return
         self._state = state
         self._reason = reason
+        self._deferred_voice_settled.set()
 
 
 __all__ = [
     "ForegroundSupplier",
     "GenerationIsCurrent",
     "PreparedTaskProgressSource",
+    "TASK_PROGRESS_NON_PRESENTABLE_EVENTS",
+    "TASK_PROGRESS_PRESENTABLE_EVENTS",
     "TaskEventAuthorityProgressSource",
     "TaskProgressHandoffKind",
     "TaskProgressNotificationIntent",

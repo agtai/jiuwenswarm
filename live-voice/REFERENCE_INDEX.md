@@ -33,6 +33,7 @@
 | Product composition | [Product Composition Gate 0](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md), then only the implicated integration record |
 | Unified hands-free baseline | [D118 pre-D119 candidate snapshot](D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md) |
 | Running adjustment and terminal notification | [D119 candidate-specific frozen review](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md) |
+| Complete-P3 historical coverage, source recovery and activation-time reuse | [2026-08-18 P3 implementation/reuse audit](reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md) and its [implementation-level source-asset manifest](reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md); coverage estimates remain bound to the pre-G0 baseline, while the manifest records exact legacy refs and current-HEAD mapping rules; use current [STATUS](STATUS.md) and the [complete P3 plan](roadmap/FULL_P3_EXECUTION_PLAN.md) for live package gates |
 | Code duplication and convergence timing | [2026-08-17 duplicate-code audit](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md) |
 | Removable branch content, re-homing and final-merge cleanup | [2026-08-17 branch-retirement audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) |
 | Removable/superseded documents and authority-preserving deletion batches | [2026-08-17 documentation-retirement audit](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) |
@@ -64,23 +65,29 @@ Read only the record that owns the regression or source boundary being examined.
 
 ## Fresh-clone recovery
 
-The feature branch is published on the configured `agtai` remote, not
-`origin`. Verify that `agtai` resolves to the intended repository before
-fetching; a fresh clone that lacks this remote must configure it explicitly.
+Remote names and publication state are repository-local Git facts. Do not
+assume `agtai`, `origin` or any other fixed name. First inspect configured
+remotes and remote-tracking refs, verify the selected URL, and remember that a
+fresh clone can recover only commits already published to that ref. Local-ahead
+commits require a separately authorized remote update before another clone can
+retrieve them.
 
 ```powershell
-git remote get-url agtai
-git fetch agtai hx/0812_live_voice_w3
-git switch --track -c hx/0812_live_voice_w3 agtai/hx/0812_live_voice_w3
+git remote -v
+git branch -r --list "*/hx/0812_live_voice_w3"
+$liveVoiceRemote = Read-Host "Verified remote name"
+git remote get-url $liveVoiceRemote
+git fetch $liveVoiceRemote hx/0812_live_voice_w3
+git switch --track -c hx/0812_live_voice_w3 "$liveVoiceRemote/hx/0812_live_voice_w3"
 git status --short --branch
 git rev-parse HEAD
 git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
 git rev-list --left-right --count 'HEAD...@{upstream}'
 ```
 
-The Git commands above and current [STATUS](STATUS.md) are the orientation path.
-Do not use `scripts/live_voice_snapshot.ps1` as current authority: the
-[2026-08-17 cleanup audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md)
-records that its Resume-capsule/Verified-code-base model is stale and that the
-script is a retirement candidate. Update a worktree with `git pull --ff-only`
-only when the user explicitly requests an update and the worktree is safe.
+The Git commands above and current [STATUS](STATUS.md) are the only current
+orientation path. The retired Resume-capsule/Verified-code-base helper has been
+removed; its historical disposition remains in the
+[2026-08-17 cleanup audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md).
+Update a worktree with `git pull --ff-only` only when the user explicitly
+requests an update and the worktree is safe.

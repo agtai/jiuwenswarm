@@ -35,6 +35,28 @@ from .formal_task_models import (
 )
 
 
+# P3-6 policy-parity vocabulary.  ``FormalTaskPolicyAdapter.map`` retains its
+# currently composed P3-1 subset; the production multi-Task resolver uses this
+# closed vocabulary without claiming that an unsupported Core/Executor command
+# has acquired an implementation.
+FORMAL_TASK_QUERY_OPERATIONS = frozenset(
+    {"task.get", "task.list", "task.status", "task.events", "task.result"}
+)
+FORMAL_TASK_MUTATION_OPERATIONS = frozenset(
+    {
+        "task.create",
+        "task.update",
+        "task.adjust",
+        "task.provide_input",
+        "task.pause",
+        "task.resume",
+        "task.reprioritize",
+        "task.cancel",
+        "task.create_successor",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class FormalTaskPolicyInput:
     """A committed semantic decision plus separate trusted policy artifacts."""
@@ -67,6 +89,8 @@ class FormalTaskPolicyInput:
     policy_bypass: str | None = None
     current_task_binding: bool = False
     after_seq: int = -1
+    cursor: str | None = None
+    limit: int | None = None
     retry_precondition: TaskRetryPrecondition | None = None
     retry_product_request: TaskRetryProductRequestFingerprint | None = None
 
@@ -117,11 +141,23 @@ class FormalTaskInvocation:
 class FormalTaskPolicyAdapter:
     """Fail closed before a formal command/query reaches the Task Core."""
 
-    _QUERIES = frozenset({"task.get", "task.list", "task.status", "task.events"})
+    _QUERIES = FORMAL_TASK_QUERY_OPERATIONS
     _COMMANDS = frozenset({"task.create", "task.adjust", "task.cancel", "task.retry"})
 
     def __init__(self, commits: TurnCommitLedger | None = None) -> None:
         self._commits = commits
+
+    @staticmethod
+    def accepts_production_operation(operation: str) -> bool:
+        """Return whether P3-6 may submit ``operation`` to closed policy.
+
+        This is vocabulary parity only.  State/capability policy can still
+        return ``unsupported`` or ``conflict`` before Core invocation.
+        """
+
+        return operation in (
+            FORMAL_TASK_QUERY_OPERATIONS | FORMAL_TASK_MUTATION_OPERATIONS
+        )
 
     def map(self, intent: FormalTaskPolicyInput) -> FormalTaskInvocation:
         self._validate_common(intent)
@@ -411,6 +447,12 @@ class FormalTaskPolicyAdapter:
                 "formal task mutation requires a stable command id",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        if intent.cursor is not None or intent.limit is not None:
+            raise FormalTaskViolation(
+                "INVALID_TASK_COMMAND_CURSOR",
+                "formal task mutations cannot carry read cursors or page limits",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         confirmed_boundary = intent.confirmed and bool(intent.confirmation_id)
         bypass_boundary = (
             not intent.confirmed
@@ -636,19 +678,65 @@ class FormalTaskPolicyAdapter:
                     ErrorCode.INVALID_ARGUMENT,
                 )
             target_id = intent.task_id
-        if intent.operation == "task.events":
+        if intent.operation == "task.list":
+            if intent.after_seq != -1:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_LIST_CURSOR",
+                    "task.list cannot carry an event cursor",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if intent.cursor is not None and (
+                type(intent.cursor) is not str
+                or not intent.cursor.strip()
+                or "\x00" in intent.cursor
+                or len(intent.cursor) > 256
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_LIST_CURSOR",
+                    "task.list cursor must be one bounded Task identity",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            limit = 50 if intent.limit is None else intent.limit
+            if type(limit) is not int or not 1 <= limit <= 100:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_PAGE_LIMIT",
+                    "task.list limit must be between 1 and 100",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            payload: dict[str, object] = {
+                "cursor": intent.cursor,
+                "limit": limit,
+            }
+        elif intent.operation == "task.events":
             if type(intent.after_seq) is not int or intent.after_seq < -1:
                 raise FormalTaskViolation(
                     "INVALID_EVENT_CURSOR",
                     "task.events after_seq must be an integer at least -1",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-            payload: dict[str, object] = {"after_seq": intent.after_seq}
+            if intent.cursor is not None:
+                raise FormalTaskViolation(
+                    "INVALID_EVENT_CURSOR",
+                    "task.events uses only its authoritative sequence cursor",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            limit = 100 if intent.limit is None else intent.limit
+            if type(limit) is not int or not 1 <= limit <= 500:
+                raise FormalTaskViolation(
+                    "INVALID_EVENT_PAGE_LIMIT",
+                    "task.events limit must be between 1 and 500",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            payload = {"after_seq": intent.after_seq, "limit": limit}
         else:
-            if intent.after_seq != -1:
+            if (
+                intent.after_seq != -1
+                or intent.cursor is not None
+                or intent.limit is not None
+            ):
                 raise FormalTaskViolation(
                     "INVALID_TASK_QUERY_CURSOR",
-                    "only task.events accepts an event cursor",
+                    "only task.list and task.events accept pagination fields",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             payload = {}
@@ -671,6 +759,8 @@ class FormalTaskPolicyAdapter:
 
 
 __all__ = [
+    "FORMAL_TASK_MUTATION_OPERATIONS",
+    "FORMAL_TASK_QUERY_OPERATIONS",
     "FormalTaskInvocation",
     "FormalTaskPolicyAdapter",
     "FormalTaskPolicyInput",

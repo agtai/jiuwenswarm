@@ -7,6 +7,13 @@
 > the current uncommitted documentation reconciliation and review records.
 > Current state remains in [STATUS](../STATUS.md). Audit state:
 > **ANALYSIS COMPLETE / BATCH A COMPLETE / BATCHES B–C NOT STARTED**.
+>
+> **Rebaseline note (2026-08-21):** twenty P3 planning, preparation, review and
+> evidence documents were added after this frozen inventory. The 20-file set in
+> §6 is therefore the audit-time target, not an executable current deletion
+> result. Before Batches B–C, re-inventory every later document and assign an
+> explicit retain, merge or retire disposition; do not mechanically execute the
+> old manifest or infer that the current branch will contain 20 documents.
 
 ## 1. Result
 

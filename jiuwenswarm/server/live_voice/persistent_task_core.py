@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Formal persistent P3-alpha Task Core and durable outbox orchestration."""
+"""Formal persistent P3 Task Core and durable outbox orchestration."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 
 from .formal_task_models import (
+    AdmissionPolicy,
     AppliedTaskRetryReplay,
     ExecutorDeliveryResult,
     ExecutorObservation,
@@ -29,6 +30,8 @@ from .formal_task_models import (
     FormalTaskSpec,
     FormalTaskViolation,
     OutboxKind,
+    PersistedExecutorSelection,
+    PersistentAdmissionRecord,
     PersistentAttemptRecord,
     PersistentOutboxItem,
     PersistentTaskEvent,
@@ -38,14 +41,22 @@ from .formal_task_models import (
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
     TaskAuthorizationGrant,
+    TaskCommandDisposition,
     TaskMutationDisposition,
+    TaskMutationPrecondition,
     TaskMutationResult,
+    TaskResultAvailability,
+    TaskResultRecord,
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
     canonical_task_adjustment_rejection_reason,
+    command_result_extensions,
     require_exact_payload,
     utc_now,
 )
+from .durability_identity import DurabilityProfileBinding
+from .durability_authority import DurabilityMutationAuthorization
+from .durability_recovery_facts import ExecutorRecoveryFacts
 from .task_store import SqliteTaskStore
 
 _PROJECTABLE_TASK_EVENTS = frozenset(
@@ -90,6 +101,40 @@ class FormalExecutor(Protocol):
     ) -> ExecutorRetryReadiness:
         """Prove exact predecessor cleanup before a bounded retry is admitted."""
 
+    def recovery_facts(
+        self,
+        task: PersistentTaskRecord,
+        producer_attempt: PersistentAttemptRecord,
+        *,
+        candidate_recovery_attempt_id: str,
+        profile: DurabilityProfileBinding,
+        recovery_generation: int,
+        observed_at: str,
+        expires_at: str,
+    ) -> ExecutorRecoveryFacts:
+        """Prove exact Executor/runtime/OS quiescence for linked recovery."""
+
+    def authorize_durable_recovery(
+        self,
+        task: PersistentTaskRecord,
+        producer_attempt: PersistentAttemptRecord,
+        *,
+        recovery_id: str,
+        candidate_recovery_attempt_id: str,
+        profile: DurabilityProfileBinding,
+        recovery_generation: int,
+        checkpoint_head: int,
+        checkpoint_prefix_digest: str,
+        effect_head: int,
+        effect_prefix_digest: str,
+        claim_owner_id: str,
+        claim_token: str,
+        claim_generation: int,
+        observed_at: str,
+        expires_at: str,
+    ) -> tuple[ExecutorRecoveryFacts, DurabilityMutationAuthorization]:
+        """Mint one Store-bound recovery receipt after Direct preflight."""
+
 
 def _contract_error(error: FormalTaskViolation) -> ContractViolation:
     return ContractViolation(
@@ -107,10 +152,37 @@ def _failure(
     *,
     observed_at: str,
 ) -> ResultEnvelope:
+    extensions: Mapping[str, object] | None = None
+    contract_error = error
+    if isinstance(owner, CommandEnvelope):
+        if error.code in {ErrorCode.UNSUPPORTED, ErrorCode.CAPABILITY_UNAVAILABLE}:
+            disposition = TaskCommandDisposition.UNSUPPORTED
+        elif error.code in {ErrorCode.CONFLICT, ErrorCode.STALE}:
+            disposition = TaskCommandDisposition.CONFLICT
+        elif error.code is ErrorCode.TIMEOUT:
+            disposition = TaskCommandDisposition.TIMEOUT
+        elif error.code is ErrorCode.RESULT_UNKNOWN:
+            disposition = TaskCommandDisposition.UNKNOWN
+        elif error.code in {
+            ErrorCode.UNAVAILABLE,
+            ErrorCode.CANCELLED,
+            ErrorCode.PROTOCOL_VIOLATION,
+            ErrorCode.INTERNAL,
+        }:
+            disposition = TaskCommandDisposition.UNKNOWN
+            contract_error = FormalTaskViolation(
+                error.reason,
+                str(error),
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        else:
+            disposition = TaskCommandDisposition.REJECTED
+        extensions = command_result_extensions(disposition)
     return ResultEnvelope.failure(
         owner=owner,
-        error=_contract_error(error).error,
+        error=_contract_error(contract_error).error,
         observed_at=observed_at,
+        extensions=extensions,
     )
 
 
@@ -184,6 +256,21 @@ class PersistentTaskCore:
             "attributes",
         }
     )
+    _SUCCESSOR_PAYLOAD: ClassVar[frozenset[str]] = frozenset(
+        {
+            "expected_predecessor_revision_number",
+            "expected_predecessor_event_head",
+            "predecessor_terminal_event_id",
+            "predecessor_outcome",
+            "predecessor_result_sha256",
+            "name",
+            "instruction",
+            "constraints",
+            "executor_id",
+            "side_effect_class",
+            "attributes",
+        }
+    )
 
     def __init__(
         self,
@@ -191,10 +278,36 @@ class PersistentTaskCore:
         executor: FormalExecutor,
         *,
         reconciliation_event_sink: ReconciliationEventSink | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ) -> None:
         self.store = store
         self.executor = executor
         self._reconciliation_event_sink = reconciliation_event_sink
+        self._admission_policy = (
+            AdmissionPolicy() if admission_policy is None else admission_policy
+        )
+        if not isinstance(self._admission_policy, AdmissionPolicy):
+            raise TypeError("admission_policy must be an AdmissionPolicy")
+
+    def read_consumer_task(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> PersistentTaskRecord:
+        """Read a Task for one stable authenticated subject/project consumer."""
+
+        return self.store.get_consumer_task(task_id, scope)
+
+    def read_consumer_task_result(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None, str]:
+        """Read result truth without making Session part of consumer identity."""
+
+        return self.store.consumer_task_result(task_id, scope)
 
     def read_current_retry_authority(
         self,
@@ -205,6 +318,125 @@ class PersistentTaskCore:
         """Expose Store-derived retry lineage without accepting client payload."""
 
         return self.store.read_current_retry_authority(scope=scope, task_id=task_id)
+
+    async def recover_durable_attempt(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+        operator_id: str,
+        observed_at: str | None = None,
+    ) -> PersistentAttemptRecord:
+        """Operator-only, unregistered linked recovery orchestration."""
+
+        if (
+            type(operator_id) is not str
+            or not operator_id.strip()
+            or len(operator_id.encode("utf-8")) > 512
+        ):
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_OPERATOR",
+                "durable recovery requires one bounded operator identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        now = observed_at or utc_now()
+        try:
+            parsed_now = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            if parsed_now.tzinfo is None:
+                raise ValueError
+        except (TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "INVALID_DURABILITY_TIME",
+                "durable recovery time must be canonical UTC",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        expires_at = (
+            (parsed_now + _OUTBOX_CLAIM_LEASE)
+            .astimezone(UTC)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+        authority = self.store.read_durable_recovery_authority(
+            scope=scope, task_id=task_id
+        )
+        binding = self.store.read_durability_binding(
+            scope=scope,
+            task_id=task_id,
+            origin_attempt_id=authority.producer_attempt.attempt_id,
+        )
+        owner_id = f"durability-recovery:{operator_id}:{uuid.uuid4().hex}"
+        claim = self.store.claim_durability_mutator(
+            scope=scope,
+            task_id=task_id,
+            owner_id=owner_id,
+            observed_at=now,
+            expires_at=expires_at,
+        )
+        if claim is None:
+            raise FormalTaskViolation(
+                "TASK_RECOVERY_MUTATOR_BUSY",
+                "another durability mutator owns the Task",
+                ErrorCode.UNAVAILABLE,
+            )
+        candidate_attempt_id = f"attempt-{uuid.uuid4().hex}"
+        recovery_id = f"recovery-{uuid.uuid4().hex}"
+        try:
+            checkpoints = self.store.read_durability_checkpoints(binding)
+            effects = self.store.read_durability_effects(binding)
+            authorize = getattr(self.executor, "authorize_durable_recovery", None)
+            if not callable(authorize):
+                raise FormalTaskViolation(
+                    "EXECUTOR_DURABILITY_UNAVAILABLE",
+                    "Executor recovery facts are unavailable",
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                )
+            facts, authorization = authorize(
+                authority.task,
+                authority.producer_attempt,
+                recovery_id=recovery_id,
+                candidate_recovery_attempt_id=candidate_attempt_id,
+                profile=binding.profile,
+                recovery_generation=authority.recovery_generation,
+                checkpoint_head=checkpoints.head,
+                checkpoint_prefix_digest=checkpoints.prefix_digest,
+                effect_head=effects.head,
+                effect_prefix_digest=effects.prefix_digest,
+                claim_owner_id=owner_id,
+                claim_token=claim[0],
+                claim_generation=claim[1],
+                observed_at=now,
+                expires_at=expires_at,
+            )
+            if (
+                type(facts) is not ExecutorRecoveryFacts
+                or type(authorization) is not DurabilityMutationAuthorization
+            ):
+                raise FormalTaskViolation(
+                    "EXECUTOR_RECOVERY_FACTS_INVALID",
+                    "Executor recovery facts are not exact",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            return self.store.recover_durable_attempt(
+                authority,
+                recovery_id=recovery_id,
+                recovery_facts=facts,
+                checkpoint_head=checkpoints.head,
+                checkpoint_prefix_digest=checkpoints.prefix_digest,
+                effect_head=effects.head,
+                effect_prefix_digest=effects.prefix_digest,
+                authorization=authorization,
+                observed_at=now,
+                admission_policy=self._admission_policy,
+            )
+        except BaseException:
+            self.store.release_durability_mutator(
+                scope=scope,
+                task_id=task_id,
+                owner_id=owner_id,
+                claim_token=claim[0],
+                claim_generation=claim[1],
+            )
+            raise
 
     def read_current_retry_admission(
         self,
@@ -278,9 +510,21 @@ class PersistentTaskCore:
         context: ResolvedTaskContext | None = None,
         now: str | None = None,
         current_background_session_id: str | None = None,
+        selection: PersistedExecutorSelection | None = None,
+        admission_policy: AdmissionPolicy | None = None,
+        mutation_precondition: TaskMutationPrecondition | None = None,
     ) -> ResultEnvelope:
         observed_at = now or utc_now()
         try:
+            selected_policy = (
+                None
+                if selection is None
+                else (
+                    self._admission_policy
+                    if admission_policy is None
+                    else admission_policy
+                )
+            )
             if authorization is None:
                 raise FormalTaskViolation(
                     "FORMAL_TASK_AUTHORIZATION_REQUIRED",
@@ -292,6 +536,13 @@ class PersistentTaskCore:
                 "task.cancel",
                 "task.retry",
                 "task.adjust",
+                "task.update",
+                "task.provide_input",
+                "task.pause",
+                "task.resume",
+                "task.reprioritize",
+                "task.create_successor",
+                "task.ack_events",
             }:
                 raise FormalTaskViolation(
                     "UNSUPPORTED_FORMAL_TASK_COMMAND",
@@ -334,30 +585,176 @@ class PersistentTaskCore:
                 destructive=True,
                 now=observed_at,
             )
+            if mutation_precondition is not None:
+                if type(mutation_precondition) is not TaskMutationPrecondition:
+                    raise FormalTaskViolation(
+                        "TASK_MUTATION_PRECONDITION_INVALID",
+                        "formal Task mutation precondition must be trusted and typed",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if command.command_type not in {"task.cancel", "task.adjust"}:
+                    raise FormalTaskViolation(
+                        "TASK_MUTATION_PRECONDITION_UNSUPPORTED",
+                        "only task.cancel and task.adjust admit this exact precondition",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if mutation_precondition.task_id != command.target_ref.id:
+                    raise FormalTaskViolation(
+                        "TASK_MUTATION_PRECONDITION_INVALID",
+                        "task mutation precondition targets a different Task",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+            if command.command_type == "task.ack_events":
+                require_exact_payload(
+                    command.payload,
+                    frozenset(
+                        {
+                            "presentation_class",
+                            "acked_through_seq",
+                            "acked_event_id",
+                            "expected_event_head",
+                        }
+                    ),
+                    field_name="task.ack_events payload",
+                )
+                return self.store.ack_events(command, observed_at=observed_at)
             if command.command_type == "task.cancel":
                 require_exact_payload(
                     command.payload, frozenset(), field_name="task.cancel payload"
                 )
-                return self.store.cancel(command, observed_at=observed_at)
+                return self.store.cancel(
+                    command,
+                    observed_at=observed_at,
+                    mutation_precondition=mutation_precondition,
+                )
+            if command.command_type in {
+                "task.provide_input",
+                "task.pause",
+                "task.resume",
+                "task.reprioritize",
+            }:
+                expected_payload = {
+                    "task.provide_input": frozenset(
+                        {
+                            "attempt_id",
+                            "expected_event_head",
+                            "responds_to_event_id",
+                            "text",
+                        }
+                    ),
+                    "task.pause": frozenset(
+                        {"attempt_id", "expected_event_head", "reason"}
+                    ),
+                    "task.resume": frozenset(
+                        {"attempt_id", "expected_event_head", "reason"}
+                    ),
+                    "task.reprioritize": frozenset(
+                        {"attempt_id", "expected_event_head", "priority", "reason"}
+                    ),
+                }[command.command_type]
+                require_exact_payload(
+                    command.payload,
+                    expected_payload,
+                    field_name=f"{command.command_type} payload",
+                )
+                if command.command_type == "task.reprioritize":
+                    return self.store.reprioritize(command, observed_at=observed_at)
+                return self.store.decide_unsupported_control(
+                    command, observed_at=observed_at
+                )
+            if command.command_type == "task.create_successor":
+                require_exact_payload(
+                    command.payload,
+                    self._SUCCESSOR_PAYLOAD,
+                    field_name="task.create_successor payload",
+                )
+                if context is None:
+                    raise FormalTaskViolation(
+                        "FORMAL_TASK_CONTEXT_REQUIRED",
+                        "task.create_successor requires server-resolved context",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                context.require_usable(
+                    scope=command.scope,
+                    required_permissions=frozenset({"task.execute", "project.write"}),
+                    destructive=True,
+                    now=observed_at,
+                )
+                attributes = command.payload["attributes"]
+                if (
+                    type(attributes) is not dict
+                    or set(attributes) != {"model_identity", "model_config_version"}
+                    or any(
+                        type(key) is not str or type(value) is not str
+                        for key, value in attributes.items()
+                    )
+                ):
+                    raise FormalTaskViolation(
+                        "INVALID_FORMAL_TASK_ATTRIBUTES",
+                        "successor requires an exact resolved model binding",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                spec = FormalTaskSpec(
+                    name=command.payload["name"],
+                    instruction=command.payload["instruction"],
+                    origin=command.origin,
+                    context=context,
+                    executor_id=command.payload["executor_id"],
+                    required_capabilities=tuple(command.required_capabilities),
+                    side_effect_class=command.payload["side_effect_class"],
+                    constraints=tuple(command.payload["constraints"]),
+                    attributes=tuple(sorted(attributes.items())),
+                )
+                if spec.executor_id != self.executor.executor_id:
+                    raise FormalTaskViolation(
+                        "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                        "requested Executor is not available in this Task Core",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                if spec.side_effect_class != "project_mutation":
+                    raise FormalTaskViolation(
+                        "EXECUTOR_SIDE_EFFECT_CLASS_MISMATCH",
+                        "project Code Agent tasks require project_mutation side effects",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                return self.store.create_successor(
+                    command,
+                    spec,
+                    observed_at=observed_at,
+                    selection=selection,
+                    admission_policy=selected_policy,
+                )
+            if command.command_type == "task.update":
+                require_exact_payload(
+                    command.payload,
+                    frozenset(
+                        {
+                            "attempt_id",
+                            "expected_event_head",
+                            "instruction",
+                            "constraints",
+                        }
+                    ),
+                    field_name="task.update payload",
+                )
+                return self.store.update(command, observed_at=observed_at)
             if command.command_type == "task.adjust":
                 require_exact_payload(
                     command.payload,
                     frozenset({"adjustment"}),
                     field_name="task.adjust payload",
                 )
-                if current_background_session_id is None:
-                    raise FormalTaskViolation(
-                        "CURRENT_BACKGROUND_SESSION_REQUIRED",
-                        "task.adjust requires the current authorized Session",
-                        ErrorCode.PERMISSION_DENIED,
-                    )
                 return self.store.adjust(
                     command,
                     observed_at=observed_at,
-                    current_background_session_id=current_background_session_id,
+                    mutation_precondition=mutation_precondition,
                 )
             if command.command_type == "task.retry":
-                authority_or_replay = self.store.read_retry_authority(command)
+                authority_or_replay = self.store.read_retry_authority(
+                    command,
+                    observed_at=observed_at,
+                    selection=selection,
+                )
                 if isinstance(authority_or_replay, ResultEnvelope):
                     return authority_or_replay
                 authority = authority_or_replay
@@ -386,6 +783,8 @@ class PersistentTaskCore:
                     spec,
                     authority,
                     observed_at=observed_at,
+                    selection=selection,
+                    admission_policy=selected_policy,
                 )
             if context is None:
                 raise FormalTaskViolation(
@@ -446,6 +845,8 @@ class PersistentTaskCore:
                 spec,
                 observed_at=observed_at,
                 current_background_session_id=current_background_session_id,
+                selection=selection,
+                admission_policy=selected_policy,
             )
         except FormalTaskViolation as error:
             return _failure(command, error, observed_at=observed_at)
@@ -510,6 +911,17 @@ class PersistentTaskCore:
                 ErrorCode.UNAVAILABLE,
             )
 
+    @staticmethod
+    def _task_read_projection(
+        task: PersistentTaskRecord,
+        admission: PersistentAdmissionRecord | None,
+    ) -> tuple[dict[str, object], dict[str, object] | None]:
+        admission_payload = None if admission is None else admission.to_dict()
+        task_payload = task.to_dict()
+        task_payload["queued"] = bool(admission is not None and admission.queued)
+        task_payload["admission"] = admission_payload
+        return task_payload, admission_payload
+
     def query(
         self,
         query: QueryEnvelope,
@@ -557,13 +969,32 @@ class PersistentTaskCore:
                         "task.list requires its canonical collection target",
                         ErrorCode.INVALID_ARGUMENT,
                     )
-                require_exact_payload(
-                    query.payload, frozenset(), field_name="task.list payload"
+                payload = query.payload
+                if set(payload) - {"cursor", "limit"}:
+                    raise FormalTaskViolation(
+                        "INVALID_TASK_LIST_QUERY",
+                        "task.list query has unknown payload fields",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                cursor = payload.get("cursor")
+                limit = payload.get("limit", 50)
+                snapshots, next_cursor, has_more = (
+                    self.store.list_task_read_snapshots_page(
+                        query.scope,
+                        cursor=cursor,
+                        limit=limit,
+                    )
                 )
+                projected_tasks = [
+                    self._task_read_projection(task, admission)[0]
+                    for task, _attempt, admission in snapshots
+                ]
                 result: Mapping[str, object] = {
-                    "tasks": [
-                        task.to_dict() for task in self.store.list_tasks(query.scope)
-                    ]
+                    "tasks": projected_tasks,
+                    "cursor": cursor,
+                    "next_cursor": next_cursor,
+                    "has_more": has_more,
+                    "limit": limit,
                 }
             elif query.query_type in {"task.get", "task.status"}:
                 require_exact_payload(
@@ -571,31 +1002,77 @@ class PersistentTaskCore:
                     frozenset(),
                     field_name=f"{query.query_type} payload",
                 )
-                task = self.store.get_task(query.target_ref.id, query.scope)
+                task, attempt, admission = self.store.task_read_snapshot(
+                    query.target_ref.id, query.scope
+                )
+                task_payload, admission_payload = self._task_read_projection(
+                    task, admission
+                )
                 result = {
-                    "task": task.to_dict(),
-                    "attempt": self.store.get_attempt(task.attempt_id).to_dict(),
+                    "task": task_payload,
+                    "attempt": attempt.to_dict(),
+                    "admission": admission_payload,
                 }
             elif query.query_type == "task.events":
                 payload = query.payload
-                if set(payload) - {"after_seq"}:
+                if set(payload) - {"after_seq", "limit"}:
                     raise FormalTaskViolation(
                         "INVALID_TASK_EVENTS_QUERY",
                         "task.events query has unknown payload fields",
                         ErrorCode.INVALID_ARGUMENT,
                     )
                 after_seq = payload.get("after_seq", -1)
-                task = self.store.get_task(query.target_ref.id, query.scope)
-                events = self.store.events(
-                    query.target_ref.id, query.scope, after_seq=after_seq
+                limit = payload.get("limit", 100)
+                events, head_seq, next_after_seq, has_more = self.store.events_page(
+                    query.target_ref.id,
+                    query.scope,
+                    after_seq=after_seq,
+                    limit=limit,
                 )
                 result = {
                     "task_id": query.target_ref.id,
                     "after_seq": after_seq,
                     "events": [event.to_dict() for event in events],
-                    "head_seq": task.event_head,
-                    "truncated": False,
-                    "cursor_replay_supported": False,
+                    "head_seq": head_seq,
+                    "next_after_seq": next_after_seq,
+                    "has_more": has_more,
+                    "limit": limit,
+                    "truncated": has_more,
+                    "cursor_replay_supported": True,
+                }
+            elif query.query_type == "task.unread_events":
+                require_exact_payload(
+                    query.payload,
+                    frozenset({"presentation_class", "limit"}),
+                    field_name="task.unread_events payload",
+                )
+                page = self.store.unread_events_page(
+                    query.target_ref.id,
+                    query.scope,
+                    presentation_class=query.payload["presentation_class"],
+                    limit=query.payload["limit"],
+                )
+                result = page.to_dict()
+            elif query.query_type == "task.result":
+                require_exact_payload(
+                    query.payload,
+                    frozenset(),
+                    field_name="task.result payload",
+                )
+                availability, record, reason = self.store.task_result(
+                    query.target_ref.id,
+                    query.scope,
+                )
+                result = {
+                    "task_id": query.target_ref.id,
+                    "availability": availability.value,
+                    "reason": reason,
+                    "task_result": (
+                        record.to_dict()
+                        if availability is TaskResultAvailability.AVAILABLE
+                        and record is not None
+                        else None
+                    ),
                 }
             else:
                 raise FormalTaskViolation(
@@ -611,9 +1088,14 @@ class PersistentTaskCore:
         except FormalTaskViolation as error:
             return _failure(query, error, observed_at=observed_at)
 
-    async def drain_outbox_once(self, *, worker_id: str | None = None) -> bool:
+    async def drain_outbox_once(
+        self,
+        *,
+        worker_id: str | None = None,
+        observed_at: str | None = None,
+    ) -> bool:
         worker = worker_id or f"task-core-{uuid.uuid4().hex}"
-        item = self.store.claim_outbox(worker)
+        item = self.store.claim_outbox(worker, observed_at=observed_at)
         if item is None:
             return False
         try:
@@ -624,6 +1106,20 @@ class PersistentTaskCore:
             else:
                 adjustment_delivery = await self.executor.adjust(item)
         except FormalTaskViolation as error:
+            if (
+                item.kind is OutboxKind.ATTEMPT_DISPATCH
+                and item.selection is not None
+                and error.code is ErrorCode.UNAVAILABLE
+                and error.reason
+                in {"EXECUTOR_PROJECT_BUSY", "EXECUTOR_CAPACITY_EXHAUSTED"}
+            ):
+                self.store.defer_admission(
+                    item,
+                    reason=error.reason,
+                    policy=self._admission_policy,
+                    observed_at=observed_at or utc_now(),
+                )
+                return True
             if item.kind is OutboxKind.ATTEMPT_ADJUST and error.code not in {
                 ErrorCode.UNAVAILABLE,
                 ErrorCode.TIMEOUT,
@@ -722,6 +1218,17 @@ class PersistentTaskCore:
             if not changed:
                 break
             delivered += 1
+        status_summary = await self.reconcile_status()
+        return {
+            "reset_claims": reset_claims,
+            "delivered": delivered,
+            "delivery_unavailable": delivery_unavailable,
+            **status_summary,
+        }
+
+    async def reconcile_status(self) -> dict[str, int]:
+        """Consume only Executor status evidence for canonical nonterminal attempts."""
+
         known = unavailable = lost = superseded = 0
         for task, attempt in self.store.nonterminal_attempts():
             if attempt.executor_ref is None:
@@ -768,6 +1275,17 @@ class PersistentTaskCore:
                     unavailable += 1
                     continue
                 if not resolution.observations:
+                    if attempt.selection is not None:
+                        receipt = self.store.mark_reconciliation_pending(
+                            task.task_id,
+                            attempt.attempt_id,
+                            "EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED",
+                        )
+                        if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                            superseded += 1
+                            continue
+                        unavailable += 1
+                        continue
                     receipt = self.store.mark_reconciliation_resolved(
                         task.task_id,
                         attempt.attempt_id,
@@ -803,6 +1321,32 @@ class PersistentTaskCore:
                     task.task_id,
                     attempt.attempt_id,
                     "EXECUTOR_STATUS_BINDING_MISMATCH",
+                )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
+                unavailable += 1
+                continue
+            expected_selection_binding = (
+                (None, None)
+                if attempt.selection is None
+                else (
+                    attempt.selection.adapter_id,
+                    attempt.selection.capability_profile_digest,
+                )
+            )
+            if any(
+                (
+                    observation.adapter_id,
+                    observation.capability_profile_digest,
+                )
+                != expected_selection_binding
+                for observation in observations
+            ):
+                receipt = self.store.mark_reconciliation_pending(
+                    task.task_id,
+                    attempt.attempt_id,
+                    "EXECUTOR_STATUS_SELECTION_MISMATCH",
                 )
                 if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
                     superseded += 1
@@ -852,9 +1396,6 @@ class PersistentTaskCore:
                     continue
                 unavailable += 1
         return {
-            "reset_claims": reset_claims,
-            "delivered": delivered,
-            "delivery_unavailable": delivery_unavailable,
             "known": known,
             "unavailable": unavailable,
             "lost": lost,

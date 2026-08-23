@@ -363,9 +363,52 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 播放后执行，不能据此声称支持 generation-time interruption。Agent `ask_user`
 问题及用户回答的完整语音回路属于 Later；当前候选不得把文字交互冒充该能力。
 
-在启动 AgentServer、Gateway 和 WebChannel 的受保护终端中，除了第 4–7 节已有的同一隔离 `JIUWENSWARM_DATA_DIR` 和本机私有 Provider 配置，还要显式启用正式组合能力与 Demo policy。下面只列非敏感开关；不要把 Speech key/token 写入脚本、日志或仓库：
+当前受控启动器是本节的执行入口；不得再用临时 AgentServer/Gateway/Vite
+命令进入人工验收。固定订单 Journey 使用默认 `hands-free-demo` profile；普通
+Formal Web 对话、Exit/立即重新启用和 critical-token 语音验证使用独立的
+`formal-web-validation` profile。两者共享完整参数合同，但分别保存项目选择，
+普通 Formal Web profile 不要求固定订单输入文件：
 
 ```powershell
+# 只检查源码、项目、私有 Provider、完整参数合同和端口占用；不改动进程。
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\live_voice\start_hands_free_demo.ps1 `
+  -RuntimeProfile formal-web-validation `
+  -ProjectPath '<已注册、可丢弃、无 remote 的 Git 项目>' `
+  -DataDir '<隔离 JIUWENSWARM_DATA_DIR>' `
+  -PreflightOnly -NoBrowser
+
+# 预检通过后才允许启动；也可双击 start_formal_web_validation.cmd。
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\live_voice\start_hands_free_demo.ps1 `
+  -RuntimeProfile formal-web-validation `
+  -ProjectPath '<同一项目>' -DataDir '<同一数据目录>' `
+  -SaveConfiguration -RestartExisting -NoBrowser
+```
+
+启动器必须在启动前拒绝脏源码、校验全部必需开关、拒绝无关外部 channel，并在启动后执行
+真实 Provider TTS→STT、critical receipt、身份错配拒绝和伪造 claim 拒绝探针，
+最后才写入不含密钥的 `logs/live_voice_runtime_contract.json`。缺少任一开关、
+项目绑定、正式 Speech 配置、Live Voice bundle 或后端 route，或者探针产生任何
+业务副作用，都必须失败退出。只有该合同记录 `speech_round_trip: passed`、
+`gateway_claim_policy: trusted_demo_bypass`、
+`executor_profile: live-voice.direct-project-code.d2.v1`，并把
+`JIUWENSWARM_LIVE_VOICE_P3_ENABLED` 与其余必需项全部记录为 `true` 后，才能
+请求真实设备人工验收。
+
+普通四场景人工检查能验证用户可见状态、真实麦克风/扬声器、重复副作用与
+Session 隔离，但不能制造可靠的 presentation-ACK 网络延迟。延迟 ACK 必须先由
+确定性 mounted oracle 证明：旧 ACK promise 未释放时，generation 2 已经激活、
+捕获并可完成自己的提交/播放；释放旧 ACK 后，新 generation 状态和副作用保持
+不变。只有这个 oracle 通过后，才重新执行普通四场景作为设备层回归；不能用
+“人工没有看到延迟”替代 ACK 解耦证据。
+
+以下列表是启动器所拥有的非敏感参数合同，仅用于诊断和代码审查，不再作为
+人工复制粘贴的启动步骤。不要把 Speech key/token 写入脚本、日志或仓库：
+
+```powershell
+$env:JIUWENSWARM_LIVE_VOICE_P3_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE = 'live-voice.direct-project-code.d2.v1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED = '1'
@@ -386,7 +429,9 @@ Remove-Item Env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED -Error
 Remove-Item Env:JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED -ErrorAction SilentlyContinue
 ```
 
-在 Vite 终端启用正式前端开关，保持旧 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 关闭：
+受控启动器使用 `build:live-voice` 加载正式前端 profile，并保持旧
+`VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 关闭。下面的手工 Vite 命令只保留为故障
+诊断参考，不能形成部署或验收证据：
 
 ```powershell
 $env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB = 'true'

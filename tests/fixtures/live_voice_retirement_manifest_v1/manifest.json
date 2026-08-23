@@ -1,0 +1,690 @@
+{
+  "schema_version": "live-voice.retirement-manifest.v1",
+  "phase": "b2_scoped_retirement_executed",
+  "deletion_authorized": false,
+  "deleted_paths": ["scripts/live_voice_snapshot.ps1"],
+  "baseline": "965fc827fb409b97d791f64febc7d32f0aaf71d3",
+  "b2_execution_baseline": "cc42098163bf6e9d7cec303f37551d3526997eb4",
+  "retirement_commits": [
+    "4e207faa",
+    "ddde7b87",
+    "7b283898"
+  ],
+  "accepted_interface_freeze": {
+    "p3_7_implementation_commit": "98e063f084c140cb6eb0042de32f3695c89c7279",
+    "p3_7_freeze_commit": "d9a18c06f02b293b1aed4625a7ed84665f475b57",
+    "review": "live-voice/reviews/P3_7_FORMAL_INTEGRATED_WEB_IMPLEMENTATION_REVIEW_2026-08-21.md",
+    "evidence": "live-voice/evidence/P3_7_FORMAL_INTEGRATED_WEB_EVIDENCE_20260821.md"
+  },
+  "source_audits": [
+    "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md",
+    "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md",
+    "live-voice/reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md"
+  ],
+  "explicit_exclusions": [
+    "Generic non-Live-Voice project scheduling remains owned by the existing project scheduler and is not a retirement target.",
+    "P3-8A observability codec, adapter, exporter and privacy assets remain accepted inputs to second-stage integration, not retirement targets.",
+    "B1 authorized no deletion; B2 executed only the three explicitly reviewed snapshot, W2-dotenv-symbol and ticket-in-path-symbol retirements recorded below.",
+    "ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are current P3-7 formal carrier/composition surfaces, not legacy-lane deletion candidates.",
+    ".env.production remains the ordinary-production default-off owner and production_task_intent.py remains active generalized intent authority.",
+    "formalTaskResultRoute.ts remains a retained isolated immutable TaskResult oracle pending an accepted composed replacement.",
+    "S7/S8 and Wave2 evidence runners remain while unique safety/private-oracle consumers are live; TESTING.md alone is not their replacement oracle."
+  ],
+  "b1_add_only_files": [
+    "jiuwenswarm/server/live_voice/observability_correlation_contract.py",
+    "jiuwenswarm/server/live_voice/live_voice_configuration_declaration.py",
+    "tests/unit_tests/live_voice/test_observability_correlation_contract.py",
+    "tests/unit_tests/live_voice/test_live_voice_configuration_declaration.py",
+    "tests/fixtures/live_voice_retirement_manifest_v1/manifest.json",
+    "tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py",
+    "live-voice/reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md"
+  ],
+  "frozen_interface_requirements": [
+    {
+      "id": "panel_formal_route_io",
+      "owner": "P3-7 formal panel route owner",
+      "requirement": "Freeze selected-route, committed-text, interaction, response-generation and presentation acknowledgement truth before B2 integration."
+    },
+    {
+      "id": "registry_agentserver_composition",
+      "owner": "P3-7 registry/AgentServer owner",
+      "requirement": "Freeze authenticated subject/project/session identity, the trusted identity-projection owner's keyed-HMAC receipt-verifier trust anchor and the formal registry composition seam without changing generic project scheduling; a receipt assertion alone cannot make correlation ready."
+    },
+    {
+      "id": "task_projection",
+      "owner": "P3-7 task lifecycle owner",
+      "requirement": "Freeze task, attempt, command, event, outbox, executor, checkpoint and effect identity/causation projections."
+    },
+    {
+      "id": "feature_off",
+      "owner": "P3-7 feature-profile owner",
+      "requirement": "Freeze fail-closed ordinary-production default-off behaviour and exact formal profile selection."
+    }
+  ],
+  "second_stage_integration": [
+    {
+      "id": "compose_correlation",
+      "after": "p3_7_gate_pass",
+      "owner": "P3-8B integration owner",
+      "intent": "Map frozen P3-7 identities and mandatory root causation through the trusted identity-projection owner's injected keyed-HMAC receipt verifier into the pure correlation contract; keep high-cardinality values trace-only, and keep readiness unavailable when the verifier is missing, rejects, raises, or sees an unreceipted, self-signed or cross-scope token set."
+    },
+    {
+      "id": "compose_configuration",
+      "after": "p3_7_gate_pass",
+      "owner": "P3-8B integration owner",
+      "intent": "Adapt validated profile/auth/executor/provider inputs into exact capability declarations without environment or lifecycle access."
+    },
+    {
+      "id": "compose_p3_8a_assets",
+      "after": "p3_7_gate_pass",
+      "owner": "P3-8B integration owner",
+      "intent": "Compose the accepted P3-8A codec/adapter/exporter through a selected external-backend boundary while retaining privacy redaction and failure isolation."
+    },
+    {
+      "id": "retirement_execution_candidate",
+      "after": "replacement_oracles_pass",
+      "owner": "P3-8B integration owner",
+      "intent": "Execute only the exact items whose replacement oracles pass independent review; every other inventory deletion remains a separately reviewed later phase."
+    }
+  ],
+  "shared_file_boundaries": [
+    {
+      "path": "jiuwenswarm/server/live_voice/project_code_executor.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["ProjectCodeExecutorAdapter", "DEMO_ITINERARY_TASK_NAME"],
+      "retained_symbols": ["DirectProjectCodeExecutorAdapter", "FORMAL_PROJECT_EXECUTOR_ID", "FORMAL_RUNTIME_SUPPORT_POLICY"],
+      "retained_owner": "Direct formal Live Voice execution plus every generic/non-Live-Voice scheduler, library and API consumer",
+      "delete_precondition": "Repository-wide caller audit proves ProjectCodeExecutorAdapter has no supported consumer; Direct terminalization/recovery/retry/cancel oracles pass."
+    },
+    {
+      "path": "jiuwenswarm/server/live_voice/product_p3_text_adapter.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["_QUERY_OPERATIONS", "_MUTATION_OPERATIONS"],
+      "retained_symbols": ["ProductP3TextAdapter", "ProductP3QueryRequest", "ProductP3ProgressRequest", "query", "activate_prepared_query", "activate_progress", "activate_prepared_text_progress", "MUTATION_CONFIRMATION_UNAVAILABLE"],
+      "retained_owner": "Current P3 query, mutation-rejection, progress activation and cleanup authority",
+      "delete_precondition": "Only _QUERY_OPERATIONS and _MUTATION_OPERATIONS may move after the canonical operation catalog preserves every query, mutation-confirmation, authority, activation, cleanup and zero-effect oracle."
+    },
+    {
+      "path": "jiuwenswarm/gateway/live_voice/dedicated_media_registration.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": [],
+      "retained_symbols": ["MEDIA_ROUTE_PATH", "DedicatedMediaProductRegistry", "_parse_media_auth_frame", "handle_registered_media_socket"],
+      "retained_owner": "Current dedicated media authority, fixed route, first-frame media.auth, origin/session/expiry/single-use enforcement",
+      "delete_precondition": "Completed in 7b283898: only MEDIA_ROUTE_PREFIX and legacy_path_ticket_compat were removed after fixed-route, first-frame authentication, privacy and zero-effect oracles passed."
+    },
+    {
+      "path": "jiuwenswarm/gateway/channel_manager/web/web_connect.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": [],
+      "retained_symbols": ["_DEDICATED_MEDIA_ROUTE_PATH", "_DEDICATED_MEDIA_REDACTION_PREFIX", "_is_dedicated_media_route", "_redacted_websocket_path", "WebChannel"],
+      "retained_owner": "Generic WebChannel plus current fixed Live Voice media transport",
+      "delete_precondition": "Completed in 7b283898: _DEDICATED_MEDIA_ROUTE_PREFIX authority was removed while hostile ticket-like paths remain redacted and generic/fixed-route WebChannel behaviour remains covered."
+    },
+    {
+      "path": "jiuwenswarm/dotenv_early.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": [],
+      "retained_symbols": ["DESKTOP_PRESERVED_ENV_KEYS", "_should_preserve_session_ports", "load_dotenv_runtime"],
+      "retained_owner": "Desktop and ordinary/current dotenv loading",
+      "delete_precondition": "Completed in ddde7b87: the five W2-only flag/key tuples and their branches were removed after zero-caller and ordinary dotenv/startup oracles passed."
+    },
+    {
+      "path": "jiuwenswarm/server/live_voice/voice_task_bridge.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["DEMO_ITINERARY_TASK_NAME", "TaskCommand", "TaskSpec"],
+      "retained_symbols": ["VoiceTaskBridge"],
+      "retained_owner": "P3-7 formal Task migration owner and remaining compatibility callers",
+      "delete_precondition": "General task input and canonical Task state-machine migration pass."
+    },
+    {
+      "path": "jiuwenswarm/server/live_voice/batch_speech.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"],
+      "retained_symbols": ["FormalBatchSpeechService", "BatchSpeechProvider", "SpeechAuthorizationResolver"],
+      "retained_owner": "Formal Speech and Provider authorization",
+      "delete_precondition": "General policy replaces only the Demo bypass and all Speech authorization tests pass."
+    },
+    {
+      "path": "jiuwenswarm/server/live_voice/p3_authenticated_composition.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["_PRODUCT_DEMO_POLICY_BYPASS_ENV", "_DEMO_ADJUSTMENT_CHECKPOINT_ENV"],
+      "retained_symbols": ["P3AuthenticatedComposition", "P3_MUTATIONS", "P3_QUERY_OPERATIONS", "P3_PRODUCTION_OPERATIONS"],
+      "retained_owner": "P3-7 authenticated formal composition and surface-specific authority",
+      "delete_precondition": "General confirmation/policy/checkpoint replacement passes without weakening authority."
+    },
+    {
+      "path": "jiuwenswarm/server/live_voice/product_composition_registry.py",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["PRODUCT_DEMO_POLICY_BYPASS_ENV", "_p2_response_generation_indices", "_closed_p2_generation_indices"],
+      "retained_symbols": ["ProductCompositionRegistry", "PRODUCT_P3_QUERY_OPERATIONS", "ProductObservabilityAdapter", "activate_product_observability_adapter"],
+      "retained_owner": "P3-7 product registry and authenticated operation authority",
+      "delete_precondition": "Only named demo/helper seams are replaced; registry authority and intentionally distinct predicates remain explicit."
+    },
+    {
+      "path": "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP2ActivationJournal.ts",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["exactObject", "sameBinding"],
+      "retained_symbols": ["ProductP2ActivationJournal", "PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA"],
+      "retained_owner": "P2 durable activation/recovery journal",
+      "delete_precondition": "Only helpers move after exact error, binding and recovery contracts pass."
+    },
+    {
+      "path": "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP3ProgressGenerationJournal.ts",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["exactObject"],
+      "retained_symbols": ["ProductP3ProgressGenerationJournalStore", "ProductP3ProgressGenerationIdentity"],
+      "retained_owner": "P3 progress generation persistence boundary",
+      "delete_precondition": "Only exact-object helper moves after P3 unknown-field/persistence tests pass."
+    },
+    {
+      "path": "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["exactObject"],
+      "retained_symbols": ["ProductP1VoiceRouteOwner", "PRODUCT_P1_MEDIA_ACTIVATE_METHOD"],
+      "retained_owner": "Formal P1 Speech/media route",
+      "delete_precondition": "P1 helper remains separate until its error contract is proven identical."
+    },
+    {
+      "path": "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productWebActivation.ts",
+      "whole_file_deletion_target": false,
+      "candidate_symbols": ["sameBinding"],
+      "retained_symbols": ["ProductWebP2ActivationOwner", "ProductWebP3MutationOwner", "ProductWebP3ProgressOwner"],
+      "retained_owner": "Formal Web P2/P3 lifecycle and authority",
+      "delete_precondition": "Only binding equality moves; activation/mutation/progress ownership remains explicit and tested."
+    }
+  ],
+  "audit_object_mappings": [
+    {"id": "branch_w2_dotenv", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "W2 dotenv preservation flags", "current_disposition": "retired_exact_symbols_ddde7b87", "manifest_entry_ids": ["w2_dotenv_preservation_flags"], "retained_owner": "ordinary/current dotenv", "excluded_scope": "whole dotenv_early.py"},
+    {"id": "branch_ticket_path", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Legacy ticket-in-path dedicated-media routing", "current_disposition": "retired_exact_symbols_7b283898", "manifest_entry_ids": ["legacy_ticket_media"], "retained_owner": "current fixed-route media authority", "excluded_scope": "whole dedicated-media and WebChannel files"},
+    {"id": "branch_snapshot", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "scripts/live_voice_snapshot.ps1", "current_disposition": "retired_path_4e207faa", "manifest_entry_ids": ["retired_snapshot_helper"], "retained_owner": "README/STATUS Git bootstrap", "excluded_scope": "plain Git bootstrap"},
+    {"id": "branch_s7", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "s7_alpha_verification.py", "current_disposition": "retain_until_unique_oracles_migrate", "manifest_entry_ids": ["retired_s7_s8_runners"], "retained_owner": "current S7 capability probes and tests", "excluded_scope": "unique privacy/security/media/benchmark/Agent regressions"},
+    {"id": "branch_s8", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "test_s8_readiness_cli.py", "current_disposition": "retain_until_unique_oracles_migrate", "manifest_entry_ids": ["retired_s7_s8_runners"], "retained_owner": "current S8 isolation/readiness tests", "excluded_scope": "isolation/source-ref/defect regressions"},
+    {"id": "backend_alpha_benchmark", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "alpha_benchmark.py", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["test_support_rehome"], "retained_owner": "benchmark tests/tools", "excluded_scope": "active benchmark oracle"},
+    {"id": "backend_alpha_privacy", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "alpha_privacy_conformance.py", "current_disposition": "retained_by_p3_8a_rebaseline", "manifest_entry_ids": ["p3_8a_accepted_observability_assets"], "retained_owner": "P3-8A privacy conformance", "excluded_scope": "accepted privacy oracle"},
+    {"id": "backend_exporter", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "observability_exporter.py", "current_disposition": "retained_by_p3_8a_rebaseline", "manifest_entry_ids": ["p3_8a_accepted_observability_assets"], "retained_owner": "P3-8A/B observability", "excluded_scope": "accepted exporter"},
+    {"id": "backend_fault_harness", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "observability_fault_harness.py", "current_disposition": "retained_by_p3_8a_rebaseline", "manifest_entry_ids": ["p3_8a_accepted_observability_assets"], "retained_owner": "P3-8A failure isolation", "excluded_scope": "accepted fault oracle"},
+    {"id": "backend_observability_adapter", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "product_observability_adapter.py", "current_disposition": "retained_by_p3_8a_rebaseline", "manifest_entry_ids": ["p3_8a_accepted_observability_assets"], "retained_owner": "current registry/B2 integration", "excluded_scope": "accepted adapter"},
+    {"id": "backend_p2_readiness", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "product_p2_readiness.py", "current_disposition": "rehome_acceptance_support", "manifest_entry_ids": ["test_support_rehome"], "retained_owner": "current acceptance tests", "excluded_scope": "active readiness oracle"},
+    {"id": "backend_realtime_media", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.1", "locator_token": "realtime_media.py", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["test_support_rehome"], "retained_owner": "media tests/fakes", "excluded_scope": "supported runtime consumer if found"},
+    {"id": "frontend_runtime_replica", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "conversationRuntimeReplica.ts", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "frontend runtime tests", "excluded_scope": "real runtime truth"},
+    {"id": "frontend_fake_vertical", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "fakeP1Vertical.ts", "current_disposition": "rehome_or_remove_fake", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "frontend test support", "excluded_scope": "formal product truth"},
+    {"id": "frontend_task_result", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "formalTaskResultRoute.ts", "current_disposition": "retain_isolated_immutable_result_oracle", "manifest_entry_ids": ["formal_task_result_route_retained"], "retained_owner": "Isolated immutable TaskResult parser oracle pending an accepted composed replacement", "excluded_scope": "whole isolated parser/oracle"},
+    {"id": "frontend_v2_contract", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "liveVoiceContractV2.ts", "current_disposition": "retain", "manifest_entry_ids": ["duplicate_frontend_validators"], "retained_owner": "cross-language trust boundary", "excluded_scope": "backend/frontend parity"},
+    {"id": "frontend_observability", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "liveVoiceObservability.ts", "current_disposition": "retain_product_subset_rehome_support", "manifest_entry_ids": ["duplicate_frontend_validators", "frontend_formal_test_support"], "retained_owner": "formal Web observability", "excluded_scope": "product-consumed subset"},
+    {"id": "frontend_product_contract", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "productCompositionContract.ts", "current_disposition": "retain_trust_boundary", "manifest_entry_ids": ["product_composition_contract_retained_boundary"], "retained_owner": "Web/backend contract parity", "excluded_scope": "whole validator before generated replacement"},
+    {"id": "frontend_lifecycle_recorder", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.2", "locator_token": "webLifecycleObservationRecorder.ts", "current_disposition": "rehome_test_support", "manifest_entry_ids": ["frontend_formal_test_support"], "retained_owner": "formal Web tests", "excluded_scope": "real exported product observer if selected"},
+    {"id": "replace_legacy_web", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Legacy `useLiveVoiceDemo`", "current_disposition": "replace_then_remove", "manifest_entry_ids": ["legacy_web_task_lane"], "retained_owner": "compatibility path until formal default", "excluded_scope": "formal ChatPanel route"},
+    {"id": "replace_task_core", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Old `task_core.py`", "current_disposition": "replace_then_remove", "manifest_entry_ids": ["legacy_task_models"], "retained_owner": "formal persistent Task", "excluded_scope": "canonical Task state machine"},
+    {"id": "replace_executor", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "`ProjectCodeExecutorAdapter`", "current_disposition": "symbol_scoped_replace_then_remove", "manifest_entry_ids": ["legacy_project_scheduler_adapter"], "retained_owner": "Direct adapter and generic scheduler callers", "excluded_scope": "whole project_code_executor.py"},
+    {"id": "replace_demo_profile", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": ".env.production", "current_disposition": "retain_current_default_off_owner", "manifest_entry_ids": ["current_configuration_and_intent_retained"], "retained_owner": "ordinary production default-off", "excluded_scope": "whole .env.production and generalized production intent"},
+    {"id": "replace_launcher", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "start_hands_free_demo.ps1", "current_disposition": "retain_until_physical_replacement", "manifest_entry_ids": ["legacy_demo_entrypoints"], "retained_owner": "bounded physical Demo", "excluded_scope": "generalized production launcher"},
+    {"id": "replace_demo_fixture", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Three-day-itinerary prompt/file fixture", "current_disposition": "symbol_scoped_replace_then_remove", "manifest_entry_ids": ["exact_demo_profile_and_fixtures"], "retained_owner": "general task input/confirmation/policy", "excluded_scope": "whole shared composition/Executor files"},
+    {"id": "replace_w2_rehearsal", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "scripts/live_voice/w2_rehearsal/", "current_disposition": "transplant_then_remove", "manifest_entry_ids": ["w2_rehearsal_assets"], "retained_owner": "capability defect/audio regressions", "excluded_scope": "needed WAV oracle"},
+    {"id": "duplicate_strict_record", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Strict record validation", "current_disposition": "consolidate_preserving_errors", "manifest_entry_ids": ["duplicate_frontend_validators"], "retained_owner": "each trust-boundary validator", "excluded_scope": "caller error contracts"},
+    {"id": "duplicate_exact_object", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Exact-object validation", "current_disposition": "share_p2_p3_keep_p1_separate", "manifest_entry_ids": ["duplicate_exact_object_validators"], "retained_owner": "frontend formal journals", "excluded_scope": "P1 until compared"},
+    {"id": "duplicate_binding_equality", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "P2 activation binding equality", "current_disposition": "share_binding_utility", "manifest_entry_ids": ["duplicate_exact_object_validators"], "retained_owner": "P2 journal and Web activation authority", "excluded_scope": "authority-specific behaviour"},
+    {"id": "duplicate_task_clone", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Visible-task cloning", "current_disposition": "consolidate_with_legacy_retirement", "manifest_entry_ids": ["legacy_web_task_lane"], "retained_owner": "legacy task compatibility", "excluded_scope": "immutable snapshot semantics"},
+    {"id": "duplicate_generation_traversal", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "2", "locator_token": "Closed/response generation-index traversal", "current_disposition": "symbol_scoped_consolidation", "manifest_entry_ids": ["duplicate_operation_allowlists"], "retained_owner": "P3-7 registry", "excluded_scope": "different state predicates"},
+    {"id": "duplicate_operation_drift", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "3.4", "locator_token": "Operation-name duplication with contract drift", "current_disposition": "retain_surface_specific_until_catalog", "manifest_entry_ids": ["duplicate_operation_allowlists"], "retained_owner": "surface authority owners", "excluded_scope": "unqualified global allowlist"},
+    {"id": "retained_product_roots", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "6", "locator_token": "Current product-root implementations", "current_disposition": "retain", "manifest_entry_ids": ["product_composition_contract_retained_boundary", "p3_8a_accepted_observability_assets"], "retained_owner": "media/Speech/composition/persistent Task/Direct Executor", "excluded_scope": "all current product roots"},
+    {"id": "retained_independent_validation", "source_audit": "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "4", "locator_token": "Repetition that must remain for now", "current_disposition": "retain", "manifest_entry_ids": ["duplicate_frontend_validators", "product_composition_contract_retained_boundary"], "retained_owner": "DTO/confirmation/persistence/scope/execution boundaries", "excluded_scope": "independent validation and test-oracle literals"},
+    {"id": "excluded_local_artifacts", "source_audit": "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md", "source_section": "7", "locator_token": "Local artifacts excluded from the final commit", "current_disposition": "local_only_excluded", "manifest_entry_ids": [], "retained_owner": "workspace/runtime data owner", "excluded_scope": "coverage caches dist node_modules logs runtime databases/audio"}
+  ],
+  "document_rebaseline": {
+    "source_audit": "live-voice/reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md",
+    "deletion_authorized": false,
+    "batch_a_completed": {
+      "source_section": "3",
+      "audit_time_count": 19,
+      "current_disposition": "completed_git_recoverable_not_a_current_target",
+      "expected_current_presence": false,
+      "paths": [
+        "live-voice/archive/POST_V0_STASH_HANDOFF.md",
+        "live-voice/archive/TWO_WEEK_DEMO.md",
+        "live-voice/D91_W2_RUNTIME_BLOCKER_CLOSURE_REVIEW_2026-08-08.md",
+        "live-voice/D92_OPENAI_PCM_PROVIDER_CLOSURE_REVIEW_2026-08-08.md",
+        "live-voice/D93_OPENAI_IDENTITY_HTTP_CLOSURE_REVIEW_2026-08-08.md",
+        "live-voice/D96_W2_BLOCKER_CLOSURE_REVIEW_2026-08-10.md",
+        "live-voice/D97_W2_NO_EVIDENCE_SMOKE_REVIEW_2026-08-10.md",
+        "live-voice/D113_S6_02_SYNTHESIS_EVENT_TIMEOUT_REPAIR_2026-08-13.md",
+        "live-voice/D114_S6_02_COLD_EOT_AND_LONG_PLAYOUT_REPAIR_2026-08-13.md",
+        "live-voice/LATEST_FOUNDATIONS_D053_REVIEW_2026-08-06.md",
+        "live-voice/PRODUCT_COMPOSITION_FOUNDATIONS_REVIEW_2026-08-06.md",
+        "live-voice/PRODUCT_COMPOSITION_REGISTRATION_REVIEW_2026-08-06.md",
+        "live-voice/S8_FAST_CLOSEOUT_LEDGER_2026-08-15.md",
+        "live-voice/SPEECH_CRITICAL_TOKEN_SAFETY_REVIEW_2026-08-05.md",
+        "live-voice/W1_A_PACKAGE_REVIEW_2026-08-04.md",
+        "live-voice/W1_X2_P1B_REVIEW_2026-08-04.md",
+        "scripts/live_voice/S7_AUTOMATION.md",
+        "scripts/live_voice/S8_READINESS.md",
+        "scripts/live_voice/w2_rehearsal/README.md"
+      ]
+    },
+    "batch_b": {
+      "source_section": "4",
+      "locator_token": "Batch B — obsolete numbered-stage execution bundle",
+      "audit_time_count": 12,
+      "current_disposition": "retain_until_regression_and_link_migration",
+      "paths": [
+        "live-voice/D111_ALPHA_REAL_PATH_ACTIVATION_2026-08-12.md",
+        "live-voice/D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md",
+        "live-voice/D115_S6_02_BREATH_PAUSE_VAD_REPAIR_2026-08-13.md",
+        "live-voice/D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md",
+        "live-voice/D117_POST_9B8_COMMIT_AUDIT_2026-08-13.md",
+        "live-voice/S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md",
+        "live-voice/S6_ALPHA_INTEGRATION_REVIEW_2026-08-12.md",
+        "live-voice/S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md",
+        "live-voice/S8_READINESS_PREPARATION_2026-08-13.md",
+        "live-voice/roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md",
+        "live-voice/roadmap/S7_EXECUTION_PACKET_2026-08-13.md",
+        "live-voice/roadmap/S8_FAST_CLOSEOUT_PACKET_2026-08-15.md"
+      ],
+      "retained_owner": "Source VAD/cold-EOT/playout/media regressions and current E2E physical operating steps"
+    },
+    "batch_c": {
+      "source_section": "5",
+      "locator_token": "Batch C — historical delivery and implementation corpus",
+      "audit_time_count": 43,
+      "current_disposition": "retain_until_current_contract_link_rebaseline",
+      "paths": [
+        "live-voice/AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/P1_FORMAL_SPEECH_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/P2_REAL_AGENT_CR_BLOCKER_REVIEW_2026-08-05.md",
+        "live-voice/P3ALPHA_REPLACEMENT_REVIEW_2026-08-05.md",
+        "live-voice/P3_AUTH_COMPOSITION_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/X_E2E_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/X_OBS_IMPLEMENTATION_REVIEW_2026-08-05.md",
+        "live-voice/SOL_MODULE_PRE_REVIEWS_2026-08-03.md",
+        "live-voice/W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md",
+        "live-voice/ALPHA_PRODUCT_INTEGRATION_REVIEW_2026-08-07.md",
+        "live-voice/ALPHA_WAVE_AB_INTEGRATION_REVIEW_2026-08-07.md",
+        "live-voice/ALPHA_WAVE_C_INTEGRATION_REVIEW_2026-08-07.md",
+        "live-voice/ALPHA_POST_WAVE_C_INTEGRATION_REVIEW_2026-08-07.md",
+        "live-voice/roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md",
+        "live-voice/roadmap/ALPHA_WAVE_AB_EXECUTION_2026-08-07.md",
+        "live-voice/roadmap/ALPHA_WAVE_C_EXECUTION_2026-08-07.md",
+        "live-voice/roadmap/DEMO_90_EXECUTION_2026-08-07.md",
+        "live-voice/roadmap/P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md",
+        "live-voice/roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md",
+        "live-voice/roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md",
+        "live-voice/D90_W2_INTEGRATED_DEMO_REVIEW_2026-08-08.md",
+        "live-voice/D94_BROWSER_REFRESH_DUPLEX_RECOVERY_REVIEW_2026-08-08.md",
+        "live-voice/D95_P3_D0_ATTEMPT_BINDING_REPAIR_2026-08-08.md",
+        "live-voice/D98_W2_FINAL_AUTOMATION_ATTEMPT_2026-08-10.md",
+        "live-voice/D99_P3_ORIGIN_ROUTE_RECONCILIATION_REVIEW_2026-08-11.md",
+        "live-voice/D100_P3_TERMINAL_REPLAY_VALIDATION_READY_2026-08-11.md",
+        "live-voice/D101_W2_NEW_ENVIRONMENT_MANUAL_HANDOFF_2026-08-11.md",
+        "live-voice/D102_W2_SIGNED_REHEARSAL_FAULT_PROBE_REPAIR_2026-08-11.md",
+        "live-voice/D103_W2_UNSIGNED_MANUAL_PRODUCT_ACCEPTANCE_2026-08-11.md",
+        "live-voice/D104_P3_REFRESH_RECOVERY_AND_W2_ACCEPTANCE_CONTINUATION_2026-08-11.md",
+        "live-voice/D105_W2_PRODUCT_ACCEPTANCE_2026-08-11.md",
+        "live-voice/D106_W2_SIGNED_GATE_CODE_REMOVAL_REVIEW_2026-08-11.md",
+        "live-voice/D108_PROJECT_PROGRESS_AND_GOVERNANCE_REVIEW_2026-08-12.md",
+        "live-voice/D109_STAGE_MODULE_DOCUMENTATION_SYNC_2026-08-12.md",
+        "live-voice/D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md",
+        "live-voice/demo/DEMO_SHOWCASE.md",
+        "live-voice/demo/INTEGRATED_SHOWCASE.md",
+        "live-voice/validation/V0_ACCEPTANCE.md",
+        "live-voice/validation/INTEGRATED_DEMO_ACCEPTANCE.md",
+        "live-voice/evidence/V0_20260802_ee2896a4.md",
+        "live-voice/evidence/P2_BROWSER_AGENT_TOOL_20260807_fb40f12b.md"
+      ],
+      "retained_owner": "Current contracts/tests/status/runbook plus Git recovery after all inbound links and unique facts migrate"
+    },
+    "later_twenty_provenance": {
+      "method": "frozen explicit path set reconstructed from the documentation-audit rebaseline boundary and revalidated at the B1 baseline",
+      "inventory_baseline": "965fc827fb409b97d791f64febc7d32f0aaf71d3",
+      "path_set_sha256": "416eba0bd3690f778ddef55796a7094d65645b7214b1d9e35b9777616fcbeb0f"
+    },
+    "later_twenty_rebaseline": [
+      {"path": "live-voice/evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md", "current_disposition": "retain_current_evidence", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md", "current_disposition": "retain_until_repaired_candidate", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md", "current_disposition": "retain_current_p3_evidence", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md", "current_disposition": "retain_current_p3_evidence", "deletion_authorized": false},
+      {"path": "live-voice/reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md", "current_disposition": "retain_active_cleanup_input", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md", "current_disposition": "retain_current_p3_review", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md", "current_disposition": "retain_until_p3_integration", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_3_CAPABILITY_ADMISSION_ACTIVATION_PREPARATION_2026-08-18.md", "current_disposition": "retain_until_p3_integration", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_4_DURABILITY_RECOVERY_ACTIVATION_PREPARATION_2026-08-18.md", "current_disposition": "retain_until_p3_integration", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_4_DURABILITY_RECOVERY_IMPLEMENTATION_REVIEW_2026-08-21.md", "current_disposition": "retain_current_p3_review", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md", "current_disposition": "retain_until_p3_integration", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_5B_PRESENTATION_CONSUMPTION_IMPLEMENTATION_REVIEW_2026-08-21.md", "current_disposition": "retain_current_p3_review", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md", "current_disposition": "retain_accepted_p3_8_input", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md", "current_disposition": "retain_active_cleanup_input", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md", "current_disposition": "retain_active_cleanup_input", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md", "current_disposition": "retain_current_p3_review", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EXECUTION_PACKET_2026-08-20.md", "current_disposition": "retain_until_p3_integration", "deletion_authorized": false},
+      {"path": "live-voice/reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md", "current_disposition": "retain_current_p3_review", "deletion_authorized": false},
+      {"path": "live-voice/roadmap/FULL_P3_EXECUTION_PLAN.md", "current_disposition": "merge_or_retire_after_status_rebaseline", "deletion_authorized": false},
+      {"path": "live-voice/roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md", "current_disposition": "retain_active_optimization_input", "deletion_authorized": false}
+    ],
+    "post_note_provenance": {
+      "method": "frozen explicit pre-B1 path set after the documentation-audit rebaseline note, verified in the inventory baseline Git tree",
+      "inventory_baseline": "965fc827fb409b97d791f64febc7d32f0aaf71d3",
+      "path_set_sha256": "1cafcff88435ba06abe038fb2f3fb976c2b3694cb9bbfc79a869b52d85fc846a"
+    },
+    "post_note_additions": [
+      {"path": "live-voice/evidence/P1_P2_W3_INTEGRATION_EVIDENCE_20260821.md", "current_disposition": "retain_current_evidence", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md", "current_disposition": "retain_current_evidence", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md", "current_disposition": "retain_current_evidence", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P1_T2_POST_PLAYOUT_RECEIPT_DECOUPLING_2026-08-20.md", "current_disposition": "retain_current_evidence", "deletion_authorized": false},
+      {"path": "live-voice/evidence/P1_T2_SUCCESSOR_CAPTURE_ACK_DECOUPLING_2026-08-20.md", "current_disposition": "retain_current_evidence", "deletion_authorized": false}
+    ],
+    "b1_candidate_provenance": {
+      "method": "B1 add-only path set, absent from the inventory baseline and verified in the candidate HEAD Git tree",
+      "inventory_baseline": "965fc827fb409b97d791f64febc7d32f0aaf71d3",
+      "candidate_tree": "HEAD",
+      "path_set_sha256": "03ee191e71bc30586dd072fa37c7d3fd59d7704d999bef0c44b85d2e3fcbae04"
+    },
+    "b1_added_paths": [
+      {"path": "live-voice/reviews/P3_8B_PREPARATION_RETIREMENT_MANIFEST_2026-08-21.md", "current_disposition": "retain_active_p3_8b_review", "deletion_authorized": false}
+    ],
+    "audit_time_working_set": [
+      "live-voice/README.md",
+      "live-voice/STATUS.md",
+      "live-voice/DOCUMENTATION_RULES.md",
+      "live-voice/REFERENCE_INDEX.md",
+      "live-voice/decisions/DECISIONS.md",
+      "live-voice/architecture/ARCHITECTURE_CONTRACT_GATE_V1.md",
+      "live-voice/architecture/FULL_SOLUTION_2026-07-30.md",
+      "live-voice/runbooks/E2E_RUNBOOK.md",
+      "live-voice/validation/PRODUCT_READINESS_ACCEPTANCE.md",
+      "live-voice/demo/PRODUCT_READINESS_SHOWCASE.md",
+      "live-voice/D031_IMPLEMENTATION_REVIEW_2026-08-04.md",
+      "live-voice/evidence/D031_20260805_PROJECT_BOUND.md",
+      "live-voice/D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md",
+      "live-voice/D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md",
+      "live-voice/D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md",
+      "live-voice/evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md",
+      "live-voice/reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md",
+      "live-voice/roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md",
+      "live-voice/reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md",
+      "live-voice/reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md"
+    ]
+  },
+  "entries": [
+    {
+      "id": "legacy_web_task_lane",
+      "category": "legacy_bridge_ui",
+      "phase": "inventory",
+      "disposition": "retain_until_replacement",
+      "deletion_authorized": false,
+      "paths": [
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts",
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceCore.ts",
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceStreamingSpeech.ts",
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskAdapter.ts",
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskBridge.ts",
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskClient.ts",
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskMonitor.ts"
+      ],
+      "replacement_owner": "P3-7 formal panel route and task lifecycle owners",
+      "oracle_migration": ["Formal panel route owns committed-text submission, task projection and presentation acknowledgement; current ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are retained formal carrier/composition surfaces, not members of this legacy lane."],
+      "delete_preconditions": ["P3-7 Gate PASS", "Mounted formal-route and physical browser/device evidence pass without the legacy bridge."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceCore.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceStreamingSpeech.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskAdapter.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskBridge.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskClient.test.mjs"],
+      "rollback": "Restore the retained files and disable the formal profile."
+    },
+    {
+      "id": "w2_dotenv_preservation_flags",
+      "category": "legacy_configuration",
+      "phase": "retired",
+      "disposition": "exact_symbols_removed_ddde7b87",
+      "deletion_authorized": true,
+      "paths": ["jiuwenswarm/dotenv_early.py"],
+      "replacement_owner": "Ordinary production configuration and explicit Live Voice profile owners",
+      "oracle_migration": ["The five W2-only flag/key tuples, preservation branches, exports and two W2-only tests were removed; default/current dotenv and Desktop/CLI port preservation remain owned by dotenv_early.py."],
+      "delete_preconditions": ["Completed: exact W2 flag-name caller audit is empty", "Completed: default/current dotenv and startup regressions pass 24/24."],
+      "affected_tests": ["tests/unit_tests/test_desktop_port_resolve.py", "tests/unit_tests/test_start_services_ready_hint.py"],
+      "rollback": "Restore the isolated preservation branches without enabling Live Voice in ordinary production."
+    },
+    {
+      "id": "legacy_project_scheduler_adapter",
+      "category": "legacy_scheduler",
+      "phase": "inventory",
+      "disposition": "split_live_voice_from_generic_scheduler",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/server/live_voice/project_code_executor.py"],
+      "replacement_owner": "P3-7 DirectProjectCodeExecutorAdapter owner",
+      "oracle_migration": ["Formal Live Voice dispatch/status/cancel and durability truth move to the direct adapter; generic scheduling stays in place."],
+      "delete_preconditions": ["Direct adapter positive and negative mutation tests pass", "Non-Live-Voice schedule callers are proven unaffected."],
+      "affected_tests": ["tests/integration/live_voice/test_formal_task_executor_adapter.py", "tests/unit_tests/live_voice/test_project_code_executor.py"],
+      "rollback": "Restore only the Live Voice adapter seam; never remove generic scheduler ownership."
+    },
+    {
+      "id": "w2_rehearsal_assets",
+      "category": "legacy_runner_fixture",
+      "phase": "inventory",
+      "disposition": "transplant_regressions_then_remove",
+      "deletion_authorized": false,
+      "paths": ["scripts/live_voice/w2_rehearsal"],
+      "replacement_owner": "Capability-owned physical speech and defect-regression test owners",
+      "oracle_migration": ["Any live defect regression and required WAV properties move to current capability tests before rehearsal ownership is removed."],
+      "delete_preconditions": ["Caller and evidence link audit is empty", "Transplanted audio/launcher regressions pass."],
+      "affected_tests": ["scripts/live_voice/w2_rehearsal/tests/test_audio_asset.py", "scripts/live_voice/w2_rehearsal/tests/test_portable_launchers.py"],
+      "rollback": "Restore the rehearsal directory from Git as non-authoritative test support."
+    },
+    {
+      "id": "legacy_task_models",
+      "category": "legacy_task_contract",
+      "phase": "inventory",
+      "disposition": "retain_until_replacement",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/server/live_voice/task_core.py", "jiuwenswarm/server/live_voice/voice_task_bridge.py", "jiuwenswarm/server/live_voice/executor_port.py"],
+      "replacement_owner": "P3-7 task lifecycle and executor adapter owners",
+      "oracle_migration": ["Authoritative task/attempt/command/event/outbox/executor/checkpoint/effect identities and transitions move to the frozen lifecycle contract."],
+      "delete_preconditions": ["Projection parity and replay/conflict tests pass", "Forbidden mutation side effects remain zero."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_task_core.py", "tests/unit_tests/live_voice/test_voice_task_bridge.py", "tests/unit_tests/live_voice/test_executor_port.py"],
+      "rollback": "Re-enable the retained legacy projection without changing durable authority."
+    },
+    {
+      "id": "frontend_formal_test_support",
+      "category": "test_support",
+      "phase": "inventory",
+      "disposition": "rehome_or_integrate_by_owner",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts"],
+      "replacement_owner": "P3-7 formal Web route and frontend test-support owners",
+      "oracle_migration": ["Integrate product-owned route behaviour; move replicas, fakes and recorders to test support only after consumers migrate."],
+      "delete_preconditions": ["Runtime caller classification is complete", "Formal route and isolated support tests pass from replacement ownership."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceConversationRuntime.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceFakeP1Vertical.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceWebLifecycleObservationRecorder.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceObservability.test.mjs"],
+      "rollback": "Restore original source locations and formal-route imports."
+    },
+    {
+      "id": "formal_task_result_route_retained",
+      "category": "retained_current_owner",
+      "phase": "inventory",
+      "disposition": "retain_isolated_immutable_result_oracle",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskResultRoute.ts"],
+      "replacement_owner": "Isolated immutable TaskResult parser oracle pending an accepted composed replacement",
+      "oracle_migration": ["No migration is authorized: the uncomposed route remains an isolated complete immutable TaskResult parser/replay oracle until an accepted owner absorbs its unique semantics."],
+      "delete_preconditions": ["A separately accepted replacement preserves exact result/replay/error semantics", "P3-7 result-route and mounted regressions pass against that replacement."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/formalTaskResultRoute.test.mjs"],
+      "rollback": "Retain the isolated oracle; never delete it as generic frontend test support."
+    },
+    {
+      "id": "duplicate_exact_object_validators",
+      "category": "duplicate_validator",
+      "phase": "inventory",
+      "disposition": "share_after_error_contract_comparison",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP2ActivationJournal.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP3ProgressGenerationJournal.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productWebActivation.ts"],
+      "replacement_owner": "Frontend formal contract utility owner",
+      "oracle_migration": ["P2/P3 exact-object validation may share one utility; P1 remains separate until error and trust-boundary contracts compare equal."],
+      "delete_preconditions": ["Unknown-field/version negatives remain fail-closed", "Caller-specific error contracts are preserved."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/productP2ActivationJournal.test.mjs", "jiuwenswarm/channels/web/frontend/tests/productP3ProgressGenerationJournal.test.mjs", "jiuwenswarm/channels/web/frontend/tests/productWebActivation.test.mjs"],
+      "rollback": "Restore local validators at each trust boundary."
+    },
+    {
+      "id": "legacy_ticket_media",
+      "category": "legacy_entrypoint",
+      "phase": "retired",
+      "disposition": "exact_symbols_removed_7b283898",
+      "deletion_authorized": true,
+      "paths": ["jiuwenswarm/gateway/live_voice/dedicated_media_registration.py", "jiuwenswarm/gateway/channel_manager/web/web_connect.py", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserDedicatedMediaRoute.ts"],
+      "replacement_owner": "Current fixed-route DedicatedMediaProductRegistry and WebChannel authority",
+      "oracle_migration": ["MEDIA_ROUTE_PREFIX, legacy_path_ticket_compat, _DEDICATED_MEDIA_ROUTE_PREFIX and the frontend optional compatibility branch were removed; fixed MEDIA_ROUTE_PATH, Registry, handler, exact WebChannel predicate, redaction and first-frame media.auth remain authoritative."],
+      "delete_preconditions": ["Completed: legacy ticket-prefix compatibility has no supported caller", "Completed: fixed-route registry/auth/lifecycle, WebChannel/privacy and frontend oracles pass", "Completed: ordinary WebChannel and feature-off behaviour are unaffected."],
+      "affected_tests": ["tests/unit_tests/gateway/test_dedicated_media_registration.py", "tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py", "jiuwenswarm/channels/web/frontend/tests/liveVoiceBrowserDedicatedMediaRoute.test.mjs"],
+      "rollback": "Restore only legacy prefix compatibility symbols; never replace fixed-route registry or WebChannel authority."
+    },
+    {
+      "id": "legacy_demo_entrypoints",
+      "category": "legacy_entrypoint",
+      "phase": "inventory",
+      "disposition": "retain_current_physical_launcher",
+      "deletion_authorized": false,
+      "paths": ["scripts/live_voice/start_hands_free_demo.ps1", "scripts/live_voice/start_hands_free_demo.cmd"],
+      "replacement_owner": "Current bounded physical Demo launcher and future P3-9 physical acceptance owner",
+      "oracle_migration": ["The current physical launcher remains required; it may retire only after a replacement owns device/browser/profile startup and all physical oracles."],
+      "delete_preconditions": ["Replacement physical launcher/profile is documented and tested", "Current launcher, device and private-runtime consumers are migrated."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_s7_alpha_verification.py"],
+      "rollback": "Restore scripts from the inventory commit; they do not become production authority."
+    },
+    {
+      "id": "retired_snapshot_helper",
+      "category": "retired_entrypoint",
+      "phase": "retired",
+      "disposition": "path_removed_4e207faa",
+      "deletion_authorized": true,
+      "paths": ["scripts/live_voice_snapshot.ps1"],
+      "replacement_owner": "README/STATUS plain Git bootstrap",
+      "oracle_migration": ["REFERENCE_INDEX now directs orientation to Git status/HEAD/upstream and STATUS; historical disposition remains in the branch-content audit."],
+      "delete_preconditions": ["Completed: no current README/runbook/caller invokes the helper", "Completed: 491 current Markdown links resolve."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py"],
+      "rollback": "Recover the helper from cc420981 only if a separately accepted orientation owner requires it; never restore stale Resume-capsule authority."
+    },
+    {
+      "id": "exact_demo_profile_and_fixtures",
+      "category": "legacy_demo_configuration",
+      "phase": "inventory",
+      "disposition": "replace_before_generalized_claim",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py", "jiuwenswarm/server/live_voice/batch_speech.py", "jiuwenswarm/server/live_voice/fake_verticals.py"],
+      "replacement_owner": "Explicit formal profile, general task input/confirmation and Provider owners",
+      "oracle_migration": ["Ordinary production stays default-off; generalized task input, confirmation/policy and selected Provider configuration replace exact-demo assumptions."],
+      "delete_preconditions": ["Explicit formal profile and physical candidate pass", "General input/confirmation/policy positive and fail-closed negative scenarios pass."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_batch_speech.py", "tests/unit_tests/live_voice/test_production_task_intent_classifier.py", "tests/integration/live_voice/test_fake_verticals.py"],
+      "rollback": "Restore bounded Demo fixtures under explicit Demo-only ownership; do not call them generalized production support."
+    },
+    {
+      "id": "current_configuration_and_intent_retained",
+      "category": "retained_current_owner",
+      "phase": "inventory",
+      "disposition": "retain_current_default_off_and_intent_owners",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/.env.production", "jiuwenswarm/server/live_voice/production_task_intent.py"],
+      "replacement_owner": "Ordinary-production default-off profile and generalized production-intent owners",
+      "oracle_migration": ["No migration is authorized: .env.production remains default-off and production_task_intent.py remains active generalized intent authority."],
+      "delete_preconditions": ["A separately accepted profile owner preserves ordinary default-off", "A separately accepted intent owner preserves exact P3-6 classification/confirmation semantics."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceBuildProfiles.test.mjs", "tests/unit_tests/live_voice/test_production_task_intent_classifier.py"],
+      "rollback": "Retain both current owners; never classify them as exact-Demo whole-file candidates."
+    },
+    {
+      "id": "retired_s7_s8_runners",
+      "category": "legacy_runner",
+      "phase": "inventory",
+      "disposition": "retain_until_unique_oracles_migrate",
+      "deletion_authorized": false,
+      "paths": ["scripts/live_voice/s7_alpha_verification.py", "scripts/live_voice/s7_real_probe_support.py", "scripts/live_voice/s7_probe_agent_executor.py", "scripts/live_voice/s7_probe_benchmark_fault.py", "scripts/live_voice/s7_probe_privacy.py", "scripts/live_voice/s7_probe_secure_deployment.py", "scripts/live_voice/s7_probe_speech_media.py", "scripts/live_voice/s8_readiness.py", "tests/unit_tests/live_voice/test_s7_alpha_verification.py", "tests/unit_tests/live_voice/test_s7_real_probes.py", "tests/unit_tests/live_voice/test_s8_readiness.py", "tests/integration/live_voice/test_s8_readiness_cli.py"],
+      "replacement_owner": "Current S7/S8 probe, isolation, privacy, media, benchmark and readiness oracle owners",
+      "oracle_migration": ["TESTING.md defines process only; every unique probe/isolation/privacy/media/benchmark/Agent oracle must first move to a capability-owned test before a runner can retire."],
+      "delete_preconditions": ["Every unique oracle has an explicit replacement test and no current review/runbook caller", "Historical provenance remains recoverable in Git."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_s7_alpha_verification.py", "tests/unit_tests/live_voice/test_s7_real_probes.py", "tests/unit_tests/live_voice/test_s8_readiness.py", "tests/integration/live_voice/test_s8_readiness_cli.py"],
+      "rollback": "Recover the historical runners from Git without treating them as current gates."
+    },
+    {
+      "id": "retired_wave2_evidence_gate",
+      "category": "legacy_validator_runner",
+      "phase": "inventory",
+      "disposition": "retain_live_private_oracle_support",
+      "deletion_authorized": false,
+      "paths": ["scripts/live_voice/p3_wave2_real_evidence_producer.py", "scripts/live_voice/p3_wave2_real_evidence_validator.py", "scripts/live_voice/p3_wave2_real_evidence.schema.json"],
+      "replacement_owner": "Current Wave2/3 private evidence producer/validator/schema test owners",
+      "oracle_migration": ["The signed W2 Gate verdict is retired, but these files remain live test/private-oracle support until every import and capability-owned replacement is proven."],
+      "delete_preconditions": ["AgentServer and test imports are zero and every private oracle has a capability-owned replacement", "D-071/D-072 retirement history remains indexed."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_p3_wave2_real_evidence_producer.py", "tests/unit_tests/live_voice/test_p3_wave2_real_evidence_validator.py"],
+      "rollback": "Recover historical artifacts only for an explicitly authorized new audit; do not reactivate by default."
+    },
+    {
+      "id": "duplicate_frontend_validators",
+      "category": "duplicate_validator",
+      "phase": "inventory",
+      "disposition": "retain_until_generated_validator",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceContractV2.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceRouteTelemetry.ts", "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceObservability.ts"],
+      "replacement_owner": "P3-7 frozen protocol/schema owner",
+      "oracle_migration": ["A generated or single-source validator must preserve exact-object rejection, version gates and closed vocabularies."],
+      "delete_preconditions": ["Frozen protocol/schema is accepted", "All positive and unknown-field/version negative tests pass against one replacement."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceContractV2.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceRouteTelemetry.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceObservability.test.mjs"],
+      "rollback": "Restore the hand-written validators and keep unknown fields fail-closed."
+    },
+    {
+      "id": "product_composition_contract_retained_boundary",
+      "category": "retained_trust_boundary",
+      "phase": "inventory",
+      "disposition": "retain_until_generated_replacement",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productCompositionContract.ts", "jiuwenswarm/server/live_voice/product_composition_contract.py"],
+      "replacement_owner": "P3-7 cross-language product-composition contract owner",
+      "oracle_migration": ["Keep frontend/backend trust-boundary parity until one accepted generated validator replaces both exact contract checks."],
+      "delete_preconditions": ["Generated replacement is accepted", "Unknown-field/version and cross-language parity tests pass."],
+      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceProductCompositionContract.test.mjs", "tests/unit_tests/live_voice/test_product_composition_contract.py"],
+      "rollback": "Restore both validators; never remove one side of the trust boundary independently."
+    },
+    {
+      "id": "duplicate_operation_allowlists",
+      "category": "duplicate_validator",
+      "phase": "inventory",
+      "disposition": "symbol_scoped_await_p3_7_freeze",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/server/live_voice/p3_authenticated_composition.py", "jiuwenswarm/server/live_voice/product_p3_text_adapter.py", "jiuwenswarm/server/live_voice/product_composition_registry.py"],
+      "replacement_owner": "P3-7 canonical operation-catalog owner; each active adapter/composition/registry remains its own runtime authority",
+      "oracle_migration": ["Only product_p3_text_adapter.py::_QUERY_OPERATIONS and product_p3_text_adapter.py::_MUTATION_OPERATIONS are named consolidation candidates here; active ProductP3TextAdapter query, mutation-rejection, activation and cleanup seams remain retained."],
+      "delete_preconditions": ["P3-7 operation vocabulary and per-surface differences are frozen", "Only named allowlist symbols move", "Authentication/scope/version/unknown-operation/mutation-confirmation negatives assert zero Agent/Tool/Task effects."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_p3_authenticated_composition.py", "tests/unit_tests/live_voice/test_product_p3_text_adapter.py", "tests/unit_tests/live_voice/test_product_composition_registry.py"],
+      "rollback": "Restore local allowlists and fail closed until the shared vocabulary is repaired."
+    },
+    {
+      "id": "test_support_rehome",
+      "category": "test_support",
+      "phase": "inventory",
+      "disposition": "rehome_after_consumers_migrate",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/server/live_voice/alpha_benchmark.py", "jiuwenswarm/server/live_voice/product_p2_readiness.py", "jiuwenswarm/server/live_voice/realtime_media.py"],
+      "replacement_owner": "Live Voice test-support owner",
+      "oracle_migration": ["Move deterministic fakes/harnesses under test support only after every consumer imports the new location."],
+      "delete_preconditions": ["Runtime imports are zero", "All affected tests pass at the new location."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_alpha_benchmark.py", "tests/unit_tests/live_voice/test_product_p2_readiness.py", "tests/unit_tests/live_voice/test_realtime_media.py"],
+      "rollback": "Restore the original module locations and imports."
+    },
+    {
+      "id": "p3_8a_accepted_observability_assets",
+      "category": "retained_current_acceptance",
+      "phase": "inventory",
+      "disposition": "retain_for_p3_8b_integration",
+      "deletion_authorized": false,
+      "paths": ["jiuwenswarm/server/live_voice/observability.py", "jiuwenswarm/server/live_voice/observability_otel_codec.py", "jiuwenswarm/server/live_voice/observability_exporter.py", "jiuwenswarm/server/live_voice/product_observability_adapter.py", "jiuwenswarm/server/live_voice/observability_fault_harness.py", "jiuwenswarm/server/live_voice/alpha_privacy_conformance.py"],
+      "replacement_owner": "Accepted P3-8A asset owner and P3-8B integration owner",
+      "oracle_migration": ["The frozen audit test-ownership finding is superseded by P3-8A acceptance and current registry integration; preserve codec/adapter/exporter/privacy/failure-isolation truth."],
+      "delete_preconditions": ["A separately accepted replacement owns every P3-8A oracle", "P3-8B external-backend and privacy conformance pass."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_observability_otel_codec.py", "tests/unit_tests/live_voice/test_observability_exporter.py", "tests/unit_tests/live_voice/test_product_observability_adapter.py", "tests/unit_tests/live_voice/test_observability_fault_harness.py", "tests/unit_tests/live_voice/test_alpha_privacy_conformance.py"],
+      "rollback": "Retain the accepted P3-8A assets and disable any incomplete B2 composition."
+    },
+    {
+      "id": "historical_document_batches",
+      "category": "documentation",
+      "phase": "inventory",
+      "disposition": "retain_until_link_migration",
+      "deletion_authorized": false,
+      "paths": ["live-voice/reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md"],
+      "replacement_owner": "Live Voice documentation structure owner",
+      "oracle_migration": ["Current STATUS/README routes and retained decision/audit links replace stale numbered-plan navigation."],
+      "delete_preconditions": ["REFERENCE_INDEX and inbound links are migrated", "Historical decisions and evidence provenance remain discoverable."],
+      "affected_tests": ["tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py"],
+      "rollback": "Recover documents from Git and restore their index links."
+    }
+  ]
+}

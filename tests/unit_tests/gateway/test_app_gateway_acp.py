@@ -215,6 +215,7 @@ def test_live_voice_web_alpha_credential_owner_is_default_off(
         ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
         ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
         ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
@@ -310,9 +311,7 @@ async def test_gateway_redeems_voice_receipt_and_strips_client_claim(
             "critical_confirmation": True,
         }
     ]
-    assert msg.params["gateway_voice_claim"]["kind"] == (
-        "formal_speech_recognition"
-    )
+    assert msg.params["gateway_voice_claim"]["kind"] == ("formal_speech_recognition")
     assert "voice_commit_receipt" not in msg.params
     assert "critical_confirmation" not in msg.params
 

@@ -248,7 +248,7 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
-from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
+from jiuwenswarm.server.wire_truncate import (  # noqa: E402, F401 — test/handler re-export
     _HISTORY_PAGE_SIZE,
     _HISTORY_WIRE_STRING_LIMIT,
     _HISTORY_WIRE_METADATA_STRING_LIMIT,
@@ -1412,6 +1412,7 @@ class AgentWebSocketServer:
             logger.info("[LiveVoiceProduct] central composition disabled")
             return
         registry: Any = None
+        observability_runtime: Any = None
         try:
             from jiuwenswarm.server.live_voice.latency_probe import (
                 create_latency_probe_runtime_from_environment,
@@ -1419,6 +1420,54 @@ class AgentWebSocketServer:
             from jiuwenswarm.server.live_voice.product_composition_registry import (
                 create_product_composition_registry_from_environment,
             )
+
+            observability_enabled = str(
+                os.getenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_OBSERVABILITY_ENABLED") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if observability_enabled:
+                try:
+                    from jiuwenswarm.server.live_voice.product_observability_runtime import (
+                        BoundedInMemoryOtelBackend,
+                        create_product_observability_runtime_from_environment,
+                    )
+
+                    backend = BoundedInMemoryOtelBackend()
+                    configuration_owner = getattr(
+                        self._live_voice_p3_composition,
+                        "validated_live_voice_configuration",
+                        None,
+                    )
+                    if not callable(configuration_owner):
+                        raise RuntimeError(
+                            "authenticated configuration owner is unavailable"
+                        )
+                    validated_configuration = configuration_owner(
+                        provider=backend.validated_provider_configuration()
+                    )
+                    observability_runtime = (
+                        create_product_observability_runtime_from_environment(
+                            backend=backend,
+                            validated_configuration=validated_configuration,
+                        )
+                    )
+                    if observability_runtime is None:
+                        raise RuntimeError("observability runtime remained disabled")
+                    health = await observability_runtime.start()
+                    if health.ready is not True:
+                        raise RuntimeError("observability runtime failed readiness")
+                except Exception:  # noqa: BLE001 -- product route remains independent
+                    logger.exception(
+                        "[LiveVoiceProduct] observability unavailable; "
+                        "no formal diagnostic route registered"
+                    )
+                    if observability_runtime is not None:
+                        try:
+                            await observability_runtime.close()
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "[LiveVoiceProduct] observability startup cleanup pending"
+                            )
+                    observability_runtime = None
 
             latency_probe_runtime = create_latency_probe_runtime_from_environment(
                 "agent_server"
@@ -1433,23 +1482,19 @@ class AgentWebSocketServer:
                 p3_confirmation_forwarder=(
                     getattr(self, "_live_voice_p3_confirmation_forwarder", None)
                 ),
-                commit_ledger=getattr(
-                    self, "_live_voice_turn_commit_ledger", None
-                ),
+                commit_ledger=getattr(self, "_live_voice_turn_commit_ledger", None),
+                observability_runtime=observability_runtime,
             )
             if registry is None:
+                if observability_runtime is not None:
+                    await observability_runtime.close()
                 logger.info("[LiveVoiceProduct] central composition disabled")
                 return
-            from jiuwenswarm.server.live_voice.observability import (
-                LiveVoiceObservabilityCollector,
-            )
-
             self._live_voice_product_composition = registry
+            self._live_voice_product_observability = observability_runtime
             self._live_voice_latency_probe_runtime = latency_probe_runtime
-            self._live_voice_product_observability = LiveVoiceObservabilityCollector()
             logger.info(
-                "[LiveVoiceProduct] central composition registered; "
-                "p2=%s p3_text=%s",
+                "[LiveVoiceProduct] central composition registered; p2=%s p3_text=%s",
                 registry.p2_enabled,
                 registry.p3_text_enabled,
             )
@@ -1464,52 +1509,52 @@ class AgentWebSocketServer:
                     logger.exception(
                         "[LiveVoiceProduct] failed registry cleanup failed"
                     )
+            if observability_runtime is not None:
+                try:
+                    await observability_runtime.close()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[LiveVoiceProduct] failed observability cleanup failed"
+                    )
             self._live_voice_product_composition = None
             self._live_voice_product_observability = None
             self._live_voice_latency_probe_runtime = None
 
     async def _stop_live_voice_product_composition(self) -> bool:
         registry = self._live_voice_product_composition
-        if registry is None:
-            self._live_voice_product_observability = None
-            latency_runtime = getattr(
-                self, "_live_voice_latency_probe_runtime", None
-            )
-            if latency_runtime is not None:
+        runtime = getattr(self, "_live_voice_product_observability", None)
+        if registry is not None:
+            try:
+                await registry.stop()
+            except Exception as exc:  # noqa: BLE001 -- continue owner shutdown
+                logger.warning("[LiveVoiceProduct] shutdown cleanup pending: %s", exc)
+                return False
+            if self._live_voice_product_composition is registry:
+                self._live_voice_product_composition = None
+        if runtime is not None:
+            close = getattr(runtime, "close", None)
+            if callable(close):
                 try:
-                    closed = await asyncio.to_thread(latency_runtime.close, 5.0)
-                    if closed is not True:
-                        logger.warning(
-                            "[LiveVoiceLatency] Agent export drain incomplete"
-                        )
-                except Exception:  # noqa: BLE001 -- diagnostic only
+                    await close()
+                except Exception as exc:  # noqa: BLE001 -- retain runtime for retry
                     logger.warning(
-                        "[LiveVoiceLatency] Agent export cleanup failed"
+                        "[LiveVoiceProduct] observability cleanup pending: %s", exc
                     )
-            self._live_voice_latency_probe_runtime = None
-            return True
-        try:
-            await registry.stop()
-        except Exception as exc:  # noqa: BLE001 -- continue owner shutdown
-            logger.warning("[LiveVoiceProduct] shutdown cleanup pending: %s", exc)
-            return False
-        if self._live_voice_product_composition is registry:
-            self._live_voice_product_composition = None
+                    return False
+        if getattr(self, "_live_voice_product_observability", None) is runtime:
             self._live_voice_product_observability = None
-            latency_runtime = getattr(
-                self, "_live_voice_latency_probe_runtime", None
-            )
-            if latency_runtime is not None:
-                try:
-                    closed = await asyncio.to_thread(latency_runtime.close, 5.0)
-                    if closed is not True:
-                        logger.warning(
-                            "[LiveVoiceLatency] Agent export drain incomplete"
-                        )
-                except Exception:  # noqa: BLE001 -- diagnostic only
+        latency_runtime = getattr(self, "_live_voice_latency_probe_runtime", None)
+        if latency_runtime is not None:
+            try:
+                closed = await asyncio.to_thread(latency_runtime.close, 5.0)
+                if closed is not True:
                     logger.warning(
-                        "[LiveVoiceLatency] Agent export cleanup failed"
+                        "[LiveVoiceLatency] Agent export drain incomplete"
                     )
+            except Exception:  # noqa: BLE001 -- diagnostic only
+                logger.warning(
+                    "[LiveVoiceLatency] Agent export cleanup failed"
+                )
             self._live_voice_latency_probe_runtime = None
         return True
 
@@ -2033,6 +2078,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
@@ -9105,7 +9151,13 @@ class AgentWebSocketServer:
                 registry is not None
                 and registry.p3_text_enabled
                 and operation
-                in {"task.get", "task.list", "task.status", "task.events"}
+                in {
+                    "task.get",
+                    "task.list",
+                    "task.status",
+                    "task.events",
+                    "task.result",
+                }
             ):
                 result = await registry.handle_p3_query(
                     operation=operation,
@@ -9247,6 +9299,12 @@ class AgentWebSocketServer:
                     request_id=request.request_id,
                     session_id=request.session_id,
                 )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED:
+                result = await registry.handle_p2_presentation_failed(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN:
                 result = await registry.handle_p2_barge_in(
                     params=params,
@@ -9336,7 +9394,22 @@ class AgentWebSocketServer:
         """
 
         collector = getattr(self, "_live_voice_product_observability", None)
-        if collector is None or not isinstance(payload, dict):
+        registry = getattr(self, "_live_voice_product_composition", None)
+        consume_observation = getattr(registry, "consume_product_observation", None)
+        consume_metric = getattr(registry, "consume_product_metric", None)
+        legacy_emit_observation = getattr(collector, "emit_observation", None)
+        legacy_emit_metric = getattr(collector, "emit_metric", None)
+        formal_consumer = callable(consume_observation) and callable(consume_metric)
+        legacy_collector = callable(legacy_emit_observation) and callable(
+            legacy_emit_metric
+        )
+        # The B2 runtime is the callback behind the accepted product adapter's
+        # unique bounded exporter, never a second synchronous collector.
+        if (
+            collector is None
+            or (not formal_consumer and not legacy_collector)
+            or not isinstance(payload, dict)
+        ):
             return
         if payload.get("request_id") != request.request_id:
             return
@@ -9368,14 +9441,12 @@ class AgentWebSocketServer:
                 or not isinstance(resolution_id, str)
                 or len(resolution_id) != 64
                 or any(
-                    character not in "0123456789abcdef"
-                    for character in resolution_id
+                    character not in "0123456789abcdef" for character in resolution_id
                 )
                 or not isinstance(commit_sha256, str)
                 or len(commit_sha256) != 64
                 or any(
-                    character not in "0123456789abcdef"
-                    for character in commit_sha256
+                    character not in "0123456789abcdef" for character in commit_sha256
                 )
             ):
                 return
@@ -9393,8 +9464,10 @@ class AgentWebSocketServer:
             interaction_id = origin_id
             source_record_id = resolution_id
             if disposition == "dispatched":
-                if result_ok is not True or task_id is None or not isinstance(
-                    result.get("formal_task_result"), dict
+                if (
+                    result_ok is not True
+                    or task_id is None
+                    or not isinstance(result.get("formal_task_result"), dict)
                 ):
                     return
                 # task.status is a read-only Query.  The current closed
@@ -9462,13 +9535,19 @@ class AgentWebSocketServer:
                 create_metric,
                 create_observation,
             )
+            from jiuwenswarm.server.live_voice.product_observability_runtime import (
+                ProductDiagnosticIdentity,
+                ProductDiagnosticSeam,
+            )
 
             digest = hashlib.sha256(
                 f"{request.request_id}:{event_kind}".encode("utf-8")
             ).hexdigest()
-            observed_at = _dt.datetime.now(_dt.UTC).isoformat(
-                timespec="milliseconds"
-            ).replace("+00:00", "Z")
+            observed_at = (
+                _dt.datetime.now(_dt.UTC)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
             binding = {
                 "correlation_id": correlation_id,
                 "interaction_id": interaction_id,
@@ -9499,7 +9578,18 @@ class AgentWebSocketServer:
                         "duration_ms": duration_ms,
                     }
                 )
-                collector.emit_observation(observation)
+                if formal_consumer:
+                    consume_observation(
+                        session_id=request.session_id,
+                        correlation_id=correlation_id,
+                        observation=observation,
+                        diagnostic_identity=ProductDiagnosticIdentity(
+                            seam=ProductDiagnosticSeam.COMMAND,
+                            seam_id=source_record_id or observation.event_id,
+                        ),
+                    )
+                else:
+                    legacy_emit_observation(observation)
                 return
             route = {
                 "implementation_class": "fallback",
@@ -9539,8 +9629,31 @@ class AgentWebSocketServer:
                     "reason_code": "DEGRADED",
                 }
             )
-            collector.emit_observation(observation)
-            collector.emit_metric(metric)
+            seam = (
+                ProductDiagnosticSeam.GENERATION
+                if method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE
+                else ProductDiagnosticSeam.RESULT
+            )
+            identity = ProductDiagnosticIdentity(
+                seam=seam,
+                seam_id=source_record_id or observation.event_id,
+            )
+            if formal_consumer:
+                consume_observation(
+                    session_id=request.session_id,
+                    correlation_id=correlation_id,
+                    observation=observation,
+                    diagnostic_identity=identity,
+                )
+                consume_metric(
+                    session_id=request.session_id,
+                    correlation_id=correlation_id,
+                    metric=metric,
+                    diagnostic_identity=identity,
+                )
+            else:
+                legacy_emit_observation(observation)
+                legacy_emit_metric(metric)
             logger.warning(
                 "[LiveVoiceProduct] task route degraded; reason=DEGRADED method=%s",
                 method.value if method is not None else "unknown",

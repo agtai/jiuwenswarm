@@ -72,6 +72,17 @@ The exact A/reference commits, detached benchmark worktrees and remote-tracking
 refs are immutable evidence inputs. They are not documentation targets and do
 not receive credit from later documentation commits.
 
+### 2.1 2026-08-23 composition overlay
+
+Construction-time heads above stay evidence inputs. After Hongxing closed the
+four P1/P2 lifecycle boundaries on `67381193a`, the accepted P2 bounded-pull
+candidate was merged onto that tip. The current integration hub is
+`latency/hx-optimizations`; `latency/p2-bounded-pull-b` follows the same
+composed tip. `0812_live_voice_w3_renan` remains the pre-composition
+documentation hub. `latency_checkpoint_accepted_optimizations` remains the
+controlled LVL-05 / Semantic VAD spec owner and was not merged. This overlay
+does not change any LVL result, Gate C failure or §15 decision route.
+
 ## 3. Experiment index
 
 | ID | Experiment or episode | Lane and total class | Headline result | Decision / next gate |

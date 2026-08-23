@@ -232,6 +232,9 @@ class ReqMethod(Enum):
     LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK = (
         "live_voice.composition.p2.presentation.ack"
     )
+    LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED = (
+        "live_voice.composition.p2.presentation.failed"
+    )
     LIVE_VOICE_COMPOSITION_P2_BARGE_IN = (
         "live_voice.composition.p2.barge_in"
     )
