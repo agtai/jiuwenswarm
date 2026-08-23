@@ -11771,6 +11771,104 @@ test('mounted in-flight interruption from a retired Session cannot touch its suc
   }
 });
 
+test('mounted in-flight interruption that succeeds late cannot reset its successor', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-late-success-a';
+  const successorSessionId = 'mounted-generation-late-success-b';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '在新会话里帮我查一下天气。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  // The interruption succeeds, which is the branch that clears output, drops
+  // the reason and resets the status to idle. Those are exactly the fields the
+  // successor Session owns once it starts waiting for its own answer.
+  let releaseInterrupt = () => undefined;
+  responder.interruptGate = new Promise(resolve => {
+    releaseInterrupt = resolve;
+  });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+    });
+
+    // Session A is retired while its interruption is still on the wire, and
+    // Session B is driven all the way to waiting for its own answer.
+    await act(async () => {
+      renderer.update(
+        mountedGenerationInterruptElement(i18n, successorSessionId, responder.request, true, extraProps),
+      );
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'the successor capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the successor capture did not listen');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(() => responder.submits.length === 2, 'the successor turn was not submitted');
+      await waitForMounted(
+        () => states.at(-1)?.text_status === 'waiting',
+        `the successor did not start waiting for its answer; states=${states
+          .slice(-6)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+      );
+    });
+    const successorSubmit = responder.submits[1];
+    assert.equal(successorSubmit.params.session_id, successorSessionId);
+    const beforeLateSuccess = states.length;
+    const successorCaptureBefore = responder.calls.filter(call => call.method === 'live_voice.media.activate').length;
+
+    // Session A now succeeds. Session B must keep waiting for its own answer.
+    await act(async () => {
+      releaseInterrupt();
+      await new Promise(resolve => setTimeout(resolve, 80));
+    });
+    const afterLateSuccess = states.slice(beforeLateSuccess);
+    assert.equal(
+      afterLateSuccess.some(state => state.text_status === 'idle'),
+      false,
+      `a retired interruption success reset the successor status; states=${afterLateSuccess
+        .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`)
+        .join(' | ')}`,
+    );
+    assert.equal(states.at(-1)?.text_status, 'waiting', 'the successor stopped waiting for its own answer');
+    assert.equal(
+      afterLateSuccess.some(state => ['closed', 'failed', 'cleanup_pending'].includes(state.p1_status)),
+      false,
+      'a retired interruption success disturbed the successor capture',
+    );
+    assert.equal(
+      responder.calls.filter(call => call.method === 'live_voice.media.activate').length,
+      successorCaptureBefore,
+      'a retired interruption success restarted capture on the successor',
+    );
+    assert.equal(responder.interruptCalls.length, 1, 'the successor must not inherit an interruption');
+    assert.equal(responder.submits.length, 2, 'a retired interruption success must not submit anything');
+    assert.equal(responder.heldResponses.size, 2, 'both answers must still be outstanding');
+  } finally {
+    releaseInterrupt();
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted Session switch during generation-time listening abandons it without interruption or submit', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-switch-session';

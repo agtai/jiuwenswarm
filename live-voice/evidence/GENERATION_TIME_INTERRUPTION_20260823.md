@@ -136,12 +136,13 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 72 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
-| Frontend `npm run test:live-voice-integrated-web` | 481 passed (472 pre-existing + 9 new); `test:live-voice-l0-measurement` 3 passed |
+| Frontend `npm run test:live-voice-integrated-web` | 482 passed (472 pre-existing + 10 new); `test:live-voice-l0-measurement` 3 passed |
 | `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3923 passed, 11 failed — the identical 11 pre-existing failures (see §5) |
 
 ### 3.1 Mutation checks
 
 Every claimed invariant was checked by breaking it and confirming a test dies.
+Twenty-two mutants were run in total: 20 killed, 2 disclosed survivors.
 
 Backend (`test_generation_time_interruption.py`, baseline green):
 
@@ -184,10 +185,12 @@ Frontend (mounted panel suite, baseline green):
 | Playout no longer yields to a live speaker | KILLED |
 | Surrendered capture leaves its listening window behind | **SURVIVED** |
 
-The interruption-admission mutant is killed through the rejection path. The
-success path is guarded by the same `ownsInterruptionOutcome()` predicate the
-mutant removes, so it is covered by that mutant rather than by a second case;
-no separate success-path oracle was written.
+The interruption-admission mutant is killed independently through both branch
+outcomes: `mounted in-flight interruption from a retired Session cannot touch its
+successor` covers the rejection side (recovery reason, `failed` status) and
+`mounted in-flight interruption that succeeds late cannot reset its successor`
+covers the success side (cleared output, `idle` status, cleared reason) against a
+successor that is already waiting for its own answer.
 
 The surrendered-window mutant survives: with the cleanup removed, the stale
 window is still never observable from outside, because the notification poll is
