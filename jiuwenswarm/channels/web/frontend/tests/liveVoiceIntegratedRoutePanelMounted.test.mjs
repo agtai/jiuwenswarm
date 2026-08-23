@@ -3468,7 +3468,7 @@ test('mounted Task AUDIO without a P1 owner reports one exact failure and never 
   }
 });
 
-test('mounted Task AUDIO ACK waits for successful P1 playout and never reports failure', async () => {
+test('mounted stale Task AUDIO has zero effects while its in-flight unified foreground successor remains deliverable', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-task-audio-success-session';
   const controlRef = { current: null };
@@ -3476,6 +3476,7 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
   const states = [];
   const queuedNotifications = [];
   const notificationWaiters = [];
+  const unifiedGate = deferred();
   let binding = null;
   let activeMediaBinding = null;
   let renderer;
@@ -3511,7 +3512,7 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
       };
     }
     if (method === 'live_voice.composition.p2.presentation.failed') {
-      throw new Error('successful Task AUDIO must not report presentation failure');
+      throw new Error('stale Task AUDIO must not report presentation failure');
     }
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.media.activate') {
@@ -3541,6 +3542,7 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
       return mountedRecognition(params, 'Read the latest background task update.', 1);
     }
     if (method === 'live_voice.composition.unified.submit') {
+      await unifiedGate.promise;
       return {
         request_id: options.requestId,
         ok: true,
@@ -3558,8 +3560,8 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
           round_id: `mounted-task-audio-success-round-${params.voice_claim_id}`,
           response: {
             interaction_id: params.interaction_id,
-            response_id: 'mounted-task-audio-success-response',
-            response_generation: 4,
+            response_id: 'mounted-task-audio-foreground-response',
+            response_generation: 3,
           },
         },
       };
@@ -3616,6 +3618,7 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
         () => controlRef.current !== null && states.at(-1)?.available === true,
         'Task AUDIO success P1 owner did not activate',
       );
+      await waitForMounted(() => notificationWaiters.length === 1, 'Task AUDIO predecessor poll did not start');
       void controlRef.current.start();
       await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'Task AUDIO success capture did not start');
       await browser.emitFirstFrame();
@@ -3625,7 +3628,6 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
         () => calls.some(call => call.method === 'live_voice.composition.unified.submit'),
         'Task AUDIO success source turn was not committed',
       );
-      await waitForMounted(() => notificationWaiters.length === 1, 'Task AUDIO exact notification poll did not start');
       const notification = {
         ok: true,
         result: {
@@ -3635,7 +3637,7 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
           response: {
             interaction_id: binding.interaction_id,
             response_id: 'mounted-task-audio-success-response',
-            response_generation: 4,
+            response_generation: 2,
           },
           agent_event: {
             event_type: 'chat.final',
@@ -3651,10 +3653,71 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
         },
       };
       publishNotification(notification);
+      await new Promise(resolve => globalThis.setTimeout(resolve, 25));
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length,
+        0,
+        'older Task AUDIO must not start TTS while the unified final is in flight',
+      );
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+      unifiedGate.resolve();
+      await waitForMounted(() => notificationWaiters.length === 1, 'stale Task AUDIO did not release its notification lane');
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'transport.keepalive',
+          response: null,
+          agent_event: null,
+          progress_event: null,
+          presentation_unit: null,
+        },
+      });
+      try {
+        await waitForMounted(() => notificationWaiters.length === 1, 'foreground successor poll did not start');
+      } catch (error) {
+        assert.fail(
+          `${error.message}; states=${states
+            .slice(-12)
+            .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}/${state.terminal_announcement_state}`)
+            .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+        );
+      }
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'mounted-task-audio-foreground-response',
+            response_generation: 3,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'The foreground response remains authoritative.',
+            source_provenance: 'server.authoritative',
+          },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-task-audio-foreground-unit',
+            seq: 0,
+            content_ref: `sha256:${'e'.repeat(64)}`,
+          },
+        },
+      });
       try {
         await waitForMounted(
-          () => calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
-          'Task AUDIO did not reach the formal batch TTS owner',
+          () =>
+            calls.some(
+              call =>
+                call.method === 'live_voice.speech.synthesize_batch' &&
+                call.params.response.response_id === 'mounted-task-audio-foreground-response',
+            ),
+          'foreground successor did not reach the formal batch TTS owner',
         );
       } catch (error) {
         assert.fail(
@@ -3664,7 +3727,7 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
             .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
         );
       }
-      await waitForMounted(() => browser.counts.sourceStarts === 1, 'Task AUDIO did not start browser playout');
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'foreground successor did not start browser playout');
     });
 
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
@@ -3674,22 +3737,28 @@ test('mounted Task AUDIO ACK waits for successful P1 playout and never reports f
       browser.endLatestSource();
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack'),
-        'Task AUDIO successful playout did not emit its exact ACK',
+        'foreground successor playout did not emit its exact ACK',
       );
     });
     const acknowledgements = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
     assert.equal(acknowledgements.length, 1);
-    assert.equal(acknowledgements[0].params.response_id, 'mounted-task-audio-success-response');
-    assert.equal(acknowledgements[0].params.response_generation, 4);
-    assert.equal(acknowledgements[0].params.surface, 'audio');
-    assert.equal(acknowledgements[0].params.unit_id, 'mounted-task-audio-success-unit');
+    assert.equal(acknowledgements[0].params.response_id, 'mounted-task-audio-foreground-response');
+    assert.equal(acknowledgements[0].params.response_generation, 3);
+    assert.equal(acknowledgements[0].params.surface, 'text');
+    assert.equal(acknowledgements[0].params.unit_id, 'mounted-task-audio-foreground-unit');
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
-    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
+    const syntheses = calls.filter(call => call.method === 'live_voice.speech.synthesize_batch');
+    assert.equal(syntheses.length, 1);
+    assert.equal(syntheses[0].params.response.response_id, 'mounted-task-audio-foreground-response');
     const p2Activations = calls.filter(call => call.method === 'live_voice.composition.p2.activate');
     assert.equal(p2Activations.length, 2);
     assert.deepEqual(p2Activations[1].params, p2Activations[0].params, 'media start must replay the exact P2 activation binding');
     assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 1);
-    const playoutReceiptIndex = calls.findIndex(call => call.method === 'live_voice.media.playout_receipt');
+    const playoutReceiptIndex = calls.findIndex(
+      call =>
+        call.method === 'live_voice.media.playout_receipt' &&
+        call.params.response_id === 'mounted-task-audio-foreground-response',
+    );
     const presentationAckIndex = calls.findIndex(call => call.method === 'live_voice.composition.p2.presentation.ack');
     assert.equal(playoutReceiptIndex >= 0 && playoutReceiptIndex < presentationAckIndex, true);
   } finally {

@@ -2099,6 +2099,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       return disposition;
     }
+    if (disposition.task_notification && pendingUnifiedFinalRef.current !== null) {
+      // This poll completed after a newer authoritative voice final took the
+      // foreground. Leave the unacknowledged Task presentation to the server
+      // recovery owner; an older response generation must have zero local
+      // UI, TTS, ACK, failure or history effects here.
+      setP2NotificationWakeEpoch(epoch => epoch + 1);
+      return disposition;
+    }
     if (!disposition.task_notification && terminalAnnouncementStateRef.current === 'fetching' && terminalAnnouncementTaskIdRef.current !== null) {
       updateTerminalAnnouncementState('queued');
     }
