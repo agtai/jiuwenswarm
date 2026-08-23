@@ -3539,6 +3539,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingUnifiedFinalRef.current !== null ||
         pendingPresentationAttemptRef.current !== null ||
         pendingBargeInRef.current !== null ||
+        // A generation-time listening window, and the interruption it issues,
+        // are foreground work: a Task announcement must not take the
+        // microphone away from a speaker who is replacing an answer.
+        generationCaptureRef.current !== null ||
+        pendingGenerationInterruptRef.current !== null ||
         activeVoiceResponseRef.current !== null ||
         productTextStatus === 'waiting' ||
         activationOwnerRef.current?.hasPendingSubmission() ||
