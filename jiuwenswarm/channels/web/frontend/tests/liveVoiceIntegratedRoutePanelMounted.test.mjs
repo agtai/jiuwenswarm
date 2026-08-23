@@ -11968,6 +11968,101 @@ test('mounted Task notification stands down for the speaker and is spoken once t
   }
 });
 
+test('mounted browser takeover during generation-time listening surrenders the poll privilege', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-takeover-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '再讲一个。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+
+    // Another same-origin tab takes browser capture ownership. This is the
+    // exact surrender path the ownership lifecycle drives, and it is not the
+    // Exit path: it hands the microphone over without retiring the voice loop.
+    await act(async () => {
+      await controlRef.current.closeSession(sessionId);
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    assert.equal(responder.interruptCalls.length, 0, 'a surrendered capture must not interrupt anything');
+
+    // The outstanding answer lands with no capture owner, so it is retained and
+    // acknowledged rather than spoken, which releases the foreground fence.
+    await act(async () => {
+      responder.releaseHeldAnswer(utterances[0]);
+      await waitForMounted(
+        () =>
+          responder.calls.filter(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.ack' &&
+              call.params.response_id === responder.submits[0].response.response_id,
+          ).length === 1,
+        'the outstanding answer was never settled after the surrender',
+      );
+    });
+
+    // Ownership comes back and an ordinary capture starts. Ordinary capture
+    // never gets to keep the notification poll alive; only a live
+    // generation-time listening window does. A window left behind by the
+    // surrendered capture would silently grant that privilege here.
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(
+        () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status ?? ''),
+        `the reacquired capture did not start; states=${states
+          .slice(-8)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+      );
+      if (states.at(-1)?.p1_status === 'starting') await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the reacquired capture did not listen');
+    });
+    // A Task announcement published now must not be adopted: an ordinary
+    // capture yields the poll, so nothing may reach the announcement state
+    // machine while the microphone is open for a plain turn.
+    await act(async () => {
+      responder.publishAgentAnswer(
+        {
+          interaction_id: responder.submits[0].params.interaction_id,
+          response_id: 'mounted-generation-takeover-task',
+          response_generation: 91,
+        },
+        '后台任务已完成。',
+        responder.submits[0].params,
+        'server.task_notification',
+      );
+      await new Promise(resolve => setTimeout(resolve, 80));
+    });
+    assert.equal(
+      states.some(state => state.terminal_announcement_state !== 'idle'),
+      false,
+      `a surrendered generation window kept the notification poll alive during ordinary capture; states=${states
+        .slice(-10)
+        .map(state => `${state.p1_status}/${state.terminal_announcement_state}`)
+        .join(' | ')}`,
+    );
+    assert.equal(responder.interruptCalls.length, 0);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted Exit during generation-time listening issues no interruption and no replacement turn', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-exit-session';

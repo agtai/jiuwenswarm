@@ -136,7 +136,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 72 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
-| Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing + 8 new); `test:live-voice-l0-measurement` 3 passed |
+| Frontend `npm run test:live-voice-integrated-web` | 481 passed (472 pre-existing + 9 new); `test:live-voice-l0-measurement` 3 passed |
 | `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3923 passed, 11 failed — the identical 11 pre-existing failures (see §5) |
 
 ### 3.1 Mutation checks
@@ -182,13 +182,21 @@ Frontend (mounted panel suite, baseline green):
 | Deferred attempt keeps the foreground busy forever | KILLED |
 | Settled speaker never resumes the announcement | KILLED |
 | Playout no longer yields to a live speaker | KILLED |
+| Surrendered capture leaves its listening window behind | **SURVIVED** |
 
 The interruption-admission mutant is killed through the rejection path. The
 success path is guarded by the same `ownsInterruptionOutcome()` predicate the
 mutant removes, so it is covered by that mutant rather than by a second case;
 no separate success-path oracle was written.
 
-The surviving mutant is a defence-in-depth guard: with it removed, a playout-time
+The surrendered-window mutant survives: with the cleanup removed, the stale
+window is still never observable from outside, because the notification poll is
+independently gated by the presentation ACK and active-response conditions that
+hold at that point. The cleanup is kept as the correct owner-surrender
+behaviour and is recorded here as defence-in-depth rather than claimed as
+covered. It was found by writing the takeover case, not by the case failing.
+
+The other surviving mutant is a defence-in-depth guard: with it removed, a playout-time
 speech-start would additionally invoke the generation handler, which then returns
 without effect because no generation listening window is bound. It is retained
 for intent clarity and is recorded here as uncovered rather than claimed.
@@ -199,7 +207,7 @@ for intent clarity and is recorded here as uncovered rather than claimed.
 |---|---|
 | Exit | Backend `test_exit_owns_the_interaction_and_refuses_a_later_interruption`; frontend `mounted Exit during generation-time listening…` |
 | Session switch | Frontend `mounted Session switch during generation-time listening…`, which also asserts a retired Session stops polling notifications, plus `mounted in-flight interruption from a retired Session cannot touch its successor`, which holds a rejected interruption on the wire across the switch and asserts the successor never sees its failure or reason |
-| Browser capture ownership | Ownership is owned by `useProductVoiceBrowserOwnership` in the parent ChatPanel, which surrenders by driving the same `close()` the Exit case exercises, so the Exit coverage above is the ownership coverage. Within the panel, generation listening starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture; only the exact bound response relaxes that barrier. No dedicated cross-tab takeover × generation-window case was written |
+| Browser capture ownership | Frontend `mounted browser takeover during generation-time listening surrenders the poll privilege` drives the exact surrender entry point the ownership lifecycle uses (`closeSession`), which is **not** the Exit path. Writing it found that `closeSession` cleaned the P1 owner and capture binding but left the generation-time listening window behind; that is now cleaned too. Generation listening otherwise starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture |
 | Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification stands down for the speaker and is spoken once they finish` — it is not spoken over the speaker, the P1 route carrying their utterance is never torn down, and the exact retained announcement is spoken and acknowledged once after they finish |
 
 ## 5. Explicit non-claims

@@ -6448,6 +6448,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (p1VoiceCaptureBindingRef.current?.session_id === sessionId) {
         p1VoiceCaptureBindingRef.current = null;
       }
+      // Browser capture ownership just moved away. The generation-time
+      // listening window belonged to the capture that was surrendered, and it
+      // is the one thing that lets the notification poll run during a capture;
+      // leaving it behind would grant that privilege to whatever starts next.
+      if (generationCaptureRef.current?.fence.session_id === sessionId) {
+        generationCaptureRef.current = null;
+      }
     }
   };
 
