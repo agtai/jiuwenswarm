@@ -80,7 +80,11 @@ export interface ProductP1Recognition {
   readonly voice_commit_receipt: string;
 }
 
-type ProductP1Request = (method: string, params: Record<string, unknown>) => Promise<unknown>;
+type ProductP1Request = (
+  method: string,
+  params: Record<string, unknown>,
+  options?: Readonly<{ timeoutMs?: number; signal?: AbortSignal }>,
+) => Promise<unknown>;
 
 interface PendingProductPlayout {
   readonly response: Readonly<AudioResponseRef>;
@@ -660,7 +664,11 @@ export class ProductP1VoiceRouteOwner {
       this.#speech = new GatewayBatchSpeechClient({
         enabled: true,
         transport: {
-          request: async <T = unknown>(method: string, params?: Record<string, unknown>) => (await this.#request(method, params ?? {})) as T,
+          request: async <T = unknown>(
+            method: string,
+            params?: Record<string, unknown>,
+            options?: Readonly<{ timeoutMs?: number; signal?: AbortSignal }>,
+          ) => (await this.#request(method, params ?? {}, options)) as T,
         },
         scope: {
           subject_id: requiredText(activation.subject_id, 'subject_id'),
@@ -1388,7 +1396,11 @@ export class ProductP1VoiceRouteOwner {
     this.#speech = new GatewayBatchSpeechClient({
       enabled: true,
       transport: {
-        request: async <T = unknown>(method: string, params?: Record<string, unknown>) => (await this.#request(method, params ?? {})) as T,
+        request: async <T = unknown>(
+          method: string,
+          params?: Record<string, unknown>,
+          options?: Readonly<{ timeoutMs?: number; signal?: AbortSignal }>,
+        ) => (await this.#request(method, params ?? {}, options)) as T,
       },
       scope: {
         subject_id: subjectId,

@@ -19,6 +19,10 @@ import {
 } from '../node_modules/.cache/live-voice-browser-dedicated-media/browserDedicatedMediaRoute.mjs';
 
 const captureProcessorSource = readFileSync(new URL('../src/features/live-voice/formal/adapters/liveVoiceCaptureProcessor.js', import.meta.url), 'utf8');
+const productP1VoiceRouteSource = readFileSync(
+  new URL('../src/features/live-voice/formal/productP1VoiceRoute.ts', import.meta.url),
+  'utf8',
+);
 const MANUAL_EOT_FALLBACK = Object.freeze({
   status: 'fallback',
   requested_capability: 'media.end_of_turn.v1',
@@ -2187,8 +2191,8 @@ test('formal P1 consumes the streaming STT final without replaying batch audio',
       queueMicrotask(() => socket.open(binding));
       return socket;
     },
-    request: async (method, params) => {
-      calls.push([method, params]);
+    request: async (method, params, options) => {
+      calls.push([method, params, options]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return streamingMediaActivation(binding);
       if (method === 'live_voice.speech.recognize_streaming_result') {
         return streamingRecognitionResult(params);
@@ -2220,6 +2224,7 @@ test('formal P1 consumes the streaming STT final without replaying batch audio',
     calls.map(([method]) => method),
     [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_streaming_result']
   );
+  assert.deepEqual(calls[1][2], { timeoutMs: 38_000, signal: undefined });
   assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
 });
 
@@ -3587,6 +3592,7 @@ test('formal P1 fences successor capture while retained close is in flight', asy
 
 async function runConcurrentCaptureJourney(options = {}) {
   const calls = [];
+  const requestOptions = [];
   const statuses = [];
   const statusSnapshots = [];
   const sockets = [];
@@ -3901,8 +3907,9 @@ async function runConcurrentCaptureJourney(options = {}) {
       socketOpenTasks.push(openTask);
       return socket;
     }),
-    request: (request = async (method, params) => {
+    request: (request = async (method, params, transportOptions) => {
       calls.push([method, params]);
+      requestOptions.push([method, transportOptions]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
         activationCount += 1;
         const binding = makeUplinkBinding(params, activationCount);
@@ -3942,9 +3949,18 @@ async function runConcurrentCaptureJourney(options = {}) {
                   interrupt_response: false,
                 }
               : MANUAL_EOT_FALLBACK,
+          ...(options.streamingRecognition === true
+            ? {
+                streaming_recognition: true,
+                streaming_degradation: null,
+              }
+            : {}),
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
+      }
+      if (method === 'live_voice.speech.recognize_streaming_result') {
+        return streamingRecognitionResult(params, 'duplex streaming text');
       }
       if (method === 'live_voice.speech.recognize_batch') {
         return {
@@ -4576,6 +4592,7 @@ async function runConcurrentCaptureJourney(options = {}) {
   return {
     owner,
     calls,
+    requestOptions,
     statuses,
     statusSnapshots,
     sockets,
@@ -4648,6 +4665,43 @@ async function runFirstRecoveredRetry(journey, afterCaptureStarted = async () =>
   await playing;
   return { owner, recognition, statuses };
 }
+
+test('formal P1 preserves the streaming finalize budget for initial and successor captures', async () => {
+  const journey = await runConcurrentCaptureJourney({ streamingRecognition: true });
+
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  const successorRecognition = await journey.owner.stopAndRecognize();
+  assert.deepEqual(successorRecognition, {
+    text: 'duplex streaming text',
+    voice_commit_receipt: 'streaming-voice-receipt-1',
+  });
+  assert.deepEqual(
+    journey.requestOptions
+      .filter(([method]) => method === 'live_voice.speech.recognize_streaming_result')
+      .map(([, options]) => options),
+    [
+      { timeoutMs: 38_000, signal: undefined },
+      { timeoutMs: 38_000, signal: undefined },
+    ],
+  );
+  assert.equal(
+    journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    0,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 initial and successor Speech adapters forward the exact request options object', () => {
+  const exactSpeechRequestAdapter =
+    /request: async <T = unknown>\(\s*method: string,\s*params\?: Record<string, unknown>,\s*options\?: Readonly<\{ timeoutMs\?: number; signal\?: AbortSignal \}>,\s*\) => \(await this\.#request\(method, params \?\? \{\}, options\)\) as T,/g;
+
+  assert.equal(
+    [...productP1VoiceRouteSource.matchAll(exactSpeechRequestAdapter)].length,
+    2,
+    'initial and successor Gateway Speech adapters must pass the same timeout/signal options object unchanged',
+  );
+});
 
 test('formal P1 dedicated downlink ACKs scheduled audio and receipts only rendered audio', async () => {
   const journey = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });

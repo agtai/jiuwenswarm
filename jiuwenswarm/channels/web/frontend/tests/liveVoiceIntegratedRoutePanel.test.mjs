@@ -1662,6 +1662,17 @@ test('successor capture admission uses the authoritative activation owner instea
     'an already-active successor owner must not lose its only scheduled capture to a lagging React publication',
   );
 });
+test('formal P1 receives the exact Web request function without an option-dropping panel adapter', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const admission = source.match(
+    /const startProductVoiceCaptureOwned = async \(\) => \{(?<body>[\s\S]*?)\n  const startProductVoiceCapture =/,
+  )?.groups?.body;
+
+  assert.ok(admission);
+  assert.match(admission, /new ProductP1VoiceRouteOwner\([\s\S]*?request: productRequest,/);
+  assert.doesNotMatch(admission, /request: \(method, params\) => productRequest\(method, params\)/);
+});
+
 test('voice Task origin is exact-session and exact-committed-text only', () => {
   const origin = Object.freeze({
     session_id: 'session-voice',

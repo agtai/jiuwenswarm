@@ -4302,7 +4302,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       const nextOwner = new ProductP1VoiceRouteOwner({
         enabled: true,
         expected_origin: window.location.origin,
-        request: (method, params) => productRequest(method, params),
+        request: productRequest,
         on_status: (status, reason) => {
           if (callbackOwner !== null && p1VoiceOwnerRef.current === callbackOwner) {
             if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
