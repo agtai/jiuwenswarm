@@ -1,8 +1,8 @@
 # Agent generation-time interruption — implementation evidence (2026-08-23)
 
 **Branch:** `hx/0823_generation_interruption`
-**Base:** `7c589dcda` (`hx/0812_live_voice_w3` at the time of writing)
-**Named-ref caveat:** that ref has now been amended **three** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda`, all carrying the same subject, and the last pair differ by 18 files). It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
+**Base:** `24e7e61065a609b30462dcca6b77515c6fa1fe56` (`hx/0812_live_voice_w3` at the time of writing)
+**Named-ref caveat:** that ref has now been amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject; the last pair differ by 10 files, the pair before that by 18). It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
 **Scope:** hands-free speech that arrives while an Agent answer is still being
 generated can now stop or replace that exact answer.
 
@@ -128,7 +128,7 @@ because the speaker asked for that answer to stop existing.
 it opens a microphone between turn submission and first audio, which changes
 microphone occupancy, echo exposure and capture cost for every hands-free turn.
 With the flag off the browser behaves exactly as before -- no second microphone,
-no interruption -- which the unchanged 477-case baseline suite demonstrates. This
+no interruption -- which the unchanged 478-case baseline suite demonstrates. This
 is a browser-behaviour claim, not a protocol-surface one: the new RPC is
 registered on the server and in the Gateway allowlists regardless of the Vite
 flag, so an authenticated P2 client that sends the method explicitly gets it
@@ -144,8 +144,22 @@ method.
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 48 passed |
 | `tests/unit_tests/live_voice/test_product_composition_registry.py` | 176 passed, 6 pre-existing failures |
-| Frontend `npm run test:live-voice-integrated-web` | 491 passed (477 pre-existing + 14 new); `test:live-voice-l0-measurement` 4 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3955 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
+| Frontend `npm run test:live-voice-integrated-web` | 492 passed (478 pre-existing + 14 new); `test:live-voice-l0-measurement` 4 passed |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3957 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
+
+One intermittent failure was observed and is reported rather than hidden. In a
+single focused run immediately after the ten-minute full sweep,
+`test_partial_activation_failure_rolls_back_runtime[start_false-...]` failed on
+`assert result.reason is expected_reason`. It did not reproduce in six further
+runs, four of them under eight busy-loop processes. The mechanism was then
+pinned down directly: that test's fixture builds the adapter with
+`cleanup_timeout_seconds=0.02`, and lowering it to `0.0001` reproduces exactly
+the observed assertion -- the bounded rollback wait expires and the result
+becomes `ROLLBACK_FAILED` instead of the expected cause. The fixture, the test
+and the activation/rollback path are all untouched by this change (this branch
+adds 57 lines to `product_p2_interaction_adapter.py`, none of them on that
+path, and zero lines to that test file), so this is a pre-existing 20 ms
+timing margin, not a regression. A reviewer running under load may hit it.
 
 ### 3.1 Mutation checks
 
@@ -247,16 +261,6 @@ speech-start would additionally invoke the generation handler, which then return
 without effect because no generation listening window is bound. It is retained
 for intent clarity and is recorded here as uncovered rather than claimed.
 
-## 4. Concurrency coverage
-
-| Concurrent owner | Covered by |
-|---|---|
-| Exit | Backend `test_exit_owns_the_interaction_and_refuses_a_later_interruption`; frontend `mounted Exit during generation-time listening…` |
-| Session switch | Frontend `mounted Session switch during generation-time listening…`, which also asserts a retired Session stops polling notifications, plus `mounted in-flight interruption from a retired Session cannot touch its successor`, which holds a rejected interruption on the wire across the switch and asserts the successor never sees its failure or reason |
-| Browser capture ownership | Frontend `mounted browser takeover during generation-time listening surrenders the poll privilege` drives the exact surrender entry point the ownership lifecycle uses (`closeSession`), which is **not** the Exit path. Writing it found that `closeSession` cleaned the P1 owner and capture binding but left the generation-time listening window behind; that is now cleaned too. Generation listening otherwise starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture |
-| Production Registry -> lease -> Runtime | Backend `test_product_p2_generation_interrupt_reaches_the_runtime_round` drives the real `handle_p2_interrupt_generation` and asserts the effects and round cancellation the Runtime must have produced; breaking either hop kills it |
-| Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification stands down for the speaker and is spoken once they finish` — it is not spoken over the speaker, the P1 route carrying their utterance is never torn down, and the exact retained announcement is spoken and acknowledged once after they finish |
-
 ### 3.2 Invariants with no mutation-sensitive oracle
 
 Stated so they are not mistaken for covered:
@@ -269,6 +273,16 @@ Stated so they are not mistaken for covered:
   only through P2 recovery/successor activation, which no mounted case drives.
   Cross-Session abandonment of an owner with pending work is pre-existing
   cleanup behaviour shared with barge-in and was not changed here.
+
+## 4. Concurrency coverage
+
+| Concurrent owner | Covered by |
+|---|---|
+| Exit | Backend `test_exit_owns_the_interaction_and_refuses_a_later_interruption`; frontend `mounted Exit during generation-time listening…` |
+| Session switch | Frontend `mounted Session switch during generation-time listening…`, which also asserts a retired Session stops polling notifications, plus `mounted in-flight interruption from a retired Session cannot touch its successor`, which holds a rejected interruption on the wire across the switch and asserts the successor never sees its failure or reason |
+| Browser capture ownership | Frontend `mounted browser takeover during generation-time listening surrenders the poll privilege` drives the exact surrender entry point the ownership lifecycle uses (`closeSession`), which is **not** the Exit path. Writing it found that `closeSession` cleaned the P1 owner and capture binding but left the generation-time listening window behind; that is now cleaned too. Generation listening otherwise starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture |
+| Production Registry -> lease -> Runtime | Backend `test_product_p2_generation_interrupt_reaches_the_runtime_round` drives the real `handle_p2_interrupt_generation` and asserts the effects and round cancellation the Runtime must have produced; breaking either hop kills it |
+| Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification stands down for the speaker and is spoken once they finish` — it is not spoken over the speaker, the P1 route carrying their utterance is never torn down, and the exact retained announcement is spoken and acknowledged once after they finish |
 
 ## 5. Cancellation is tied to a fenceable target, not to producing the effects
 
@@ -293,7 +307,7 @@ cancel nothing: there is no fenceable live target at all.
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
 * The 11 failures in the full backend sweep are pre-existing on the base commit
-  `7c589dcda` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  `24e7e6106` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
   six in `test_product_composition_registry`, `test_task_progress_return`) and
   three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
   `test_upload_storage`). Each was reproduced by running the same files in a
