@@ -1068,3 +1068,16 @@
 - 回滚：默认切换验收完成后，回滚窗口不再依赖长期部署开关；若当前实现发生已证实回归，使用有边界的代码回退/修复并保留旧客户端单条兼容。该决定不授权 remote ref update。
 - 证据：[P2 default-on evidence](../evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md)。
 - 重新评估条件：显式 `2..16` 无法保持严格绑定/顺序/authoritative barrier；旧客户端缺省单条路径失败；生产 `16` 在真实负载下产生有证据的 backpressure、丢序或错误授权；或固定语料证明另一有界值需要成为新产品默认。重新评估不自动恢复环境开关。
+
+## D-095 接受 Agent 生成期插话的精确围栏与取代
+
+- 日期：2026-08-23
+- 状态：Accepted scoped 实现决定（基线 `67381193a53a578097c187b81950260c43075192`，分支 `hx/0823_generation_interruption`）。本决定关闭"生成期免提语音无法中断或取代该回答"这一实现缺口，不授予物理、延迟、flag-on 上线、controlled-candidate、feature-complete、Production 或 `develop` credit。
+- 围栏语义决定：生成期插话对一个精确 response 同时关闭 TEXT 与 AUDIO 两个 presentation surface、作废其待认领的 `ui.render`/`audio.enqueue` effect、发出一次 `playback.stop` 并一次性请求 response cancel。此后该 response 的 token、final、TTS 入队、presentation ACK 与 assistant history 投影全部被 CR 拒绝。playout-time barge-in 保持更窄的既有语义（只关 AUDIO，让仍有价值的回答继续渲染），两者不合并。
+- 取消范围决定：`interrupt_generation` 在接口层不接受任何 cancellation scope 参数，运行时恒定构造 `round.cancel` 指向精确 conversational round。它在结构上无法扩大为 `task.cancel`；由该 round 创建的后台 Task 继续运行、继续保有自身 authority、继续通过 Task 通知路径播报。浏览器侧的 durable operation 参数键集合同样不包含任何 scope 键。
+- 取代原子性决定：`submit_committed_turn(supersedes=ref)` 在提交替换 turn 之前完成围栏，因此一个 interaction 不会同时存在两个未围栏 response，被取代回答的输出也无法与新回答交错。`supersedes` 进入 retained admission fingerprint，同一 request_id 的重放不会二次打断。目标若已自然结束不视为错误，返回 `ALREADY_SETTLED` 并把这段语音作为普通下一轮接纳，绝不丢弃用户已说出的内容。
+- 浏览器监听窗口决定：生成期监听窗口绑定到它可能取代的精确 response；只有 provider speech-start 才触发围栏，EOT 仍是唯一的识别与提交边界。窗口内无人说话时以 `abandonCapture` 释放：该释放走完与识别相同的上行结算（含 Agent 播放所依赖的已确认帧数），但不发起任何识别请求，因此静默释放不产生首音延迟。P2 通知轮询为这一个窗口保持活跃——否则回答必须等到用户停止说话才能到达，恰好放大本能力要打算消除的延迟。
+- 开关与回退决定：`VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` 默认关闭。开启会在提交与首音之间打开麦克风，改变每一轮免提的麦克风占用、回声暴露与采集成本。关闭时行为与既有实现完全一致，由未改变的 466 例累积套件证明。
+- 证据与判读：新增后端 `test_generation_time_interruption.py` `11 passed`；`test_agent_conversation_runtime.py` `72 passed`；conversation runtime `50 passed`；P2 adapter `47 passed`；前端 `npm run test:live-voice-integrated-web` `472 passed`（466 既有 + 6 新增）。后端 7 个变异体全部被杀死，前端 8 个变异体杀死 7 个，存活的一个是纵深防御守卫且已在证据中如实标注为未覆盖。完整 live_voice 后端套件中的 8 项失败已在基线 commit 的干净 worktree 中复现，与本改动无关。详见 [evidence](../evidence/GENERATION_TIME_INTERRUPTION_20260823.md)。
+- 明确非声明：未做真机麦克风/TTS 旅程；未测量生成期监听窗口的延迟；生成期开麦下的回声与 double-talk 行为未评估；无 flag-on 上线、A/B 或回退证据；未新增前端挂载的 Task 通知旅程用例，该并发面由后端用例覆盖。
+- 重新评估条件：需要让插话触及 `task.cancel` 或任何 Task authority；需要在 EOT 之前提交语音；需要第二个打断 authority 或让 barge-in 与生成期围栏合并；需要在窗口内做识别以判断是否释放；需要默认开启而无物理与延迟证据；或把本次自动化与变异证据冒充物理、feature-complete、controlled-candidate 或产品验收。

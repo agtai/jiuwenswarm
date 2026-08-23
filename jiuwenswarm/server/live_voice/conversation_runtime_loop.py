@@ -83,6 +83,25 @@ class BargeInResult:
 
 
 @dataclass(frozen=True, slots=True)
+class GenerationInterruptionResult:
+    """One exact generation-time fence over an unfinished response.
+
+    Unlike barge-in, which closes only AUDIO so a still-useful answer can keep
+    rendering, this fence closes every presentation surface of the exact target
+    and cancels it once.  It therefore owns the complete token/final/TTS/ACK/
+    history boundary a replacement turn needs, and it never names a Task.
+    """
+
+    action_id: str
+    ref: ResponseRef
+    applied: bool
+    replayed: bool
+    interrupted_state: ResponseState
+    cancel_requested: bool
+    effect_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseCancelResult:
     command_id: str
     applied: bool
@@ -190,6 +209,12 @@ class ConversationRuntimeLoop:
             str, tuple[ResponseRef, asyncio.Future[ResponseCancelResult]]
         ] = {}
         self._playback_stopped: set[ResponseRef] = set()
+        self._generation_interrupt_fingerprints: dict[str, ResponseRef] = {}
+        self._generation_interrupt_results: dict[str, GenerationInterruptionResult] = {}
+        self._generation_interrupt_errors: dict[str, Exception] = {}
+        self._pending_generation_interrupt: dict[
+            str, tuple[ResponseRef, asyncio.Future[GenerationInterruptionResult]]
+        ] = {}
 
     @property
     def enabled(self) -> bool:
@@ -565,6 +590,54 @@ class ConversationRuntimeLoop:
             self.post_barge_in(action_id, ref, cancel_response=cancel_response)
         )
 
+    def post_generation_interrupt(
+        self, action_id: str, ref: ResponseRef
+    ) -> asyncio.Future[GenerationInterruptionResult]:
+        action_id = self._require_id(action_id, "action_id")
+        running = self._require_admission()
+        pending = self._pending_generation_interrupt.get(action_id)
+        if pending is not None:
+            pending_ref, future = pending
+            if pending_ref != ref:
+                raise ConversationRuntimeLoopViolation(
+                    "GENERATION_INTERRUPT_ACTION_CONFLICT",
+                    "a generation interrupt action identifier cannot change target",
+                    ErrorCode.CONFLICT,
+                )
+            return future
+        prior_ref = self._generation_interrupt_fingerprints.get(action_id)
+        if prior_ref is not None:
+            if prior_ref != ref:
+                raise ConversationRuntimeLoopViolation(
+                    "GENERATION_INTERRUPT_ACTION_CONFLICT",
+                    "a generation interrupt action identifier cannot change target",
+                    ErrorCode.CONFLICT,
+                )
+            error = self._generation_interrupt_errors.get(action_id)
+            if error is not None:
+                return self._failed_future(running, error)
+            return self._resolved_future(
+                running,
+                replace(self._generation_interrupt_results[action_id], replayed=True),
+            )
+        future = self._post(
+            lambda: self._generation_interrupt(action_id, ref), control=True
+        )
+        self._pending_generation_interrupt[action_id] = (ref, future)
+        future.add_done_callback(
+            lambda completed: self._clear_pending_generation_interrupt(
+                action_id, completed
+            )
+        )
+        return future
+
+    async def interrupt_generation(
+        self, action_id: str, ref: ResponseRef
+    ) -> GenerationInterruptionResult:
+        return await self._await_future(
+            self.post_generation_interrupt(action_id, ref)
+        )
+
     async def claim_effects(
         self, *, limit: int | None = None
     ) -> tuple[ConversationEffect, ...]:
@@ -610,6 +683,13 @@ class ConversationRuntimeLoop:
             return len(invalidated)
 
         return await self._submit(apply, control=True)
+
+    def response_fence_state(
+        self, ref: ResponseRef
+    ) -> tuple[bool, ResponseState] | None:
+        """Expose the exact CR-A response fence for output admission checks."""
+
+        return self._runtime.response_fence_state(ref)
 
     def snapshot(self) -> ConversationRuntimeLoopSnapshot:
         worker_running = self._worker is not None and not self._worker.done()
@@ -823,6 +903,98 @@ class ConversationRuntimeLoop:
             raise
         self._cancel_results[command_id] = result
         return result
+
+    def _generation_interrupt(
+        self, action_id: str, ref: ResponseRef
+    ) -> GenerationInterruptionResult:
+        action_id = self._require_id(action_id, "action_id")
+        prior_ref = self._generation_interrupt_fingerprints.get(action_id)
+        if prior_ref is not None:
+            if prior_ref != ref:
+                raise ConversationRuntimeLoopViolation(
+                    "GENERATION_INTERRUPT_ACTION_CONFLICT",
+                    "a generation interrupt action identifier cannot change target",
+                    ErrorCode.CONFLICT,
+                )
+            prior_error = self._generation_interrupt_errors.get(action_id)
+            if prior_error is not None:
+                raise prior_error
+            return replace(self._generation_interrupt_results[action_id], replayed=True)
+
+        self._generation_interrupt_fingerprints[action_id] = ref
+        try:
+            result = self._apply_new_generation_interrupt(action_id, ref)
+        except Exception as error:
+            self._generation_interrupt_errors[action_id] = error
+            raise
+        self._generation_interrupt_results[action_id] = result
+        return result
+
+    def _apply_new_generation_interrupt(
+        self, action_id: str, ref: ResponseRef
+    ) -> GenerationInterruptionResult:
+        record = self._response_record(ref)
+        interaction = next(
+            (
+                item
+                for item in self._runtime.snapshot().interactions
+                if item.interaction_id == ref.interaction_id
+            ),
+            None,
+        )
+        if interaction is None or interaction.state is not InteractionState.OPEN:
+            # Exit already owns this interaction.  A later speech interrupt
+            # must not reopen or mutate that closing decision.
+            raise ConversationRuntimeLoopViolation(
+                "INTERACTION_NOT_OPEN",
+                "generation interruption requires an open interaction",
+                ErrorCode.CONFLICT,
+            )
+        latest = self._latest_response_record(ref.interaction_id)
+        if latest is None or latest.ref != ref:
+            raise ConversationRuntimeLoopViolation(
+                "STALE_RESPONSE_OUTPUT",
+                "generation interruption must target the latest exact response",
+                ErrorCode.STALE,
+            )
+        if record.state is ResponseState.TERMINAL:
+            raise ConversationRuntimeLoopViolation(
+                "RESPONSE_ALREADY_TERMINAL",
+                "a terminal response has no live generation to interrupt",
+                ErrorCode.CONFLICT,
+            )
+
+        effects: list[ConversationEffect] = []
+        # One fence closes TEXT and AUDIO together.  Every later produce,
+        # enqueue, ACK and history projection of this exact tuple is refused by
+        # _require_current_output / _require_acknowledgeable_output.
+        self._fence_presentation(ref, reason="generation_interrupt")
+        stop = self._emit_playback_stop_once(ref, action_id=action_id)
+        if stop is not None:
+            effects.append(stop)
+        cancel_requested = False
+        if record.cancel_state is CancelState.NONE:
+            self._runtime.request_response_cancel(ref)
+            cancel_requested = True
+            effects.append(
+                self._emit_effect("response.cancel", ref, action_id=action_id)
+            )
+        return GenerationInterruptionResult(
+            action_id=action_id,
+            ref=ref,
+            applied=bool(effects),
+            replayed=False,
+            interrupted_state=record.state,
+            cancel_requested=cancel_requested,
+            effect_ids=tuple(effect.effect_id for effect in effects),
+        )
+
+    def _clear_pending_generation_interrupt(
+        self, action_id: str, completed: asyncio.Future[GenerationInterruptionResult]
+    ) -> None:
+        pending = self._pending_generation_interrupt.get(action_id)
+        if pending is not None and pending[1] is completed:
+            del self._pending_generation_interrupt[action_id]
 
     def _clear_pending_barge(
         self, action_id: str, completed: asyncio.Future[BargeInResult]

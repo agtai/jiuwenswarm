@@ -9244,6 +9244,12 @@ class AgentWebSocketServer:
                     request_id=request.request_id,
                     session_id=request.session_id,
                 )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_INTERRUPT_GENERATION:
+                result = await registry.handle_p2_interrupt_generation(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE:
                 result = await registry.handle_p3_confirmation_issue(
                     params=params,

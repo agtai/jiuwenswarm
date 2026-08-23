@@ -345,6 +345,7 @@ export class ProductP1VoiceRouteOwner {
   readonly #socketFactory: DedicatedMediaSocketFactory;
   readonly #onStatus?: (status: ProductP1VoiceStatus, reason: string | null) => void;
   readonly #onConcurrentCaptureStarted?: () => void;
+  readonly #onGenerationSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #audio: BrowserAudioIOAdapter;
@@ -399,7 +400,9 @@ export class ProductP1VoiceRouteOwner {
   #endOfTurnDelivered = false;
   #bargeInSpeechStartDelivered = false;
   #bargeInEndOfTurnDelivered = false;
+  #generationSpeechStartDelivered = false;
   #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
+  #abandonCapturePromise: Promise<boolean> | null = null;
   #captureRotationPromise: Promise<void> | null = null;
   #captureRotationSourceId: string | null = null;
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
@@ -428,6 +431,12 @@ export class ProductP1VoiceRouteOwner {
       on_concurrent_capture_started?: () => void;
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
       on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
+      /**
+       * Provider speech-start observed while an ordinary capture is open. The
+       * hands-free loop uses this to interrupt an Agent answer that is still
+       * being generated, before any of it has been spoken.
+       */
+      on_generation_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
     }>
   ) {
     this.#enabled = input.enabled === true;
@@ -438,6 +447,7 @@ export class ProductP1VoiceRouteOwner {
     this.#onConcurrentCaptureStarted = input.on_concurrent_capture_started;
     this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
+    this.#onGenerationSpeechStart = input.on_generation_speech_start;
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
@@ -606,6 +616,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
+    this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
     this.#failureCleanupReason = null;
     this.#frames = [];
@@ -798,6 +809,101 @@ export class ProductP1VoiceRouteOwner {
     const operation = this.#stopAndRecognizeOnce();
     this.#stopAndRecognizePromise = operation;
     return operation;
+  }
+
+  /**
+   * Release an open capture that produced no utterance, without recognizing it.
+   *
+   * The hands-free loop listens while an Agent answer is still being generated.
+   * When that answer arrives and nobody spoke, the listening window has to close
+   * before playout, and paying for a recognition round-trip on silence would add
+   * exactly the first-audio latency this listening window is meant to remove.
+   * Speech and playout authority are retained, so the next capture reuses them.
+   */
+  abandonCapture(reason: string): Promise<boolean> {
+    const retained = this.#abandonCapturePromise;
+    if (retained !== null) return retained;
+    const operation = this.#abandonCaptureOnce(requiredText(reason, 'abandon_reason')).finally(() => {
+      if (this.#abandonCapturePromise === operation) this.#abandonCapturePromise = null;
+    });
+    this.#abandonCapturePromise = operation;
+    return operation;
+  }
+
+  async #abandonCaptureOnce(reason: string): Promise<boolean> {
+    // A recognition already in flight owns this capture; an utterance the user
+    // actually spoke must never be discarded by a late playout arrival.
+    if (
+      this.#closed ||
+      this.#closeRequested ||
+      this.#failureCleanupPromise !== null ||
+      this.#stopAndRecognizePromise !== null ||
+      this.#status !== 'capturing' ||
+      this.#route === null ||
+      this.#captureProviderSpeechStartObserved
+    ) {
+      return false;
+    }
+    const rotation = this.#captureRotationPromise;
+    if (rotation !== null) await rotation;
+    if (this.#status !== 'capturing' || this.#route === null || this.#captureProviderSpeechStartObserved) {
+      return false;
+    }
+    const operationGeneration = ++this.#operationGeneration;
+    const route = this.#route;
+    try {
+      this.#captureStopExpected = true;
+      try {
+        await this.#audio.stopCapture(reason);
+      } finally {
+        this.#captureStopExpected = false;
+      }
+      this.#requireCurrent(operationGeneration);
+      // Finish the uplink the same way recognition does. The acknowledged
+      // frame count is the media receipt authority the answer about to be
+      // spoken depends on, so a released listening window must settle it
+      // rather than drop it. No recognition request is made.
+      this.#drainCaptureFrames();
+      const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
+      let pending = route.leaf.flush();
+      while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
+        await waitTurn();
+        this.#requireCurrent(operationGeneration);
+        this.#drainCaptureFrames();
+        pending = route.leaf.flush();
+      }
+      if (this.#mediaSentFrames === this.#frames.length && pending.pending_frames === 0) {
+        this.#captureFramesAcked = this.#mediaSentFrames;
+        await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+      } else {
+        route.leaf.close('MEDIA_LOCAL_CLOSE');
+      }
+      this.#requireCurrent(operationGeneration);
+      if (this.#route === route) this.#route = null;
+      this.#frames = [];
+      this.#captureSpeechObserved = false;
+      this.#captureProviderSpeechStartObserved = false;
+      this.#captureLocalActivityRecencyFrames = 0;
+      this.#captureUtteranceStartFrameIndex = null;
+      this.#mediaSentFrames = 0;
+      // `#captureFramesAcked` is the retained proof that this lease really
+      // captured and delivered audio; Agent playout requires it. Releasing a
+      // silent listening window must not erase the authority the answer about
+      // to be spoken depends on, exactly as an empty recognition does not.
+      this.#endOfTurnNegotiated = false;
+      this.#pendingSpeechStart = null;
+      this.#pendingEndOfTurn = null;
+      this.#endOfTurnHandler = null;
+      this.#endOfTurnDelivered = false;
+      this.#bargeInSpeechStartDelivered = false;
+      this.#bargeInEndOfTurnDelivered = false;
+      this.#generationSpeechStartDelivered = false;
+      this.#setStatus('idle', reason);
+      return true;
+    } catch (error) {
+      await this.#fail(error);
+      throw error;
+    }
   }
 
   pauseIdleCaptureForNotification(): Promise<'paused' | 'speech_active'> {
@@ -1384,6 +1490,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
+    this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
     this.#reason = reason;
   }
@@ -1437,6 +1544,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
+    this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
     this.#l0CaptureStartedAtMs = monotonicNowMs();
     this.#l0LastFrameSentClock = null;
@@ -2609,6 +2717,31 @@ export class ProductP1VoiceRouteOwner {
     }
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
+    this.#deliverGenerationSpeechStart(operationGeneration, route);
+  }
+
+  #deliverGenerationSpeechStart(
+    operationGeneration: number,
+    route: ActiveBrowserDedicatedMediaRoute | null
+  ): void {
+    // An ordinary open capture is the hands-free listening window that runs
+    // while an Agent answer is still being generated. Playout-time barge-in
+    // owns the `playing` status separately and must not be duplicated here.
+    const event = this.#pendingSpeechStart;
+    if (
+      event === null ||
+      this.#onGenerationSpeechStart === undefined ||
+      this.#generationSpeechStartDelivered ||
+      this.#status !== 'capturing' ||
+      this.#pendingPlayout !== null ||
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    this.#generationSpeechStartDelivered = true;
+    this.#onGenerationSpeechStart(event);
   }
 
   #deliverBargeInSpeechStart(

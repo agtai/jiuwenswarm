@@ -9,12 +9,15 @@ import hashlib
 import math
 import threading
 from collections import deque
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CONTRACT_VERSION,
+    CancelScope,
     CommandEnvelope,
     ContextRef,
     ErrorCode,
@@ -49,6 +52,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoop,
     ConversationRuntimeLoopSnapshot,
     ConversationRuntimeLoopViolation,
+    GenerationInterruptionResult,
     PresentationHistoryIntent,
     ResponseCancelResult,
 )
@@ -109,12 +113,44 @@ class AgentConversationShutdownStatus(StrEnum):
     FAILED = "failed"
 
 
+class GenerationInterruptionFenceStatus(StrEnum):
+    """Why an exact generation fence did or did not change the target."""
+
+    FENCED = "fenced"
+    ALREADY_SETTLED = "already_settled"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentGenerationInterruption:
+    """One exact, replayable generation-time interruption of a live round.
+
+    ``cancel_scope`` is a fixed fact, not a parameter: this operation issues
+    ``round.cancel`` against the exact conversational round and can never widen
+    into ``task.cancel``.  A background Task created by an earlier turn keeps
+    running, keeps its own authority, and keeps reporting through the Task
+    notification path.
+    """
+
+    action_id: str
+    response_ref: ResponseRef
+    fence_status: GenerationInterruptionFenceStatus
+    fence: GenerationInterruptionResult | None
+    fence_reason: str | None
+    request_id: str | None
+    round_id: str | None
+    round_cancel: RoundCancelResult | None
+    round_cancel_reason: str | None = None
+    replayed: bool = False
+    cancel_scope: str = CancelScope.ROUND_CANCEL.value
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConversationHandle:
     request_id: str
     round_id: str
     response_ref: ResponseRef
     completion: AgentBridgeCompletionHandle
+    superseded: AgentGenerationInterruption | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,6 +584,7 @@ class _ResponseOutputState:
     notification_published: bool = True
     total_utf8: int = 0
     usable_finals: int = 0
+    fence_notice_published: bool = False
     terminal_outcome: TerminalOutcome | None = None
     terminal_event: EventEnvelope | None = None
 
@@ -681,6 +718,9 @@ class AgentConversationRuntime:
         self._ack_lock = asyncio.Lock()
         self._effect_lock = asyncio.Lock()
         self._closing_interactions: set[str] = set()
+        self._generation_interruptions: dict[str, AgentGenerationInterruption] = {}
+        self._generation_interruption_order: deque[str] = deque()
+        self._generation_interruption_lock = asyncio.Lock()
         self._consumer: asyncio.Task[None] | None = None
         self._shutdown: asyncio.Task[AgentConversationShutdownResult] | None = None
         self._started = False
@@ -1053,6 +1093,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
+        supersedes: ResponseRef | None = None,
     ) -> AgentConversationHandle:
         """Own one retained product submission from TurnCommit through dispatch.
 
@@ -1061,6 +1102,14 @@ class AgentConversationRuntime:
         cancel the coordinator or consume that outcome.  The existing
         Bridge/Harness admission and CR response-acceptance machinery is reused
         after the turn becomes committed.
+
+        ``supersedes`` names the exact response this committed speech replaces.
+        It is fenced and its round is cancelled before the replacement turn is
+        committed, so no output of the replaced response can interleave with
+        the new one.  The fence is part of the retained admission fingerprint,
+        which keeps replay of the same request_id from interrupting twice.  A
+        target that already settled is not an error; the returned handle
+        reports that fact through ``superseded``.
         """
 
         if not isinstance(commit, TurnCommit) or commit.scope != self._scope:
@@ -1083,6 +1132,25 @@ class AgentConversationRuntime:
                 "formal Agent tool policy must be a boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        if supersedes is not None:
+            if not isinstance(supersedes, ResponseRef):
+                raise AgentConversationRuntimeViolation(
+                    "INVALID_SUPERSEDED_RESPONSE",
+                    "superseded response must be a canonical ResponseRef",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if supersedes.interaction_id != commit.interaction_id:
+                raise AgentConversationRuntimeViolation(
+                    "SUPERSEDED_RESPONSE_INTERACTION_MISMATCH",
+                    "a replacement turn can only supersede its own interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if supersedes.response_id == response_id:
+                raise AgentConversationRuntimeViolation(
+                    "SUPERSEDED_RESPONSE_SELF_REFERENCE",
+                    "a replacement response cannot supersede itself",
+                    ErrorCode.CONFLICT,
+                )
         # This side-effect-free construction validates all reservation identity
         # fields before start_turn can mutate CR.
         HarnessRoundBinding(
@@ -1099,6 +1167,7 @@ class AgentConversationRuntime:
             context=context,
             channel_id=channel_id,
             allow_tools=allow_tools,
+            supersedes=supersedes,
         )
         product_entry = self._committed_turn_submissions.get(request_id)
         if product_entry is not None:
@@ -1141,6 +1210,7 @@ class AgentConversationRuntime:
                         before_dispatch=before_dispatch,
                         after_dispatch=after_dispatch,
                         allow_tools=allow_tools,
+                        supersedes=supersedes,
                     )
                 else:
                     turn_key = (commit.interaction_id, commit.turn_id)
@@ -1167,6 +1237,7 @@ class AgentConversationRuntime:
                             before_dispatch=before_dispatch,
                             after_dispatch=after_dispatch,
                             allow_tools=allow_tools,
+                            supersedes=supersedes,
                         )
                     except BaseException:
                         self._release_product_identity(claim)
@@ -2007,6 +2078,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
+        supersedes: ResponseRef | None = None,
     ) -> asyncio.Future[_AdmissionOutcome]:
         """Register one preflighted submission while admission fence is held."""
 
@@ -2117,6 +2189,7 @@ class AgentConversationRuntime:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
+                supersedes=supersedes,
             ),
             name=f"live-voice-product-turn:{request_id}",
         )
@@ -2788,6 +2861,154 @@ class AgentConversationRuntime:
         self._require_started()
         return await self._cr.barge_in(action_id, ref, cancel_response=cancel_response)
 
+    async def interrupt_generation(
+        self, *, action_id: str, ref: ResponseRef
+    ) -> AgentGenerationInterruption:
+        """Fence one unfinished response so newer committed speech can own it.
+
+        The fence is the complete boundary the replacement turn depends on:
+        every later token, final, TTS enqueue, presentation ACK and assistant
+        history projection of this exact response tuple is refused by CR.  The
+        only cancellation this operation can issue is ``round.cancel`` against
+        the exact conversational round; a Task started by that round keeps its
+        own authority and is never cancelled here.
+
+        A target that already settled on its own is not an error.  The result
+        reports ``ALREADY_SETTLED`` so the caller can still admit the speech as
+        an ordinary next turn instead of discarding what the user said.
+        """
+
+        self._require_started()
+        action_id = self._require_interruption_id(action_id)
+        if not isinstance(ref, ResponseRef):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_RESPONSE_REFERENCE",
+                "generation interruption requires a canonical ResponseRef",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        async with self._generation_interruption_lock:
+            retained = self._generation_interruptions.get(action_id)
+            if retained is not None:
+                if retained.response_ref != ref:
+                    raise AgentConversationRuntimeViolation(
+                        "GENERATION_INTERRUPT_ACTION_CONFLICT",
+                        "action_id cannot change its generation interruption target",
+                        ErrorCode.CONFLICT,
+                    )
+                return replace(retained, replayed=True)
+            result = await self._apply_generation_interruption(action_id, ref)
+            self._retain_generation_interruption(action_id, result)
+            return result
+
+    async def _apply_generation_interruption(
+        self, action_id: str, ref: ResponseRef
+    ) -> AgentGenerationInterruption:
+        state = self._outputs.get(ref)
+        fence: GenerationInterruptionResult | None = None
+        fence_reason: str | None = None
+        try:
+            fence = await self._cr.interrupt_generation(action_id, ref)
+        except (
+            ConversationRuntimeLoopViolation,
+            ConversationRuntimeViolation,
+        ) as error:
+            if error.reason not in {
+                "RESPONSE_ALREADY_TERMINAL",
+                "STALE_RESPONSE_OUTPUT",
+            }:
+                raise AgentConversationRuntimeViolation(
+                    error.reason, str(error), error.code
+                ) from error
+            fence_reason = error.reason
+        status = (
+            GenerationInterruptionFenceStatus.FENCED
+            if fence is not None
+            else GenerationInterruptionFenceStatus.ALREADY_SETTLED
+        )
+        round_cancel: RoundCancelResult | None = None
+        round_cancel_reason: str | None = None
+        handle = None if state is None else state.handle
+        if handle is None:
+            round_cancel_reason = "NO_AGENT_ROUND"
+        else:
+            try:
+                round_cancel = self._harness.cancel_round(
+                    handle, self._generation_round_cancel_command(action_id, handle)
+                )
+            except HarnessRoundViolation as error:
+                round_cancel_reason = error.reason
+        return AgentGenerationInterruption(
+            action_id=action_id,
+            response_ref=ref,
+            fence_status=status,
+            fence=fence,
+            fence_reason=fence_reason,
+            request_id=None if state is None else state.request_id,
+            round_id=None if handle is None else handle.round_id,
+            round_cancel=round_cancel,
+            round_cancel_reason=round_cancel_reason,
+        )
+
+    def _generation_round_cancel_command(
+        self, action_id: str, handle: HarnessRoundHandle
+    ) -> CommandEnvelope:
+        """Build the only cancellation scope this operation may ever issue."""
+
+        binding = handle.reservation.binding
+        return CommandEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": binding.request_id,
+                "command_id": f"generation-interrupt:{action_id}",
+                "command_type": CancelScope.ROUND_CANCEL.value,
+                "issued_at": self._interruption_timestamp(),
+                "scope": binding.commit.scope.to_dict(),
+                "correlation_id": binding.correlation_id,
+                "causation_id": None,
+                "origin": {
+                    "kind": "committed_turn",
+                    "turn_id": binding.commit.turn_id,
+                    "commit_id": binding.commit.commit_id,
+                },
+                "target_ref": {"kind": "round", "id": handle.round_id},
+                "context_refs": [],
+                "required_capabilities": [CancelScope.ROUND_CANCEL.value],
+                "payload": {},
+                "extensions": {},
+            }
+        )
+
+    def _retain_generation_interruption(
+        self, action_id: str, result: AgentGenerationInterruption
+    ) -> None:
+        self._generation_interruptions[action_id] = result
+        self._generation_interruption_order.append(action_id)
+        while len(self._generation_interruption_order) > self._max_requests:
+            evicted = self._generation_interruption_order.popleft()
+            self._generation_interruptions.pop(evicted, None)
+
+    def _require_interruption_id(self, action_id: str) -> str:
+        if (
+            not isinstance(action_id, str)
+            or not action_id.strip()
+            or len(action_id) > _MAX_EFFECT_ID_CHARS
+            or len(action_id.encode("utf-8")) > _MAX_EFFECT_ID_UTF8_BYTES
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_GENERATION_INTERRUPT_ACTION",
+                "generation interruption requires a bounded non-empty action_id",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return action_id
+
+    @staticmethod
+    def _interruption_timestamp() -> str:
+        return (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+
     async def close_interaction(self, command: CommandEnvelope) -> RoundCancelResult:
         self._require_started()
         if not isinstance(command, CommandEnvelope):
@@ -2973,6 +3194,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
+        superseded: AgentGenerationInterruption | None = None,
     ) -> None:
         reservation = entry.harness_reservation
         bridge_reservation = entry.bridge_reservation
@@ -3006,6 +3228,7 @@ class AgentConversationRuntime:
                 round_id=reservation.round_id,
                 response_ref=response_ref,
                 completion=submission.completion,
+                superseded=superseded,
             )
             if after_dispatch is not None:
                 # No await occurs between scheduling the Harness/Bridge work
@@ -3081,12 +3304,19 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
+        supersedes: ResponseRef | None = None,
     ) -> None:
         try:
-            await self._commit_admitted_turn(
-                commit,
-                request_id=entry.harness_reservation.binding.request_id,
-            )
+            request_id = entry.harness_reservation.binding.request_id
+            superseded: AgentGenerationInterruption | None = None
+            if supersedes is not None:
+                # The fence runs before the replacement turn is committed, so
+                # CR can never hold two unfenced responses for one interaction
+                # and no replaced output can interleave with the new round.
+                superseded = await self.interrupt_generation(
+                    action_id=f"supersede:{request_id}", ref=supersedes
+                )
+            await self._commit_admitted_turn(commit, request_id=request_id)
             await self._complete_admission(
                 entry,
                 context=context,
@@ -3094,6 +3324,7 @@ class AgentConversationRuntime:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
+                superseded=superseded,
             )
         except BaseException as error:  # noqa: BLE001 - retained outcome truth
             try:
@@ -3138,6 +3369,28 @@ class AgentConversationRuntime:
         event = delivery.event
         state = self._outputs.get(request.response_ref)
         if state is None:
+            return
+        fence = self._cr.response_fence_state(request.response_ref)
+        if fence is None or fence[0] or fence[1] is ResponseState.TERMINAL:
+            # Generation fence.  A superseded, cancelled or settled response
+            # may not deliver any further token or final text: partial output
+            # of a replaced answer is exactly what the interrupting speaker
+            # asked to stop.  One bounded notice per response keeps the
+            # existing STALE_RESPONSE_OUTPUT contract observable without
+            # emitting one refusal per token.
+            if not state.fence_notice_published:
+                state.fence_notice_published = True
+                self._publish(
+                    AgentConversationNotification(
+                        kind="agent.output",
+                        request_id=request.request_id,
+                        round_id=request.round_id,
+                        response_ref=request.response_ref,
+                        agent_event=None,
+                        presentation_unit=None,
+                        error_reason="STALE_RESPONSE_OUTPUT",
+                    )
+                )
             return
         presentation: PresentationUnit | None = None
         error_reason: str | None = None
@@ -3771,6 +4024,7 @@ class AgentConversationRuntime:
         context: FormalContextSnapshot,
         channel_id: str,
         allow_tools: bool,
+        supersedes: ResponseRef | None = None,
     ) -> bytes:
         return canonical_json_bytes(
             {
@@ -3787,5 +4041,14 @@ class AgentConversationRuntime:
                 ],
                 "channel_id": channel_id,
                 "allow_tools": allow_tools,
+                "supersedes": (
+                    None
+                    if supersedes is None
+                    else {
+                        "interaction_id": supersedes.interaction_id,
+                        "response_id": supersedes.response_id,
+                        "response_generation": supersedes.response_generation,
+                    }
+                ),
             }
         )
