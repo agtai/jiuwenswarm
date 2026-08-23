@@ -95,7 +95,7 @@ the unchanged 466-case cumulative suite demonstrates.
 
 | Suite | Result |
 |---|---|
-| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 11 passed |
+| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 12 passed |
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 72 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
@@ -116,6 +116,11 @@ Backend (`test_generation_time_interruption.py`, baseline green):
 | Open-interaction (Exit) guard removed | KILLED |
 | `supersedes` ignored | KILLED |
 | Response cancellation not requested | KILLED |
+
+A self-review after the first implementation found the CR-B interruption replay
+ledger unbounded. Unlike barge-in, which a user triggers by control action, an
+interruption ledger grows with conversation length, so it is now oldest-first
+bounded at 256 with a test that asserts the bound directly.
 
 Frontend (mounted panel suite, baseline green):
 

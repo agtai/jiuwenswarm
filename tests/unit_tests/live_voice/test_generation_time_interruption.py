@@ -32,6 +32,11 @@ from jiuwenswarm.server.live_voice.conversation_runtime import (
     InteractionState,
     ResponseState,
 )
+from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+    _MAX_RETAINED_GENERATION_INTERRUPTS,
+    ConversationRuntimeLoop,
+    ConversationRuntimeLoopViolation,
+)
 from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessRoundHandle,
     JiuWenSwarmRoundHarness,
@@ -769,3 +774,34 @@ async def test_supersedes_must_name_a_real_prior_response_of_this_interaction() 
     assert getattr(unknown.value, "reason", None) == "STALE_RESPONSE_REFERENCE"
     assert lower.calls == 0
     await shutdown(current)
+
+
+@pytest.mark.asyncio
+async def test_interruption_replay_ledger_stays_bounded() -> None:
+    """One turn can carry one interruption, so the ledger cannot grow freely."""
+
+    loop = ConversationRuntimeLoop(scope())
+    assert await loop.start() is True
+    await loop.open_interaction("interaction-1")
+    attempts = _MAX_RETAINED_GENERATION_INTERRUPTS + 40
+    for index in range(attempts):
+        with pytest.raises(ConversationRuntimeLoopViolation) as unknown:
+            await loop.interrupt_generation(
+                f"action-{index}", ResponseRef("interaction-1", f"response-{index}", index)
+            )
+        assert unknown.value.reason == "STALE_RESPONSE_REFERENCE"
+    # Private ledgers are asserted directly: they have no product surface, and
+    # an unbounded one is exactly the defect this guards.
+    assert (
+        len(loop._generation_interrupt_fingerprints)
+        <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    )
+    assert len(loop._generation_interrupt_errors) <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    assert len(loop._generation_interrupt_order) <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    # The most recent action is still replayable.
+    with pytest.raises(ConversationRuntimeLoopViolation):
+        await loop.interrupt_generation(
+            f"action-{attempts - 1}",
+            ResponseRef("interaction-1", f"response-{attempts - 1}", attempts - 1),
+        )
+    await loop.close()

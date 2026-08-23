@@ -40,6 +40,11 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
 )
 
 
+# One hands-free turn can carry one generation interruption, so its replay
+# ledger is bounded by conversation length rather than by user control actions.
+_MAX_RETAINED_GENERATION_INTERRUPTS = 256
+
+
 class ConversationRuntimeLoopViolation(ValueError):
     def __init__(self, reason: str, message: str, code: ErrorCode) -> None:
         super().__init__(message)
@@ -212,6 +217,7 @@ class ConversationRuntimeLoop:
         self._generation_interrupt_fingerprints: dict[str, ResponseRef] = {}
         self._generation_interrupt_results: dict[str, GenerationInterruptionResult] = {}
         self._generation_interrupt_errors: dict[str, Exception] = {}
+        self._generation_interrupt_order: deque[str] = deque()
         self._pending_generation_interrupt: dict[
             str, tuple[ResponseRef, asyncio.Future[GenerationInterruptionResult]]
         ] = {}
@@ -922,6 +928,8 @@ class ConversationRuntimeLoop:
             return replace(self._generation_interrupt_results[action_id], replayed=True)
 
         self._generation_interrupt_fingerprints[action_id] = ref
+        self._generation_interrupt_order.append(action_id)
+        self._evict_retained_generation_interrupts()
         try:
             result = self._apply_new_generation_interrupt(action_id, ref)
         except Exception as error:
@@ -929,6 +937,23 @@ class ConversationRuntimeLoop:
             raise
         self._generation_interrupt_results[action_id] = result
         return result
+
+    def _evict_retained_generation_interrupts(self) -> None:
+        """Bound the replay ledger across a long hands-free conversation.
+
+        Every turn can carry one interruption, so this ledger grows with the
+        conversation rather than with a user control action.  Eviction is
+        oldest-first and never touches an action whose future is still pending.
+        """
+
+        while len(self._generation_interrupt_order) > _MAX_RETAINED_GENERATION_INTERRUPTS:
+            evicted = self._generation_interrupt_order.popleft()
+            if evicted in self._pending_generation_interrupt:
+                self._generation_interrupt_order.append(evicted)
+                return
+            self._generation_interrupt_fingerprints.pop(evicted, None)
+            self._generation_interrupt_results.pop(evicted, None)
+            self._generation_interrupt_errors.pop(evicted, None)
 
     def _apply_new_generation_interrupt(
         self, action_id: str, ref: ResponseRef
