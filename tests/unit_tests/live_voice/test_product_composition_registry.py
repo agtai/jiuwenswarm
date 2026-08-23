@@ -12689,6 +12689,17 @@ async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
         session_id="session-product",
     )
 
+    # A client-supplied cancellation scope is refused outright, not ignored.
+    scoped = await registry.handle_p2_interrupt_generation(
+        params={**params, "cancel_scope": "task.cancel"},
+        request_id="request-generation-interrupt-scoped",
+        session_id="session-product",
+    )
+    assert scoped.ok is False
+    assert cast(dict, scoped.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+
     assert interrupted.ok is True
     result = cast(dict, interrupted.payload["result"])
     assert result["status"] == "generation_interrupted"

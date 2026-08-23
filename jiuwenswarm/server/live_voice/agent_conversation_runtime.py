@@ -2877,9 +2877,13 @@ class AgentConversationRuntime:
         replaced, is not an error.  The result reports ``ALREADY_SETTLED`` so
         the caller can still admit the speech as an ordinary next turn instead
         of discarding what the user said, and no cancellation of any kind is
-        issued in that case: a cancellation is only ever the companion of a
-        fence this call actually applied, so neither the settled round nor the
-        successor that replaced it is touched.
+        issued in that case: cancellation belongs to a target that is still a
+        fenceable live response, so neither the settled round nor the successor
+        that replaced it is touched.  A live target that another action already
+        fenced -- typically ``barge_in(cancel_response=True)`` -- still gets its
+        round cancelled: barge-in never touches the Harness, so that round is
+        still generating and is exactly what an interrupting speaker is asking
+        to stop.
         """
 
         self._require_started()
