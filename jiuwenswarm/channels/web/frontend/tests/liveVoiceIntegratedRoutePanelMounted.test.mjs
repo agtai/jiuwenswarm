@@ -11846,7 +11846,7 @@ test('mounted Session switch during generation-time listening abandons it withou
   }
 });
 
-test('mounted Task notification survives a generation interruption without being spoken over it', async () => {
+test('mounted Task notification stands down for the speaker and is spoken once they finish', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-task-session';
   const controlRef = { current: null };
@@ -11895,27 +11895,61 @@ test('mounted Task notification survives a generation interruption without being
       0,
       'a Task notification that was never spoken must not be acknowledged',
     );
-    // The notification is retained for recovery rather than dropped.
+    // It stands down for the speaker instead of failing, and the P1 route that
+    // is carrying their words is left completely intact.
     assert.equal(
-      states.some(state => state.terminal_announcement_state === 'recovering'),
+      states.some(state => state.terminal_announcement_state === 'queued'),
       true,
-      `the Task notification was silently dropped; states=${states
+      `the Task notification did not stand down for the speaker; states=${states
         .slice(-10)
         .map(state => `${state.p1_status}/${state.terminal_announcement_state}`)
         .join(' | ')}`,
     );
-    // KNOWN LIMITATION, asserted so it cannot be forgotten: a Task terminal
-    // announcement that lands while the speaker is mid-interruption still
-    // rebuilds the P1 route to retry, which discards the utterance in progress.
-    // Generation-time listening is what makes this reachable at all, so it is a
-    // blocker for turning the flag on, not for this implementation boundary.
-    // When Task announcement recovery learns to wait for the speaker instead,
-    // this assertion is expected to fail and must be replaced by the resumed
-    // announcement it will then produce.
     assert.equal(
-      states.some(state => state.p1_status === 'cleanup_pending'),
-      true,
-      'the known Task-announcement-versus-speaker limitation changed shape',
+      states.some(state => ['cleanup_pending', 'closed', 'failed'].includes(state.p1_status)),
+      false,
+      `the speaker route was torn down by a Task announcement; states=${states
+        .slice(-10)
+        .map(state => `${state.p1_status}/${state.terminal_announcement_state}`)
+        .join(' | ')}`,
+    );
+    assert.equal(
+      responder.calls.filter(
+        call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === taskResponse.response_id,
+      ).length,
+      0,
+      'the announcement must not be spoken over a live speaker',
+    );
+
+    // The speaker finishes. The exact retained announcement is now spoken and
+    // acknowledged, without a second fetch and without rebuilding P1.
+    await act(async () => {
+      await browser.emitSpeechEndOfTurnOnly();
+      await waitForMounted(
+        () =>
+          responder.calls.filter(
+            call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === taskResponse.response_id,
+          ).length === 1,
+        `the retained announcement was never resumed; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.terminal_announcement_state}`)
+          .join(' | ')}`,
+      );
+      await waitForMounted(() => browser.counts.sourceStarts >= 1, 'the resumed announcement scheduled no audio');
+      browser.endLatestSource();
+      await waitForMounted(
+        () =>
+          responder.calls.filter(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === taskResponse.response_id,
+          ).length === 1,
+        'the resumed announcement was not acknowledged exactly once',
+      );
+    });
+    assert.equal(
+      states.some(state => ['cleanup_pending', 'closed', 'failed'].includes(state.p1_status)),
+      false,
+      'resuming the announcement must not rebuild the P1 route',
     );
     // The fenced conversational answer stays silent throughout.
     assert.equal(

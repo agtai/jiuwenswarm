@@ -271,6 +271,17 @@ function durablePresentationAckMatches(
   );
 }
 
+export const PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER = 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER';
+
+/** True when playout stood down for a live speaker rather than failing. */
+function playoutDeferredToSpeaker(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    (value as { reason?: unknown }).reason === PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER
+  );
+}
+
 function stableProductTextReason(value: unknown, fallback: string): string {
   const candidate = typeof value === 'string' ? value : extractWebErrorReason(value);
   return typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(candidate) ? candidate : fallback;
@@ -1492,8 +1503,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     } | null;
     failure_reason?: ProductTaskPresentationFailureReason;
     settlement?: Promise<void>;
+    /**
+     * Set when playout yielded to a live speaker. The announcement is retained
+     * exactly as delivered and replayed once that speaker settles; it is not a
+     * playout failure and must not rebuild the P1 route.
+     */
+    deferred_to_speaker?: boolean;
   } | null>(null);
   const retryTerminalAnnouncementHandlerRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
+  const resumeDeferredTaskAnnouncementRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
   const pendingBargeInRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: {
@@ -2253,7 +2271,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         .then(readiness => {
           if (readiness !== 'ready') {
             throw Object.assign(new Error('playout yielded to an active speaker'), {
-              reason: 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER',
+              reason: PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER,
             });
           }
           return voiceOwner.playAgentText({
@@ -2315,6 +2333,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             binding: presentationBinding,
             response: disposition.response,
           });
+          if (disposition.task_notification && playoutDeferredToSpeaker(error)) {
+            // The speaker is mid-utterance. Rebuilding P1 to retry would throw
+            // away the words they are still saying, and this is not a playout
+            // failure at all: the announcement was never handed to TTS. Retain
+            // it exactly as delivered and let arbitration replay it once the
+            // speaker settles.
+            presentationAttempt.deferred_to_speaker = true;
+            terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
+            updateTerminalAnnouncementState('queued');
+            return;
+          }
           if (disposition.task_notification) {
             setProductTextReason(reason);
             setProductTextStatus('failed');
@@ -3563,7 +3592,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       foreground_active: Boolean(
         pendingProductTurnRef.current !== null ||
         pendingUnifiedFinalRef.current !== null ||
-        pendingPresentationAttemptRef.current !== null ||
+        // An announcement that stood down for a speaker is waiting for exactly
+        // this arbitration to replay it, so it must not report itself busy.
+        (pendingPresentationAttemptRef.current !== null &&
+          pendingPresentationAttemptRef.current.deferred_to_speaker !== true) ||
         pendingBargeInRef.current !== null ||
         // A generation-time listening window, and the interruption it issues,
         // are foreground work: a Task announcement must not take the
@@ -3621,6 +3653,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     if (action === 'fetch') {
       terminalAnnouncementSpeechOwnerRef.current = null;
+      const deferred = pendingPresentationAttemptRef.current;
+      if (deferred !== null && deferred.deferred_to_speaker === true) {
+        // The speaker settled. Replay the exact announcement already delivered
+        // instead of fetching a new one; nothing was consumed twice and the P1
+        // route the speaker just used stays intact.
+        resumeDeferredTaskAnnouncementRef.current(deferred);
+        return;
+      }
       updateTerminalAnnouncementState('fetching');
     }
   }, [p1VoiceStatus, p2Activation.status, productTextStatus, props.isConnected, terminalAnnouncementState]);
@@ -4901,6 +4941,102 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         activeVoiceResponseRef.current = null;
       }
       if (pendingPresentationAttemptRef.current === retained) {
+        const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'tts',
+          disposition: 'terminal',
+          reason,
+          binding: activationOwner.snapshot().binding,
+          response: terminal.disposition.response,
+        });
+        updateTerminalAnnouncementState('recovering');
+      }
+    });
+  };
+
+  /**
+   * Replay an announcement that stood down for a live speaker.
+   *
+   * Unlike the recovery retry, this never closes or rebuilds the P1 route: the
+   * route is healthy and has just finished carrying the utterance that made the
+   * announcement stand down. Nothing was consumed twice -- the exact delivered
+   * announcement is still retained -- so there is no fetch either.
+   */
+  resumeDeferredTaskAnnouncementRef.current = retained => {
+    const terminal = retained.task_notification;
+    if (
+      terminal === null ||
+      retained.deferred_to_speaker !== true ||
+      terminal.retry_pending ||
+      pendingPresentationAttemptRef.current !== retained
+    ) {
+      return;
+    }
+    const activationOwner = retained.owner;
+    if (
+      !mountedRef.current ||
+      !voiceLoopEnabledRef.current ||
+      !isConnectedRef.current ||
+      activationOwnerRef.current !== activationOwner
+    ) {
+      return;
+    }
+    terminal.retry_pending = true;
+    void (async () => {
+      const readiness = await settleCaptureBeforePlayout();
+      if (
+        !mountedRef.current ||
+        activationOwnerRef.current !== activationOwner ||
+        pendingPresentationAttemptRef.current !== retained
+      ) {
+        terminal.retry_pending = false;
+        return;
+      }
+      const voiceOwner = p1VoiceOwnerRef.current;
+      if (readiness !== 'ready' || voiceOwner === null) {
+        // Still speaking. Stay queued without spending the recovery budget.
+        terminal.retry_pending = false;
+        terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
+        updateTerminalAnnouncementState('queued');
+        return;
+      }
+      retained.deferred_to_speaker = false;
+      terminalAnnouncementSpeechOwnerRef.current = null;
+      p1VoiceCaptureBindingRef.current = null;
+      updateTerminalAnnouncementState('playing');
+      activeVoiceResponseRef.current = terminal.disposition.response;
+      await voiceOwner.playAgentText({
+        response: terminal.disposition.response,
+        unit_id: terminal.disposition.unit_id,
+        text: terminal.disposition.text,
+      });
+      if (activationOwnerRef.current !== activationOwner || pendingPresentationAttemptRef.current !== retained) {
+        terminal.retry_pending = false;
+        return;
+      }
+      if (activeVoiceResponseRef.current?.response_id === terminal.disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      clearProductRecoveryDiagnostic({
+        seam: 'tts',
+        binding: activationOwner.snapshot().binding,
+        response: terminal.disposition.response,
+      });
+      terminal.retry_pending = false;
+      retained.markPlayoutSettled();
+      updateTerminalAnnouncementState('acking');
+      setPendingPresentationAck(terminal.disposition.ack);
+      void settleProductPresentationAck(retained);
+    })().catch(error => {
+      terminal.retry_pending = false;
+      retained.deferred_to_speaker = false;
+      if (activeVoiceResponseRef.current?.response_id === terminal.disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      if (pendingPresentationAttemptRef.current === retained) {
+        // A real playout failure now: fall back to the ordinary recovery path.
         const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
         setProductTextReason(reason);
         setProductTextStatus('failed');

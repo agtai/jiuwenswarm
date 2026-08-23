@@ -9,10 +9,10 @@ This record is implementation and automated-verification evidence only. It
 grants no physical, latency, controlled-candidate or product-readiness credit.
 
 An independent review of the first implementation returned **FAIL — C0 / I2 /
-M0**. Both Important findings are repaired below (§2.6), each with the direct
-oracle whose absence let them through. The review also found a known limitation
-that only generation-time listening makes reachable; it is recorded in §5 as a
-flag-on blocker rather than repaired here.
+M0**. Both Important findings are repaired below (§2.5), each with the direct
+oracle whose absence let them through. Writing the Task-notification journey the
+review asked for then exposed a third defect that only generation-time listening
+makes reachable; it is repaired in §2.5 as well.
 
 ## 1. The defect this closes
 
@@ -109,6 +109,16 @@ because the speaker asked for that answer to stop existing.
   authority barrier, the close recovery barrier, the cleanup precondition, the
   turn/text admission guards and `settleRetainedP2Operations`, which settles it
   through the exact owner that issued it.
+* **A Task announcement no longer talks over, or tears down, a live speaker.**
+  Before generation-time listening, no capture was ever open while an answer was
+  outstanding, so a terminal Task announcement always found P1 idle. With the
+  listening window it can land mid-utterance, where handing it to P1 failed the
+  whole route and the existing recovery rebuilt P1 — discarding the words the
+  user was still saying. Playout now refuses rather than attempts, and that
+  refusal is classified as standing down rather than failing: the exact
+  delivered announcement is retained, the arbitration replays it once the
+  speaker settles, and the P1 route carrying their utterance is never rebuilt.
+  Nothing is fetched twice and nothing is acknowledged unspoken.
 
 ### 2.6 Feature flag
 
@@ -127,7 +137,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
 | Frontend `npm run test:live-voice-integrated-web` | 480 passed (472 pre-existing + 8 new); `test:live-voice-l0-measurement` 3 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3893 passed, 11 failed — all 11 pre-existing (see §6) |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3893 passed, 11 failed — all 11 pre-existing (see §5) |
 
 ### 3.1 Mutation checks
 
@@ -168,6 +178,10 @@ Frontend (mounted panel suite, baseline green):
 | Released listening drops its uplink receipt | KILLED |
 | Generation speech-start delivered while playing | **SURVIVED** |
 | Interruption outcome admitted on `mountedRef` alone | KILLED |
+| Deferred announcement rebuilds P1 instead of standing down | KILLED |
+| Deferred attempt keeps the foreground busy forever | KILLED |
+| Settled speaker never resumes the announcement | KILLED |
+| Playout no longer yields to a live speaker | KILLED |
 
 The interruption-admission mutant is killed through the rejection path. The
 success path is guarded by the same `ownsInterruptionOutcome()` predicate the
@@ -186,26 +200,9 @@ for intent clarity and is recorded here as uncovered rather than claimed.
 | Exit | Backend `test_exit_owns_the_interaction_and_refuses_a_later_interruption`; frontend `mounted Exit during generation-time listening…` |
 | Session switch | Frontend `mounted Session switch during generation-time listening…`, which also asserts a retired Session stops polling notifications, plus `mounted in-flight interruption from a retired Session cannot touch its successor`, which holds a rejected interruption on the wire across the switch and asserts the successor never sees its failure or reason |
 | Browser capture ownership | Ownership is owned by `useProductVoiceBrowserOwnership` in the parent ChatPanel, which surrenders by driving the same `close()` the Exit case exercises, so the Exit coverage above is the ownership coverage. Within the panel, generation listening starts through the same `runAuthorizedMediaStart` and capture-authority barrier as ordinary capture; only the exact bound response relaxes that barrier. No dedicated cross-tab takeover × generation-window case was written |
-| Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification survives a generation interruption without being spoken over it` — the announcement is neither dropped nor acknowledged unspoken, and the fenced answer stays silent |
+| Task notification | Backend `test_task_notification_still_speaks_after_a_generation_interruption` — an authoritative Task notification is presented and acknowledged after a fence, with exactly one `round.cancel` issued. Frontend `mounted Task notification stands down for the speaker and is spoken once they finish` — it is not spoken over the speaker, the P1 route carrying their utterance is never torn down, and the exact retained announcement is spoken and acknowledged once after they finish |
 
-## 5. Known limitation that blocks turning the flag on
-
-A Task terminal announcement that arrives while the speaker is mid-interruption
-cannot be spoken without talking over them. Playout is now refused rather than
-attempted, so the route no longer fails on the speaker, but the existing Task
-announcement recovery still rebuilds the P1 route to retry, and that rebuild
-discards the utterance in progress.
-
-Generation-time listening is what makes this reachable at all: before it, no
-capture was open while an answer was outstanding. Repairing it means teaching
-Task announcement recovery to wait for the speaker instead of rebuilding, which
-belongs to the cross-load arbitration work rather than to this boundary.
-
-The frontend case above asserts the current shape of this limitation on purpose,
-so it fails loudly when the behaviour is fixed and cannot be forgotten. **The
-flag must not be turned on until this is repaired.**
-
-## 6. Explicit non-claims
+## 5. Explicit non-claims
 
 * No physical microphone/speaker run was performed for this packet. No latency
   measurement is claimed, including for the generation listening window itself.
