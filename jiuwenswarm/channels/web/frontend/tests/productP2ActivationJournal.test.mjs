@@ -334,6 +334,35 @@ test('v1 generic result-unknown upgrades in place and retains its zero-effect ba
   assert.equal(JSON.parse(storage.values.get(key)).schema, 'live-voice.product-p2-activation-journal.v2');
 });
 
+test('v2 journal upgrades in place and retains its exact pending-operation recovery barrier', () => {
+  const storage = memoryStorage();
+  const created = openJournal(storage);
+  const binding = created.prepareSuccessor('page-a');
+  created.markActive(binding);
+  const operation = durableOperations(binding)[0];
+  created.checkpointOperation(operation);
+  const [key] = storage.values.keys();
+  const predecessor = JSON.parse(storage.values.get(key));
+  predecessor.schema = 'live-voice.product-p2-activation-journal.v2';
+  delete predecessor.retired_presentation_acks;
+  storage.values.set(key, JSON.stringify(predecessor));
+
+  const upgraded = openJournal(storage, 'client-upgrade');
+  const persisted = JSON.parse(storage.values.get(key));
+
+  assert.equal(upgraded.snapshot().schema, 'live-voice.product-p2-activation-journal.v3');
+  assert.equal(upgraded.snapshot().revision, predecessor.revision + 1);
+  assert.equal(upgraded.snapshot().phase, 'operation_result_unknown');
+  assert.deepEqual(upgraded.snapshot().binding, binding);
+  assert.deepEqual(upgraded.snapshot().pending_operation, operation);
+  assert.deepEqual(upgraded.snapshot().retired_presentation_acks, []);
+  assert.equal(persisted.schema, 'live-voice.product-p2-activation-journal.v3');
+  assert.equal(persisted.revision, predecessor.revision + 1);
+  assert.equal(persisted.phase, 'operation_result_unknown');
+  assert.deepEqual(persisted.pending_operation, operation);
+  assert.deepEqual(persisted.retired_presentation_acks, []);
+});
+
 test('submit ACK and barge-in replay exact durable operation before activation cleanup', async () => {
   for (const expectedOperation of ['submit', 'presentation.ack', 'barge_in']) {
     const storage = memoryStorage();

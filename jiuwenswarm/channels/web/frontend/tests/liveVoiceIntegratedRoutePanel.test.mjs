@@ -1595,7 +1595,7 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /onTaskSelect=/);
   assert.match(source, /onTaskMutation=/);
   assert.match(source, /onTaskConfirm=/);
-  assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
+  assert.match(source, /startProductVoiceWithBrowserOwnership/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
   assert.match(source, /addMessageIfAbsent\(event\.session_id/);
   assert.match(source, /recoveryFailedWithReason/);
@@ -1646,6 +1646,79 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   );
 });
 
+test('ChatPanel mounts the production browser-ownership lifecycle used by the timing oracle', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
+  const lifecycleSource = await readFile(
+    new URL('../src/components/ChatPanel/useProductVoiceBrowserOwnership.ts', import.meta.url),
+    'utf8',
+  );
+  const panelSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const lifecycleCall = source.slice(
+    source.indexOf('useProductVoiceBrowserOwnership({'),
+    source.indexOf('let formalVoiceVisualState'),
+  );
+  const start = lifecycleSource.slice(
+    lifecycleSource.indexOf('const start ='),
+    lifecycleSource.indexOf('const stop ='),
+  );
+  const sessionStop = lifecycleSource.slice(
+    lifecycleSource.indexOf('const stopSessionAndReleaseBrowserOwnership'),
+    lifecycleSource.indexOf('useEffect(() => {', lifecycleSource.indexOf('const stopSessionAndReleaseBrowserOwnership')),
+  );
+  const sessionCleanup = lifecycleSource.slice(
+    lifecycleSource.indexOf('const closeSessionForBrowserOwnership'),
+    lifecycleSource.indexOf('const closeForBrowserOwnership'),
+  );
+  const unmountCleanup = lifecycleSource.slice(lifecycleSource.lastIndexOf('useEffect(() => {'));
+  const formalProps = source.slice(
+    source.indexOf('const formalLiveVoiceDemoProps'),
+    source.indexOf('const liveVoiceDemoBar'),
+  );
+  const sessionReplacement = lifecycleSource.match(
+    /useEffect\(\(\) => \{(?<body>[\s\S]*?sessionRef\.current = options\.activeSessionId;[\s\S]*?)\n  \}, \[options\.activeSessionId,/,
+  )?.groups?.body;
+
+  assert.match(source, /useProductVoiceBrowserOwnership/);
+  assert.match(lifecycleCall, /activeSessionId/);
+  assert.match(lifecycleCall, /controlRef: productVoiceControlRef/);
+  assert.match(lifecycleCall, /getActiveSessionId: getActiveProductVoiceSessionId/);
+  assert.match(lifecycleSource, /createBrowserLiveVoiceOwnership/);
+  assert.match(lifecycleSource, /createBrowserLiveVoiceOwnershipBarrier/);
+  assert.match(lifecycleSource, /cleanupControlRef/);
+  assert.match(lifecycleSource, /unmountedRef/);
+  assert.match(panelSource, /closeSession\(sessionId: string\): Promise<void>/);
+  assert.match(start, /await browserOwnership\.acquire/);
+  assert.match(start, /await ownershipBarrier\.wait\(\)/);
+  assert.match(start, /await ownershipBarrier\.run\(async \(\) => \{/);
+  assert.equal(start.indexOf('await ownershipBarrier.wait()') < start.indexOf('await browserOwnership.acquire'), true);
+  assert.match(start, /const cleanupControl = options\.controlRef\.current/);
+  assert.match(start, /cleanupControlRef\.current = cleanupControl/);
+  assert.equal(start.indexOf('await browserOwnership.acquire') < start.indexOf('setActive(true)'), true);
+  assert.equal(start.indexOf('setActive(true)') < start.indexOf('await control.start()'), true);
+  assert.match(start, /setActive\(false\)[\s\S]*?await closeForBrowserOwnership\(\)/);
+  assert.match(start, /await closeSessionForBrowserOwnership\(cleanupSessionId\)[\s\S]*?await browserOwnership\.release\(\)/);
+  assert.match(sessionCleanup, /await control\.closeSession\(cleanupSessionId\)/);
+  assert.match(sessionCleanup, /return control/);
+  assert.doesNotMatch(sessionCleanup, /control\?\./);
+  assert.doesNotMatch(sessionCleanup, /cleanupControlRef\.current = null/);
+  assert.match(
+    sessionStop,
+    /await ownershipBarrier\.run\(async \(\) => \{[\s\S]*?const cleanedControl =[\s\S]*?await closeSessionForBrowserOwnership\(sessionId\)[\s\S]*?await browserOwnership\?\.release\(\)[\s\S]*?cleanupControlRef\.current === cleanedControl[\s\S]*?cleanupControlRef\.current = null[\s\S]*?\}\);/,
+  );
+  assert.match(formalProps, /onEnable:[\s\S]*?startProductVoiceWithBrowserOwnership/);
+  assert.match(formalProps, /onExit:[\s\S]*?stopProductVoiceAndReleaseBrowserOwnership/);
+  assert.match(formalProps, /onRetryListening:[\s\S]*?startProductVoiceWithBrowserOwnership/);
+  assert.doesNotMatch(formalProps, /productVoiceControlRef\.current\?\.start\(\)/);
+  assert.match(unmountCleanup, /unmountedRef\.current = true/);
+  assert.match(unmountCleanup, /cleanupControlRef\.current \?\? options\.controlRef\.current/);
+  assert.match(unmountCleanup, /browserOwnership\?\.disposeAfterRelease\(\)/);
+  assert.doesNotMatch(unmountCleanup, /catch \{\s*return;\s*\}/);
+  assert.ok(sessionReplacement);
+  assert.match(sessionReplacement, /const previousSessionId = sessionRef\.current/);
+  assert.match(sessionReplacement, /stopSessionAndReleaseBrowserOwnership\(previousSessionId\)/);
+  assert.doesNotMatch(sessionReplacement, /void stop\(\)/);
+});
+
 test('successor capture admission uses the authoritative activation owner instead of lagging rendered state', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   const admission = source.match(
@@ -1662,6 +1735,7 @@ test('successor capture admission uses the authoritative activation owner instea
     'an already-active successor owner must not lose its only scheduled capture to a lagging React publication',
   );
 });
+
 test('formal P1 receives the exact Web request function without an option-dropping panel adapter', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   const admission = source.match(

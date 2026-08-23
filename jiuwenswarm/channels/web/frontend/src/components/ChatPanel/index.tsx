@@ -66,6 +66,7 @@ import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
+import { useProductVoiceBrowserOwnership } from './useProductVoiceBrowserOwnership';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -1254,7 +1255,6 @@ export function ChatPanel({
   const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
   const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
   const addMessageIfAbsent = useChatStore((state) => state.addMessageIfAbsent);
-  const [productVoiceActive, setProductVoiceActive] = useState(false);
   const adoptProductVoiceState = useCallback((next: Readonly<ProductLiveVoiceSurfaceState>) => {
     setProductVoiceState(previous => {
       if (
@@ -1293,8 +1293,20 @@ export function ChatPanel({
       return next;
     });
   }, []);
+  const getActiveProductVoiceSessionId = useCallback(
+    () => useChatStore.getState().activeSessionId,
+    [],
+  );
+  const {
+    active: productVoiceActive,
+    start: startProductVoiceWithBrowserOwnership,
+    stop: stopProductVoiceAndReleaseBrowserOwnership,
+  } = useProductVoiceBrowserOwnership({
+    activeSessionId,
+    controlRef: productVoiceControlRef,
+    getActiveSessionId: getActiveProductVoiceSessionId,
+  });
   useEffect(() => {
-    setProductVoiceActive(false);
     setProductVoiceState(null);
   }, [activeSessionId]);
 
@@ -1376,19 +1388,16 @@ export function ChatPanel({
     statusLabel: formalStatusLabel,
     handsFree: true,
     onEnable: () => {
-      setProductVoiceActive(true);
-      void productVoiceControlRef.current?.start();
+      void startProductVoiceWithBrowserOwnership();
     },
     onExit: () => {
-      setProductVoiceActive(false);
-      void productVoiceControlRef.current?.close();
+      void stopProductVoiceAndReleaseBrowserOwnership();
     },
     onPrimaryAction: () => {
       // Hands-free mode has no primary control after the first enable click.
     },
     onRetryListening: () => {
-      setProductVoiceActive(true);
-      void productVoiceControlRef.current?.start();
+      void startProductVoiceWithBrowserOwnership();
     },
     onInterruptAndSpeak: () => {
       // Formal playout already owns a concurrent successor capture. Stopping

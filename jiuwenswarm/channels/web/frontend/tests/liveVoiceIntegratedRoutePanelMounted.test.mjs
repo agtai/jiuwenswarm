@@ -66,6 +66,152 @@ after(async () => {
   await rm(mountedBundleDirectory, { recursive: true, force: true });
 });
 
+const ownershipLifecycleBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'useProductVoiceBrowserOwnership.mjs'));
+await build({
+  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/useProductVoiceBrowserOwnership.ts', import.meta.url))],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  packages: 'external',
+  outfile: fileURLToPath(ownershipLifecycleBundleUrl),
+});
+const { useProductVoiceBrowserOwnership } = await import(`${ownershipLifecycleBundleUrl.href}?ownership=${Date.now()}`);
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+const MountedProductVoiceBrowserOwnership = React.forwardRef((props, ref) => {
+  const lifecycle = useProductVoiceBrowserOwnership(props);
+  React.useImperativeHandle(ref, () => lifecycle, [lifecycle]);
+  return null;
+});
+
+test('mounted production ChatPanel ownership lifecycle completes Session handoff before successor start', async () => {
+  const closeSessionGate = deferred();
+  const firstReleaseGate = deferred();
+  const events = [];
+  const releaseGates = [firstReleaseGate.promise, Promise.resolve()];
+  let ownershipHeld = false;
+  let activeSessionId = 'session-a';
+  let takeover = null;
+  const ownership = {
+    async acquire(onTakeover) {
+      takeover = onTakeover;
+      events.push(`acquire-${ownershipHeld ? 'held' : 'free'}`);
+      ownershipHeld = true;
+    },
+    async release() {
+      events.push('release-start');
+      await (releaseGates.shift() ?? Promise.resolve());
+      ownershipHeld = false;
+      events.push('release-finished');
+    },
+    async dispose() {
+      await this.release();
+    },
+    disposeAfterRelease() {
+      ownershipHeld = false;
+      events.push('dispose-after-release');
+    },
+    isOwner() {
+      return ownershipHeld;
+    },
+  };
+  const oldControl = {
+    async start() {
+      events.push(`old-start-owner-${ownershipHeld}`);
+    },
+    async closeSession(sessionId) {
+      events.push(`old-close-session-${sessionId}-start`);
+      await closeSessionGate.promise;
+      events.push(`old-close-session-${sessionId}-finished`);
+    },
+    async close() {
+      events.push('old-close');
+    },
+  };
+  const successorControl = {
+    async start() {
+      events.push(`successor-start-owner-${ownershipHeld}`);
+    },
+    async closeSession(sessionId) {
+      events.push(`successor-close-session-${sessionId}`);
+    },
+    async close() {
+      events.push('successor-close');
+    },
+  };
+  const controlRef = { current: oldControl };
+  const lifecycleRef = React.createRef();
+  const createOwnership = () => ownership;
+  const getActiveSessionId = () => activeSessionId;
+  const element = sessionId => React.createElement(MountedProductVoiceBrowserOwnership, {
+    ref: lifecycleRef,
+    activeSessionId: sessionId,
+    controlRef,
+    createOwnership,
+    getActiveSessionId,
+  });
+  let renderer;
+
+  try {
+    await act(async () => {
+      renderer = create(element(activeSessionId));
+    });
+    await act(async () => {
+      await lifecycleRef.current.start();
+    });
+    assert.deepEqual(events, ['acquire-free', 'old-start-owner-true']);
+
+    activeSessionId = 'session-b';
+    controlRef.current = successorControl;
+    await act(async () => {
+      renderer.update(element(activeSessionId));
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    assert.equal(events.at(-1), 'old-close-session-session-a-start');
+
+    let successorStart;
+    await act(async () => {
+      successorStart = lifecycleRef.current.start();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    closeSessionGate.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(events.at(-1), 'release-start');
+    assert.equal(events.includes('successor-start-owner-true'), false);
+
+    firstReleaseGate.resolve();
+    await act(async () => {
+      await successorStart;
+    });
+    assert.deepEqual(events.slice(-3), [
+      'release-finished',
+      'acquire-free',
+      'successor-start-owner-true',
+    ]);
+    assert.equal(ownershipHeld, true);
+
+    await act(async () => {
+      await lifecycleRef.current.stop();
+    });
+    assert.equal(events.includes('old-close'), false);
+    assert.equal(events.filter(event => event === 'successor-close').length, 1);
+    assert.equal(events.at(-1), 'release-finished');
+    assert.equal(ownershipHeld, false);
+    assert.equal(typeof takeover, 'function');
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
 const enabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelEnabled.mjs'));
 await build({
   entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
@@ -5640,6 +5786,131 @@ test('mounted P1 retained Start cannot allocate an old-binding successor after S
     assert.equal(mediaCloses[0].session_id, 'mounted-p1-old-session');
     assert.equal(mediaCloses[0].subject_id, 'mounted-p1-replaced-session-subject');
   } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    browser.restore();
+  }
+});
+
+test('mounted late old-Session capture cleanup cannot close or rotate the replacement Session activation', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const controlRef = { current: null };
+  const p2Activations = [];
+  const p2Closes = [];
+  const mediaActivations = [];
+  const mediaCloses = [];
+  let resolveOldMediaClose = null;
+  let oldSessionCleanup = null;
+  let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
+  const request = async (method, params) => {
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Activations.push({ ...params });
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      p2Closes.push({ ...params });
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    if (method === 'live_voice.media.activate') {
+      mediaActivations.push({ ...params });
+      return {
+        status: 'active',
+        reason_id: null,
+        subject_id: `mounted-session-scoped-${params.session_id}`,
+        endpoint_path: '/api/v1/live_voice/media',
+        media_ticket: 'S'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        binding: {},
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: false },
+      };
+    }
+    if (method === 'live_voice.media.close') {
+      mediaCloses.push({ ...params });
+      if (params.session_id === 'mounted-session-scoped-old' && mediaCloses.filter(close => close.session_id === params.session_id).length === 1) {
+        return new Promise(resolve => {
+          resolveOldMediaClose = () => resolve({ status: 'closed', reason_id: null, ...params });
+        });
+      }
+      return { status: 'closed', reason_id: null, ...params };
+    }
+    throw new Error(`unexpected mounted session-scoped request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-session-scoped-old', request, {
+        productVoiceControlRef: controlRef,
+      }));
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'old Session did not expose formal P1 Start');
+      void controlRef.current.start();
+      await waitForMounted(
+        () => mediaActivations.some(activation => activation.session_id === 'mounted-session-scoped-old'),
+        'old Session did not start capture',
+      );
+    });
+
+    await act(async () => {
+      renderer.update(mountedP1Element(i18n, 'mounted-session-scoped-new', request, {
+        productVoiceControlRef: controlRef,
+      }));
+      await waitForMounted(
+        () =>
+          p2Activations.some(activation => activation.session_id === 'mounted-session-scoped-new') &&
+          mediaCloses.some(close => close.session_id === 'mounted-session-scoped-old'),
+        'replacement Session did not activate while exact old capture cleanup remained pending',
+      );
+      oldSessionCleanup = controlRef.current.closeSession('mounted-session-scoped-old');
+      await Promise.resolve();
+    });
+
+    assert.equal(typeof resolveOldMediaClose, 'function');
+    assert.equal(
+      p2Closes.some(close => close.session_id === 'mounted-session-scoped-new'),
+      false,
+      'a late parent cleanup for the old Session must not close the replacement P2 activation',
+    );
+
+    await act(async () => {
+      resolveOldMediaClose();
+      await oldSessionCleanup;
+      await Promise.resolve();
+    });
+    assert.equal(
+      p2Closes.some(close => close.session_id === 'mounted-session-scoped-new'),
+      false,
+      'settling exact old capture cleanup must not rotate the replacement P2 activation',
+    );
+
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(
+        () => mediaActivations.some(activation => activation.session_id === 'mounted-session-scoped-new'),
+        'replacement Session did not start capture after exact old cleanup settled',
+      );
+    });
+    assert.equal(browser.counts.getUserMedia, 2, 'replacement Session must allocate exactly one successor microphone');
+    assert.equal(
+      mediaActivations.filter(activation => activation.session_id === 'mounted-session-scoped-new').length,
+      1,
+    );
+    assert.equal(
+      p2Closes.some(close => close.session_id === 'mounted-session-scoped-new'),
+      false,
+    );
+  } finally {
+    if (resolveOldMediaClose !== null) resolveOldMediaClose();
     if (renderer) {
       await act(async () => {
         renderer.unmount();
