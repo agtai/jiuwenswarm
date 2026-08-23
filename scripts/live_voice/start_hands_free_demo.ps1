@@ -10,6 +10,10 @@ param(
     [switch]$RestartExisting,
     [switch]$AllowDirtyProject,
     [switch]$NoBrowser,
+    [switch]$L0Measurement,
+    [ValidateRange(9222, 9322)]
+    [int]$L0MeasurementPort = 9223,
+    [string]$L0MeasurementDirectory,
     [ValidateRange(30, 300)]
     [int]$ReadyTimeoutSeconds = 120
 )
@@ -84,7 +88,11 @@ function Get-ChromeExecutable {
     Fail '找不到 Google Chrome。请安装桌面版 Google Chrome，或使用 -NoBrowser 仅启动服务。'
 }
 
-function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
+function Start-IsolatedChrome(
+    [string]$ChromeExecutable,
+    [string]$Url,
+    [int]$RemoteDebuggingPort = 0
+) {
     $profileName = 'jiuwenswarm-live-voice-chrome-{0}-{1}' -f (
         Get-Date -Format 'yyyyMMdd-HHmmss'
     ), ([guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -100,9 +108,12 @@ function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-background-mode',
-        '--new-window',
-        $Url
+        '--new-window'
     )
+    if ($RemoteDebuggingPort -gt 0) {
+        $arguments += "--remote-debugging-port=$RemoteDebuggingPort"
+    }
+    $arguments += $Url
     $chrome = Start-Process -FilePath $ChromeExecutable -ArgumentList $arguments -WindowStyle Normal -PassThru
     Start-Sleep -Milliseconds 750
     if ($chrome.HasExited) {
@@ -322,6 +333,33 @@ try {
         }
         Write-Warn "源码工作区存在 $($sourceDirty.Count) 项未提交修改；脚本会按当前源码构建，不会提交或覆盖它们。"
     }
+    $l0RunLabelsPath = $null
+    if ($L0Measurement) {
+        if ($RuntimeProfile -ne 'formal-web-validation') {
+            Fail 'L0 物理采集只允许 formal-web-validation profile。'
+        }
+        if ($NoBrowser) {
+            Fail 'L0 物理采集需要隔离 Chrome，不能同时使用 -NoBrowser。'
+        }
+        if ([string]::IsNullOrWhiteSpace($L0MeasurementDirectory)) {
+            $L0MeasurementDirectory = Join-Path $RepoRoot (
+                'logs\l0-physical-{0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+            )
+        } elseif (-not [System.IO.Path]::IsPathRooted($L0MeasurementDirectory)) {
+            $L0MeasurementDirectory = Join-Path $RepoRoot $L0MeasurementDirectory
+        }
+        $L0MeasurementDirectory = [System.IO.Path]::GetFullPath($L0MeasurementDirectory)
+        if (Test-Path -LiteralPath $L0MeasurementDirectory) {
+            $existingEvidence = @(Get-ChildItem -LiteralPath $L0MeasurementDirectory -Force)
+            if ($existingEvidence.Count -gt 0) {
+                Fail "L0 采集目录必须为空或不存在：$L0MeasurementDirectory"
+            }
+        } else {
+            New-Item -ItemType Directory -Path $L0MeasurementDirectory | Out-Null
+        }
+        $l0RunLabelsPath = Join-Path $L0MeasurementDirectory 'run-labels.json'
+        Write-Pass "L0 内容无关证据目录已隔离：$L0MeasurementDirectory"
+    }
 
     # Keep the machine selection at one stable path so a non-default data
     # directory can still be discovered by the next no-argument launch.
@@ -506,6 +544,18 @@ try {
     }
     foreach ($entry in $featureEnvironment.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+    }
+    if ($L0Measurement) {
+        [Environment]::SetEnvironmentVariable(
+            'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_DIR',
+            $L0MeasurementDirectory,
+            'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_RUN_LABELS_FILE',
+            $l0RunLabelsPath,
+            'Process'
+        )
     }
     foreach ($entry in $ExpectedPorts.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
@@ -714,8 +764,33 @@ try {
     $isolatedChromeProfile = $null
     if (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
-        $isolatedChromeProfile = Start-IsolatedChrome -ChromeExecutable $ChromeExecutable -Url "http://localhost:$FrontendPort"
+        $browserUrl = "http://localhost:$FrontendPort"
+        $remoteDebuggingPort = 0
+        if ($L0Measurement) {
+            $browserUrl += '?live_voice_l0_measurement=1'
+            $remoteDebuggingPort = $L0MeasurementPort
+        }
+        $isolatedChromeProfile = Start-IsolatedChrome `
+            -ChromeExecutable $ChromeExecutable `
+            -Url $browserUrl `
+            -RemoteDebuggingPort $remoteDebuggingPort
         Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
+        if ($L0Measurement) {
+            [ordered]@{
+                schema_version      = 'live-voice.l0-browser-session.v1'
+                source_head         = (& git rev-parse HEAD).Trim()
+                runtime_profile     = $RuntimeProfile
+                evidence_directory = $L0MeasurementDirectory
+                run_labels_file    = $l0RunLabelsPath
+                browser_endpoint   = "http://127.0.0.1:$L0MeasurementPort"
+                physical_evidence  = 'pending-user-run'
+                raw_audio_retained = $false
+                transcript_retained = $false
+            } | ConvertTo-Json | Set-Content `
+                -LiteralPath (Join-Path $L0MeasurementDirectory 'browser-session.json') `
+                -Encoding UTF8
+            Write-Pass "L0 自动采集端点已就绪：127.0.0.1:$L0MeasurementPort"
+        }
     }
 
     Write-Host "`n============================================================" -ForegroundColor Green
@@ -725,6 +800,10 @@ try {
     Write-Host "  Log: $logPath" -ForegroundColor DarkGray
     if ($null -ne $isolatedChromeProfile) {
         Write-Host "  Isolated Chrome: $isolatedChromeProfile" -ForegroundColor DarkGray
+    }
+    if ($L0Measurement) {
+        Write-Host "  L0 Evidence: $L0MeasurementDirectory" -ForegroundColor DarkGray
+        Write-Host "  Capture: & '$Python' scripts\live_voice\l0_browser_capture.py --session '$L0MeasurementDirectory\browser-session.json'" -ForegroundColor Yellow
     }
     Write-Host '  首次进入页面仍需由浏览器授予麦克风权限并选择该项目。' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green

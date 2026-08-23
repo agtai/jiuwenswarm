@@ -5,6 +5,7 @@ import {
   type BrowserAudioPcmChunk,
   type BrowserAudioPlayoutEvent,
   type BrowserAudioPlayoutMetadata,
+  type BrowserAudioPlayoutScheduledEvent,
 } from './adapters/browserAudioIOAdapter.js';
 import {
   createBrowserDedicatedMediaRoute,
@@ -29,6 +30,11 @@ import {
   type FormalSynthesisDownlink,
   type GatewaySpeechProvider,
 } from './gatewayBatchSpeechClient.js';
+import {
+  browserL0Enabled,
+  recordBrowserL0Milestone,
+  type BrowserL0Binding,
+} from './l0Measurement.js';
 
 export const PRODUCT_P1_MEDIA_ACTIVATE_METHOD = 'live_voice.media.activate';
 export const PRODUCT_P1_MEDIA_CLOSE_METHOD = 'live_voice.media.close';
@@ -163,6 +169,10 @@ function requiredText(value: unknown, field: string): string {
     throw new Error(`${field} is invalid`);
   }
   return value;
+}
+
+function l0ResponseKey(response: Readonly<AudioResponseRef>): string {
+  return `${response.interaction_id}\u0000${response.response_id}\u0000${response.response_generation}`;
 }
 
 function consumePrivateText(record: Record<string, unknown>, key: string, field: string): string {
@@ -379,6 +389,12 @@ export class ProductP1VoiceRouteOwner {
   #captureRotationSourceId: string | null = null;
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
   #captureStopExpected = false;
+  #l0PlayoutStartedAtMs: number | null = null;
+  #l0PlayoutResponseKey: string | null = null;
+  #l0ScheduledResponseKey: string | null = null;
+  #l0FirstFrameResponseKey: string | null = null;
+  #l0LastFrameSentClock: Readonly<{ observedAt: string; monotonicMs: number }> | null = null;
+  #l0CaptureStartedAtMs: number | null = null;
 
   constructor(
     input: Readonly<{
@@ -440,6 +456,7 @@ export class ProductP1VoiceRouteOwner {
           }
         },
         onPlayoutState: event => this.#observePlayout(event),
+        onPlayoutScheduled: event => this.#observePlayoutScheduled(event),
       },
     });
     this.#publish();
@@ -462,6 +479,48 @@ export class ProductP1VoiceRouteOwner {
       successor_readiness: this.#successorCaptureReadiness,
       successor_readiness_reason: this.#successorCaptureReadinessReason,
       successor_readiness_elapsed_ms: this.#successorCaptureReadinessElapsedMs,
+    });
+  }
+
+  #l0Binding(response: Readonly<AudioResponseRef> | null = null): Readonly<BrowserL0Binding> | null {
+    if (
+      this.#sessionId === null
+      || this.#correlationId === null
+      || this.#interactionId === null
+      || this.#activationGeneration <= 0
+    ) return null;
+    return Object.freeze({
+      correlation_id: this.#correlationId,
+      session_id: this.#sessionId,
+      interaction_id: this.#interactionId,
+      activation_generation: this.#activationGeneration,
+      response_id: response?.response_id ?? null,
+      response_generation: response?.response_generation ?? null,
+      turn_id: null,
+      round_id: null,
+      task_id: null,
+      attempt_id: null,
+    });
+  }
+
+  #l0Record(
+    milestone: Parameters<typeof recordBrowserL0Milestone>[0]['milestone'],
+    response: Readonly<AudioResponseRef> | null = null,
+    durationMs?: number,
+    classification?: Parameters<typeof recordBrowserL0Milestone>[0]['classification'],
+    clock?: Readonly<{ observedAt: string; monotonicMs: number }>,
+  ): boolean {
+    const binding = this.#l0Binding(response);
+    if (binding === null) return false;
+    return recordBrowserL0Milestone({
+      milestone,
+      binding,
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+      ...(classification === undefined ? {} : { classification }),
+      ...(clock === undefined ? {} : {
+        observed_at: clock.observedAt,
+        monotonic_ms: clock.monotonicMs,
+      }),
     });
   }
 
@@ -551,6 +610,8 @@ export class ProductP1VoiceRouteOwner {
         deviceSelection.output_device_id ? { deviceId: deviceSelection.output_device_id } : {}
       );
       this.#requireCurrent(operationGeneration);
+      this.#l0CaptureStartedAtMs = monotonicNowMs();
+      this.#l0LastFrameSentClock = null;
       const metadata = await this.#audio.startCapture(deviceSelection.input_device_id ? { deviceId: deviceSelection.input_device_id } : {});
       this.#captureActualProcessing = metadata.actual_processing;
       this.#captureStartupAudioReady = true;
@@ -793,6 +854,7 @@ export class ProductP1VoiceRouteOwner {
     this.#setStatus('recognizing', null);
     try {
       await this.#audio.stopCapture('formal_recognition_requested');
+      this.#l0Record('capture_stopped');
       this.#requireCurrent(operationGeneration);
       this.#drainCaptureFrames();
       const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
@@ -805,6 +867,19 @@ export class ProductP1VoiceRouteOwner {
       }
       if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
         throw new Error('dedicated media route did not acknowledge the complete capture');
+      }
+      if (
+        this.#l0CaptureStartedAtMs !== null
+        && this.#l0LastFrameSentClock !== null
+        && this.#l0LastFrameSentClock.monotonicMs >= this.#l0CaptureStartedAtMs
+      ) {
+        this.#l0Record(
+          'last_frame_sent',
+          null,
+          this.#l0LastFrameSentClock.monotonicMs - this.#l0CaptureStartedAtMs,
+          undefined,
+          this.#l0LastFrameSentClock,
+        );
       }
       this.#captureFramesAcked = this.#mediaSentFrames;
       await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
@@ -831,6 +906,7 @@ export class ProductP1VoiceRouteOwner {
           result = streaming.result;
         } else if (streaming.fallback.fallback_tier === 'batch') {
           degradationReason = streaming.fallback.reason_id;
+          this.#l0Record('fallback', null, undefined, 'fallback');
           console.warn(`live_voice_speech_degradation reason=${degradationReason} target=batch visible=true`);
           this.#setStatus('recognizing', degradationReason);
           result = await speech.recognizeFinal(recognitionInput);
@@ -843,6 +919,7 @@ export class ProductP1VoiceRouteOwner {
         if (degradationReason !== null) {
           const fallbackTier = this.#streamingFallbackTier;
           if (fallbackTier === null) throw new Error('streaming recognition fallback tier is absent');
+          this.#l0Record('fallback', null, undefined, 'fallback');
           console.warn(`live_voice_speech_degradation reason=${degradationReason} target=${fallbackTier} visible=true`);
           this.#setStatus('recognizing', degradationReason);
           if (fallbackTier === 'text') {
@@ -1011,6 +1088,10 @@ export class ProductP1VoiceRouteOwner {
         this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
         this.#requireCurrent(operationGeneration);
       }
+      this.#l0PlayoutStartedAtMs = monotonicNowMs();
+      this.#l0PlayoutResponseKey = l0ResponseKey(result.response);
+      this.#l0ScheduledResponseKey = null;
+      this.#l0FirstFrameResponseKey = null;
       this.#audio.beginPlayout(result.response);
       this.#fillPlayoutQueue(pendingPlayout);
       this.#deliverBargeInSpeechStart(operationGeneration, this.#route);
@@ -1028,6 +1109,9 @@ export class ProductP1VoiceRouteOwner {
       const rotation = this.#captureRotationPromise;
       if (rotation !== null) await rotation;
       const captureReadiness = capturePreparation === null ? null : await capturePreparation;
+      if (captureReadiness?.ready === true) {
+        this.#l0Record('successor_capture_ready', pendingPlayout.response);
+      }
       // When overlap is enabled, the successor capture remains live while the
       // final downlink detach is drained. Any capture startup or device failure
       // synchronously changes the operation generation; fence it before minting
@@ -1089,12 +1173,14 @@ export class ProductP1VoiceRouteOwner {
       pending.response.response_generation !== response.response_generation
     )
       return false;
+    this.#l0Record('barge_in', response);
     this.#pendingPlayout = null;
     const stopped = this.#audio.stopPlayout(response, 'formal_product_barge_in');
     if (!stopped) {
       this.#pendingPlayout = pending;
       return false;
     }
+    this.#l0Record('fence_cancel_completion', response, undefined, 'cancelled');
     pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
     pending.reject(
       Object.assign(new Error('formal playout was interrupted'), {
@@ -1286,6 +1372,8 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
+    this.#l0CaptureStartedAtMs = monotonicNowMs();
+    this.#l0LastFrameSentClock = null;
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
     );
@@ -1606,6 +1694,7 @@ export class ProductP1VoiceRouteOwner {
       frame.seq >= (pending.frameCount ?? MAX_STREAMING_PLAYOUT_FRAMES)
     )
       throw new Error('dedicated media downlink frame is stale or non-contiguous');
+    this.#observeBrowserFirstFrame(pending.response, frame.seq);
     pending.chunks.push(
       Object.freeze({
         response: pending.response,
@@ -1626,6 +1715,7 @@ export class ProductP1VoiceRouteOwner {
     try {
       while (pending.nextChunkIndex < pending.chunks.length && pending.nextChunkIndex - pending.renderedChunks < PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY) {
         const chunk = pending.chunks[pending.nextChunkIndex];
+        this.#observeBrowserFirstFrame(pending.response, chunk.seq);
         pending.nextChunkIndex += 1;
         const depthAfterEnqueue = pending.nextChunkIndex - pending.renderedChunks;
         if (!this.#audio.enqueuePlayout(chunk)) {
@@ -1817,10 +1907,46 @@ export class ProductP1VoiceRouteOwner {
       return;
     }
     if (pending.expected.size === 1 && [...pending.expected].every(([unitId, seq]) => (pending.observed.get(unitId) ?? -1) >= seq) && pending.nextChunkIndex === pending.chunks.length) {
+      if (
+        this.#l0PlayoutStartedAtMs !== null
+        && this.#l0PlayoutResponseKey === l0ResponseKey(pending.response)
+      ) {
+        const elapsedMs = monotonicNowMs() - this.#l0PlayoutStartedAtMs;
+        if (elapsedMs >= 0) {
+          this.#l0Record('playout_completed', pending.response, elapsedMs, 'success');
+        }
+      }
       this.#pendingPlayout = null;
       this.#settlingPlayout = pending;
       pending.resolve();
     }
+  }
+
+  #observeBrowserFirstFrame(response: Readonly<AudioResponseRef>, seq: number): void {
+    if (seq !== 0) return;
+    const key = l0ResponseKey(response);
+    if (this.#l0FirstFrameResponseKey === key) return;
+    if (this.#l0Record('browser_first_frame', response)) {
+      this.#l0FirstFrameResponseKey = key;
+    }
+  }
+
+  #observePlayoutScheduled(event: Readonly<BrowserAudioPlayoutScheduledEvent>): void {
+    if (event.seq !== 0) return;
+    const key = l0ResponseKey(event.response);
+    if (this.#l0ScheduledResponseKey === key) return;
+    if (!this.#l0Record('webaudio_first_frame_scheduled', event.response)) return;
+    this.#l0ScheduledResponseKey = key;
+    if (!browserL0Enabled()) return;
+    const delay = Math.max(0, Math.ceil(event.start_delay_ms));
+    globalThis.setTimeout(() => {
+      if (
+        this.#l0ScheduledResponseKey !== key
+        || this.#l0PlayoutResponseKey !== key
+        || !event.has_started()
+      ) return;
+      this.#l0Record('webaudio_actually_started', event.response);
+    }, delay);
   }
 
   #observeMediaTerminal(route: ActiveBrowserDedicatedMediaRoute, event: Readonly<DedicatedMediaTerminalEvent>): void {
@@ -2083,6 +2209,10 @@ export class ProductP1VoiceRouteOwner {
         });
       }
       this.#mediaSentFrames += 1;
+      this.#l0LastFrameSentClock = Object.freeze({
+        observedAt: new Date().toISOString(),
+        monotonicMs: monotonicNowMs(),
+      });
     }
   }
 
@@ -2371,6 +2501,7 @@ export class ProductP1VoiceRouteOwner {
     ) {
       throw new Error('end-of-turn control escaped its media authority');
     }
+    this.#l0Record('browser_eot_receipt');
     this.#pendingEndOfTurn = event;
     this.#deliverBargeInEndOfTurn(operationGeneration, route);
     this.#deliverEndOfTurn(operationGeneration, route);

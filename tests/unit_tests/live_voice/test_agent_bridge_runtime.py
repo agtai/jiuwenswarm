@@ -18,6 +18,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
 )
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
+from jiuwenswarm.server.live_voice import agent_bridge_runtime
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentBridgeCompletionStatus,
     AgentBridgeDelivery,
@@ -28,6 +29,10 @@ from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentRoundRequest,
     WorkProgressDelivery,
     project_round_work_progress,
+)
+from jiuwenswarm.server.live_voice.latency_measurement import (
+    L0Milestone,
+    L0RoundBinding,
 )
 
 
@@ -336,6 +341,89 @@ async def test_slow_adapter_never_blocks_submit_and_preserves_two_sequence_domai
     assert completion.status is AgentBridgeCompletionStatus.TERMINAL_OBSERVED
     assert completion.terminal_outcome is TerminalOutcome.COMPLETED
     assert adapter.cancel_calls == 0
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_production_agent_bridge_emits_only_exact_bound_l0_milestones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound = L0RoundBinding(
+        correlation_id="correlation-round-1",
+        session_id="session-1",
+        interaction_id="interaction-1",
+        activation_generation=2,
+        response_id="response-round-1",
+        response_generation=0,
+        turn_id="turn-1",
+        round_id="round-1",
+    )
+    resolved: list[dict[str, object]] = []
+    emitted: list[dict[str, object]] = []
+
+    def resolve(**kwargs: object) -> L0RoundBinding:
+        resolved.append(kwargs)
+        return bound
+
+    def emit(**kwargs: object) -> bool:
+        emitted.append(kwargs)
+        return True
+
+    monkeypatch.setattr(agent_bridge_runtime, "resolve_runtime_l0_binding", resolve)
+    monkeypatch.setattr(agent_bridge_runtime, "emit_runtime_l0_milestone", emit)
+
+    def script(request: AgentRoundRequest):
+        common = (
+            request.request_id,
+            request.commit.interaction_id,
+            request.commit.turn_id,
+            request.commit.commit_id,
+        )
+        return (
+            AgentEvent(
+                *common,
+                0,
+                "chat.delta",
+                request.source_provenance,
+                text="private delta",
+            ),
+            AgentEvent(
+                *common,
+                1,
+                "chat.final",
+                request.source_provenance,
+                text="private final",
+            ),
+        )
+
+    adapter = ScriptedAdapter(script)
+    runtime = AgentBridgeRuntime(instance_id="bridge-l0-production", output_capacity=4)
+    await runtime.start()
+    submission = submit(runtime, adapter)
+    deliveries = [
+        await asyncio.wait_for(runtime.next_delivery(), timeout=1) for _ in range(2)
+    ]
+    completion = await asyncio.wait_for(submission.completion, timeout=1)
+    assert all(isinstance(item, AgentEventDelivery) for item in deliveries)
+    assert completion.status is AgentBridgeCompletionStatus.STREAM_ENDED_WITHOUT_TERMINAL
+    assert resolved == [
+        {
+            "correlation_id": "correlation-round-1",
+            "interaction_id": "interaction-1",
+            "response_id": "response-round-1",
+            "response_generation": 0,
+        }
+    ]
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.AGENT_REQUEST_START,
+        L0Milestone.FIRST_DELTA,
+        L0Milestone.FIRST_STABLE_SPEAKABLE_SENTENCE,
+        L0Milestone.CHAT_FINAL,
+    ]
+    assert all(item["binding"] == bound for item in emitted)
+    assert "classification" not in emitted[-1]
+    assert "private delta" not in repr(emitted)
+    assert "private final" not in repr(emitted)
     await runtime.close()
 
 

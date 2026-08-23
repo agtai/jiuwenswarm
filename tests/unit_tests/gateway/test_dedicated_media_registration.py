@@ -49,6 +49,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechAuthorizationBinding,
     SpeechRpcContext,
 )
+from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 
 
 ORIGIN = "https://voice.example.test"
@@ -915,6 +916,43 @@ async def test_completed_media_socket_retains_recognition_content(
 
     assert record.route_completed is True
     assert record.recognition_content_sha256 is not None
+
+
+def test_production_gateway_completion_emits_content_free_l0_ack_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        dedicated_media_registration,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    record = _pending_record(registry, _media_ticket(activation))
+    registry.accept_frame(
+        record,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+    )
+    registry.complete_route(
+        record,
+        SimpleNamespace(activated=True, accepted_frames=1),
+    )
+
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.LAST_FRAME_ACKED,
+        L0Milestone.UPLINK_CLOSED,
+    ]
+    assert emitted[0]["binding"].session_id == "session-1"
+    assert emitted[0]["binding"].activation_generation == 1
+    assert emitted[0]["duration_ms"] >= 0
+    assert "samples" not in repr(emitted)
+    assert "pcm" not in repr(emitted).lower()
 
 
 @pytest.mark.asyncio

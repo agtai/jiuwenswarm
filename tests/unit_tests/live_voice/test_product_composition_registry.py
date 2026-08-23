@@ -121,6 +121,8 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
 )
+from jiuwenswarm.server.live_voice import product_composition_registry
+from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
@@ -3274,6 +3276,64 @@ async def test_agent_checkpoint_failure_rolls_back_then_retries_once_after_resta
         restarted_route.activation_lease._runtime.snapshot().published_notifications > 0
     )
     await _close_unified_route(restarted, stem="agent-ambiguous")
+
+
+@pytest.mark.asyncio
+async def test_production_p2_acceptance_registers_exact_l0_response_before_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-l0-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    registered: list[object] = []
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        product_composition_registry,
+        "register_runtime_l0_binding",
+        lambda binding: registered.append(binding) or True,
+    )
+    monkeypatch.setattr(
+        product_composition_registry,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="l0-production",
+            text="private committed speech",
+        ),
+        request_id="request-l0-submit",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert result.payload["result"]["status"] == "round_accepted"
+    assert manager.agent.calls == 1
+    assert len(registered) == 1
+    binding = registered[0]
+    assert binding.session_id == "session-product"
+    assert binding.correlation_id == "correlation-p2"
+    assert binding.interaction_id == "interaction-1"
+    assert binding.activation_generation == 1
+    assert binding.response_id is not None
+    assert binding.round_id is not None
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.COMMITTED_SUBMIT_ACCEPTED
+    ]
+    assert emitted[0]["binding"] == binding
+    assert emitted[0]["duration_ms"] >= 0
+    assert "private committed speech" not in repr(emitted)
+    await _close_unified_route(registry, stem="l0-production")
 
 
 @pytest.mark.asyncio

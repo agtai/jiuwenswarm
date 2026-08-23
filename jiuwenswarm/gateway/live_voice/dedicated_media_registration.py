@@ -89,6 +89,12 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechRpcContext,
     parse_synthesis_batch_request,
 )
+from jiuwenswarm.server.live_voice.latency_measurement import (
+    L0Milestone,
+    L0RoundBinding,
+    L0RoundClassification,
+    emit_runtime_l0_milestone,
+)
 from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnDetection,
     SynthesisStreamRef,
@@ -630,6 +636,23 @@ class _MediaAuthority:
     downlink_overlap_observed: bool = False
     downlink_results: dict[tuple[ResponseRef, str], dict[str, object]] = field(
         default_factory=dict, repr=False
+    )
+
+
+def _l0_media_binding(
+    record: _MediaAuthority,
+    *,
+    response: ResponseRef | None = None,
+) -> L0RoundBinding:
+    return L0RoundBinding(
+        correlation_id=record.binding.correlation_id,
+        session_id=record.binding.session_id,
+        interaction_id=record.binding.interaction_id,
+        activation_generation=record.product_activation_generation,
+        response_id=(response.response_id if response is not None else None),
+        response_generation=(
+            response.response_generation if response is not None else None
+        ),
     )
 
 
@@ -1567,6 +1590,12 @@ class DedicatedMediaProductRegistry:
                 "live_voice_end_of_turn_observed detector=server_vad "
                 "timing_basis=provider_time provenance=adapter_derived"
             )
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.PROVIDER_EOT,
+                binding=_l0_media_binding(record),
+                event_nonce=record.record_id,
+            )
             return MediaEndOfTurn(
                 lease_id=record.binding.lease_id,
                 generation=record.binding.generation.value,
@@ -1724,6 +1753,21 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             return
+        if (
+            outcome.completed
+            and outcome.final_text is not None
+            and record.streaming_started_at is not None
+        ):
+            elapsed_ms = (
+                self._monotonic() - record.streaming_started_at
+            ) * 1000.0
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.STT_FINAL_AVAILABLE,
+                binding=_l0_media_binding(record),
+                duration_ms=elapsed_ms if elapsed_ms >= 0.0 else None,
+                event_nonce=record.record_id,
+            )
         if outcome.completed:
             issuer = self._streaming_receipt_issuer
             if issuer is None or outcome.final_text is None:
@@ -2207,28 +2251,45 @@ class DedicatedMediaProductRegistry:
     def complete_route(
         self, record: _MediaAuthority, result: DedicatedMediaSocketLeafResult
     ) -> None:
+        completed = False
         with self._lock:
             record.route_completed = True
             if not result.activated or result.accepted_frames <= 0 or not record.pcm:
                 record.pcm.clear()
-                return
-            wav = _wav_bytes(
-                bytes(record.pcm), record.binding.frame_format.sample_rate_hz
-            )
-            audio_sha = hashlib.sha256(wav).hexdigest()
-            record.recognition_content_sha256 = hashlib.sha256(
-                canonical_json_bytes(
-                    {
-                        "capture_id": record.binding.generation.id,
-                        "capture_generation": record.binding.generation.value,
-                        "track_id": record.binding.track_id,
-                        "locale": record.locale,
-                        "sample_rate_hz": record.binding.frame_format.sample_rate_hz,
-                        "audio_sha256": audio_sha,
-                    }
+            else:
+                wav = _wav_bytes(
+                    bytes(record.pcm), record.binding.frame_format.sample_rate_hz
                 )
-            ).hexdigest()
-            record.pcm.clear()
+                audio_sha = hashlib.sha256(wav).hexdigest()
+                record.recognition_content_sha256 = hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "capture_id": record.binding.generation.id,
+                            "capture_generation": record.binding.generation.value,
+                            "track_id": record.binding.track_id,
+                            "locale": record.locale,
+                            "sample_rate_hz": record.binding.frame_format.sample_rate_hz,
+                            "audio_sha256": audio_sha,
+                        }
+                    )
+                ).hexdigest()
+                record.pcm.clear()
+                completed = True
+        if completed:
+            elapsed_ms = (self._monotonic() - record.issued_at) * 1_000.0
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.LAST_FRAME_ACKED,
+                binding=_l0_media_binding(record),
+                duration_ms=elapsed_ms if elapsed_ms >= 0.0 else None,
+                event_nonce=record.record_id,
+            )
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.UPLINK_CLOSED,
+                binding=_l0_media_binding(record),
+                event_nonce=record.record_id,
+            )
 
     def abort_route(self, record: _MediaAuthority) -> None:
         """Close one exceptional/cancelled media owner with zero retained audio."""
@@ -2765,6 +2826,23 @@ class DedicatedMediaProductRegistry:
         binding = _synthesis_authorization_binding(request)
         if self.authorize(binding) != binding:
             return None
+        with self._lock:
+            l0_parent_id = self._subjects.get((session_id, context.subject_id))
+            l0_parent = self._records.get(l0_parent_id or "")
+            if (
+                l0_parent is None
+                or l0_parent.binding.direction is not MediaDirection.UPLINK
+                or l0_parent.binding.correlation_id != request.correlation_id
+                or l0_parent.binding.interaction_id != request.response.interaction_id
+            ):
+                l0_parent = None
+        if l0_parent is not None:
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.TTS_REQUEST,
+                binding=_l0_media_binding(l0_parent, response=request.response),
+                event_nonce=request.operation_id,
+            )
         stream_identity = hashlib.sha256(
             canonical_json_bytes(
                 {
@@ -2811,6 +2889,17 @@ class DedicatedMediaProductRegistry:
         if start.source is None:
             outcome = start.outcome
             assert outcome is not None
+            if l0_parent is not None:
+                emit_runtime_l0_milestone(
+                    component="gateway",
+                    milestone=L0Milestone.FALLBACK,
+                    binding=_l0_media_binding(
+                        l0_parent,
+                        response=request.response,
+                    ),
+                    classification=L0RoundClassification.FALLBACK,
+                    event_nonce=request.operation_id,
+                )
             if outcome.batch_eligible and not outcome.first_audio_emitted:
                 batch_result = await batch_service.synthesize(params, context)
                 return {
@@ -2824,6 +2913,13 @@ class DedicatedMediaProductRegistry:
             )
 
         source = start.source
+        if l0_parent is not None:
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.PROVIDER_FIRST_AUDIO,
+                binding=_l0_media_binding(l0_parent, response=request.response),
+                event_nonce=request.operation_id,
+            )
         try:
             model = source.model
             voice = source.voice
@@ -2905,6 +3001,13 @@ class DedicatedMediaProductRegistry:
                 request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
             )
         ticket, media_binding = stored
+        if l0_parent is not None:
+            emit_runtime_l0_milestone(
+                component="gateway",
+                milestone=L0Milestone.DOWNLINK_TICKET,
+                binding=_l0_media_binding(l0_parent, response=request.response),
+                event_nonce=request.operation_id,
+            )
         audio = {
             "format": "pcm_f32_mono_20ms",
             "sample_rate_hz": request.required_sample_rate_hz,

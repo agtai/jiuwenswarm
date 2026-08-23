@@ -243,11 +243,20 @@ export interface BrowserAudioPlayoutEvent {
   readonly through_seq: number | null;
 }
 
+export interface BrowserAudioPlayoutScheduledEvent {
+  readonly response: Readonly<AudioResponseRef>;
+  readonly unit_id: string;
+  readonly seq: number;
+  readonly start_delay_ms: number;
+  readonly has_started: () => boolean;
+}
+
 export interface BrowserAudioObserver {
   onCaptureFrame?(frame: Readonly<CapturedAudioFrame>): void;
   onCaptureState?(event: Readonly<BrowserAudioCaptureStateEvent>): void;
   onDeviceChange?(event: Readonly<BrowserAudioDeviceEvent>): void;
   onPlayoutState?(event: Readonly<BrowserAudioPlayoutEvent>): void;
+  onPlayoutScheduled?(event: Readonly<BrowserAudioPlayoutScheduledEvent>): void;
 }
 
 export interface BrowserAudioPcmChunk {
@@ -1235,6 +1244,18 @@ export class BrowserAudioIOAdapter {
       const startAt = Math.max(context.currentTime, playback.nextStartTime);
       sourceStartAttempted = true;
       source.start(startAt);
+      this.#notifyPlayoutScheduled(
+        playback,
+        chunk.unit_id,
+        chunk.seq,
+        Math.max(0, (startAt - context.currentTime) * 1_000),
+        () => (
+          this.#playback === playback
+          && !playback.stopped
+          && context.state === 'running'
+          && context.currentTime >= startAt
+        )
+      );
       playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
     } catch {
       playback.sources.delete(sourceKey);
@@ -2105,6 +2126,28 @@ export class BrowserAudioIOAdapter {
       this.#observer.onDeviceChange?.(event);
     } catch {
       // Diagnostics observers cannot alter device ownership.
+    }
+  }
+
+  #notifyPlayoutScheduled(
+    playback: PlaybackSession,
+    unitId: string,
+    seq: number,
+    startDelayMs: number,
+    hasStarted: () => boolean
+  ): void {
+    try {
+      this.#observer.onPlayoutScheduled?.(
+        Object.freeze({
+          response: playback.response,
+          unit_id: unitId,
+          seq,
+          start_delay_ms: startDelayMs,
+          has_started: hasStarted,
+        })
+      );
+    } catch {
+      // Timing observers cannot alter browser source scheduling.
     }
   }
 }

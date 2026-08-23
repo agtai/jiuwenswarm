@@ -17,6 +17,7 @@ import logging
 import os
 import secrets
 import threading
+import time
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -73,6 +74,12 @@ from .formal_task_models import (
 )
 from .task_store import TaskDurabilityDiagnosticSnapshot
 from .interaction_engine import InteractionEnginePort
+from .latency_measurement import (
+    L0Milestone,
+    L0RoundBinding,
+    emit_runtime_l0_milestone,
+    register_runtime_l0_binding,
+)
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
     P3_MUTATIONS,
@@ -4485,6 +4492,40 @@ class AgentServerProductCompositionRegistry:
         allow_agent_tools: bool = True,
     ) -> P3RouteResult:
         result_unknown = False
+        submission_started = time.monotonic()
+
+        def measurement_binding(
+            response_ref: ResponseRef,
+            *,
+            round_id: str | None = None,
+        ) -> L0RoundBinding:
+            return L0RoundBinding(
+                correlation_id=retained.binding.correlation_id,
+                session_id=retained.binding.session_id,
+                interaction_id=retained.binding.interaction_id,
+                activation_generation=retained.binding.activation_generation,
+                response_id=response_ref.response_id,
+                response_generation=response_ref.response_generation,
+                turn_id=commit.turn_id,
+                round_id=round_id,
+            )
+
+        async def before_dispatch_with_measurement(
+            response_ref: ResponseRef,
+            round_id: str,
+        ) -> None:
+            binding = measurement_binding(response_ref, round_id=round_id)
+            register_runtime_l0_binding(binding)
+            emit_runtime_l0_milestone(
+                component="runtime",
+                milestone=L0Milestone.COMMITTED_SUBMIT_ACCEPTED,
+                binding=binding,
+                duration_ms=(time.monotonic() - submission_started) * 1_000.0,
+                event_nonce=request_id,
+            )
+            if before_agent_dispatch is not None:
+                await before_agent_dispatch(response_ref, round_id)
+
         try:
             common = {
                 "session_id": retained.binding.session_id,
@@ -4552,6 +4593,15 @@ class AgentServerProductCompositionRegistry:
                 if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
                     self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
                 self._pending_voice_commit_routes.pop(commit.commit_id, None)
+                task_binding = measurement_binding(response_ref)
+                register_runtime_l0_binding(task_binding)
+                emit_runtime_l0_milestone(
+                    component="runtime",
+                    milestone=L0Milestone.COMMITTED_SUBMIT_ACCEPTED,
+                    binding=task_binding,
+                    duration_ms=(time.monotonic() - submission_started) * 1_000.0,
+                    event_nonce=request_id,
+                )
                 return _success_result(
                     request_id,
                     {
@@ -4575,7 +4625,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 context=context,
                 channel_id=channel_id,
-                before_dispatch=before_agent_dispatch,
+                before_dispatch=before_dispatch_with_measurement,
                 after_dispatch=after_agent_dispatch,
                 allow_tools=allow_agent_tools,
             )
