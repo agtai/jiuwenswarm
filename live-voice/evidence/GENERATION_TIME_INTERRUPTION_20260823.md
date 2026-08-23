@@ -100,6 +100,7 @@ the unchanged 466-case cumulative suite demonstrates.
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 47 passed |
 | Frontend `npm run test:live-voice-integrated-web` | 472 passed (466 pre-existing + 6 new) |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3884 passed, 11 failed — all 11 pre-existing (see §5) |
 
 ### 3.1 Mutation checks
 
@@ -160,9 +161,12 @@ which is out of this packet. The backend case above is the retained coverage.
 * Default-off. No flag-on rollout, A/B or rollback evidence exists yet.
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
-* Eight backend unit-test failures observed in the full `tests/unit_tests/live_voice`
-  run are pre-existing on the base commit `67381193a` — verified by running the
-  same files in a clean detached worktree of that commit, which fails the same
-  eight. They are unrelated to this change.
+* The 11 failures in the full backend sweep are pre-existing on the base commit
+  `67381193a` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  six in `test_product_composition_registry`, `test_task_progress_return`) and
+  three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
+  `test_upload_storage`). Each was reproduced by running the same files in a
+  clean detached worktree of that commit, which fails the identical set. They
+  are unrelated to this change and are not repaired here.
 * This closes the implementation gap only. Feature-complete, controlled-candidate
   and product-readiness boundaries remain unchanged.
