@@ -1,133 +1,106 @@
 # P1/P2 Exit/immediate-re-enable lifecycle evidence
 
-## Boundary, source and disposition
+## Boundary and final disposition
 
-- Date: 2026-08-22
-- Integration base:
-  `451599b4319c8b4a29054d75d8e2c8b051edae37`
-- Consolidated implementation: the commit containing this record,
-  `fix(live-voice): consolidate Exit re-enable recovery`. The final hash is
-  intentionally reported at handoff rather than embedded in its own content.
-- Pre-rebaseline physical source:
-  `698c6c375bf3d36563b4f035b573000de136a3e9`
-- Disposition: **PARTIAL — ordinary Exit/re-enable paths repaired and observed;
-  delayed predecessor presentation ACK still blocks successor activation**
+- Date: 2026-08-22; consolidated 2026-08-23
+- Baseline: `2e01965ecd89a33ca5917cdad1c1080018bb8b1b`
+- Consolidated implementation:
+  `1fec48027` (`fix(live-voice): decouple retained ACK from successor`)
 - Risk: Tier 3 under root `TESTING.md`
-- Owners changed: Formal Integrated Web presentation/capture arbitration,
-  same-tab P2 recovery, Registry-to-P2 lifecycle retirement and the controlled
-  Formal Web validation profile
+- Gate: **PASS — `C0 / I0 / M0`**
+- Scoped physical source:
+  `8994489ba79db18ccdde16593dd44d61450697af`
+- Physical credit: text/tool, ordinary voice, Exit/immediate re-enable,
+  Session isolation and resource zero/re-establishment PASS; Exit/immediate
+  re-enable repeated on the exact consolidated product/test tree
 
-No Provider, media wire protocol, shared schema, Agent/Tool/Task product policy
-or generation-time Agent cancellation policy changed.
+This boundary owns foreground presentation/capture fencing, exact P2
+predecessor retirement and durable background settlement of old presentation
+ACKs. It does not change Provider/media wire protocols, shared schema,
+Agent/Tool/Task policy, P2 latency or generation-time Agent cancellation.
 
-## Corrected root cause and retained boundaries
+## Root cause and final lifecycle
 
-The first intermediate repair treated an accepted predecessor response as
-presentation work that a successor generation should fetch, text-present and
-ACK. That crossed the canonical generation fence. Exit closes the predecessor
-notification consumer, while Runtime shutdown may discard its unpresented final
-after the accepted Agent turn finishes. A successor was therefore waiting for
-output it was not authorized to present and the backend could discard.
+Exit must withdraw all unpresented predecessor authority immediately. An
+accepted predecessor Agent turn may finish once under retained Runtime cleanup,
+but a successor generation may present only its own response.
 
-The consolidated repair implements this subset:
+The original foreground recovery path still treated an unresolved predecessor
+presentation ACK as a blocking current operation. Exit/re-enable could
+therefore wait for, retry through or be polluted by that old settlement. The
+final lifecycle separates current-generation recovery from durable old-ACK
+settlement:
 
-- Exit synchronously fences the old activation/generation, local output and all
-  unpresented predecessor presentation authority;
-- an accepted predecessor Agent turn may finish exactly once under its shielded
-  Runtime close coordinator but produces zero successor notification, ACK,
-  TTS/playout or assistant-history effect;
-- Registry logically retires a route whose P2 lease is already `CLOSING` or
-  `CLOSED`, while a retained background owner finishes physical Runtime cleanup;
-- in the unresolved-Agent path, a strictly newer generation activates and
-  captures without waiting for that Agent turn;
-- the successor records, submits, presents, ACKs and plays only its own exact
-  generation.
+- Exit synchronously increments/fences the voice-loop generation, clears
+  predecessor presentation/capture authority and starts exact cleanup;
+- generation 2 may activate, open media and capture before generation 1's ACK
+  settles;
+- before predecessor reconciliation, an unresolved presentation ACK moves from
+  the blocking operation slot into a bounded v3 retired ledger;
+- the retired record preserves exact Session/journal/route, method, request id
+  and closed params;
+- a background drainer replays the same request id and never owns current P2
+  activation recovery;
+- success, authoritative `accepted: false`, route-not-found or definitive
+  rejection removes only that retired record;
+- timeout/unknown keeps the record for exact replay and cannot publish old
+  text/recovery state;
+- a live original transport is marked in flight, preventing parallel replay;
+  its `finally` releases only its exact owner/request and wakes the drainer;
+- retirement is authorized by durable journal identity, not by the presence of
+  a transient Promise;
+- overlapping retirement transfers one same-identity retry wake to the current
+  drainer epoch, preventing a lost wake while the previous epoch holds the Web
+  Lock;
+- Session, route, journal, connectivity and unmount changes remain fail-closed;
+  and
+- the retired ledger is bounded at 16 and never evicts unresolved authority.
 
-The same-tab explicit **Listen again** repair remains necessary for a different
-failure. It promotes only a generic `result_unknown` journal with no durable
-pending operation into exact predecessor reconciliation. Automatic recovery
-remains zero-effect and fail-closed. This fallback does not and must not clear a
-retained presentation ACK.
+Notification adoption captures the poll generation and exact foreground
+response fence. Exit generation change, pending P2 refresh or cleanup rejects a
+predecessor before UI, assistant history, TTS, audio or ACK. Text-only P2
+presentation remains available when no foreground voice fence exists.
 
-## Open delayed-ACK defect
+## Retained exact fences and removed residue
 
-The complete acceptance invariant is stricter than the implemented subset: an
-old presentation ACK may finish once in the background, but its latency or
-result must not gate, close, mutate or otherwise influence a newer generation.
-The current browser recovery owner does not satisfy this.
+`PendingForegroundPresentationFence` retains exact Session, correlation,
+interaction, activation id/generation and response id/generation. Capture
+barriers, timers, P2 refresh fencing and complete resource cleanup remain.
 
-The mounted test
-`mounted Exit during a retained presentation ACK settles once before opening
-one P2 successor` deliberately retains the ACK transport. After Exit followed by
-immediate start, it asserts zero P2 close. Only after `releaseAck()` does it
-expect predecessor close, generation-2 activation and successor capture. The
-test is green, but that oracle encodes the undesired serialization. Formal Web
-`443/443` therefore does not close the complete defect package.
+The consolidated repair removes unread `turn_id`, `commit_id`,
+`origin_voice_loop_generation` and the unreachable
+`crossesExitedVoiceLoopGeneration` branch. Static and mounted oracles enforce
+both the retained fields and removed residue.
 
-The gate is in `productP2ActivationJournal.ts`: recovery treats a retained
-presentation ACK like every other durable pending operation and awaits
-`replay_operation` before predecessor close and successor allocation. The
-Registry/P2 lifecycle already has the separate capability to logically retire a
-`CLOSING` predecessor while its retained cleanup finishes. The follow-up repair
-should preserve the ACK as a predecessor-owned, exactly-once background
-operation while releasing successor activation from that wait.
+## Review closure
 
-Required follow-up oracle:
+| Review HEAD | Result | Finding | Closed at |
+|---|---|---|---|
+| `ee2e24249843669796de27bf1d74fd08a774658e` | FAIL `C0/I2/M0` | timeout left a false in-flight ACK owner; cleanup-window predecessor notification could reach UI/history/TTS/ACK | `8116cb5420c4ddce57b11ce6e26a222543e4a8fe` |
+| `8116cb5420c4ddce57b11ce6e26a222543e4a8fe` | FAIL `C0/I1/M0` | ACK timeout before P1 cleanup completion could miss retirement and re-enter foreground settlement | `09df81a07a122a867389006fafd1d4303a94f0c6` |
+| `09df81a07a122a867389006fafd1d4303a94f0c6` | FAIL `C0/I2/M0` | overlapping retirement could lose its wake; live original-transport branch lacked a mutation-sensitive oracle | `a640ce97e78173a7f7764ccec29efd4db014c892` |
+| `a640ce97e78173a7f7764ccec29efd4db014c892` | PASS `C0/I0/M0` | no finding; durable wake transfer and live-transport singleflight accepted | — |
 
-- retain the predecessor ACK promise;
-- Exit and immediately re-enable;
-- prove predecessor ACK call count remains exactly one;
-- before releasing the ACK, prove generation 2 activates, reaches capture,
-  records, submits and can present its own response;
-- release the old ACK and prove its result cannot close/mutate generation 2,
-  replay TTS/audio/history or allocate any Agent/Tool/Task effect;
-- finish with balanced microphone, AudioContext, AudioWorklet, socket, timer,
-  media-authority and Agent-pin ownership.
+The final review froze this production boundary and required no further
+review-driven refactor.
 
-## Removable intermediate residue
+## Automated evidence
 
-The first intermediate presentation-fence model also left three obsolete pieces
-in `LiveVoiceIntegratedRoutePanel.tsx`:
+Mounted production Panel journeys cover:
 
-- `PendingForegroundPresentationFence.turn_id` is written but never read;
-- `PendingForegroundPresentationFence.commit_id` is written but never read;
-- `origin_voice_loop_generation` exists only to drive
-  `crossesExitedVoiceLoopGeneration`.
-
-The crossing branch is unreachable under the corrected invariant. The fence is
-installed only when the component is mounted, the Session is current, Live Voice
-is enabled and the loop generation still equals its origin. Session replacement,
-Exit and every other generation-changing owner clear the pending fence. A
-different loop generation therefore cannot observe the retained fence. The two
-identity fields and the crossing branch may be removed, while the exact
-Session/correlation/interaction/activation/response fence must remain.
-
-This cleanup should be included in the delayed-ACK packet, not committed alone:
-its focused source-structure and mounted resource oracles can then prove both
-that dead code disappeared and that no stale-output/TTS protection was weakened.
-
-## Product and test surfaces
-
-Implementation:
-
-- `LiveVoiceIntegratedRoutePanel.tsx` clears predecessor output authority at
-  Exit, binds presentation to exact activation/response identity, fences capture
-  timers and performs explicit same-tab retry recovery;
-- `productP2ActivationJournal.ts` retains exact durable P2 operation/recovery
-  truth; its current presentation-ACK serialization is the open seam above;
-- `product_p2_interaction_adapter.py` admits a strictly newer binding after the
-  old lease synchronously enters `CLOSING`;
-- `product_composition_registry.py` archives the logically closed route,
-  releases route-local Task/critical-token state, retains root cleanup ownership
-  and drains pending P2 teardown in the background;
-- the controlled Formal Web launcher owns the provider/origin/media/receipt/
-  Direct-D2 runtime contract and verifies it with a credential-free probe.
-
-## Automated result on the rebased tree
+- generation-2 activation/media/capture before old ACK release;
+- ACK success, `accepted: false`, rejection, timeout and route-not-found;
+- refresh and same-tab Session isolation;
+- timeout inside held `AudioContext.close()`;
+- original transport in flight across Exit with zero parallel replay;
+- overlapping retired ACKs while the first drainer holds the Web Lock;
+- same-request-id recovery, ledger zero and zero stale UI/reason/diagnostic;
+- zero predecessor UI/history/TTS/audio/ACK inside the cleanup window; and
+- balanced microphone, AudioContext, AudioWorklet and socket resources.
 
 ```text
 npm run test:live-voice-integrated-web
-443 passed, 0 failed
+466 passed, 0 failed on the rewritten consolidated product/test tree
 
 npm run test:live-voice-browser-audio-io
 103 passed, 0 failed
@@ -138,41 +111,43 @@ npm run test:live-voice-browser-dedicated-media
 node --test tests/liveVoiceBuildProfiles.test.mjs
 2 passed, 0 failed
 
-pytest test_portable_launchers.py
-3 passed, 0 failed
-
-pytest test_product_p2_interaction_adapter.py test_product_composition_registry.py
-214 passed, 6 failed
+npx tsc --noEmit
+PASS
 
 npm run build:live-voice
 PASS
 
-ruff check (changed Python product/test files)
-PASS
-
-git diff --check
+ruff check (affected P2/Registry product/test files)
 PASS
 ```
 
-The six Python failures are the existing P3 fixture/projection cases: test
-`_P3Composition` lacks `_accepting`, or its collection projection fails with
-`PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH`. The exact Exit/Agent-generation
-Registry-to-Runtime race passes. These P3 failures are outside this repair, but
-also grant no PASS credit to it.
+The independently rerun combined P2/Registry result is disclosed as `214/220`, not
+called PASS. Its six failures remain unrelated P3 fixture/projection cases and
+no Python product/test file changed in this consolidated frontend packet.
+Existing duplicate-locale, mixed-import and chunk-size warnings remain
+non-findings.
 
-The build retained existing Vite chunk-size, mixed-import and duplicate locale
-key warnings. No warning category was introduced by this repair.
+## Physical evidence and non-claims
 
-## Physical observation and non-claims
+On exact clean product source
+`8994489ba79db18ccdde16593dd44d61450697af`, using the controlled
+`formal-web-validation` profile, the user passed:
 
-On the pre-rebaseline local tree `698c6c375`, the user completed four ordinary
-physical scenarios successfully: baseline dialogue; Exit while the Agent was
-working followed by immediate re-enable; Exit during playout followed by
-re-enable; and Session isolation. No duplicate user/Agent/history/Tool/Task or
-audio effect was observed, and the successor could record, submit and play.
+1. real text input through JiuwenSwarm Agent/tool execution;
+2. one ordinary microphone recognition/answer/playout/listen cycle;
+3. Exit during an active response followed by immediate re-enable, with an
+   immediately usable successor and no old audio/response revival;
+4. Session switching with zero late visible/audio/state contamination; and
+5. Exit resource zero followed by one clean re-established cycle.
 
-That run did not artificially retain the presentation-ACK request and predates
-the two D-093 remote commits. It is supporting physical evidence, not delayed-ACK
-or current-candidate acceptance. Independent Tier-3 review, the delayed-ACK
-repair and a clean current-source physical rerun remain open. This record does
-not claim complete P1/P2, P3-9, product readiness or Production readiness.
+The physical run did not inject ACK transport outcomes. Delayed ACK
+success/rejection/timeout/route-not-found, refresh and overlapping drainer
+schedules remain automation-owned. The scoped PASS does not claim complete
+P1/P2, P3-9, controlled-candidate, product-readiness or production readiness.
+
+The 2026-08-23 final run on deployed docs HEAD `56290ba444` repeated an active
+response Exit followed by immediate re-enable. The successor recognized and
+played one fresh response without old response/audio revival. Across the full
+journey the runtime recorded seven committed submissions and seven presentation
+ACKs, with zero `REQUEST_TIMEOUT`, `REQUEST_ABORTED` or recovery-failure event.
+The final evidence-only amend changes no deployed product/test file.
