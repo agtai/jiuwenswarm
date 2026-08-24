@@ -362,7 +362,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | Ref | Candidate | Status | Expected headroom | Area / likely code | Current evidence and rationale |
 |---:|---|---|---:|---|---|
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
-| 2 | Provider-native Semantic VAD with 1200 ms fallback | **SPECIFIED — QUEUED AFTER LVL-10** | **250–400 ms hypothesis**, not accepted gain | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms exposed 285–412 ms only on successful cases and failed natural-pause integrity. The approved Tier-3 screen compares separate `auto` and `high` A/B/A blocks without another RPC; product activation and Gate C remain excluded. The spec remains branch-bound at `latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`. |
+| 2 | Provider-native Semantic VAD with 1200 ms fallback | **SPECIFIED — NEXT EXISTING NO-BROWSER SCREEN** | **250–400 ms hypothesis**, not accepted gain | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms exposed 285–412 ms only on successful cases and failed natural-pause integrity. The approved Tier-3 screen compares separate `auto` and `high` A/B/A blocks without another RPC; product activation and Gate C remain excluded. The spec remains branch-bound at `latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`. |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **DIAGNOSTIC ONLY — DEFAULT REMAINS 1000 MS** | One unmatched-round segment delta **-532.295 ms**; population headroom `UNKNOWN` | `browserAudioIOAdapter.ts`; bounded hook on `latency/playout-lead-screen` | A 250 ms-attributed round reduced the schedule→start estimate from 578.998 to 46.703 ms and sounded clean, but workloads/manifests were incompatible and candidate underrun/rebuffer evidence was not bound. Require same-source/workload A1=1000/B=250/A2=1000 before any default decision. |
 | 5 | Separate retained receipt settlement from successor readiness | **DONE — SCOPED LIFECYCLE SOURCE/AUTOMATION** | Earlier controlled waits exposed approximately **254/754/1007 ms**; no new physical gain is credited | P2 activation journal, retained presentation ACK and next-turn ownership | Hongxing commit `1fec48027` decouples retained predecessor settlement from the successor generation and passed its scoped review. This is lifecycle closure, not a p50/p95 latency population. |
@@ -372,7 +372,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final segmented TTS | **SPECIFIED — ACTIVE REAL-PROVIDER SCREEN; IMPLEMENTATION AWAITS SPEC REVIEW** | `UNKNOWN`; **400–800 ms and `>600 ms` are not credited gates** | benchmark runner over `openai_streaming_speech.py`; product route excluded | Distinct from LVL-07: after complete `chat.final`, compare `LVL-10-A1/A2` current one-request full-final SSE with `LVL-10-B` bounded ordered segmentation. Optional `LVL-10-R0` Batch/fallback is diagnostic only. The [prospective spec](AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md) freezes source reserve, manifest offsets, concurrency/prefetch/failure rules and numeric gates before A1; Browser Lane C is conditional after Provider PASS. |
+| 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but medium A1/A2 drift 426.8 ms invalidated run 1 and long drift 321.7 ms invalidated run 2. No Browser Lane C or general chunked route is authorized. A long-form completion-primary follow-up requires a separate prospective LVL-10L spec. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
 
 ## 7. Residual P2 candidates
 
@@ -411,10 +411,9 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
 1. Preserve the D-094 atomic ordered batch observation and batch-16 default.
    The fixed-corpus product off/on waterfall remains useful evidence, but it is
    no longer a repair prerequisite.
-2. Review, implement and run the no-Browser real-Provider LVL-10 screen under
-   the [prospective specification](AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md).
-   A1/A2 retain full-final SSE, B uses manifest-bounded post-final segmentation
-   and product wiring remains excluded until Provider PASS.
+2. Preserve the no-Browser LVL-10 result as `INCONCLUSIVE`; do not wire it into
+   the product or Browser. Route any completion-primary long-form hypothesis to
+   a new prospective LVL-10L spec rather than changing the completed screen.
 3. Run the separately specified Provider-native Semantic VAD
    `auto` and `high` causal screens with the 1200 ms fallback. Treat this as
    Tier-3 Provider/commit/fence work, not a low-risk constant change.
@@ -492,10 +491,11 @@ and its scoped human acceptance; frozen-corpus product p50/p95 remains open.
 EOT/STT found at most 0.885 ms p50 removable settlement tail and did not
 authorize a product change. Stable-sentence measured only 177.2 ms p50
 projected pre-final gain for the tested workloads and stopped before wiring.
-LVL-10 is now the active no-Browser causal screen. Its prospective spec freezes
-the real-Provider A1/B/A2 contract, but it receives no numeric credit because
-the current full-final path already streams Provider audio. A1/A2 retain that
-SSE reference, B is manifest-bounded segmentation and optional Batch/fallback
-R0 is non-causal; Provider PASS must precede Browser Lane C or product code.
-Provider-native Semantic VAD remains specified behind LVL-10. Adaptive WebAudio
-250 ms has only one unmatched diagnostic signal and the default stays 1000 ms.
+LVL-10 completed two formal real-Provider populations but remains
+`INCONCLUSIVE`: both ran 45/45 without Provider errors, yet each violated its
+A1/A2 drift gate. The current full-final path remains unchanged and no Browser
+Lane C is authorized. Long completion improved 20–24% against both controls in
+both runs while medium completion regressed, preserving only a new conditional
+long-form hypothesis. Provider-native Semantic VAD is again the next existing
+no-Browser screen. Adaptive WebAudio 250 ms has one unmatched diagnostic signal
+and the default stays 1000 ms.

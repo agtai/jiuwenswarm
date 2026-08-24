@@ -106,9 +106,9 @@ a frozen-corpus off/on waterfall.
 | `LVL-05` | Combined P2 + TTS checkpoint | Deterministic Gate A; controlled round total | W1 **8,000→6,985**, W2 **14,900→10,240**, W3 **17,150→8,580 ms**, `CONTROLLED` + `DERIVED` | Controlled checkpoint improved; raw product observer was not covered |
 | `LVL-06` | EOT/STT early-result waiter materiality | Deterministic Gate A; component total | Largest removable-gap p50 **0.885 ms**, fraction **0.015**, `MEASURED` + `DERIVED` | Stop: no material serial tail; no candidate B |
 | `LVL-07` | Stable-sentence Agent→TTS overlap | Real Agent + real Provider screen; projected perceived latency | Projected gain p50 **177.2 ms**, p95 **425.3 ms**, `DERIVED`; final-gated baseline `ESTIMATED` | Stop for tested workloads; failed all three latency materiality gates |
-| `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Queued after the activated LVL-10 screen; retain 1200 ms fallback |
+| `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Next already-specified no-Browser screen after LVL-10 stopped inconclusive; retain 1200 ms fallback |
 | `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser diagnostic; estimated schedule boundary | One unmatched-round schedule→start estimate **578.998→46.703 ms**, delta **-532.295 ms**, `MEASURED` + `DIAGNOSTIC` | Default remains 1000 ms; clean same-source/workload A1/B/A2 required |
-| `LVL-10` | Authoritative-final segmented TTS | Specified no-Browser real-Provider `A1/B/A2`; optional Batch/fallback `R0` non-causal | Numeric result `UNKNOWN`; current full-final TTS already streams SSE audio deltas | Activated screen distinct from LVL-07; [prospective spec](../roadmap/AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md) review and Provider PASS before conditional Browser Lane C or product wiring |
+| `LVL-10` | Authoritative-final chunked TTS | Real-Provider no-Browser `A1/B/A2`; two formal 45/45 populations | **INCONCLUSIVE:** medium A1/A2 drift 426.8 ms in run 1; long drift 321.7 ms in run 2. Long completion B repeated **20–24%** improvement, while medium regressed | Stop before Browser/product wiring; a completion-primary long-form follow-up requires a new prospective hypothesis/spec |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -610,7 +610,7 @@ audible-output and underrun/rebuffer gates.
 
 ## 14. LVL-10 — authoritative-final segmented-TTS materiality screen
 
-This planned candidate starts only after one complete authoritative
+This candidate starts only after one complete authoritative
 `chat.final`. It then splits that immutable text into bounded ordered sentence
 or clause segments, synthesizes the first segment immediately and may prefetch
 a bounded number of successors. It must fence unplayed segments on
@@ -647,7 +647,13 @@ credit. Only a passing Provider screen may enter a separate Browser Lane C for
 first-downlink, schedule/start, underrun/rebuffer, audible-output, physical
 barge-in and receipt truth. Product wiring is excluded until a prospective
 spec declares its materiality thresholds before A1 and the screen passes them.
-Neither `>600 ms` nor the 400–800 ms idea is a current gate. See the
+Neither `>600 ms` nor the 400–800 ms idea is a current gate. Two later formal
+real-Provider populations completed 45/45 with zero errors but each failed the
+A1/A2 drift validity gate. LVL-10 is therefore `INCONCLUSIVE` and does not enter
+Browser Lane C or product wiring. Long completion repeatedly improved 20–24%,
+while medium completion regressed; this is only a new conditional long-form
+hypothesis. See the [sanitized result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md)
+and the
 [SOTA latency review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md).
 
 ## 15. What has and has not been measured end to end
@@ -682,17 +688,16 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-07 | Credited v2 artifacts survive with verified bindings; unversioned pilot directories are superseded |
 | LVL-08 | No run artifact exists |
 | LVL-09 | Reused manual run directory survives, but its manifest/report cannot bind a compatible A/B population |
-| LVL-10 | No run artifact exists; review and proposed screen only |
+| LVL-10 | Failed 2-second preflight, corrected 9/9 pilot and two 45/45 formal real-Provider populations survive with hashes bound in the [LVL-10 result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md) |
 
 ## 17. Current decision route
 
 1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
    LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
    remains an evidence gap, not a repair packet.
-2. Review, implement and run the activated no-Browser LVL-10 materiality spec:
-   `LVL-10-A1/B/A2` compares current full-final SSE with bounded post-final
-   segmentation under one real Provider. Product wiring remains excluded until
-   a materiality/integrity PASS.
+2. Preserve LVL-10 as `INCONCLUSIVE`: no Browser/product wiring. A conditional
+   long-form completion screen requires a new prospective LVL-10L packet rather
+   than changing LVL-10's primary metric after the run.
 3. Repair or replace the manual driver before another physical population: a
    beep must identify profile/round/terminal, advancement must reject a
    mismatched or extra batch, and shutdown must retire the complete process

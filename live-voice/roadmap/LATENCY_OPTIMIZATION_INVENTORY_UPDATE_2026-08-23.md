@@ -443,7 +443,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; **400–800 ms and `>600 ms` are not credited gates** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: after complete `chat.final`, compare `LVL-10-A1/A2` current one-request full-final SSE with `LVL-10-B` bounded ordered segmentation. Optional `LVL-10-R0` Batch/fallback is diagnostic only. The future spec freezes source-reserve/sample/clock, segmentation/concurrency/prefetch/failure rules and thresholds before A1; Browser Lane C is conditional after Provider PASS. Legacy `splitLiveVoiceTtsText`/`liveVoiceStreamingSpeech` remains a provisional Demo queue, not a Formal implementation base. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
+| 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but separate A1/A2 drift violations invalidated both causal decisions. No Browser Lane C or universal chunked route is authorized. A completion-primary long-form follow-up requires a separate prospective LVL-10L spec. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
 
 ## 7. Residual P2 candidates
 
@@ -501,12 +501,9 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    shortens Task completion, and both retain Task/Presentation authority risk.
 7. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
    demonstrates real P2 backlog.
-8. Specify and run the no-Browser real-Provider `LVL-10-A1/B/A2` screen before
-   any segmented-TTS product wiring: unchanged current full-final SSE vs
-   bounded post-final segmentation. Keep optional Batch/fallback R0 outside
-   causal credit. Freeze source-reserve, group policy, reliability/cost and
-   numeric materiality gates before A1. The one-round 1561 ms segment grants no
-   projected gain; Browser Lane C is conditional on Provider PASS.
+8. Preserve the completed LVL-10 screen as `INCONCLUSIVE`; no Browser or product
+   wiring follows. A conditional long-form completion hypothesis must use a new
+   prospective LVL-10L contract rather than changing the observed experiment.
 9. Treat native speech-to-speech as a strategic architecture study requiring a
    separate Registry/Tool/Task/presentation-authority decision.
 
@@ -578,18 +575,19 @@ scoped human validation; the earlier authorization defect is closed for that
 declared run, while frozen-corpus p50/p95 remains open. EOT/STT found at most
 0.885 ms p50 removable tail and did not authorize a product change.
 Stable-sentence measured only 177.2 ms p50 projected gain for the tested
-workloads and stopped before product wiring. The user activated the distinct
-LVL-10 post-final TTS screen first under its
-[prospective specification](AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md).
-Provider-native Semantic VAD remains specified behind it. Adaptive WebAudio at 250 ms has a
+workloads and stopped before product wiring. The distinct LVL-10 post-final TTS
+screen then completed two 45/45 real-Provider populations with zero errors but
+remained `INCONCLUSIVE` because each violated A1/A2 drift. Long completion
+improved 20–24% while medium completion regressed, supporting only a future
+conditional long-form hypothesis. Provider-native Semantic VAD is again the
+next existing no-Browser screen. Adaptive WebAudio at 250 ms has a
 promising 532.295 ms one-round segment signal, but production remains at 1000 ms
 until a clean compatible A1/B/A2 and truthful underrun/rebuffer evidence pass.
-The 2026-08-24 SOTA review adds LVL-10, authoritative-final segmented TTS, as a
-separate materiality question from LVL-07. It has no numeric credit: the
-current full-final SSE path remains A1/A2, bounded post-final segmentation is
-B, and optional Batch/fallback R0 is diagnostic only. The real-Provider screen
-must show whether B improves first PCM or source reserve without request,
-prosody, ordering or cancellation regressions before Browser Lane C.
+The 2026-08-24 SOTA review introduced LVL-10 as a separate materiality question
+from LVL-07. The completed screen grants no product credit: the current
+full-final SSE route remains unchanged, Browser Lane C is closed, and the
+[sanitized result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md)
+owns the long-form secondary signal and its limits.
 The current-source muted pilot adds partial localization at approximately
 587.6 ms EOT/STT, 1,518.3 ms TTS-to-downlink and 728.0 ms schedule-to-start
 diagnostic medians, but only two dialogue rounds completed. Four Task batches
