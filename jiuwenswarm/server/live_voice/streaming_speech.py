@@ -80,6 +80,7 @@ class ProviderControlKind(StrEnum):
 class RecognitionTurnDetectionMode(StrEnum):
     MANUAL = "manual"
     SERVER_VAD = "server_vad"
+    SEMANTIC_VAD = "semantic_vad"
 
 
 class RecognitionTurnBoundaryKind(StrEnum):
@@ -137,10 +138,29 @@ class ServerVadConfig:
             )
 
 
+class SemanticVadEagerness(StrEnum):
+    AUTO = "auto"
+    HIGH = "high"
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticVadConfig:
+    eagerness: SemanticVadEagerness = SemanticVadEagerness.AUTO
+    create_response: bool = False
+    interrupt_response: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.eagerness, SemanticVadEagerness):
+            raise StreamingSpeechViolation("INVALID_SEMANTIC_VAD", "semantic VAD eagerness is invalid")
+        if self.create_response is not False or self.interrupt_response is not False:
+            raise StreamingSpeechViolation("SEMANTIC_VAD_BUSINESS_AUTHORITY_FORBIDDEN", "Speech turn detection cannot create or interrupt Agent responses")
+
+
 @dataclass(frozen=True, slots=True)
 class RecognitionTurnDetection:
     mode: RecognitionTurnDetectionMode
     server_vad: ServerVadConfig | None = None
+    semantic_vad: SemanticVadConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, RecognitionTurnDetectionMode):
@@ -148,14 +168,15 @@ class RecognitionTurnDetection:
                 "INVALID_TURN_DETECTION", "recognition turn detection mode is invalid"
             )
         if self.mode is RecognitionTurnDetectionMode.MANUAL:
-            if self.server_vad is not None:
+            if self.server_vad is not None or self.semantic_vad is not None:
                 raise StreamingSpeechViolation(
                     "INVALID_TURN_DETECTION", "manual turn detection cannot carry VAD"
                 )
-        elif not isinstance(self.server_vad, ServerVadConfig):
-            raise StreamingSpeechViolation(
-                "INVALID_TURN_DETECTION", "server VAD mode requires its typed config"
-            )
+        elif self.mode is RecognitionTurnDetectionMode.SERVER_VAD:
+            if not isinstance(self.server_vad, ServerVadConfig) or self.semantic_vad is not None:
+                raise StreamingSpeechViolation("INVALID_TURN_DETECTION", "server VAD mode requires only its typed config")
+        elif not isinstance(self.semantic_vad, SemanticVadConfig) or self.server_vad is not None:
+            raise StreamingSpeechViolation("INVALID_TURN_DETECTION", "semantic VAD mode requires only its typed config")
 
     @classmethod
     def manual(cls) -> "RecognitionTurnDetection":
@@ -164,6 +185,10 @@ class RecognitionTurnDetection:
     @classmethod
     def server_vad_default(cls) -> "RecognitionTurnDetection":
         return cls(RecognitionTurnDetectionMode.SERVER_VAD, ServerVadConfig())
+
+    @classmethod
+    def semantic_vad_configured(cls, eagerness: SemanticVadEagerness) -> "RecognitionTurnDetection":
+        return cls(RecognitionTurnDetectionMode.SEMANTIC_VAD, semantic_vad=SemanticVadConfig(eagerness))
 
     @classmethod
     def server_vad_barge_in(cls) -> "RecognitionTurnDetection":
@@ -184,6 +209,7 @@ class RecognitionProviderSupport:
     provider_cancel_ack: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
     native_partials: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
     server_vad: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
+    semantic_vad: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
 
 
 @dataclass(frozen=True, slots=True)

@@ -2761,16 +2761,13 @@ def _turn_detection_value(
 ) -> dict[str, object] | None:
     if detection.mode is RecognitionTurnDetectionMode.MANUAL:
         return None
+    if detection.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD:
+        config = detection.semantic_vad
+        assert config is not None
+        return {"type": "semantic_vad", "eagerness": config.eagerness.value, "create_response": False, "interrupt_response": False}
     config = detection.server_vad
     assert config is not None
-    return {
-        "type": "server_vad",
-        "threshold": float(config.threshold),
-        "prefix_padding_ms": config.prefix_padding_ms,
-        "silence_duration_ms": config.silence_duration_ms,
-        "create_response": False,
-        "interrupt_response": False,
-    }
+    return {"type": "server_vad", "threshold": float(config.threshold), "prefix_padding_ms": config.prefix_padding_ms, "silence_duration_ms": config.silence_duration_ms, "create_response": False, "interrupt_response": False}
 
 
 def _turn_detection_echo_accepted(
@@ -2792,7 +2789,7 @@ def _turn_detection_echo_accepted(
         return echo is None
     if type(echo) is not dict:
         return False
-    governed = ("type", "threshold", "prefix_padding_ms", "silence_duration_ms")
+    governed = ("type", "eagerness") if detection.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD else ("type", "threshold", "prefix_padding_ms", "silence_duration_ms")
     optional = ("create_response", "interrupt_response")
     if set(echo) - set(governed) - set(optional):
         return False
