@@ -45,6 +45,7 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnBoundaryEvent,
     RecognitionTurnBoundaryKind,
     RecognitionTurnDetection,
+    RecognitionTurnDetectionMode,
     StreamingRecognitionEvent,
 )
 
@@ -295,6 +296,10 @@ class StreamingRecognitionRouteOwner:
             detection.server_vad is not None
             and provider.capability.recognition.server_vad
             is not CapabilityProvenance.PROVIDER_NATIVE
+        ) or (
+            detection.semantic_vad is not None
+            and provider.capability.recognition.semantic_vad
+            is not CapabilityProvenance.PROVIDER_NATIVE
         ):
             return None, self._fallback(
                 StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL,
@@ -405,12 +410,12 @@ class StreamingRecognitionRouteOwner:
                 queue=queue,
                 end_of_turn=(
                     asyncio.get_running_loop().create_future()
-                    if detection.server_vad is not None
+                    if detection.mode in (RecognitionTurnDetectionMode.SERVER_VAD, RecognitionTurnDetectionMode.SEMANTIC_VAD)
                     else None
                 ),
                 speech_start=(
                     asyncio.get_running_loop().create_future()
-                    if detection.server_vad is not None
+                    if detection.mode in (RecognitionTurnDetectionMode.SERVER_VAD, RecognitionTurnDetectionMode.SEMANTIC_VAD)
                     else None
                 ),
                 latency_probe=latency_probe,
