@@ -160,7 +160,7 @@ class ScriptedSseFactory:
 def _config() -> OpenAIStreamingSpeechConfig:
     return OpenAIStreamingSpeechConfig(
         api_key="lvl10-test-key",
-        api_base="https://example.invalid/v1",
+        api_base="https://api.openai.com/v1",
         stt_model="test-stt",
         tts_model="test-tts",
         tts_voice="test-voice",
