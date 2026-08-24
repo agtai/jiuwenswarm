@@ -704,6 +704,26 @@ def test_v2_formal_population_uses_five_round_budget_and_fifteen_response_identi
     assert all(len(provider.conformance.responses) == 15 for provider in providers)
 
 
+def test_percentile_provenance_labels_formal_and_pilot_as_descriptive_non_gating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider())
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    for rounds, label in ((1, "p50=median; p90/p95 descriptive nearest-rank (n=1), non-gating."), (5, "p50=median; p90/p95 descriptive nearest-rank (n=5), non-gating.")):
+        output = tmp_path / f"percentile-{rounds}"
+        assert main([
+            "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+            "--run-id", f"percentile-{rounds}", "--source-commit", "a" * 40, "--source-state", "clean",
+            "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", str(rounds),
+        ]) == 0
+        expected = {"p50": "median", "p90_p95": f"nearest-rank descriptive (n={rounds})", "decision_role": "non-gating"}
+        assert json.loads((output / "run.json").read_text(encoding="utf-8"))["percentile_provenance"] == expected
+        assert json.loads((output / "report.json").read_text(encoding="utf-8"))["percentile_provenance"] == expected
+        assert label in (output / "report.md").read_text(encoding="utf-8")
+
+
 def test_monotonic_bucket_walk_and_b4_incremental_preference_are_reported() -> None:
     records = _formal_population()
     for record in records:

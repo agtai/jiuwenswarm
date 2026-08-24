@@ -735,6 +735,14 @@ def _nearest_rank(values: Sequence[int | float], percentile: int) -> float:
     return float(ordered[(len(ordered) * percentile + 99) // 100 - 1])
 
 
+def _percentile_provenance(rounds: int) -> dict[str, str]:
+    return {
+        "p50": "median",
+        "p90_p95": f"nearest-rank descriptive (n={rounds})",
+        "decision_role": "non-gating",
+    }
+
+
 def _timing_summary(rows: Sequence[Any], metric: str) -> dict[str, float | None]:
     values = [getattr(row, metric) for row in rows if getattr(row, metric) is not None]
     if not values:
@@ -870,6 +878,7 @@ def _markdown_report(
     records: Sequence[AttemptRecord],
     observed_requests: int,
     expected_requests: int,
+    rounds: int,
 ) -> str:
     timing_rows = [
         "| Role | Fixture | n / measured | First p50/p90/p95 ms | Reserve p50/p90/p95 ms | Complete p50/p90/p95 ms | Duration p50/p90/p95 ms |",
@@ -918,6 +927,7 @@ def _markdown_report(
         f"Decision: **{report.decision}**. Selected arm: **{report.selected_arm or 'none'}**. Smallest break-even: **{report.smallest_break_even or 'none'}**.",
         f"Attempts: {len(records)}; requests: {observed_requests}/{expected_requests}.",
         f"Gate reasons: {', '.join(report.gate_reasons)}.",
+        f"Percentiles: p50=median; p90/p95 descriptive nearest-rank (n={rounds}), non-gating.",
         "",
         "## Per-role/fixture timings",
         "",
@@ -990,6 +1000,7 @@ def _write_artifacts(
         "candidate_decision_inputs": candidate_inputs,
         "b4_incremental_vs_b2": incremental["long_2100"],
         "whole_chunk_availability": "diagnostic_only_non_gating",
+        "percentile_provenance": _percentile_provenance(args.rounds),
         "artifact_hashes": {
             "run_sha256": _file_sha256(output_root / "run.json"),
             "manifest_sha256": _file_sha256(output_root / "manifest.json"),
@@ -1003,7 +1014,7 @@ def _write_artifacts(
         json.dumps(report_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
     (output_root / "report.md").write_text(
-        _markdown_report(report, per_cell, paired_completion, control_drift, candidate_inputs, incremental, records, observed_requests, expected_requests),
+        _markdown_report(report, per_cell, paired_completion, control_drift, candidate_inputs, incremental, records, observed_requests, expected_requests, args.rounds),
         encoding="utf-8",
     )
 
@@ -1022,6 +1033,7 @@ def _write_setup_failure_artifacts(output_root: Path, args: argparse.Namespace) 
         "selected_arm": None,
         "smallest_break_even": None,
         "setup_failure": "provider_setup_failed",
+        "percentile_provenance": _percentile_provenance(args.rounds),
         "artifact_hashes": {
             "run_sha256": _file_sha256(output_root / "run.json"),
             "manifest_sha256": _file_sha256(output_root / "manifest.json"),
@@ -1138,6 +1150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "automatic_retries": 0,
             "provider_lock": "/tmp/jiuwenswarm-lvl10-provider.lock",
             "clock": "time.monotonic_ns",
+            "percentile_provenance": _percentile_provenance(args.rounds),
             "role_schedule": [
                 [role.value, fixture]
                 for round_index in range(args.rounds)
