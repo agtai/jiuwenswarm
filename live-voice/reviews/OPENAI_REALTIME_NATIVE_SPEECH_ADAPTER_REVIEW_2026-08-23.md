@@ -373,6 +373,50 @@ collect that suite because its inherited `pysbd` package contains a Python-3.13
 invalid escape; this is an environment/dependency incompatibility, not a hidden
 Web pass. The focused and affected speech matrices used Python 3.13.
 
+## Transport settlement finding and root-cause repair
+
+The required detached complete-module review of exact clean HEAD
+`6224f8e27fa1ba4508f08e4820c4871ba162c8a2` returned **`C0/I1/M0`**. It closed
+all earlier findings and isolated one remaining shared defect: the session
+finalizer ignored the legitimate boolean `False` returned by transport cleanup.
+That allowed recognition FINAL to be published while the socket-close task was
+only retained, and allowed close-side process-control to escape public cancel
+before a session-local retry and the required degradation fact.
+
+Source `6aed58f5bce5fdfed3bc2920937af377ebafddc3` repairs that one settlement
+boundary. `_FinalizationFailures.settle` now preserves typed incomplete truth;
+recognition and synthesis use the same two-attempt finalizer-owned transport
+settlement; bounded failure becomes `SPEECH_PROVIDER_CLEANUP_INCOMPLETE` rather
+than a false terminal success. Cancellation and ordinary failure facts are
+settled even when cleanup has stored a later process-control outcome. Exact
+oracles prove that a blocked recognition close releases no FINAL, while both
+recognition and synthesis retry a one-shot close `GeneratorExit`, close on the
+second attempt, retain one cancellation fact and only then rethrow. No
+Agent/Tool/Task/history or unauthorized PCM effect is introduced.
+
+Executed on exact source `6aed58f5bce5fdfed3bc2920937af377ebafddc3`:
+
+```text
+.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
+158 passed in 7.52s; openai_streaming_speech.py 2111 statements, 275 missed, 87%
+
+.venv\Scripts\python.exe -m pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
+171 passed, 1 deselected in 8.82s
+
+.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
+80 passed in 17.12s
+
+Ruff check/format, targeted mypy, py_compile and git diff --check
+PASS
+```
+
+The deselected Gateway baseline still fails independently at
+`handle.cleanup_complete is True` with actual `False`; this repair does not
+touch that route. These are implementer-run source/automation results, not an
+independent PASS. Root `TESTING.md` therefore requires one targeted independent
+confirmation of this I1 repair and its materially affected paths, not another
+complete module review.
+
 ## Cold complete-diff review
 
 The same-session substitute review corrected these issues before the final
@@ -407,11 +451,13 @@ LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
-The next acceptance trigger is one detached independent Tier-3 review of exact
-lifecycle-convergence source `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861`
-and its complete module boundary. Only after that review
-passes may a shortest real server-to-server probe be followed by the existing
-microphone/Agent/playout journey. The physical run must record Provider/session
-model truth, final transcript, audible exact Agent text, cancel/degradation
-behaviour and fixed-corpus latency, and must not reuse the API key in browser
-state, logs or evidence.
+The next acceptance trigger is one detached targeted Tier-3 confirmation of
+transport-settlement source `6aed58f5bce5fdfed3bc2920937af377ebafddc3`.
+It must verify the independent review's sole I1 and the materially affected
+normal-final, cancel/failure, timeout and service-close settlement paths; it
+must not restart the already completed full module review. Only after that
+confirmation passes may a shortest real server-to-server probe be followed by
+the existing microphone/Agent/playout journey. The physical run must record
+Provider/session model truth, final transcript, audible exact Agent text,
+cancel/degradation behaviour and fixed-corpus latency, and must not reuse the
+API key in browser state, logs or evidence.
