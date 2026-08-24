@@ -411,7 +411,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; proposed **400–800 ms is not credited** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: accept complete `chat.final`, then compare bounded sentence/clause synthesis with the current full-final SSE stream. Measure first PCM/playable reserve, continuity, completion, request count, order and cancellation before product wiring. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
+| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; proposed **400–800 ms is not credited** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: accept complete `chat.final`, then run B0=batch vs S1=current one-request full-final SSE; build S2=ordered sentence/clause group only if S1 leaves >600 ms first-PCM/playable delay. Measure Provider first PCM, ticket, browser playable reserve, source completion, continuity/prosody, request count/cost, ordered receipt and group cancellation before product wiring. Legacy `splitLiveVoiceTtsText`/`liveVoiceStreamingSpeech` is a provisional Demo queue, not a Formal implementation base. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
 
 ## 7. Residual P2 candidates
 
@@ -469,9 +469,11 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    shortens Task completion, and both retain Task/Presentation authority risk.
 7. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
    demonstrates real P2 backlog.
-8. Specify and run the no-Browser real-Provider LVL-10 screen before any
-   segmented-TTS product wiring. The current full-final route already streams
-   SSE audio, so the one-round 1561 ms segment grants no projected gain.
+8. Specify and run the real-Provider B0/S1 screen before any segmented-TTS
+   product wiring: B0=batch vs S1=current full-final SSE, with Provider first
+   PCM, media ticket, browser playable reserve and source completion measured.
+   Build S2=ordered sentence group only if S1 leaves >600 ms first-PCM/playable
+   delay. The one-round 1561 ms batch segment grants no projected gain.
 9. Treat native speech-to-speech as a strategic architecture study requiring a
    separate Registry/Tool/Task/presentation-authority decision.
 
