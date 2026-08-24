@@ -60,11 +60,13 @@ class ScriptedSseStream:
         release: asyncio.Event | None = None,
         before_done: asyncio.Event | None = None,
         on_terminal: Callable[[], None],
+        on_close: Callable[[], None],
     ) -> None:
         self._lines = lines
         self._release = release
         self._before_done = before_done
         self._on_terminal = on_terminal
+        self._on_close = on_close
         self._terminal = False
         self.closed = False
 
@@ -87,6 +89,7 @@ class ScriptedSseStream:
 
     async def aclose(self) -> None:
         self.closed = True
+        self._on_close()
         if self._release is not None:
             self._release.set()
         if self._before_done is not None:
@@ -107,6 +110,7 @@ class ScriptedSseFactory:
     ) -> None:
         self.inputs: list[str] = []
         self.terminal_input_indexes: set[int] = set()
+        self.closed_input_indexes: set[int] = set()
         self.active = 0
         self.max_active = 0
         self.fail_input_index = fail_input_index
@@ -152,6 +156,7 @@ class ScriptedSseFactory:
             release=self.release if self.block_input_index == index else None,
             before_done=self.allow_done if self.delay_done_input_index == index else None,
             on_terminal=lambda: self._deactivate_once(index),
+            on_close=lambda: self.closed_input_indexes.add(index),
         )
         self.streams.append(stream)
         return stream
@@ -242,6 +247,28 @@ async def test_short_audio_records_completion_as_reserve_when_250ms_is_unreached
 
 
 @pytest.mark.asyncio
+async def test_streamed_chunk_reserve_precedes_group_completion() -> None:
+    fixture = load_fixture_manifest(MANIFEST_PATH)[1]
+    factory = ScriptedSseFactory(delay_done_input_index=0, sample_count=12_000)
+    provider = _provider(factory)
+    task = asyncio.create_task(
+        run_attempt(provider, fixture, PopulationRole.B, _identity(PopulationRole.B))
+    )
+    try:
+        while 1 not in factory.terminal_input_indexes:
+            await asyncio.sleep(0)
+        assert 0 not in factory.terminal_input_indexes
+        factory.allow_done.set()
+        record = await task
+        assert record.request_to_reserve_ns is not None
+        assert record.request_to_complete_ns is not None
+        assert record.request_to_reserve_ns < record.request_to_complete_ns
+    finally:
+        factory.allow_done.set()
+        await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_b_prefetches_exactly_one_successor_and_releases_in_order() -> None:
     fixture = load_fixture_manifest(MANIFEST_PATH)[1]
     factory = ScriptedSseFactory(delay_done_input_index=0)
@@ -291,25 +318,25 @@ async def test_b_buffers_successor_that_completes_before_predecessor_done() -> N
 
 
 @pytest.mark.asyncio
-async def test_b_cancellation_releases_zero_pcm_after_fence() -> None:
+async def test_b_cancellation_closes_live_stream_before_false_terminal_record() -> None:
     fixture = load_fixture_manifest(MANIFEST_PATH)[1]
     factory = ScriptedSseFactory(block_input_index=1)
     provider = _provider(factory)
-    task = asyncio.create_task(run_attempt(provider, fixture, PopulationRole.B, _identity(PopulationRole.B)))
     try:
-        while len(factory.inputs) < 2:
-            await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
         # Benchmark-only deterministic test seam, not a product API. It must
-        # expose fence disposition instead of treating cancellation as success.
-        record = await runner.cancel_during_successor(
-            provider, fixture, _identity(PopulationRole.B, attempt_index=1)
+        # cancel a live successor rather than relabel a normally completed run.
+        record = await asyncio.wait_for(
+            runner.cancel_during_successor(
+                provider, fixture, _identity(PopulationRole.B, attempt_index=1)
+            ),
+            timeout=1,
         )
-        assert record.post_fence_sample_count == 0
+        assert record.terminal_outcome == "cancelled"
         assert record.group_completed is False
+        assert record.post_fence_sample_count == 0
         assert record.forbidden_effects == ZERO_FORBIDDEN_EFFECTS
+        assert factory.closed_input_indexes
+        assert factory.terminal_input_indexes
     finally:
         factory.release.set()
         await provider.close()
@@ -432,11 +459,46 @@ def test_reducer_rejects_completion_regression_and_request_bound_violation() -> 
     assert reduce_records(records).decision == "REJECTED"
 
 
-def test_reducer_marks_a1_a2_drift_inconclusive() -> None:
+@pytest.mark.parametrize(
+    "fixture_id,wrong_count",
+    (("short", 0), ("short", 2), ("medium", 2), ("medium", 4), ("long", 3), ("long", 5)),
+)
+def test_reducer_rejects_any_nonexact_b_request_count(
+    fixture_id: str, wrong_count: int
+) -> None:
     records = _valid_population()
     for record in records:
-        if record.identity.role is PopulationRole.A2:
-            record.request_to_reserve_ns = 1_500_000_000  # >250 ms and >20% drift.
+        if record.identity.role is PopulationRole.B and record.identity.fixture_id == fixture_id:
+            record.provider_request_count = wrong_count
+    assert reduce_records(records).decision == "REJECTED"
+
+
+@pytest.mark.parametrize("field", ("request_to_reserve_ns", "request_to_complete_ns"))
+def test_reducer_rejects_short_b_parity_regression_over_ten_percent(field: str) -> None:
+    records = _valid_population()
+    for record in records:
+        if record.identity.role is PopulationRole.B and record.identity.fixture_id == "short":
+            setattr(record, field, 1_700_000_000)  # >10% slower than 1,500 ms.
+    assert reduce_records(records).decision == "NO_MATERIAL_GAIN"
+
+
+def test_reducer_marks_a1_a2_absolute_drift_alone_inconclusive() -> None:
+    records = _valid_population()
+    for record in records:
+        if record.identity.fixture_id == "medium" and record.identity.role is PopulationRole.A1:
+            record.request_to_reserve_ns = 2_000_000_000
+        if record.identity.fixture_id == "medium" and record.identity.role is PopulationRole.A2:
+            record.request_to_reserve_ns = 2_300_000_000  # 300 ms, but only 15%.
+    assert reduce_records(records).decision == "INCONCLUSIVE"
+
+
+def test_reducer_marks_a1_a2_relative_drift_alone_inconclusive() -> None:
+    records = _valid_population()
+    for record in records:
+        if record.identity.fixture_id == "medium" and record.identity.role is PopulationRole.A1:
+            record.request_to_reserve_ns = 1_000_000_000
+        if record.identity.fixture_id == "medium" and record.identity.role is PopulationRole.A2:
+            record.request_to_reserve_ns = 1_201_000_000  # 20.1%, but only 201 ms.
     assert reduce_records(records).decision == "INCONCLUSIVE"
 
 
