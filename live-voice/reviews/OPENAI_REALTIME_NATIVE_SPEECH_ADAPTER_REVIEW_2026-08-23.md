@@ -2,7 +2,7 @@
 
 ## Disposition
 
-**FOURTH REPAIR SOURCE/AUTOMATION PASS — FIFTH INDEPENDENT REVIEW REQUIRED.**
+**CONSOLIDATED SOURCE/AUTOMATION PASS — ONE INDEPENDENT MODULE REVIEW REQUIRED.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -48,11 +48,17 @@ but proved that close-induced EOF can still make the recognition worker settle
 an opening session before its cancel owner, producing stale conformance and the
 wrong degradation fact. It also proved the strict local initial-resource
 contract accepts omitted `status_details` and `usage` as if they were explicit
-null. The fourth repair is limited to those two lifecycle/resource-presence
+null. The fourth repair was limited to those two lifecycle/resource-presence
 seams and their exact concurrency, process-control and zero-effect oracles. Its
-source and affected automation now pass, but no detached reviewer has inspected
-the repair. The latest independent result therefore remains `C0/I2/M0`; no
-current independent PASS or physical credit exists.
+source and affected automation passed, but the repeated repair structure left
+recognition terminal ownership distributed across cancel, receive, rollback,
+send failure and Provider close. Consolidated source
+`1d4f067cf697c4773b3ec7f0cfba307a9238594e` replaces those parallel terminal
+paths with one shielded per-session finalization task and replaces duplicated
+initial/terminal response-field sets with one shared contract. The latest
+independent result remains `C0/I2/M0` until one detached reviewer inspects this
+complete consolidated boundary; no current independent PASS or physical credit
+exists.
 
 The review covers the change based on
 `2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the containing commit is the
@@ -241,20 +247,52 @@ findings:
 These are implementer-run source/automation results only. They do not change
 the latest independent FAIL or authorize physical/provider acceptance.
 
+## Consolidation after the serial repair cycle
+
+The consolidation is a behaviour-preserving ownership refactor plus stronger
+contract mutation coverage, not another finding-by-finding product expansion:
+
+1. **One terminal owner:** cancel, Provider failure, failed-open rollback and
+   Provider close synchronously install or reuse one `finalization_task` on the
+   recognition session. All contenders await that exact task through
+   `asyncio.shield`; cancelling one waiter cannot cancel shared cleanup.
+2. **One settlement sequence:** the owner alone closes transport, settles the
+   receive worker when it is not the origin, closes/reaps conformance, retires
+   the exact registry entry, emits the applicable content-free fact and settles
+   opening `ready` last. Receive-owned failures retain close as the visible
+   post-observability barrier; external owners close first to wake receive.
+3. **Explicit cause matrix:** `cancel`, `provider_failure`, `rollback` and
+   `service_close` select only the cause-specific conformance, observability and
+   ready outcome. Mechanical cleanup is shared. Process-control is returned
+   only after the same cleanup barrier.
+4. **One response resource contract:** initial and terminal validators share
+   the same ten required fields. Both negative suites delete every field in the
+   table and require one protocol degradation with zero PCM/business effects.
+5. **Measured reduction:** target-module statements fall from `2041` to `2029`;
+   direct recognition conformance-close call sites fall from six to two; and
+   `cancel_recognition` falls from about 95 lines to a small delegating entry
+   point. The longer shared runner replaces four independent terminal
+   algorithms rather than adding a fifth.
+
+This source/automation result intentionally resets review to one cold complete
+module-boundary review. The reviewer must assess the final state machine and
+all first-owner interleavings, not replay the historical review numbering or
+grant/withhold credit based on the number of prior rounds.
+
 ## Verification
 
-Executed in the fourth-repair worktree on Windows after the fourth independent
-findings:
+Executed in the consolidation worktree on Windows after the lifecycle and
+response-contract refactor:
 
 ```text
 uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
-133 passed in 4.82s; openai_streaming_speech.py 2041 statements, 257 missed, 87%
+150 passed in 5.12s; openai_streaming_speech.py 2029 statements, 247 missed, 88%
 
 uv run pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
-171 passed, 1 deselected in 4.27s
+171 passed, 1 deselected in 5.37s
 
 C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
-80 passed in 7.37s
+80 passed in 10.21s
 
 uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
@@ -280,7 +318,10 @@ exercise the new native Realtime Adapter. It is recorded rather than hidden or
 reclassified as a pass.
 
 The repository's existing Python 3.11 environment collected and passed all 80
-Web-factory tests. The focused and affected speech matrices used Python 3.13.
+Web-factory tests. The consolidation worktree's Python 3.13 environment cannot
+collect that suite because its inherited `pysbd` package contains a Python-3.13
+invalid escape; this is an environment/dependency incompatibility, not a hidden
+Web pass. The focused and affected speech matrices used Python 3.13.
 
 ## Cold complete-diff review
 
@@ -316,8 +357,9 @@ LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
-The next acceptance trigger is a fifth detached independent Tier-3 review of
-the exact fourth-repair commit and its complete boundary. Only after that review
+The next acceptance trigger is one detached independent Tier-3 review of exact
+consolidated source `1d4f067cf697c4773b3ec7f0cfba307a9238594e` and its
+complete module boundary. Only after that review
 passes may a shortest real server-to-server probe be followed by the existing
 microphone/Agent/playout journey. The physical run must record Provider/session
 model truth, final transcript, audible exact Agent text, cancel/degradation
