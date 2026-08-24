@@ -561,3 +561,52 @@ is one fix-only Tier-3 follow-up over `35537a9a..4c1c7d68`, limited to these fiv
 repairs and their cumulative interaction with the accepted D-096 candidate. A
 PASS closes the source review Gate; only then may handoff §5 physical acceptance
 run. No remote ref was updated.
+
+## 10. 2026-08-24 Exit/cancel follow-up repair
+
+The fix-only review of `4c1c7d68` accepted the other four repaired seams and
+returned **FAIL — C0 / I1 / M0** on the remaining Exit/cancel interaction:
+
+- `ProductP1VoiceRouteOwner.close()` waited for browser audio cleanup before
+  reaching the recognition fence and both media revocations. A stalled
+  `AudioContext.close()` therefore left the Provider request, both raw PCM
+  owners and both media authorities live.
+- After that explicit fence sent cancel, a late `REQUEST_ABORTED` from the held
+  Batch request entered `recognizeFinal()`'s exception path and sent the same
+  operation a second cancel.
+
+Candidate `dab640239b1d3f1b887661ebea10266623b336e4` repairs only that seam.
+Exit now synchronously claims the exact active recognition token, clears the
+current and predecessor frame owners and starts both exact media revocations
+before browser cleanup can suspend. Media revocation is single-flight per
+owned subject during concurrent Exit/request settlement. The Batch exception
+path may send cancel only if it still owns the active recognition token, so the
+explicit fence and a late abort cannot both cancel it.
+
+The two new oracles were first compiled through their owning npm scripts
+against the unrepaired `4c1c7d68` source:
+
+| Red check | Result before repair |
+|---|---|
+| Gateway Batch: explicit fence, then held request rejects `REQUEST_ABORTED` | FAIL: `2 !== 1` cancel calls |
+| Formal Web: combined recognition Exit while `AudioContext.close()` is held | FAIL: `0 !== 1` synchronous cancel calls |
+
+The same tests also require both exact media-close requests before the audio
+gate is released, immediate local `frame_count === 0`, one cancel after the
+held request aborts, retained `cleanup_pending` truth while audio remains held,
+and zero Agent/Tool/Task effects. Current green evidence is:
+
+| Check on `dab64023` | Result |
+|---|---|
+| Formal Integrated Web | `496 passed` |
+| Gateway Batch Speech | `32 passed` |
+| Browser Audio / Browser Gateway Media / Browser Dedicated Media | `103 / 38 / 27 passed` |
+| `git diff --check` | PASS (line-ending warnings only) |
+| `npm run build:live-voice` | PASS |
+
+No backend, shared protocol, schema, product policy, flag default or
+Agent/Tool/Task/history authority changed. The unchanged backend evidence from
+`4c1c7d68` remains `261/261`. Physical acceptance remains **BLOCKED** until one
+independent, one-finding follow-up of `4c1c7d68..dab64023` returns no unresolved
+finding; that review must not reopen the four repairs its predecessor already
+accepted. No remote ref was updated.
