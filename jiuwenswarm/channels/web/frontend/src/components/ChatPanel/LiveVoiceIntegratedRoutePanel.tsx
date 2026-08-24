@@ -39,6 +39,7 @@ import {
   replayProductP2DurableOperation,
   requiresProductActivationCleanup,
   retryRetainedProductOperation,
+  type ProductWebP2ActivationBinding,
   type ProductWebP2ActivationSnapshot,
   type ProductWebP3ProgressBinding,
   type ProductWebP3ProgressSnapshot,
@@ -108,6 +109,19 @@ export function createProductP2ActivationOwner(input: ProductP2ActivationOwnerIn
     ...ownerInput,
     notification_batch_size,
   });
+}
+
+function sameProductP2ActivationBinding(
+  left: Readonly<ProductWebP2ActivationBinding>,
+  right: Readonly<ProductWebP2ActivationBinding>,
+): boolean {
+  return (
+    left.session_id === right.session_id &&
+    left.correlation_id === right.correlation_id &&
+    left.interaction_id === right.interaction_id &&
+    left.activation_id === right.activation_id &&
+    left.activation_generation === right.activation_generation
+  );
 }
 
 export interface LiveVoiceIntegratedRoutePanelProps {
@@ -740,6 +754,32 @@ type ProductP2NotificationAdmission = Readonly<{
   voice_loop_generation: number;
   foreground_presentation: PendingForegroundPresentationFence | null;
 }>;
+
+type DeferredProductTaskPresentation = Readonly<{
+  owner: ProductWebP2ActivationOwner;
+  disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
+}>;
+
+type PendingProductPresentationAttempt = {
+  owner: ProductWebP2ActivationOwner;
+  input: ProductPresentationAckInput & { presented_at: string };
+  response: Readonly<{
+    interaction_id: string;
+    response_id: string;
+    response_generation: number;
+  }>;
+  playoutSettlement: Promise<void>;
+  markPlayoutSettled: () => void;
+  task_notification: {
+    task_id: string;
+    disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
+    retry_count: number;
+    retry_pending: boolean;
+  } | null;
+  notification_repoll_before_capture?: boolean;
+  failure_reason?: ProductTaskPresentationFailureReason;
+  settlement?: Promise<void>;
+};
 
 function foregroundPresentationFenceMatchesResponse(
   fence: PendingForegroundPresentationFence | null,
@@ -1453,13 +1493,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const voiceLoopEnabledRef = useRef(false);
   const voiceLoopGenerationRef = useRef(0);
   const voiceLoopCaptureTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const productP2RecoveryTimerRef = useRef<{
+    timer: ReturnType<typeof globalThis.setTimeout>;
+    session_id: string;
+    binding: Readonly<ProductWebP2ActivationBinding>;
+    journal: ProductP2ActivationJournal;
+  } | null>(null);
   const voiceLoopP2RefreshAfterGenerationRef = useRef<number | null>(null);
   const voiceLoopP2RefreshInFlightRef = useRef(false);
+  const deferredTaskPresentationRef = useRef<DeferredProductTaskPresentation | null>(null);
   const terminalNotificationCheckRequiredRef = useRef(false);
   terminalNotificationCheckRequiredRef.current = Boolean(
-    createdProgressTaskId !== null &&
-      createdProgressOrigin?.kind === 'voice' &&
-      terminalNotificationTaskIdRef.current !== createdProgressTaskId,
+    deferredTaskPresentationRef.current !== null ||
+      (createdProgressTaskId !== null &&
+        createdProgressOrigin?.kind === 'voice' &&
+        terminalNotificationTaskIdRef.current !== createdProgressTaskId),
   );
   const submittedVoiceFinalsRef = useRef(
     new Map<string, Readonly<{ fingerprint: string; operation: Promise<void> }>>(),
@@ -1473,25 +1521,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     owner: ProductWebP2ActivationOwner;
     input: ProductTurnInput;
   } | null>(null);
-  const pendingPresentationAttemptRef = useRef<{
-    owner: ProductWebP2ActivationOwner;
-    input: ProductPresentationAckInput & { presented_at: string };
-    response: Readonly<{
-      interaction_id: string;
-      response_id: string;
-      response_generation: number;
-    }>;
-    playoutSettlement: Promise<void>;
-    markPlayoutSettled: () => void;
-    task_notification: {
-      task_id: string;
-      disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
-      retry_count: number;
-      retry_pending: boolean;
-    } | null;
-    failure_reason?: ProductTaskPresentationFailureReason;
-    settlement?: Promise<void>;
-  } | null>(null);
+  const pendingPresentationAttemptRef = useRef<PendingProductPresentationAttempt | null>(null);
   const retryTerminalAnnouncementHandlerRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
   const pendingBargeInRef = useRef<{
     owner: ProductWebP2ActivationOwner;
@@ -1643,6 +1673,59 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   activeSessionRef.current = props.activeSessionId;
   isConnectedRef.current = props.isConnected;
 
+  const currentDeferredTaskPresentation = (owner = activationOwnerRef.current) =>
+    owner !== null && deferredTaskPresentationRef.current?.owner === owner
+      ? deferredTaskPresentationRef.current
+      : null;
+
+  const retainDeferredTaskPresentation = (
+    owner: ProductWebP2ActivationOwner,
+    disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>,
+  ) => {
+    let retained = deferredTaskPresentationRef.current;
+    if (retained?.owner.snapshot().status === 'closed') {
+      deferredTaskPresentationRef.current = null;
+      retained = null;
+    }
+    if (
+      retained?.owner === owner &&
+      retained.disposition.response_id === disposition.response_id &&
+      retained.disposition.response.response_generation === disposition.response.response_generation
+    ) {
+      return;
+    }
+    if (retained !== null) {
+      throw new Error('a deferred Task presentation is still unresolved');
+    }
+    deferredTaskPresentationRef.current = Object.freeze({
+      owner,
+      disposition,
+    });
+  };
+
+  const retireDeferredTaskPresentationForClosedOwner = (owner: ProductWebP2ActivationOwner) => {
+    if (
+      deferredTaskPresentationRef.current?.owner === owner &&
+      owner.snapshot().status === 'closed'
+    ) {
+      deferredTaskPresentationRef.current = null;
+    }
+  };
+
+  const retireDeferredTaskPresentationForClosedBinding = (
+    binding: Readonly<ProductWebP2ActivationBinding>,
+  ) => {
+    const retained = deferredTaskPresentationRef.current;
+    const retainedBinding = retained?.owner.snapshot().binding ?? null;
+    if (
+      retained !== null &&
+      retainedBinding !== null &&
+      sameProductP2ActivationBinding(retainedBinding, binding)
+    ) {
+      deferredTaskPresentationRef.current = null;
+    }
+  };
+
   const clearScheduledProductVoiceLoopCapture = () => {
     const timer = voiceLoopCaptureTimerRef.current;
     if (timer === null) return;
@@ -1654,6 +1737,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (
       !voiceLoopEnabledRef.current ||
       pendingForegroundPresentationRef.current !== null ||
+      deferredTaskPresentationRef.current !== null ||
       voiceLoopCaptureTimerRef.current !== null
     ) {
       return;
@@ -1668,6 +1752,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         voiceLoopGenerationRef.current === loopGeneration &&
         pendingUnifiedFinalRef.current === null &&
         pendingForegroundPresentationRef.current === null &&
+        deferredTaskPresentationRef.current === null &&
         pendingProductTurnRef.current === null &&
         pendingPresentationAttemptRef.current === null &&
         pendingBargeInRef.current === null &&
@@ -1725,6 +1810,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       ownerSession !== undefined &&
       activeSessionRef.current === ownerSession &&
       pendingPresentationAttemptRef.current === retained;
+    const continueAfterSettlement = () => {
+      if (retained.notification_repoll_before_capture) {
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+        return;
+      }
+      if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+    };
     let settlement: Promise<void>;
     settlement = Promise.resolve()
       .then(() =>
@@ -1775,7 +1867,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           binding: owner.snapshot().binding,
           response: retained.response,
         });
-        if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+        continueAfterSettlement();
       })
       .catch(error => {
         if (!isCurrentOwner()) return;
@@ -1807,7 +1899,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               response: retained.response,
             });
           }
-          if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+          continueAfterSettlement();
           return;
         }
         setProductTextReason(reason);
@@ -1826,6 +1918,103 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       });
     retained.settlement = settlement;
     return settlement;
+  };
+
+  const clearScheduledProductP2Recovery = () => {
+    const scheduled = productP2RecoveryTimerRef.current;
+    if (scheduled === null) return;
+    globalThis.clearTimeout(scheduled.timer);
+    productP2RecoveryTimerRef.current = null;
+  };
+
+  const scheduleProductP2Recovery = (
+    sessionId: string,
+    binding: Readonly<ProductWebP2ActivationBinding>,
+    journal: ProductP2ActivationJournal,
+  ) => {
+    try {
+      const snapshot = journal.refresh();
+      if (
+        snapshot.phase === 'active' ||
+        snapshot.phase === 'closed' ||
+        snapshot.binding === null ||
+        !sameProductP2ActivationBinding(snapshot.binding, binding)
+      ) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    const scheduled = productP2RecoveryTimerRef.current;
+    if (
+      scheduled !== null &&
+      scheduled.session_id === sessionId &&
+      scheduled.journal === journal &&
+      sameProductP2ActivationBinding(scheduled.binding, binding)
+    ) {
+      return;
+    }
+    clearScheduledProductP2Recovery();
+    const timer = globalThis.setTimeout(() => {
+      if (productP2RecoveryTimerRef.current?.timer === timer) {
+        productP2RecoveryTimerRef.current = null;
+      }
+      if (
+        !mountedRef.current ||
+        activeSessionRef.current !== sessionId ||
+        p2ActivationJournalRef.current !== journal
+      ) {
+        return;
+      }
+      try {
+        const snapshot = journal.refresh();
+        if (
+          snapshot.phase === 'active' ||
+          snapshot.phase === 'closed' ||
+          snapshot.binding === null ||
+          !sameProductP2ActivationBinding(snapshot.binding, binding)
+        ) {
+          return;
+        }
+      } catch {
+        return;
+      }
+      setP2RecoveryEpoch(epoch => epoch + 1);
+    }, 1000);
+    productP2RecoveryTimerRef.current = { timer, session_id: sessionId, binding, journal };
+  };
+
+  const settleDeferredTaskPresentationFailure = (owner: ProductWebP2ActivationOwner) => {
+    const retained = currentDeferredTaskPresentation(owner);
+    if (retained === null || pendingPresentationAttemptRef.current !== null) return false;
+    const disposition = retained.disposition;
+    let markPlayoutSettled: () => void = () => undefined;
+    const playoutSettlement = new Promise<void>(resolve => {
+      markPlayoutSettled = resolve;
+    });
+    markPlayoutSettled();
+    const failureAttempt: PendingProductPresentationAttempt = {
+      owner,
+      input: {
+        ...disposition.ack,
+        presented_at: new Date().toISOString(),
+      },
+      response: disposition.response,
+      playoutSettlement,
+      markPlayoutSettled,
+      task_notification: {
+        task_id: createdProgressRouteRef.current?.task_id ?? terminalAnnouncementTaskIdRef.current ?? '',
+        disposition,
+        retry_count: 0,
+        retry_pending: false,
+      },
+      notification_repoll_before_capture: true,
+    };
+    deferredTaskPresentationRef.current = null;
+    pendingPresentationAttemptRef.current = failureAttempt;
+    updateTerminalAnnouncementState('recovering');
+    void settleTaskPresentationFailure(failureAttempt, 'task_audio_playout_failed');
+    return true;
   };
 
   const settleProductPresentationAck = (retained: NonNullable<typeof pendingPresentationAttemptRef.current>): Promise<void> => {
@@ -1897,7 +2086,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             binding: owner.snapshot().binding,
             response: retained.input,
           });
-          if (!continuePendingVoiceLoopP2Refresh()) scheduleProductVoiceLoopCapture();
+          if (
+            !settleDeferredTaskPresentationFailure(owner) &&
+            !continuePendingVoiceLoopP2Refresh()
+          ) {
+            scheduleProductVoiceLoopCapture();
+          }
         }
       })
       .catch(error => {
@@ -1979,6 +2173,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     voiceLoopGenerationRef.current += 1;
     voiceLoopP2RefreshAfterGenerationRef.current = null;
     voiceLoopP2RefreshInFlightRef.current = false;
+    deferredTaskPresentationRef.current = null;
     unifiedInputOwnerRef.current = null;
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
@@ -2062,13 +2257,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return disposition;
     }
     if (disposition.kind === 'failed') {
-      if (
-        foregroundPresentationFenceMatchesResponse(
-          pendingForegroundPresentationRef.current,
-          presentationBinding,
-          disposition.response ?? null,
-        )
-      ) {
+      const settlesForegroundPresentation = foregroundPresentationFenceMatchesResponse(
+        pendingForegroundPresentationRef.current,
+        presentationBinding,
+        disposition.response ?? null,
+      );
+      const deferredTaskSettlementStarted = settlesForegroundPresentation
+        ? settleDeferredTaskPresentationFailure(owner)
+        : false;
+      if (settlesForegroundPresentation) {
         pendingForegroundPresentationRef.current = null;
       }
       const reason = stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
@@ -2081,7 +2278,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         binding: presentationBinding,
         response: disposition.response ?? null,
       });
-      scheduleProductVoiceLoopCapture();
+      if (!deferredTaskSettlementStarted && !continuePendingVoiceLoopP2Refresh()) {
+        scheduleProductVoiceLoopCapture();
+      }
       return disposition;
     }
     if (disposition.kind !== 'presentation') {
@@ -2098,9 +2297,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     if (disposition.task_notification && pendingUnifiedFinalRef.current !== null) {
       // This poll completed after a newer authoritative voice final took the
-      // foreground. Leave the unacknowledged Task presentation to the server
-      // recovery owner; an older response generation must have zero local
-      // UI, TTS, ACK, failure or history effects here.
+      // foreground. The P2 owner has already dequeued this durable Task
+      // presentation, so retain its exact identity locally without UI, TTS,
+      // ACK, failure or history effects. After the foreground response settles,
+      // the existing Task AUDIO failure owner releases the durable reservation
+      // through its formal TEXT fallback instead of forging an AUDIO ACK.
+      retainDeferredTaskPresentation(owner, disposition);
       setP2NotificationWakeEpoch(epoch => epoch + 1);
       return disposition;
     }
@@ -2760,6 +2962,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   ]);
 
   useEffect(() => {
+    clearScheduledProductP2Recovery();
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null) {
       void voiceOwner
@@ -2803,6 +3006,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return () => {
       mountedRef.current = false;
       clearScheduledProductVoiceLoopCapture();
+      clearScheduledProductP2Recovery();
       recognizedSpeechConfirmationRef.current = null;
       editedVoiceDraftConfirmationRef.current = null;
       voiceDraftBindingRef.current = null;
@@ -2827,10 +3031,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   useEffect(() => {
     let cancelled = false;
-    let recoveryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
-    const scheduleRecovery = () => {
-      if (cancelled || recoveryTimer !== null) return;
-      recoveryTimer = globalThis.setTimeout(() => setP2RecoveryEpoch(epoch => epoch + 1), 1000);
+    const scheduleRecovery = (binding: Readonly<ProductWebP2ActivationBinding> | null) => {
+      const journal = p2ActivationJournalRef.current;
+      if (binding === null || journal === null || !ownedSessionId) return;
+      scheduleProductP2Recovery(ownedSessionId, binding, journal);
     };
     const ownedSessionId = props.activeSessionId;
     const run = async () => {
@@ -2917,6 +3121,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               journal!.markClosing(snapshot.binding);
             }
             await previous.closeWithRetry();
+            retireDeferredTaskPresentationForClosedOwner(previous);
             if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
@@ -2937,7 +3142,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
               binding: snapshot.binding,
             });
-            scheduleRecovery();
+            scheduleRecovery(snapshot.binding);
             return;
           }
           if (activationOwnerRef.current === previous) {
@@ -2961,7 +3166,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
           } catch {
             // The exact ambiguous activation is reconciled below on the next run.
-            if (previous.needsCleanup()) scheduleRecovery();
+            if (previous.needsCleanup()) scheduleRecovery(snapshot.binding);
           }
           return;
         }
@@ -2995,7 +3200,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
               binding: snapshot.binding,
             });
-            scheduleRecovery();
+            scheduleRecovery(snapshot.binding);
             return;
           }
         }
@@ -3019,6 +3224,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       const recovery = {
         owner: null as ProductWebP2ActivationOwner | null,
       };
+      const recoveryPredecessorSnapshot = journal.snapshot();
+      const recoveryPredecessorBinding =
+        recoveryPredecessorSnapshot.phase === 'closed' ? null : recoveryPredecessorSnapshot.binding;
       const recovered = await reconcileProductP2Predecessor({
         journal,
         replay_operation: operation =>
@@ -3155,7 +3363,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 binding: null,
                 reason: recovered.reason,
               });
-              scheduleRecovery();
+              scheduleRecovery(unresolvedBinding);
             }
             return;
           }
@@ -3168,12 +3376,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             reason: recovered.reason,
           });
         }
-        if (recovered.kind === 'retry') scheduleRecovery();
+        if (recovered.kind === 'retry') scheduleRecovery(journal.snapshot().binding);
         return;
       }
       const recoveredBinding = recovery.owner?.snapshot().binding ?? journal.snapshot().binding;
       recovery.owner = null;
       if (!isCurrentRun()) return;
+      const recoveredJournalSnapshot = journal.snapshot();
+      if (
+        recoveryPredecessorBinding !== null &&
+        recoveredJournalSnapshot.phase === 'closed' &&
+        recoveredJournalSnapshot.binding !== null &&
+        sameProductP2ActivationBinding(recoveredJournalSnapshot.binding, recoveryPredecessorBinding)
+      ) {
+        retireDeferredTaskPresentationForClosedBinding(recoveryPredecessorBinding);
+      }
       if (recoveredBinding !== null) {
         clearProductRecoveryDiagnostic({
           seam: 'activation',
@@ -3313,7 +3530,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           // The request may have reached the registry. Keep the write-ahead
           // activating checkpoint and replay this exact binding next epoch.
           if (isCurrentRun() && activationOwnerRef.current === owner) {
-            scheduleRecovery();
+            scheduleRecovery(binding);
           }
         } else if (cleanupRequired) {
           publishProductRecoveryDiagnostic({
@@ -3334,7 +3551,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             // Keep the exact cleanup owner and schedule another bounded pass.
             if (isCurrentRun() && activationOwnerRef.current === owner) {
               activationOwnerRef.current = null;
-              scheduleRecovery();
+              scheduleRecovery(binding);
             }
           }
         } else {
@@ -3360,7 +3577,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     void run();
     return () => {
       cancelled = true;
-      if (recoveryTimer !== null) globalThis.clearTimeout(recoveryTimer);
     };
   }, [correlationId, p2JournalState, p2RecoveryEpoch, props.activeSessionId, props.agentRouteAvailable, props.isConnected]);
 
@@ -3477,6 +3693,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       void closing
         .closeWithRetry()
         .then(() => {
+          retireDeferredTaskPresentationForClosedOwner(closing);
           if (binding && journal) {
             try {
               journal.markClosed(binding);
@@ -3641,6 +3858,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             },
           });
           if (outcome.kind === 'recovered') {
+            retireDeferredTaskPresentationForClosedOwner(owner);
             await pendingP1VoiceStartRef.current?.promise.catch(() => undefined);
             scheduleProductVoiceLoopCapture();
             return;
@@ -4349,7 +4567,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (!mountedRef.current || activeSessionRef.current !== binding.session_id) return;
         setProductTextReason(stableProductTextReason(error, 'UNIFIED_INPUT_FAILED'));
         setProductTextStatus('failed');
-        if (settledWithoutPresentation) scheduleProductVoiceLoopCapture();
+        if (settledWithoutPresentation) {
+          const activationOwner = activationOwnerRef.current;
+          const deferredTaskSettlementStarted =
+            activationOwner !== null && settleDeferredTaskPresentationFailure(activationOwner);
+          if (!deferredTaskSettlementStarted && !continuePendingVoiceLoopP2Refresh()) {
+            scheduleProductVoiceLoopCapture();
+          }
+        }
       }
     })();
     if (submittedVoiceFinalsRef.current.size >= 128) {
@@ -4374,6 +4599,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current !== null ||
       pendingUnifiedFinalRef.current !== null ||
       pendingForegroundPresentationRef.current !== null ||
+      deferredTaskPresentationRef.current !== null ||
       (pendingPresentationAttemptRef.current !== null && !retainedTerminalRecovery) ||
       pendingBargeInRef.current !== null ||
       Boolean(activationOwnerRef.current?.hasPendingSubmission()) ||
@@ -4466,6 +4692,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // predecessor closed or prepare a successor from unknown continuity.
         try {
           await activationOwner.closeWithRetry();
+          retireDeferredTaskPresentationForClosedOwner(activationOwner);
           if (activationOwnerRef.current === activationOwner && mountedRef.current && activeSessionRef.current === binding.session_id) {
             if (barrierPersisted) activationOwnerRef.current = null;
             setP2Activation({
@@ -5784,6 +6011,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const productTextTransportRetained = Boolean(
     pendingProductTurnRef.current ||
     pendingUnifiedFinalRef.current ||
+    deferredTaskPresentationRef.current ||
     unifiedInputOwnerRef.current?.hasPending() ||
     pendingPresentationAttemptRef.current ||
     pendingBargeInRef.current ||
