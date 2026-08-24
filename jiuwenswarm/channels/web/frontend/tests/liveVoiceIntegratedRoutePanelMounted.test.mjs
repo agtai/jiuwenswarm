@@ -12587,3 +12587,141 @@ test('mounted generation interruption stays off by default and opens no listenin
     browser.restore();
   }
 });
+
+test('mounted a retired Session unsettled interruption cannot fence its successor out of listening', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-retired-block-a';
+  const successorSessionId = 'mounted-generation-retired-block-b';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '新会话里再问一个问题。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '好的。',
+  });
+  // Result-unknown, so the predecessor keeps an unsettled interruption handle.
+  responder.interruptRetriableOnce = true;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+
+    // The predecessor retires with that interruption still unsettled. Its
+    // activation is closed, so nothing can ever replay it -- and it must not
+    // keep the successor Session from listening during generation.
+    await act(async () => {
+      renderer.update(
+        mountedGenerationInterruptElement(i18n, successorSessionId, responder.request, true, extraProps),
+      );
+      await new Promise(resolve => setTimeout(resolve, 80));
+    });
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'the successor capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the successor capture did not listen');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(() => responder.submits.length === 2, 'the successor utterance was not auto-submitted');
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'starting' && states.at(-1)?.text_status === 'waiting',
+        `the successor Session could not open generation-time listening; states=${states
+          .slice(-8)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+      );
+      await browser.emitFirstFrame();
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'capturing',
+        'the successor generation-time listening never reached capturing',
+      );
+    });
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted a stale voice-loop interruption failure cannot fail the next loop', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-stale-loop-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '再讲一个短的。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  let releaseInterrupt = () => undefined;
+  responder.interruptGate = new Promise(resolve => {
+    releaseInterrupt = resolve;
+  });
+  responder.interruptRejection = 'GENERATION_INTERRUPT_REFUSED';
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+    });
+
+    // Exit and re-enable the same Session and the same activation. The
+    // interruption is still on the wire and belongs to the retired voice loop.
+    await act(async () => {
+      await controlRef.current.close();
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    // Re-enabling advances the voice loop generation while the Session and the
+    // activation stay exactly the same. That combination is what the loop-
+    // generation half of the ownership check exists for: nothing else here
+    // distinguishes the retired loop from this one.
+    await act(async () => {
+      void controlRef.current.start();
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+    const statusBeforeSettlement = states.at(-1)?.text_status;
+    const settledFrom = states.length;
+
+    // The retired loop's interruption is refused now. Its outcome belongs to a
+    // voice loop that no longer exists and must not surface on this one.
+    await act(async () => {
+      releaseInterrupt();
+      await new Promise(resolve => setTimeout(resolve, 80));
+    });
+    assert.equal(
+      states.slice(settledFrom).some(state => state.text_status === 'failed'),
+      false,
+      `a retired voice loop's interruption failure surfaced on its successor; states=${states
+        .slice(settledFrom)
+        .map(state => `${state.p1_status}/${state.text_status}`)
+        .join(' | ')}`,
+    );
+    assert.equal(states.at(-1)?.text_status, statusBeforeSettlement);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});

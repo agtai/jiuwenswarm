@@ -2034,9 +2034,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingUnifiedFinalRef.current = null;
     pendingForegroundPresentationRef.current = null;
     generationCaptureRef.current = null;
-    // The interruption handle is deliberately kept: it is the only way the
-    // exact owner that issued the request can still settle it. Every consumer
-    // below matches on that owner, so a retired handle cannot bind a successor.
+    // The interruption handle is deliberately kept here: while its activation
+    // is still open, it is the only way the exact owner that issued the request
+    // can still settle it. Every consumer matches on that owner, so a retired
+    // handle can neither bind a successor nor fence one out of its own work,
+    // and `retireOwnerGenerationInterrupt` drops it once that activation
+    // closes and no replay through it is possible any more.
     interruptedProductResponsesRef.current.clear();
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || !hasDurableProductVoiceSession(sessionId)) {
@@ -2502,6 +2505,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           pendingGenerationInterruptRef.current = null;
         }
       }
+    }
+  };
+
+  /**
+   * A closed activation can no longer issue anything: `interruptGeneration`
+   * requires its active binding, so any generation interruption it still holds
+   * is unreachable for replay. Idempotence of a retried interruption is owned
+   * by the server-side `action_id` ledger, not by this handle. Dropping it
+   * with the activation is what keeps a retired one from reporting a pending
+   * interruption that no successor can ever settle.
+   */
+  const retireOwnerGenerationInterrupt = (retiring: ProductWebP2ActivationOwner) => {
+    if (pendingGenerationInterruptRef.current?.owner === retiring) {
+      pendingGenerationInterruptRef.current = null;
     }
   };
 
@@ -3027,6 +3044,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
+            retireOwnerGenerationInterrupt(previous);
           } catch {
             if (!operationsSettled && snapshot.binding && journalReady && sameSession && journal!.snapshot().pending_operation === null) {
               try {
@@ -3087,6 +3105,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
+            retireOwnerGenerationInterrupt(previous);
           } catch {
             if (
               journalReady &&
@@ -3586,6 +3605,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       void closing
         .closeWithRetry()
         .then(() => {
+          retireOwnerGenerationInterrupt(closing);
           if (binding && journal) {
             try {
               journal.markClosed(binding);
@@ -3618,7 +3638,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // are foreground work: a Task announcement must not take the
         // microphone away from a speaker who is replacing an answer.
         generationCaptureRef.current !== null ||
-        pendingGenerationInterruptRef.current !== null ||
+        // Matched on the current owner. A handle left behind by an activation
+        // that has already retired belongs to no live foreground, and must not
+        // report a successor busy forever.
+        pendingGenerationInterruptRef.current?.owner === activationOwnerRef.current ||
         activeVoiceResponseRef.current !== null ||
         productTextStatus === 'waiting' ||
         activationOwnerRef.current?.hasPendingSubmission() ||
@@ -5212,7 +5235,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       fence === null ||
       retained.fence !== fence ||
       retained.loop_generation !== voiceLoopGenerationRef.current ||
-      pendingGenerationInterruptRef.current !== null
+      pendingGenerationInterruptRef.current?.owner === p2Owner
     ) {
       return;
     }
@@ -5309,7 +5332,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationOwnerRef.current !== owner ||
       pendingPresentationAttemptRef.current !== null ||
       pendingBargeInRef.current !== null ||
-      pendingGenerationInterruptRef.current !== null ||
+      // Only this owner's own unsettled interruption closes its listening
+      // window. A retired activation's handle cannot reach this foreground,
+      // so letting it match here would block every successor Session forever.
+      pendingGenerationInterruptRef.current?.owner === owner ||
       terminalAnnouncementStateRef.current !== 'idle'
     ) {
       return;

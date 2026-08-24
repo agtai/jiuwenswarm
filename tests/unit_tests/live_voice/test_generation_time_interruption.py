@@ -1010,3 +1010,37 @@ async def test_interruption_seam_exposes_no_cancellation_scope_argument() -> Non
     ):
         names = set(inspect.signature(owner).parameters)
         assert not forbidden & names, f"{owner.__qualname__} exposes a cancellation scope"
+
+
+@pytest.mark.asyncio
+async def test_failed_supersede_fence_leaves_no_replacement_turn() -> None:
+    """The fence precedes the replacement commit, so a failed fence commits nothing.
+
+    Committing first and fencing afterwards would leave a committed turn for a
+    round that was never fenced -- two live responses for one interaction, which
+    is exactly the state the ordering exists to prevent.  This asserts the
+    ordering through its only externally visible consequence: CR holds no turn
+    for a replacement whose fence failed.
+    """
+
+    lower = SequencedFormalAdapter(rounds=1)
+    history = RecordingHistoryWriter()
+    current, _harness = build_runtime(lower, history)
+    await open_runtime(current)
+
+    first = await submit_turn(current, index=1)
+    await drain_until_generating(current, first.response_ref)
+
+    with pytest.raises(Exception) as unfenceable:
+        await submit_turn(
+            current,
+            index=2,
+            supersedes=ResponseRef("interaction-1", "response-unknown", 0),
+        )
+    assert getattr(unfenceable.value, "reason", None) == "STALE_RESPONSE_REFERENCE"
+
+    turns = current.snapshot().conversation.conversation.turns
+    assert [record.turn_id for record in turns] == ["turn-1"]
+    assert all(record.turn_id != "turn-2" for record in turns)
+    lower.gates[0].set()
+    await shutdown(current)

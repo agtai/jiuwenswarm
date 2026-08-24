@@ -849,7 +849,14 @@ export class ProductP1VoiceRouteOwner {
     if (this.#status !== 'capturing' || this.#route === null || this.#captureProviderSpeechStartObserved) {
       return false;
     }
-    const operationGeneration = ++this.#operationGeneration;
+    // The operation generation is deliberately NOT advanced before the capture
+    // is physically stopped. Advancing it first makes every control event that
+    // arrives during `stopCapture` -- including an authoritative provider
+    // speech-start -- fail its own generation check and be dropped, which is
+    // exactly how a real utterance would be silently discarded by a release
+    // that was only ever meant for a silent window. Keeping the generation
+    // lets that speech-start land, so the check below can still see it.
+    const operationGeneration = this.#operationGeneration;
     const route = this.#route;
     try {
       this.#captureStopExpected = true;
@@ -859,6 +866,17 @@ export class ProductP1VoiceRouteOwner {
         this.#captureStopExpected = false;
       }
       this.#requireCurrent(operationGeneration);
+      if (this.#captureProviderSpeechStartObserved) {
+        // The user started speaking before this window finished closing. The
+        // capture owns a real utterance, so it is not released: the status
+        // stays `capturing`, and the route, frames and media receipt are all
+        // retained, so the caller treats this exactly like a capture that was
+        // already speaking when the answer arrived.
+        return false;
+      }
+      // Only now is the release irreversible, so retire the callbacks of the
+      // capture being torn down.
+      const releaseGeneration = ++this.#operationGeneration;
       // Finish the uplink the same way recognition does. The acknowledged
       // frame count is the media receipt authority the answer about to be
       // spoken depends on, so a released listening window must settle it
@@ -868,7 +886,7 @@ export class ProductP1VoiceRouteOwner {
       let pending = route.leaf.flush();
       while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
         await waitTurn();
-        this.#requireCurrent(operationGeneration);
+        this.#requireCurrent(releaseGeneration);
         this.#drainCaptureFrames();
         pending = route.leaf.flush();
       }
@@ -878,7 +896,7 @@ export class ProductP1VoiceRouteOwner {
       } else {
         route.leaf.close('MEDIA_LOCAL_CLOSE');
       }
-      this.#requireCurrent(operationGeneration);
+      this.#requireCurrent(releaseGeneration);
       if (this.#route === route) this.#route = null;
       this.#frames = [];
       this.#captureSpeechObserved = false;

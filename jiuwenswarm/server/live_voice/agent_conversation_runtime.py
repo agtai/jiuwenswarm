@@ -2933,7 +2933,8 @@ class AgentConversationRuntime:
             # The target settled on its own or a successor already replaced it.
             # Speech that arrives now is an ordinary next turn, so it must leave
             # every existing and successor round untouched: a cancellation is
-            # only ever the companion of a fence this call actually applied.
+            # bound to a target that is still a fenceable live response, and a
+            # settled or replaced one is neither.
             return AgentGenerationInterruption(
                 action_id=action_id,
                 response_ref=ref,

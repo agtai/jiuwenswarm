@@ -6541,3 +6541,69 @@ test('formal P1 never publishes a private transport error message', async () => 
   );
   await owner.close();
 });
+
+test('a generation-time release keeps an utterance that starts while the capture is stopping', async () => {
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return streamingMediaActivation(binding, null, {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        });
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected release method ${method}`);
+    },
+  });
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  assert.equal(owner.status().status, 'capturing');
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
+
+  // The answer arrived, so the silent listening window is released. The user
+  // starts speaking inside the release itself: the provider reports it while
+  // the capture is still stopping, which is exactly the window in which a
+  // release that retired its callbacks up front would drop the utterance.
+  const releasing = owner.abandonCapture('formal_generation_listening_released');
+  socket.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: binding.lease_id,
+      generation: binding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 120,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  const released = await releasing;
+
+  assert.equal(released, false);
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, true);
+  await owner.close();
+});
