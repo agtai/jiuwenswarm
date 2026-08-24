@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from statistics import median
@@ -154,8 +154,16 @@ def load_fixture_manifest(path: Path) -> tuple[Lvl10Fixture, ...]:
 
 
 def _response(identity: AttemptIdentity) -> ResponseRef:
+    fixture_order = {"short": 0, "medium": 1, "long": 2}
+    generation = identity.attempt_index * 3 + fixture_order[identity.fixture_id]
     token = f"{identity.run_id}-{identity.role.value}-{identity.fixture_id}-{identity.attempt_index}"
-    return ResponseRef(f"lvl10-{token}", f"lvl10-response-{token}", 0)
+    # One interaction per population role bounds the active-response ledger;
+    # response generations remain strictly increasing within that interaction.
+    return ResponseRef(
+        f"lvl10-{identity.run_id}-{identity.role.value}",
+        f"lvl10-response-{token}",
+        generation,
+    )
 
 
 def _request(
@@ -165,8 +173,8 @@ def _request(
     text = fixture.final_text[start:end]
     return SynthesisStreamRequest(
         SynthesisStreamRef(
-            f"lvl10-stream-{response.response_id}-{index}",
-            0,
+            f"lvl10-stream-{response.interaction_id}-{index}",
+            response.response_generation,
             response,
             f"lvl10-unit-{index}",
             index,
@@ -184,9 +192,10 @@ async def _consume(
     request: SynthesisStreamRequest,
     *,
     clock: Callable[[], int],
-) -> tuple[bytes, int | None, int, bool]:
+) -> tuple[bytes, int | None, int | None, int, bool]:
     pcm = bytearray()
     first: int | None = None
+    reserve: int | None = None
     try:
         while True:
             event = await provider.next_synthesis_event(
@@ -196,12 +205,14 @@ async def _consume(
                 if first is None:
                     first = clock()
                 pcm.extend(event.pcm_s16le)
+                if reserve is None and len(pcm) // 2 >= RESERVE_SAMPLES:
+                    reserve = clock()
             if event.kind is SynthesisEventKind.COMPLETED:
-                return bytes(pcm), first, clock(), True
+                return bytes(pcm), first, reserve, clock(), True
             if event.kind is SynthesisEventKind.CANCELLED:
-                return bytes(pcm), first, clock(), False
+                return bytes(pcm), first, reserve, clock(), False
     except BaseException:
-        return bytes(pcm), first, clock(), False
+        return bytes(pcm), first, reserve, clock(), False
 
 
 def _effects(provider: NativeStreamingSpeechProvider) -> dict[str, int]:
@@ -241,10 +252,11 @@ async def run_attempt(
     live: dict[
         int,
         tuple[
-            SynthesisStreamRequest, asyncio.Task[tuple[bytes, int | None, int, bool]]
+            SynthesisStreamRequest,
+            asyncio.Task[tuple[bytes, int | None, int | None, int, bool]],
         ],
     ] = {}
-    completed: dict[int, tuple[bytes, int | None, int, bool]] = {}
+    completed: dict[int, tuple[bytes, int | None, int | None, int, bool]] = {}
     opened = 0
     released: list[ReleaseEvent] = []
     released_indexes: list[int] = []
@@ -258,7 +270,7 @@ async def run_attempt(
             await provider.open_synthesis(request)
         except BaseException:
             errors += 1
-            completed[index] = (b"", None, monotonic_ns(), False)
+            completed[index] = (b"", None, None, monotonic_ns(), False)
             opened += 1
             return
         live[index] = (
@@ -303,13 +315,13 @@ async def run_attempt(
                     value = task.result()
                     completed[index] = value
                     del live[index]
-                    if not value[3]:
+                    if not value[4]:
                         errors += 1
             if errors:
                 await fence()
                 break
-            while next_release in completed and completed[next_release][3]:
-                pcm, _, finished_at, _ = completed[next_release]
+            while next_release in completed and completed[next_release][4]:
+                pcm, _, _, finished_at, _ = completed[next_release]
                 released.append(ReleaseEvent(next_release, finished_at, len(pcm) // 2))
                 released_indexes.append(next_release)
                 next_release += 1
@@ -322,14 +334,11 @@ async def run_attempt(
                     await open_one(opened)
         all_pcm = sum(event.sample_count for event in released)
         firsts = [item[1] for item in completed.values() if item[1] is not None]
-        reserve_at: int | None = None
-        total = 0
-        for event in released:
-            total += event.sample_count
-            if total >= RESERVE_SAMPLES and reserve_at is None:
-                reserve_at = event.released_at_ns
+        # Chunk 0 is the first ordered source. Its streaming delta crossing is
+        # usable before its terminal event; later chunks remain fenced behind it.
+        reserve_at = completed.get(0, (b"", None, None, 0, False))[2]
         complete_at = max(
-            (item[2] for item in completed.values()), default=monotonic_ns()
+            (item[3] for item in completed.values()), default=monotonic_ns()
         )
         outcome = (
             "completed"
@@ -374,12 +383,37 @@ async def cancel_during_successor(
     fixture: Lvl10Fixture,
     identity: AttemptIdentity,
 ) -> AttemptRecord:
-    record = await run_attempt(provider, fixture, PopulationRole.B, identity)
-    return replace(
-        record,
-        terminal_outcome="cancelled",
-        group_completed=False,
-        post_fence_sample_count=0,
+    """Deterministic benchmark seam: interrupt a live B group, never relabel it."""
+    task = asyncio.create_task(
+        run_attempt(provider, fixture, PopulationRole.B, identity)
+    )
+    for _ in range(100):
+        if provider.conformance.snapshot().active_synthesis >= 2:
+            break
+        await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    return AttemptRecord(
+        identity,
+        None,
+        None,
+        None,
+        0,
+        0,
+        0,
+        0,
+        "cancelled",
+        False,
+        True,
+        True,
+        (),
+        0,
+        0,
+        _effects(provider),
+        False,
     )
 
 
@@ -441,12 +475,18 @@ def reduce_records(records: Sequence[AttemptRecord]) -> Lvl10Report:
             metric(PopulationRole.A1, fixture, "request_to_reserve_ns"),
             metric(PopulationRole.A2, fixture, "request_to_reserve_ns"),
         )
-        if (
-            fixture in ("medium", "long")
-            and abs(a1 - a2) > 250_000_000
-            and abs(a1 - a2) * 100 > min(a1, a2) * 20
+        if fixture in ("medium", "long") and (
+            abs(a1 - a2) > 250_000_000 or abs(a1 - a2) * 100 > min(a1, a2) * 20
         ):
             return Lvl10Report("INCONCLUSIVE", tuple(records))
+    short_refs = (PopulationRole.A1, PopulationRole.A2)
+    for name in ("request_to_reserve_ns", "request_to_complete_ns"):
+        short_b = metric(PopulationRole.B, "short", name)
+        if (
+            short_b * 100
+            > max(metric(role, "short", name) for role in short_refs) * 110
+        ):
+            return Lvl10Report("NO_MATERIAL_GAIN", tuple(records))
     for fixture in ("medium", "long"):
         b = metric(PopulationRole.B, fixture, "request_to_reserve_ns")
         refs = [
@@ -476,8 +516,13 @@ def reduce_records(records: Sequence[AttemptRecord]) -> Lvl10Report:
             > 100_000_000
         ):
             return Lvl10Report("REJECTED", tuple(records))
+    expected_b_requests = {"short": 1, "medium": 3, "long": 4}
     if any(
-        x.provider_request_count > MAX_SEGMENTS
+        (
+            x.identity.role is PopulationRole.B
+            and x.provider_request_count != expected_b_requests[x.identity.fixture_id]
+        )
+        or (x.identity.role is not PopulationRole.B and x.provider_request_count != 1)
         or not x.group_completed
         or not x.exact_text_coverage
         or not x.exact_segment_order
@@ -499,24 +544,85 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _population_summary(records: Sequence[AttemptRecord]) -> dict[str, object]:
+    grouped: dict[tuple[PopulationRole, str], list[AttemptRecord]] = {}
+    for record in records:
+        grouped.setdefault(
+            (record.identity.role, record.identity.fixture_id), []
+        ).append(record)
+    per_role_fixture: dict[str, dict[str, object]] = {}
+    denominators: dict[str, dict[str, int]] = {}
+    for role in PopulationRole:
+        per_role_fixture[role.value] = {}
+        denominators[role.value] = {}
+        for fixture in ("short", "medium", "long"):
+            rows = grouped[(role, fixture)]
+            denominators[role.value][fixture] = len(rows)
+
+            def timing(name: str) -> dict[str, float]:
+                values = [getattr(row, name) or 0 for row in rows]
+                return {
+                    "p50": _p50(values) / 1_000_000,
+                    "p95": _p95(values) / 1_000_000,
+                }
+
+            per_role_fixture[role.value][fixture] = {
+                "request_to_reserve_ms": timing("request_to_reserve_ns"),
+                "request_to_first_pcm_ms": timing("request_to_first_pcm_ns"),
+                "request_to_complete_ms": timing("request_to_complete_ns"),
+                "provider_request_count": _p50(
+                    [row.provider_request_count for row in rows]
+                ),
+                "provider_error_count": sum(row.provider_error_count for row in rows),
+                "failure_count": sum(
+                    row.terminal_outcome != "completed" for row in rows
+                ),
+            }
+    deltas: dict[str, object] = {}
+    for fixture in ("medium", "long"):
+        b = per_role_fixture[PopulationRole.B.value][fixture]["request_to_reserve_ms"][
+            "p50"
+        ]
+        deltas[fixture] = {
+            "a1_reserve_delta_ms": per_role_fixture[PopulationRole.A1.value][fixture][
+                "request_to_reserve_ms"
+            ]["p50"]
+            - b,
+            "a2_reserve_delta_ms": per_role_fixture[PopulationRole.A2.value][fixture][
+                "request_to_reserve_ms"
+            ]["p50"]
+            - b,
+        }
+    return {
+        "denominators": denominators,
+        "per_role_fixture": per_role_fixture,
+        "b_vs_references": deltas,
+    }
+
+
 async def _run_population(
     args: argparse.Namespace, fixtures: tuple[Lvl10Fixture, ...]
 ) -> Lvl10Report:
-    selection = await select_environment_streaming_speech(batch_available=False)
-    if selection.tier is not SpeechRouteTier.STREAMING or selection.provider is None:
-        raise RuntimeError("LVL10_STREAMING_PROVIDER_REQUIRED")
-    provider = selection.provider
     records: list[AttemptRecord] = []
-    try:
-        for role in (PopulationRole.A1, PopulationRole.B, PopulationRole.A2):
+    for role in (PopulationRole.A1, PopulationRole.B, PopulationRole.A2):
+        # A fresh adapter per arm keeps the bounded conformance identity ledger
+        # below its retained-unit cap while preserving one process/config/lock.
+        selection = await select_environment_streaming_speech(batch_available=False)
+        if (
+            selection.tier is not SpeechRouteTier.STREAMING
+            or selection.provider is None
+        ):
+            raise RuntimeError("LVL10_STREAMING_PROVIDER_REQUIRED")
+        provider = selection.provider
+        try:
             for attempt_index in range(args.attempts):
                 for fixture in fixtures:
                     identity = AttemptIdentity(
                         args.run_id, role, fixture.fixture_id, attempt_index
                     )
                     records.append(await run_attempt(provider, fixture, role, identity))
-    finally:
-        await provider.close()
+        finally:
+            await provider.close()
     report = reduce_records(records)
     attempts = args.output_root / "attempts.jsonl"
     attempts.write_text(
@@ -527,12 +633,25 @@ async def _run_population(
         encoding="utf-8",
     )
     report_path = args.output_root / "report.json"
+    summary = _population_summary(records)
     report_path.write_text(
         json.dumps(
             {
+                "schema_version": "live-voice.lvl10-report.v1",
                 "decision": report.decision,
                 "attempt_count": len(records),
-                "attempts_sha256": _sha256(attempts),
+                "provenance": {
+                    "run_id": args.run_id,
+                    "source_commit": args.source_commit,
+                    "source_state": args.source_state,
+                    "fixture_sha256": _sha256(args.output_root / "manifest.json"),
+                    "provider_instances": 3,
+                },
+                "artifact_hashes": {
+                    "manifest_sha256": _sha256(args.output_root / "manifest.json"),
+                    "attempts_sha256": _sha256(attempts),
+                },
+                **summary,
             },
             sort_keys=True,
             indent=2,
@@ -587,6 +706,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "prefetch_depth": 1,
             "automatic_retries": 0,
         }
+        copied_manifest = args.output_root / "manifest.json"
+        copied_manifest.write_bytes(args.manifest.read_bytes())
+        run_manifest["fixture_sha256"] = _sha256(copied_manifest)
         (args.output_root / "run.json").write_text(
             json.dumps(run_manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
         )
