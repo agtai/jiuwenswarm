@@ -128,6 +128,11 @@ interface ProductP1MediaCloseBinding {
   readonly activation_generation: number;
 }
 
+interface ProductP1RecognitionContinuation {
+  readonly authority: Readonly<ProductP1MediaCloseBinding>;
+  readonly frames: readonly Readonly<CapturedAudioFrame>[];
+}
+
 function objectValue(value: unknown, field: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${field} must be an object`);
@@ -402,6 +407,7 @@ export class ProductP1VoiceRouteOwner {
   #bargeInEndOfTurnDelivered = false;
   #generationSpeechStartDelivered = false;
   #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
+  #recognitionContinuation: Readonly<ProductP1RecognitionContinuation> | null = null;
   #abandonCapturePromise: Promise<boolean> | null = null;
   #captureRotationPromise: Promise<void> | null = null;
   #captureRotationSourceId: string | null = null;
@@ -618,6 +624,7 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInEndOfTurnDelivered = false;
     this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
+    this.#recognitionContinuation = null;
     this.#failureCleanupReason = null;
     this.#frames = [];
     this.#captureSpeechObserved = false;
@@ -892,11 +899,20 @@ export class ProductP1VoiceRouteOwner {
       }
       if (this.#mediaSentFrames === this.#frames.length && pending.pending_frames === 0) {
         this.#captureFramesAcked = this.#mediaSentFrames;
-        await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+        await awaitRouteCompletion(
+          route.leaf.completeUplink(
+            speakerStarted
+              ? 'MEDIA_RECOGNITION_CONTINUATION'
+              : 'MEDIA_LOCAL_CLOSE',
+          ),
+        );
       } else {
         route.leaf.close('MEDIA_LOCAL_CLOSE');
       }
       this.#requireCurrent(releaseGeneration);
+      const predecessorFrames = speakerStarted
+        ? Object.freeze([...this.#frames])
+        : null;
       if (this.#route === route) this.#route = null;
       this.#frames = [];
       this.#captureSpeechObserved = false;
@@ -910,11 +926,19 @@ export class ProductP1VoiceRouteOwner {
         // are settled above, a fresh lease keeps recording what the user is
         // still saying, and end-of-turn and recognition proceed normally. The
         // caller sees `capturing` because the capture really is live.
+        if (priorAuthority === null || predecessorFrames === null || predecessorFrames.length === 0) {
+          throw new Error('generation interruption continuation lost predecessor authority');
+        }
+        this.#recognitionContinuation = Object.freeze({
+          authority: priorAuthority,
+          frames: predecessorFrames,
+        });
         this.#captureFramesAcked = 0;
         this.#speech = null;
-        await this.#startConcurrentCapture(releaseGeneration);
-        this.#requireCurrent(releaseGeneration);
-        await this.#revokeMediaAuthority(priorAuthority);
+        await this.#startConcurrentCapture(
+          releaseGeneration,
+          priorAuthority.subject_id,
+        );
         this.#requireCurrent(releaseGeneration);
         this.#setStatus('capturing', this.#streamingFallbackReason);
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
@@ -1057,42 +1081,59 @@ export class ProductP1VoiceRouteOwner {
       // unaffected.
       const recognitionInput = Object.freeze({
         frames: this.#frames,
+        ...(this.#recognitionContinuation === null
+          ? {}
+          : {
+              predecessor: Object.freeze({
+                subjectId: this.#recognitionContinuation.authority.subject_id,
+                frames: this.#recognitionContinuation.frames,
+              }),
+            }),
         locale: this.#locale,
         correlationId: requiredText(this.#correlationId, 'correlation_id'),
         interactionId: requiredText(this.#interactionId, 'interaction_id'),
       });
       let degradationReason: string | null = this.#streamingFallbackReason;
       let result: Readonly<FormalBatchRecognitionResult | FormalStreamingRecognitionResult> | null;
-      if (this.#streamingRecognitionAvailable) {
-        const streaming = await speech.recognizeStreamingFinal(recognitionInput);
-        this.#requireCurrent(operationGeneration);
-        if (streaming.status === 'completed') {
-          result = streaming.result;
-        } else if (streaming.fallback.fallback_tier === 'batch') {
-          degradationReason = streaming.fallback.reason_id;
-          this.#l0Record('fallback', null, undefined, 'fallback');
-          console.warn(`live_voice_speech_degradation reason=${degradationReason} target=batch visible=true`);
-          this.#setStatus('recognizing', degradationReason);
-          result = await speech.recognizeFinal(recognitionInput);
-        } else {
-          throw Object.assign(new Error('streaming recognition requires text fallback'), {
-            reason_id: streaming.fallback.reason_id,
-          });
-        }
-      } else {
-        if (degradationReason !== null) {
-          const fallbackTier = this.#streamingFallbackTier;
-          if (fallbackTier === null) throw new Error('streaming recognition fallback tier is absent');
-          this.#l0Record('fallback', null, undefined, 'fallback');
-          console.warn(`live_voice_speech_degradation reason=${degradationReason} target=${fallbackTier} visible=true`);
-          this.#setStatus('recognizing', degradationReason);
-          if (fallbackTier === 'text') {
+      const continuation = this.#recognitionContinuation;
+      try {
+        if (this.#streamingRecognitionAvailable && continuation === null) {
+          const streaming = await speech.recognizeStreamingFinal(recognitionInput);
+          this.#requireCurrent(operationGeneration);
+          if (streaming.status === 'completed') {
+            result = streaming.result;
+          } else if (streaming.fallback.fallback_tier === 'batch') {
+            degradationReason = streaming.fallback.reason_id;
+            this.#l0Record('fallback', null, undefined, 'fallback');
+            console.warn(`live_voice_speech_degradation reason=${degradationReason} target=batch visible=true`);
+            this.#setStatus('recognizing', degradationReason);
+            result = await speech.recognizeFinal(recognitionInput);
+          } else {
             throw Object.assign(new Error('streaming recognition requires text fallback'), {
-              reason_id: degradationReason,
+              reason_id: streaming.fallback.reason_id,
             });
           }
+        } else {
+          if (degradationReason !== null && continuation === null) {
+            const fallbackTier = this.#streamingFallbackTier;
+            if (fallbackTier === null) throw new Error('streaming recognition fallback tier is absent');
+            this.#l0Record('fallback', null, undefined, 'fallback');
+            console.warn(`live_voice_speech_degradation reason=${degradationReason} target=${fallbackTier} visible=true`);
+            this.#setStatus('recognizing', degradationReason);
+            if (fallbackTier === 'text') {
+              throw Object.assign(new Error('streaming recognition requires text fallback'), {
+                reason_id: degradationReason,
+              });
+            }
+          }
+          result = await speech.recognizeFinal(recognitionInput);
         }
-        result = await speech.recognizeFinal(recognitionInput);
+      } finally {
+        if (continuation !== null) {
+          this.#recognitionContinuation = null;
+          await this.#revokeMediaAuthority(continuation.authority);
+          this.#requireCurrent(operationGeneration);
+        }
       }
       // The formal STT result, not captured samples, is the retained product
       // fact. Release the browser copy as soon as the exact request settles.
@@ -1526,17 +1567,24 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInEndOfTurnDelivered = false;
     this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
+    this.#recognitionContinuation = null;
     this.#reason = reason;
   }
 
-  async #startConcurrentCapture(operationGeneration: number): Promise<void> {
+  async #startConcurrentCapture(
+    operationGeneration: number,
+    recognitionPredecessorSubjectId: string | null = null,
+  ): Promise<void> {
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
     this.#mediaTerminalFailure = null;
     this.#captureReadinessPending = true;
     this.#captureReadinessPurpose = 'successor';
     try {
-      await this.#startConcurrentCaptureOwned(operationGeneration);
+      await this.#startConcurrentCaptureOwned(
+        operationGeneration,
+        recognitionPredecessorSubjectId,
+      );
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
       this.#mediaTerminalFailure = null;
@@ -1553,7 +1601,10 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async #startConcurrentCaptureOwned(operationGeneration: number): Promise<void> {
+  async #startConcurrentCaptureOwned(
+    operationGeneration: number,
+    recognitionPredecessorSubjectId: string | null,
+  ): Promise<void> {
     const sessionId = requiredText(this.#sessionId, 'session_id');
     const interactionId = requiredText(this.#interactionId, 'interaction_id');
     const correlationId = requiredText(this.#correlationId, 'correlation_id');
@@ -1604,6 +1655,9 @@ export class ProductP1VoiceRouteOwner {
         sample_rate_hz: metadata.frame_format.sample_rate_hz,
         locale: this.#locale,
         end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+        ...(recognitionPredecessorSubjectId === null
+          ? {}
+          : { recognition_predecessor_subject_id: recognitionPredecessorSubjectId }),
       });
       const activation = exactMediaActivation(activationValue);
       if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
@@ -2579,6 +2633,7 @@ export class ProductP1VoiceRouteOwner {
     // fallible browser or remote authority cleanup; retained close bindings are
     // sufficient for an exact retry and must never retain expired audio.
     this.#frames = [];
+    this.#recognitionContinuation = null;
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
     this.#captureLocalActivityRecencyFrames = 0;

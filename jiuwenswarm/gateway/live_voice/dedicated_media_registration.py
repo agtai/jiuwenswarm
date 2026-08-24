@@ -45,6 +45,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaAuthorityBinding,
     MediaDirection,
+    MediaDetachReason,
     MediaFrameFormat,
     MediaGenerationBinding,
     MediaGenerationKind,
@@ -614,6 +615,10 @@ class _MediaAuthority:
     streaming_preopen_frames: list[MediaAudioFrame] = field(
         default_factory=list, repr=False
     )
+    recognition_predecessor_subject_id: str | None = field(
+        default=None, repr=False
+    )
+    recognition_continuation_predecessor: bool = False
     streaming_voice_commit_receipt: str | None = field(default=None, repr=False)
     streaming_started_at: float | None = None
     streaming_observation_emitted: bool = False
@@ -1228,10 +1233,13 @@ class DedicatedMediaProductRegistry:
             "locale",
         }
         requests_end_of_turn = "end_of_turn_capability" in params
-        if frozenset(params) not in {
-            frozenset(expected_keys),
-            frozenset(expected_keys | {"end_of_turn_capability"}),
-        }:
+        optional_keys = {
+            "end_of_turn_capability",
+            "recognition_predecessor_subject_id",
+        }
+        if not expected_keys <= set(params) or not set(params) <= (
+            expected_keys | optional_keys
+        ):
             raise MediaTransportViolation(
                 "MEDIA_INVALID_ACTIVATION", "media activation fields are not closed"
             )
@@ -1244,6 +1252,14 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_END_OF_TURN_CAPABILITY_MISMATCH",
                 "requested end-of-turn capability is unsupported",
             )
+        recognition_predecessor_subject_id = (
+            _required_id(
+                params.get("recognition_predecessor_subject_id"),
+                "recognition_predecessor_subject_id",
+            )
+            if "recognition_predecessor_subject_id" in params
+            else None
+        )
         owner = self._streaming_recognition_owner
         end_of_turn_available = bool(
             requests_end_of_turn
@@ -1301,6 +1317,42 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED",
                     "media activation requires the exact accepted product P2 route",
                 )
+            if recognition_predecessor_subject_id is not None:
+                predecessor_id = self._subjects.get(
+                    (session_id, recognition_predecessor_subject_id)
+                )
+                predecessor = self._records.get(predecessor_id or "")
+                if (
+                    predecessor is None
+                    or predecessor.subject_id
+                    != recognition_predecessor_subject_id
+                    or predecessor.binding.direction is not MediaDirection.UPLINK
+                    or predecessor.binding.connection_id != owner_connection_id
+                    or predecessor.expected_origin != request_origin
+                    or predecessor.binding.session_id != session_id
+                    or predecessor.binding.interaction_id != interaction_id
+                    or predecessor.binding.correlation_id != correlation_id
+                    or predecessor.product_activation_id != activation_id
+                    or predecessor.product_activation_generation
+                    != activation_generation
+                    or predecessor.binding.generation.id == capture_id
+                    or predecessor.binding.track_id == track_id
+                    or predecessor.binding.frame_format.sample_rate_hz
+                    != sample_rate_hz
+                    or predecessor.locale != locale
+                    or not predecessor.recognition_continuation_predecessor
+                    or predecessor.recognition_predecessor_subject_id is not None
+                    or not predecessor.ticket_consumed
+                    or not predecessor.route_completed
+                    or predecessor.accepted_frames <= 0
+                    or predecessor.recognition_content_sha256 is None
+                    or now > predecessor.authority_expires_at
+                    or not self._has_retained_product_activation(predecessor, now)
+                ):
+                    raise MediaTransportViolation(
+                        "MEDIA_RECOGNITION_PREDECESSOR_UNTRUSTED",
+                        "continued recognition requires the exact completed predecessor",
+                    )
         ticket = secrets.token_urlsafe(32)
         record_id = f"media-record-{secrets.token_hex(16)}"
         subject_id = f"live-voice-media:{secrets.token_hex(16)}"
@@ -1333,6 +1385,9 @@ class DedicatedMediaProductRegistry:
             locale=locale,
             end_of_turn_capability=(
                 MEDIA_END_OF_TURN_CAPABILITY if end_of_turn_available else None
+            ),
+            recognition_predecessor_subject_id=(
+                recognition_predecessor_subject_id
             ),
             issued_at=now,
             ticket_expires_at=now + self._ticket_ttl,
@@ -1780,7 +1835,11 @@ class DedicatedMediaProductRegistry:
                 duration_ms=elapsed_ms if elapsed_ms >= 0.0 else None,
                 event_nonce=record.record_id,
             )
-        if outcome.completed:
+        if (
+            outcome.completed
+            and record.recognition_predecessor_subject_id is None
+            and not record.recognition_continuation_predecessor
+        ):
             issuer = self._streaming_receipt_issuer
             if issuer is None or outcome.final_text is None:
                 outcome = self._streaming_fallback(
@@ -1921,6 +1980,8 @@ class DedicatedMediaProductRegistry:
                 or record.binding.generation.id != capture_id
                 or record.binding.generation.value != capture_generation
                 or record.binding.track_id != track_id
+                or record.recognition_predecessor_subject_id is not None
+                or record.recognition_continuation_predecessor
                 or not record.ticket_consumed
                 or not record.route_completed
                 or now > record.authority_expires_at
@@ -2301,6 +2362,10 @@ class DedicatedMediaProductRegistry:
         final_ack: tuple[str, float, float] | None = None
         with self._lock:
             record.route_completed = True
+            record.recognition_continuation_predecessor = (
+                getattr(result, "reason_id", None)
+                is MediaDetachReason.RECOGNITION_CONTINUATION
+            )
             if not result.activated or result.accepted_frames <= 0 or not record.pcm:
                 record.pcm.clear()
             else:
@@ -2820,6 +2885,92 @@ class DedicatedMediaProductRegistry:
             ):
                 return None
             if binding.operation == RECOGNIZE_OPERATION:
+                if binding.recognition_segments:
+                    segments = binding.recognition_segments
+                    if (
+                        len(segments) != 2
+                        or binding.scope.subject_id != segments[-1].subject_id
+                        or binding.subject_id != segments[-1].subject_id
+                        or binding.capture_id != segments[-1].capture_id
+                        or binding.capture_generation
+                        != segments[-1].capture_generation
+                        or binding.track_id != segments[-1].track_id
+                        or segments[0].subject_id == segments[1].subject_id
+                        or segments[0].capture_id == segments[1].capture_id
+                        or segments[0].track_id == segments[1].track_id
+                        or binding.content_sha256
+                        != hashlib.sha256(
+                            canonical_json_bytes(
+                                {
+                                    "segments": [
+                                        {
+                                            "subject_id": segment.subject_id,
+                                            "capture_id": segment.capture_id,
+                                            "capture_generation": segment.capture_generation,
+                                            "track_id": segment.track_id,
+                                            "content_sha256": segment.content_sha256,
+                                        }
+                                        for segment in segments
+                                    ]
+                                }
+                            )
+                        ).hexdigest()
+                    ):
+                        return None
+                    records: list[_MediaAuthority] = []
+                    for segment in segments:
+                        segment_record_id = self._subjects.get(
+                            (binding.scope.session_id, segment.subject_id)
+                        )
+                        segment_record = self._records.get(segment_record_id or "")
+                        if (
+                            segment_record is None
+                            or not segment_record.ticket_consumed
+                            or not segment_record.route_completed
+                            or now > segment_record.authority_expires_at
+                            or segment_record.binding.direction
+                            is not MediaDirection.UPLINK
+                            or segment_record.binding.correlation_id
+                            != binding.correlation_id
+                            or not self._has_retained_product_activation(
+                                segment_record, now
+                            )
+                            or segment_record.accepted_frames <= 0
+                            or segment.capture_id
+                            != segment_record.binding.generation.id
+                            or segment.capture_generation
+                            != segment_record.binding.generation.value
+                            or segment.track_id != segment_record.binding.track_id
+                            or segment.content_sha256
+                            != segment_record.recognition_content_sha256
+                        ):
+                            return None
+                        records.append(segment_record)
+                    predecessor, current = records
+                    if (
+                        predecessor.issued_at >= current.issued_at
+                        or not predecessor.recognition_continuation_predecessor
+                        or predecessor.recognition_predecessor_subject_id is not None
+                        or current.recognition_predecessor_subject_id
+                        != predecessor.subject_id
+                        or predecessor.binding.session_id
+                        != current.binding.session_id
+                        or predecessor.binding.correlation_id
+                        != current.binding.correlation_id
+                        or predecessor.binding.interaction_id
+                        != current.binding.interaction_id
+                        or predecessor.product_activation_id
+                        != current.product_activation_id
+                        or predecessor.product_activation_generation
+                        != current.product_activation_generation
+                        or predecessor.binding.connection_id
+                        != current.binding.connection_id
+                        or predecessor.locale != current.locale
+                        or predecessor.binding.frame_format.sample_rate_hz
+                        != current.binding.frame_format.sample_rate_hz
+                    ):
+                        return None
+                    return binding
                 if record.recognition_content_sha256 is None and record.pcm:
                     wav = _wav_bytes(
                         bytes(record.pcm), record.binding.frame_format.sample_rate_hz

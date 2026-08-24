@@ -172,10 +172,14 @@ class FakeAudioContext {
 }
 
 class FakeTrack extends FakeEventTarget {
-  id = 'track-1';
   kind = 'audio';
   readyState = 'live';
   muted = false;
+
+  constructor(id = 'track-1') {
+    super();
+    this.id = id;
+  }
 
   stop() {
     this.readyState = 'ended';
@@ -272,14 +276,17 @@ class FakeSocket {
   }
 }
 
-function audioEnvironment(createId = () => 'capture-1') {
+function audioEnvironment(
+  createId = () => 'capture-1',
+  createTrackId = () => 'track-1',
+) {
   const document = new FakeEventTarget();
   document.visibilityState = 'visible';
   const mediaDevices = new FakeEventTarget();
   mediaDevices.constraints = [];
   mediaDevices.getUserMedia = async constraints => {
     mediaDevices.constraints.push(constraints);
-    const track = new FakeTrack();
+    const track = new FakeTrack(createTrackId());
     track.muted = environment.initialTrackMuted;
     environment.track = track;
     return {
@@ -6552,9 +6559,14 @@ test('a generation-time release keeps an utterance that starts while the capture
       let value = 0;
       return () => `capture-${++value}`;
     })(),
+    (() => {
+      let value = 0;
+      return () => `track-${++value}`;
+    })(),
   );
   const sockets = [];
   const bindings = [];
+  const calls = [];
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
@@ -6566,7 +6578,13 @@ test('a generation-time release keeps an utterance that starts while the capture
       return next;
     },
     request: async (method, params) => {
+      calls.push([method, params]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        if (bindings.length === 0) {
+          assert.equal('recognition_predecessor_subject_id' in params, false);
+        } else {
+          assert.equal(params.recognition_predecessor_subject_id, 'media-subject-1');
+        }
         // Each capture -- the original and the successor a speaking user gets
         // -- carries its own exact browser capture identity.
         const bound = {
@@ -6576,13 +6594,27 @@ test('a generation-time release keeps an utterance that starts while the capture
           generation: { kind: 'capture', id: params.capture_id, value: params.capture_generation },
         };
         bindings.push(bound);
-        return streamingMediaActivation(bound, null, {
-          status: 'active',
-          capability_version: 'media.end_of_turn.v1',
-          detector: 'server_vad',
-          create_response: false,
-          interrupt_response: false,
-        });
+        return {
+          ...streamingMediaActivation(bound, null, {
+            status: 'active',
+            capability_version: 'media.end_of_turn.v1',
+            detector: 'server_vad',
+            create_response: false,
+            interrupt_response: false,
+          }),
+          subject_id: `media-subject-${bindings.length}`,
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        assert.equal(params.scope.subject_id, 'media-subject-2');
+        assert.equal(params.capture.capture_id, 'capture-2');
+        assert.equal(params.predecessor.subject_id, 'media-subject-1');
+        assert.equal(params.predecessor.capture.capture_id, 'capture-1');
+        const prefix = Buffer.from(params.predecessor.audio.data_base64, 'base64');
+        const tail = Buffer.from(params.audio.data_base64, 'base64');
+        assert.equal(new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getInt16(44, true) < 0, true);
+        assert.equal(new DataView(tail.buffer, tail.byteOffset, tail.byteLength).getInt16(44, true) > 0, true);
+        return batchRecognitionResult(params, '算了，换个问题');
       }
       if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
         return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
@@ -6590,13 +6622,18 @@ test('a generation-time release keeps an utterance that starts while the capture
       throw new Error(`unexpected release method ${method}`);
     },
   });
-  await startCaptureWithFirstFrame(owner, environment, {
-    session_id: 'session-1',
-    interaction_id: 'interaction-1',
-    correlation_id: 'correlation-1',
-    activation_id: 'activation-1',
-    activation_generation: 7,
-  });
+  await startCaptureWithFirstFrame(
+    owner,
+    environment,
+    {
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    },
+    { samples: new Float32Array(960).fill(-0.25) },
+  );
   assert.equal(owner.status().status, 'capturing');
   assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
 
@@ -6635,5 +6672,70 @@ test('a generation-time release keeps an utterance that starts while the capture
   assert.notEqual(environment.track, trackBeforeRelease);
   assert.equal(trackBeforeRelease.readyState, 'ended');
   assert.equal(environment.track.readyState, 'live');
+  assert.equal(
+    sockets[0].sent
+      .filter(value => typeof value === 'string')
+      .map(JSON.parse)
+      .find(control => control.type === 'media.detach')?.reason_id,
+    'MEDIA_RECOGNITION_CONTINUATION',
+  );
+  assert.equal(
+    calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'),
+    false,
+    'the predecessor authority must remain live until the combined recognition settles',
+  );
+
+  let automatic = null;
+  assert.equal(owner.armEndOfTurn(() => {
+    automatic = owner.stopAndRecognize();
+  }), true);
+  const successorBinding = bindings[1];
+  sockets[1].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: successorBinding.lease_id,
+      generation: successorBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 120,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  sockets[1].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: successorBinding.lease_id,
+      generation: successorBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 120,
+      provider_end_ms: 720,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  for (let turn = 0; turn < 20 && automatic === null; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.notEqual(automatic, null);
+  assert.deepEqual(await automatic, {
+    text: '算了，换个问题',
+    voice_commit_receipt: 'batch-voice-receipt-1',
+  });
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_streaming_result').length, 0);
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1').length,
+    1,
+  );
+  assert.equal(calls.some(([method]) => method.includes('agent') || method.includes('tool') || method.includes('task')), false);
   await owner.close();
 });

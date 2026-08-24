@@ -64,6 +64,16 @@ def _wav(sample_rate: int = 16_000, frames: int = 320) -> bytes:
     return output.getvalue()
 
 
+def _wav_samples(samples: list[int], sample_rate: int = 16_000) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(_pcm16_samples(samples))
+    return output.getvalue()
+
+
 def _pcm16_samples(samples: list[int]) -> bytes:
     pcm = array("h", samples)
     if sys.byteorder != "little":
@@ -448,6 +458,98 @@ async def test_formal_recognition_and_synthesis_return_exact_provenance() -> Non
     assert len(resolver.calls[1].content_sha256) == 64
     assert provider.recognize_calls == 1
     assert provider.synthesize_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_capture_recognition_authorizes_and_combines_exact_segments() -> None:
+    class SegmentRecordingProvider(ControlledProvider):
+        samples: list[int] | None = None
+
+        async def recognize(
+            self, request: ProviderRecognitionRequest
+        ) -> ProviderRecognitionResult:
+            self.recognize_calls += 1
+            self.samples = _read_wav_samples(request.audio_wav)[3]
+            return ProviderRecognitionResult("prefix tail", "en", "stt-segments")
+
+    provider = SegmentRecordingProvider()
+    resolver = ExactAuthorizationResolver()
+    service = _service(provider, resolver=resolver)
+    request = _recognize_request(capture_id="capture-current", generation=2)
+    request["capture"] = {
+        "capture_id": "capture-current",
+        "capture_generation": 2,
+        "track_id": "track-current",
+        "final": True,
+    }
+    request["audio"] = {
+        "format": "wav_pcm16_mono",
+        "sample_rate_hz": 16_000,
+        "channel_count": 1,
+        "data_base64": base64.b64encode(_wav_samples([2000, 3000])).decode("ascii"),
+    }
+    request["predecessor"] = {
+        "subject_id": "subject-predecessor",
+        "capture": {
+            "capture_id": "capture-predecessor",
+            "capture_generation": 1,
+            "track_id": "track-predecessor",
+            "final": True,
+        },
+        "audio": {
+            "format": "wav_pcm16_mono",
+            "sample_rate_hz": 16_000,
+            "channel_count": 1,
+            "data_base64": base64.b64encode(_wav_samples([-3000, -2000])).decode(
+                "ascii"
+            ),
+        },
+    }
+
+    recognized = await service.recognize(request, CONTEXT)
+
+    assert recognized["ok"] is True
+    assert recognized["result"]["event"]["hypothesis"]["alternatives"][0][
+        "display_text"
+    ] == "prefix tail"
+    assert provider.samples == [-3000, -2000, 2000, 3000]
+    assert len(resolver.calls) == 1
+    assert [
+        (segment.subject_id, segment.capture_id, segment.track_id)
+        for segment in resolver.calls[0].recognition_segments
+    ] == [
+        ("subject-predecessor", "capture-predecessor", "track-predecessor"),
+        ("alice", "capture-current", "track-current"),
+    ]
+
+    replay_with_new_tail = _recognize_request(
+        request_id="request-r1",
+        operation_id="operation-r1",
+        capture_id="capture-new-tail",
+        generation=3,
+    )
+    replay_with_new_tail["predecessor"] = request["predecessor"]
+    rejected = await service.recognize(replay_with_new_tail, CONTEXT)
+    assert rejected["ok"] is False
+    assert rejected["error"]["reason"] == "STALE_RECOGNITION_SESSION"
+    assert provider.recognize_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_capture_null_predecessor_fails_before_authority_or_provider() -> (
+    None
+):
+    provider = ControlledProvider()
+    resolver = ExactAuthorizationResolver()
+    service = _service(provider, resolver=resolver)
+    request = _recognize_request()
+    request["predecessor"] = None
+
+    result = await service.recognize(request, CONTEXT)
+
+    assert result["error"]["reason"] == "INVALID_OBJECT"
+    assert resolver.calls == []
+    assert provider.recognize_calls == 0
 
 
 @pytest.mark.asyncio

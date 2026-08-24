@@ -30,12 +30,12 @@ function ids() {
   return () => `generated-${++value}`;
 }
 
-function frame(generation = 1, seq = 0, value = 0.25, captureId = 'capture-1') {
+function frame(generation = 1, seq = 0, value = 0.25, captureId = 'capture-1', trackId = 'track-1') {
   return {
     capture: {
       capture_id: captureId,
       capture_generation: generation,
-      track_id: 'track-1',
+      track_id: trackId,
     },
     seq,
     sample_cursor: seq * 320,
@@ -200,6 +200,43 @@ test('AIO-B final frames reach formal SR-B with provenance but never commit a tu
   assert.equal(result.final_text, 'formal text');
   assert.equal(result.commits_turn, false);
   assert.equal(result.provider.implementation_class, 'formal');
+  assert.equal(calls.length, 1);
+});
+
+test('cross-capture final keeps predecessor provenance and one ordered Batch request', async () => {
+  const calls = [];
+  const transport = {
+    async request(method, params) {
+      calls.push({ method, params });
+      assert.equal(method, SPEECH_RECOGNIZE_BATCH_METHOD);
+      assert.deepEqual(params.predecessor.capture, {
+        capture_id: 'capture-prefix',
+        capture_generation: 1,
+        track_id: 'track-prefix',
+        final: true,
+      });
+      assert.equal(params.predecessor.subject_id, 'subject-prefix');
+      const prefix = Buffer.from(params.predecessor.audio.data_base64, 'base64');
+      const tail = Buffer.from(params.audio.data_base64, 'base64');
+      assert.equal(new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getInt16(44, true) < 0, true);
+      assert.equal(new DataView(tail.buffer, tail.byteOffset, tail.byteLength).getInt16(44, true) > 0, true);
+      return recognitionEnvelope(params);
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+
+  const result = await client.recognizeFinal({
+    frames: [frame(2, 0, 0.5, 'capture-tail', 'track-tail')],
+    predecessor: {
+      subjectId: 'subject-prefix',
+      frames: [frame(1, 0, -0.5, 'capture-prefix', 'track-prefix')],
+    },
+    locale: 'en-US',
+    correlationId: 'correlation-1',
+  });
+
+  assert.equal(result.final_text, 'formal text');
+  assert.equal(result.capture.capture_id, 'capture-tail');
   assert.equal(calls.length, 1);
 });
 

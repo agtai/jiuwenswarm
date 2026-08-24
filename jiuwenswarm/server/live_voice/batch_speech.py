@@ -947,6 +947,16 @@ def create_environment_batch_speech_provider(
 
 
 @dataclass(frozen=True, slots=True)
+class RecognitionCaptureSegment:
+    subject_id: str
+    capture_id: str
+    capture_generation: int
+    track_id: str
+    audio_wav: bytes
+    sample_rate_hz: int
+
+
+@dataclass(frozen=True, slots=True)
 class RecognitionBatchRequest:
     request_id: str
     operation_id: str
@@ -959,6 +969,7 @@ class RecognitionBatchRequest:
     audio_wav: bytes
     sample_rate_hz: int
     timeout_ms: int
+    recognition_segments: tuple[RecognitionCaptureSegment, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -979,6 +990,15 @@ class SynthesisBatchRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeechRecognitionSegmentBinding:
+    subject_id: str
+    capture_id: str
+    capture_generation: int
+    track_id: str
+    content_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class SpeechAuthorizationBinding:
     """Exact validated request candidate; only a server-owned resolver can grant it."""
 
@@ -993,6 +1013,7 @@ class SpeechAuthorizationBinding:
     response: ResponseRef | None
     unit_id: str | None
     content_sha256: str
+    recognition_segments: tuple[SpeechRecognitionSegmentBinding, ...] = ()
 
 
 class SpeechAuthorizationResolver(Protocol):
@@ -1024,6 +1045,7 @@ def _parse_common(
     *,
     operation: str,
     extra_keys: set[str],
+    optional_extra_keys: set[str] = frozenset(),
 ) -> tuple[dict[str, object], str, str, str, ScopeRef, int]:
     data = _required_dict(payload, "speech_request")
     _exact_keys(
@@ -1039,6 +1061,7 @@ def _parse_common(
             "timeout_ms",
             *extra_keys,
         },
+        optional=optional_extra_keys,
         field="speech_request",
     )
     if data["contract_version"] != CONTRACT_VERSION:
@@ -1068,6 +1091,91 @@ def _parse_common(
     return data, request_id, operation_id, correlation_id, scope, timeout
 
 
+def _parse_recognition_segment(
+    *,
+    subject_id: str,
+    capture_value: object,
+    audio_value: object,
+    field: str,
+) -> RecognitionCaptureSegment:
+    capture = _required_dict(capture_value, f"{field}.capture")
+    _exact_keys(
+        capture,
+        required={"capture_id", "capture_generation", "track_id", "final"},
+        field=f"{field}.capture",
+    )
+    if capture["final"] is not True:
+        raise _fail(
+            ErrorCode.INVALID_ARGUMENT,
+            "FINAL_CAPTURE_REQUIRED",
+            "batch recognition accepts only finalized capture segments",
+        )
+    audio = _required_dict(audio_value, f"{field}.audio")
+    _exact_keys(
+        audio,
+        required={"format", "sample_rate_hz", "channel_count", "data_base64"},
+        field=f"{field}.audio",
+    )
+    if audio["format"] != "wav_pcm16_mono" or audio["channel_count"] != 1:
+        raise _fail(
+            ErrorCode.UNSUPPORTED,
+            "UNSUPPORTED_BATCH_AUDIO_FORMAT",
+            "batch recognition requires mono PCM16 WAV",
+        )
+    sample_rate = _positive_int(
+        audio["sample_rate_hz"], f"{field}.audio.sample_rate_hz"
+    )
+    audio_wav = _decode_base64(
+        audio["data_base64"],
+        field=f"{field}.audio.data_base64",
+        max_bytes=MAX_BATCH_AUDIO_BYTES,
+    )
+    inspect_pcm16_mono_wav(audio_wav, expected_sample_rate_hz=sample_rate)
+    return RecognitionCaptureSegment(
+        subject_id=_required_text(subject_id, f"{field}.subject_id"),
+        capture_id=_required_text(
+            capture["capture_id"], f"{field}.capture.capture_id"
+        ),
+        capture_generation=_non_negative_int(
+            capture["capture_generation"], f"{field}.capture.capture_generation"
+        ),
+        track_id=_required_text(capture["track_id"], f"{field}.capture.track_id"),
+        audio_wav=audio_wav,
+        sample_rate_hz=sample_rate,
+    )
+
+
+def _combine_recognition_segments(
+    segments: tuple[RecognitionCaptureSegment, ...],
+) -> bytes:
+    if len(segments) == 1:
+        return segments[0].audio_wav
+    pcm = bytearray()
+    sample_rate = segments[0].sample_rate_hz
+    for segment in segments:
+        if segment.sample_rate_hz != sample_rate:
+            raise _fail(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "SPEECH_SAMPLE_RATE_MISMATCH",
+                "continued capture segments must use one sample rate",
+            )
+        with wave.open(io.BytesIO(segment.audio_wav), "rb") as audio:
+            pcm.extend(audio.readframes(audio.getnframes()))
+        if _PCM_WAV_HEADER_BYTES + len(pcm) > MAX_BATCH_AUDIO_BYTES:
+            raise _fail(
+                ErrorCode.INVALID_ARGUMENT,
+                "AUDIO_LIMIT_EXCEEDED",
+                "continued capture exceeds the formal speech package limit",
+            )
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(_PCM16_SAMPLE_WIDTH_BYTES)
+        audio.setframerate(sample_rate)
+        audio.writeframes(bytes(pcm))
+    return output.getvalue()
+
+
 def parse_recognition_batch_request(
     payload: object, context: SpeechRpcContext
 ) -> RecognitionBatchRequest:
@@ -1076,50 +1184,55 @@ def parse_recognition_batch_request(
         context,
         operation=RECOGNIZE_OPERATION,
         extra_keys={"capture", "audio", "locale"},
+        optional_extra_keys={"predecessor"},
     )
-    capture = _required_dict(data["capture"], "capture")
-    _exact_keys(
-        capture,
-        required={"capture_id", "capture_generation", "track_id", "final"},
-        field="capture",
+    current = _parse_recognition_segment(
+        subject_id=scope.subject_id,
+        capture_value=data["capture"],
+        audio_value=data["audio"],
+        field="current",
     )
-    if capture["final"] is not True:
-        raise _fail(
-            ErrorCode.INVALID_ARGUMENT,
-            "FINAL_CAPTURE_REQUIRED",
-            "batch recognition accepts only a finalized capture",
+    segments = (current,)
+    if "predecessor" in data:
+        predecessor = _required_dict(data["predecessor"], "predecessor")
+        _exact_keys(
+            predecessor,
+            required={"subject_id", "capture", "audio"},
+            field="predecessor",
         )
-    audio = _required_dict(data["audio"], "audio")
-    _exact_keys(
-        audio,
-        required={"format", "sample_rate_hz", "channel_count", "data_base64"},
-        field="audio",
-    )
-    if audio["format"] != "wav_pcm16_mono" or audio["channel_count"] != 1:
-        raise _fail(
-            ErrorCode.UNSUPPORTED,
-            "UNSUPPORTED_BATCH_AUDIO_FORMAT",
-            "batch recognition requires mono PCM16 WAV",
+        prior = _parse_recognition_segment(
+            subject_id=_required_text(
+                predecessor["subject_id"], "predecessor.subject_id"
+            ),
+            capture_value=predecessor["capture"],
+            audio_value=predecessor["audio"],
+            field="predecessor",
         )
-    sample_rate = _positive_int(audio["sample_rate_hz"], "audio.sample_rate_hz")
-    audio_wav = _decode_base64(
-        audio["data_base64"], field="audio.data_base64", max_bytes=MAX_BATCH_AUDIO_BYTES
-    )
-    inspect_pcm16_mono_wav(audio_wav, expected_sample_rate_hz=sample_rate)
+        if (
+            prior.subject_id == current.subject_id
+            or prior.capture_id == current.capture_id
+            or prior.track_id == current.track_id
+        ):
+            raise _fail(
+                ErrorCode.CONFLICT,
+                "CAPTURE_CONTINUATION_IDENTITY_CONFLICT",
+                "continued recognition requires two distinct capture authorities",
+            )
+        segments = (prior, current)
+    audio_wav = _combine_recognition_segments(segments)
     return RecognitionBatchRequest(
         request_id=request_id,
         operation_id=operation_id,
         correlation_id=correlation_id,
         scope=scope,
-        capture_id=_required_text(capture["capture_id"], "capture.capture_id"),
-        capture_generation=_non_negative_int(
-            capture["capture_generation"], "capture.capture_generation"
-        ),
-        track_id=_required_text(capture["track_id"], "capture.track_id"),
+        capture_id=current.capture_id,
+        capture_generation=current.capture_generation,
+        track_id=current.track_id,
         locale=_locale(data["locale"]),
         audio_wav=audio_wav,
-        sample_rate_hz=sample_rate,
+        sample_rate_hz=current.sample_rate_hz,
         timeout_ms=timeout,
+        recognition_segments=segments,
     )
 
 
@@ -1232,18 +1345,48 @@ def parse_synthesis_batch_request(
 def _recognition_authorization_binding(
     request: RecognitionBatchRequest,
 ) -> SpeechAuthorizationBinding:
-    content_sha256 = hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "capture_id": request.capture_id,
-                "capture_generation": request.capture_generation,
-                "track_id": request.track_id,
-                "locale": request.locale,
-                "sample_rate_hz": request.sample_rate_hz,
-                "audio_sha256": hashlib.sha256(request.audio_wav).hexdigest(),
-            }
+    segment_bindings = tuple(
+        SpeechRecognitionSegmentBinding(
+            subject_id=segment.subject_id,
+            capture_id=segment.capture_id,
+            capture_generation=segment.capture_generation,
+            track_id=segment.track_id,
+            content_sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "capture_id": segment.capture_id,
+                        "capture_generation": segment.capture_generation,
+                        "track_id": segment.track_id,
+                        "locale": request.locale,
+                        "sample_rate_hz": segment.sample_rate_hz,
+                        "audio_sha256": hashlib.sha256(segment.audio_wav).hexdigest(),
+                    }
+                )
+            ).hexdigest(),
         )
-    ).hexdigest()
+        for segment in request.recognition_segments
+    )
+    if len(segment_bindings) == 1:
+        content_sha256 = segment_bindings[0].content_sha256
+        authorization_segments: tuple[SpeechRecognitionSegmentBinding, ...] = ()
+    else:
+        authorization_segments = segment_bindings
+        content_sha256 = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "segments": [
+                        {
+                            "subject_id": segment.subject_id,
+                            "capture_id": segment.capture_id,
+                            "capture_generation": segment.capture_generation,
+                            "track_id": segment.track_id,
+                            "content_sha256": segment.content_sha256,
+                        }
+                        for segment in segment_bindings
+                    ]
+                }
+            )
+        ).hexdigest()
     return SpeechAuthorizationBinding(
         subject_id=request.scope.subject_id,
         scope=request.scope,
@@ -1256,6 +1399,7 @@ def _recognition_authorization_binding(
         response=None,
         unit_id=None,
         content_sha256=content_sha256,
+        recognition_segments=authorization_segments,
     )
 
 
@@ -1690,6 +1834,25 @@ class FormalBatchSpeechService:
                         "locale": request.locale,
                         "sample_rate_hz": request.sample_rate_hz,
                         "audio_sha256": hashlib.sha256(request.audio_wav).hexdigest(),
+                        **(
+                            {
+                                "recognition_segments": [
+                                    {
+                                        "subject_id": segment.subject_id,
+                                        "capture_id": segment.capture_id,
+                                        "capture_generation": segment.capture_generation,
+                                        "track_id": segment.track_id,
+                                        "sample_rate_hz": segment.sample_rate_hz,
+                                        "audio_sha256": hashlib.sha256(
+                                            segment.audio_wav
+                                        ).hexdigest(),
+                                    }
+                                    for segment in request.recognition_segments
+                                ]
+                            }
+                            if len(request.recognition_segments) > 1
+                            else {}
+                        ),
                         "timeout_ms": request.timeout_ms,
                     }
                 )
@@ -2238,10 +2401,37 @@ class FormalBatchSpeechService:
             mapping.popitem(last=False)
 
     def _reserve_capture(self, request: RecognitionBatchRequest) -> None:
-        capture_key = (request.scope, request.capture_id)
-        seen_generation = self._seen_captures.get(capture_key)
-        if seen_generation is not None:
-            if seen_generation != request.capture_generation:
+        candidates = tuple(
+            (
+                ScopeRef(
+                    subject_id=segment.subject_id,
+                    project_id=request.scope.project_id,
+                    session_id=request.scope.session_id,
+                    assurance=request.scope.assurance,
+                ),
+                segment.capture_id,
+                segment.capture_generation,
+            )
+            for segment in request.recognition_segments
+        )
+        keys = [(scope, capture_id) for scope, capture_id, _ in candidates]
+        if len(set(keys)) != len(keys):
+            raise _fail(
+                ErrorCode.CONFLICT,
+                "CAPTURE_CONTINUATION_IDENTITY_CONFLICT",
+                "continued recognition repeated a capture identity",
+            )
+        # Preflight every segment before retaining any tombstone. A rejected
+        # continuation must never partially consume its predecessor identity.
+        for (capture_scope, capture_id), (_, _, generation) in zip(
+            keys, candidates, strict=True
+        ):
+            seen_generation = self._seen_captures.get(
+                (capture_scope, capture_id)
+            )
+            if seen_generation is None:
+                continue
+            if seen_generation != generation:
                 raise _fail(
                     ErrorCode.CONFLICT,
                     "CAPTURE_ID_REUSED",
@@ -2252,9 +2442,10 @@ class FormalBatchSpeechService:
                 "STALE_RECOGNITION_SESSION",
                 "capture generation is duplicated",
             )
-        self._bounded_identity_put(
-            self._seen_captures, capture_key, request.capture_generation
-        )
+        for capture_scope, capture_id, generation in candidates:
+            self._bounded_identity_put(
+                self._seen_captures, (capture_scope, capture_id), generation
+            )
         self._bounded_identity_put(
             self._current_capture,
             request.scope,
