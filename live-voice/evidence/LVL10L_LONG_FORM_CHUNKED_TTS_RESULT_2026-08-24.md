@@ -117,7 +117,7 @@ passed every integrity/pilot gate.
 
 | Workload / metric | A1 | B2 | B4 | A2 |
 |---|---:|---:|---:|---:|
-| 600 completion | 8,516 ms | 4,498 ms | 5,715 ms | 6,760 ms |
+| 600 completion | 8,516 ms | 4,498 ms | 5,715 ms | 6,759 ms |
 | 1200 completion | 12,522 ms | 8,221 ms | 15,581 ms | 22,652 ms |
 | 2100 completion | 18,852 ms | 11,878 ms | 11,029 ms | 18,755 ms |
 | 2100 first PCM | 965 ms | 782 ms | 782 ms | 783 ms |
@@ -128,6 +128,8 @@ Derived against each candidate's time-interpolated A1/A2 bracket:
 
 | Candidate / workload | Completion gain | Positive pilot comparison |
 |---|---:|---:|
+| B2 / 600 | 3,219 ms / 41.71% | 1/1 |
+| B4 / 600 | 1,580 ms / 21.66% | 1/1 |
 | B2 / 1200 | **7,793 ms / 48.66%** | 1/1 |
 | B4 / 1200 | 2,725 ms / 14.89% | 1/1 |
 | B2 / 2100 | **6,930 ms / 36.85%** | 1/1 |
