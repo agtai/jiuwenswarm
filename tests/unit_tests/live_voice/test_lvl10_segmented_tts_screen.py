@@ -106,6 +106,7 @@ class ScriptedSseFactory:
         sample_count: int = 12_000,
     ) -> None:
         self.inputs: list[str] = []
+        self.terminal_input_indexes: set[int] = set()
         self.active = 0
         self.max_active = 0
         self.fail_input_index = fail_input_index
@@ -116,7 +117,10 @@ class ScriptedSseFactory:
         self.allow_done = asyncio.Event()
         self.streams: list[ScriptedSseStream] = []
 
-    def _deactivate_once(self) -> None:
+    def _deactivate_once(self, index: int) -> None:
+        if index in self.terminal_input_indexes:
+            return
+        self.terminal_input_indexes.add(index)
         assert self.active > 0
         self.active -= 1
 
@@ -134,7 +138,7 @@ class ScriptedSseFactory:
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         if self.fail_input_index == index:
-            self._deactivate_once()
+            self._deactivate_once(index)
             raise ConnectionError("scripted-provider-failure")
         pcm = (index.to_bytes(2, "little", signed=True)) * self.sample_count
         lines = (
@@ -147,7 +151,7 @@ class ScriptedSseFactory:
             lines,
             release=self.release if self.block_input_index == index else None,
             before_done=self.allow_done if self.delay_done_input_index == index else None,
-            on_terminal=self._deactivate_once,
+            on_terminal=lambda: self._deactivate_once(index),
         )
         self.streams.append(stream)
         return stream
@@ -270,10 +274,13 @@ async def test_b_buffers_successor_that_completes_before_predecessor_done() -> N
         run_attempt(provider, fixture, PopulationRole.B, _identity(PopulationRole.B))
     )
     try:
-        while len(factory.inputs) < 2:
+        while 1 not in factory.terminal_input_indexes:
             await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert factory.max_active == 2
+        assert 0 not in factory.terminal_input_indexes
+        assert task.done() is False
+        # Chunk 1 has emitted all deltas and its terminal event, but the group
+        # has no result while chunk 0's done remains gated. The completed record
+        # below retains the zero-cross-boundary oracle for this interval.
         factory.allow_done.set()
         record = await task
         assert record.released_chunk_indexes == tuple(range(len(fixture.chunks)))
