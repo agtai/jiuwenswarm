@@ -152,6 +152,10 @@ CURRENT = CurrentBackgroundTaskContext(
             UnifiedCommittedInputRoute.BACKGROUND_CREATE,
         ),
         (
+            "请新建任务整理一份合成依赖发布说明。",
+            UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+        ),
+        (
             "把第二天下午改成西湖，晚上给我留出自由时间。",
             UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
         ),
@@ -249,6 +253,46 @@ def test_unified_demo_itinerary_create_uses_shared_fixture_name(text: str) -> No
     resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
     assert resolved.route is UnifiedCommittedInputRoute.BACKGROUND_CREATE
     assert resolved.name == DEMO_ITINERARY_TASK_NAME
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "请新建任务整理一份合成依赖发布说明。",
+        "请新建任务，整理一份合成依赖发布说明。",
+    ],
+)
+def test_unified_synthetic_release_create_matches_frozen_voice_corpus(
+    text: str,
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+
+    assert resolved.route is UnifiedCommittedInputRoute.BACKGROUND_CREATE
+    assert resolved.name == "Synthetic release notes"
+    assert resolved.instruction == "整理一份合成依赖发布说明"
+    assert resolved.source_span is not None
+    assert text[resolved.source_span.start : resolved.source_span.end] == (
+        resolved.instruction
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "不要新建任务整理一份合成依赖发布说明。",
+        "请新建任务整理一份真实依赖发布说明。",
+    ],
+)
+def test_unified_synthetic_release_near_misses_have_zero_task_route(
+    text: str,
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+
+    assert resolved.route is UnifiedCommittedInputRoute.DIALOGUE
+    assert resolved.task_id is None
+    assert resolved.name is None
+    assert resolved.instruction is None
+    assert resolved.source_span is None
 
 
 @pytest.mark.parametrize(

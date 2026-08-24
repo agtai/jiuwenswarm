@@ -405,6 +405,13 @@ class BoundedAlphaTaskIntentResolver:
             re.I | re.S,
         ),
     )
+    _UNIFIED_SYNTHETIC_RELEASE_CREATE = (
+        re.compile(
+            r"^\s*请新建任务\s*[，,]?\s*"
+            r"(?P<instruction>整理一份合成依赖发布说明)\s*[。.!！]?\s*$",
+            re.S,
+        ),
+    )
     _UNIFIED_TRIP_CREATE = (
         re.compile(
             r"^\s*(?P<instruction>(?:请)?(?:帮我)?(?:根据.+?)?(?:制定|规划|安排)(?:一份)?"
@@ -735,6 +742,11 @@ class BoundedAlphaTaskIntentResolver:
                 ),
             )
         for patterns, name, classify_inner_trip in (
+            (
+                self._UNIFIED_SYNTHETIC_RELEASE_CREATE,
+                "Synthetic release notes",
+                False,
+            ),
             (self._UNIFIED_EXPLICIT_CREATE, "Background voice task", True),
             (self._UNIFIED_TRIP_CREATE, DEMO_ITINERARY_TASK_NAME, False),
             (self._UNIFIED_ITINERARY_FILE_CREATE, "Itinerary file", False),

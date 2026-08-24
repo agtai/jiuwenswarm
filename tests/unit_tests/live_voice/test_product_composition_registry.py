@@ -3611,6 +3611,57 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
     await _close_unified_route(registry, stem="unified-origin-create")
 
 
+@pytest.mark.asyncio
+async def test_unified_frozen_release_voice_create_never_falls_through_to_agent(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    composition.create_state = FormalTaskState.ACCEPTED
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-release-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+
+    created = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="unified-release-create",
+            text="请新建任务整理一份合成依赖发布说明。",
+        ),
+        request_id="request-unified-release-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert created.ok
+    result = cast(dict[str, object], created.payload["result"])
+    assert result["status"] == "authoritative_presentation_accepted"
+    assert result["task_id"] == "task-current-1"
+    assert composition.create_effects == 1
+    assert manager.agent.calls == 0
+    assert len(composition.handle_calls) == 1
+    operation, params, policy = composition.handle_calls[0]
+    assert operation == "task.create"
+    assert params["name"] == "Synthetic release notes"
+    assert params["instruction"] == "整理一份合成依赖发布说明"
+    assert params["source_start"] == 5
+    assert params["source_end"] == 17
+    assert policy["trusted_demo_policy_bypass"] is True
+    await _ack_unified_presentation(
+        registry,
+        sequence=0,
+        stem="unified-release-create",
+    )
+    await _close_unified_route(registry, stem="unified-release-create")
+
+
 @pytest.mark.parametrize(
     ("state", "expected_speech"),
     [
