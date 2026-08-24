@@ -1,8 +1,8 @@
 # Agent generation-time interruption — implementation evidence (2026-08-23)
 
 **Branch:** `hx/0823_generation_interruption`
-**Base:** `24e7e61065a609b30462dcca6b77515c6fa1fe56` (`hx/0812_live_voice_w3` at the time of writing)
-**Named-ref caveat:** that ref has now been amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject; the last pair differ by 10 files, the pair before that by 18). It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
+**Base:** `a44843b628e2f2358906fa5b903190bd6bac50b2` (`hx/0812_live_voice_w3` at the time of writing)
+**Named-ref caveat:** that ref was amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject) and then advanced by a further docs-only commit to `a44843b62`. It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
 **Scope:** hands-free speech that arrives while an Agent answer is still being
 generated can now stop or replace that exact answer.
 
@@ -122,6 +122,32 @@ because the speaker asked for that answer to stop existing.
   speaker settles, and the P1 route carrying their utterance is never rebuilt.
   Nothing is fetched twice and nothing is acknowledged unspoken.
 
+Two more defects came out of the fourth review.
+
+* **A retired activation could fence every later Session out of listening.** A
+  retriably-failed interruption is kept in the panel's pending ref on purpose,
+  so the exact owner can still replay it. But three of the barriers that read
+  that ref matched on *any* pending interruption rather than on its owner, and
+  cross-Session cleanup closed the predecessor without replaying it — after
+  which `interruptGeneration` is impossible, since it requires that
+  activation's binding. The handle became permanent and every successor Session
+  was refused generation-time listening for the rest of the page's life. Each
+  barrier now matches the owner, and a closed activation's handle is retired:
+  idempotence of a retried interruption belongs to the server-side `action_id`
+  ledger, not to a handle nothing can reach.
+* **Releasing the listening window could discard an utterance.**
+  `abandonCapture` advanced the operation generation *before* physically
+  stopping the capture, so an authoritative provider speech-start arriving
+  during `stopCapture` failed its own generation check and was dropped. The
+  release then completed as if the window had been silent — throwing away words
+  the user had already started saying while the old answer kept playing. The
+  generation is now advanced only once the release is irreversible, and a
+  speech-start observed during the stop keeps the capture: status stays
+  `capturing`, and the route, frames and media receipt are retained, which the
+  caller already treats as a live speaker. The same shape exists in
+  `pauseIdleCaptureForNotification`, which is pre-existing P2-notification code
+  outside this change and is **not** repaired here.
+
 ### 2.6 Feature flag
 
 `VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` is **default-off**. Enabling
@@ -139,31 +165,31 @@ method.
 
 | Suite | Result |
 |---|---|
-| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 17 passed |
+| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 18 passed |
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 73 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 48 passed |
 | `tests/unit_tests/live_voice/test_product_composition_registry.py` | 176 passed, 6 pre-existing failures |
-| Frontend `npm run test:live-voice-integrated-web` | 492 passed (478 pre-existing + 14 new); `test:live-voice-l0-measurement` 4 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3957 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
+| Frontend `npm run test:live-voice-integrated-web` | 495 passed (478 pre-existing + 17 new); `test:live-voice-l0-measurement` 4 passed |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3958 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
 
-One intermittent failure was observed and is reported rather than hidden. In a
-single focused run immediately after the ten-minute full sweep,
-`test_partial_activation_failure_rolls_back_runtime[start_false-...]` failed on
-`assert result.reason is expected_reason`. It did not reproduce in six further
-runs, four of them under eight busy-loop processes. The mechanism was then
-pinned down directly: that test's fixture builds the adapter with
+`test_partial_activation_failure_rolls_back_runtime` is load-sensitive and is
+reported rather than hidden. It failed once in a focused run immediately after
+a full sweep, and once in a full sweep that ran while the frontend suite was
+running beside it; it passes otherwise, including six deliberate repeats, four
+of them under eight busy-loop processes. The mechanism was pinned down
+directly: that test's fixture builds the adapter with
 `cleanup_timeout_seconds=0.02`, and lowering it to `0.0001` reproduces exactly
 the observed assertion -- the bounded rollback wait expires and the result
 becomes `ROLLBACK_FAILED` instead of the expected cause. The fixture, the test
 and the activation/rollback path are all untouched by this change (this branch
 adds 57 lines to `product_p2_interaction_adapter.py`, none of them on that
-path, and zero lines to that test file), so this is a pre-existing 20 ms
-timing margin, not a regression. A reviewer running under load may hit it.
+path, and zero lines to that test file), so this is a pre-existing 20 ms timing
+margin, not a regression. A reviewer running under load may hit it.
 
 ### 3.1 Mutation checks
 
-Thirty-one mutants were run in total: 26 killed, 5 disclosed survivors. The
+Thirty-seven mutants were run in total: 30 killed, 7 disclosed survivors. The
 survivors are named below; every other listed invariant has at least one case
 that dies when it is broken. Invariants **not** in these tables are not claimed
 to be mutation-checked.
@@ -184,6 +210,7 @@ Backend (`test_generation_time_interruption.py`, baseline green):
 | Registry -> lease hop broken | KILLED |
 | Registry handler hop broken | KILLED |
 | Handler accepts a client-supplied `cancel_scope` | KILLED |
+| Replacement committed before its predecessor is fenced | KILLED |
 
 A self-review after the first implementation found the CR-B interruption replay
 ledger unbounded. Unlike barge-in, which a user triggers by control action, an
@@ -217,6 +244,11 @@ Frontend (mounted panel suite, baseline green):
 | `ALREADY_SETTLED` treated as fenced | KILLED |
 | Playout settled before the stand-down is decided | **SURVIVED** |
 | Cleanup acknowledges a deferred announcement | **SURVIVED** |
+| Listening barrier matches any pending interruption, not its owner | KILLED |
+| A closed activation keeps its unreachable interruption handle | **SURVIVED** |
+| Release retires its callbacks before the capture stops | KILLED |
+| Release ignores a speech-start observed while stopping | KILLED |
+| Late outcome admitted without its exact voice-loop generation | **SURVIVED** |
 
 The interruption-admission mutant is killed independently through both branch
 outcomes: `mounted in-flight interruption from a retired Session cannot touch its
@@ -225,7 +257,7 @@ successor` covers the rejection side (recovery reason, `failed` status) and
 covers the success side (cleared output, `idle` status, cleared reason) against a
 successor that is already waiting for its own answer.
 
-Five survivors, in two groups.
+Seven survivors, in two groups.
 
 **Group A — the repair is applied but its trigger path is not reachable from a
 mounted case.** Both come from the third-review finding that Exit could
@@ -255,6 +287,19 @@ independent guard, so no case can distinguish them:**
   on its own. The handle exists so the request can be replayed through that
   exact owner by `settleRetainedP2Operations`; that replay path is reached only
   through P2 recovery/successor activation and **has no oracle here**.
+* **Retiring a closed activation's handle.** Since the fourth-review repair,
+  every barrier matches on the owner, so a stale handle can no longer refuse a
+  successor anything — which is exactly why removing the retirement changes
+  nothing observable. It is kept because a handle whose activation is closed can
+  never be replayed through it, and leaving it behind would restore the
+  permanent-fence defect the moment any future barrier forgets to match.
+* **Exact voice-loop generation on a late outcome.** An interruption outcome
+  may only touch UI state belonging to its exact activation, Session *and* voice
+  loop. I tried to reach the one state that isolates the loop half — same owner,
+  same Session, later loop generation — by Exiting and re-enabling with the
+  interruption held on the wire. It is not reachable: the owner's own pending
+  request bars the re-enabled loop from capturing, and every visible effect is
+  already gated by the owner and Session checks. Recorded as uncovered.
 
 The other surviving mutant is a defence-in-depth guard: with it removed, a playout-time
 speech-start would additionally invoke the generation handler, which then returns
@@ -269,10 +314,14 @@ Stated so they are not mistaken for covered:
   `admitsGenerationListeningPoll` to any `starting`/`capturing` leaves the suite
   green. The exception is correct in the code, but nothing stops a regression.
 * **A retired Session replays its interruption through the exact owner that
-  issued it.** The handle is now kept for that purpose, but the replay path runs
-  only through P2 recovery/successor activation, which no mounted case drives.
-  Cross-Session abandonment of an owner with pending work is pre-existing
-  cleanup behaviour shared with barge-in and was not changed here.
+  issued it.** The handle is kept for that purpose while its activation is open,
+  but the replay path runs only through P2 recovery/successor activation, which
+  no mounted case drives. Since the fourth review, an activation that closes
+  retires the handle instead of keeping it forever, so this gap can no longer
+  disable the feature — but the replay itself is still unproven here.
+* **The exact voice-loop generation on a late interruption outcome.** See the
+  Group B entry above: the isolating state is not reachable behind the owner's
+  own pending-request barrier.
 
 ## 4. Concurrency coverage
 
@@ -307,7 +356,7 @@ cancel nothing: there is no fenceable live target at all.
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
 * The 11 failures in the full backend sweep are pre-existing on the base commit
-  `24e7e6106` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  `a44843b62` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
   six in `test_product_composition_registry`, `test_task_progress_return`) and
   three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
   `test_upload_storage`). Each was reproduced by running the same files in a
