@@ -147,6 +147,7 @@ function authoritativeFixture({
   collectionOperations = ['task.create'],
   taskAOperations = ['task.create_successor', 'task.retry', 'task.status'],
   taskBOperations = ['task.adjust', 'task.cancel', 'task.events', 'task.result', 'task.status'],
+  resultSourceEventId = 'task-a:source:1',
 } = {}) {
   const taskA = taskRecord({
     taskId: 'task-a',
@@ -214,7 +215,7 @@ function authoritativeFixture({
             task_result: {
               task_id: task.task_id,
               attempt_id: task.attempt_id,
-              source_event_id: `${task.task_id}:event:1`,
+              source_event_id: resultSourceEventId,
               result_text: 'immutable predecessor result',
               artifacts: [{ relative_path: 'result.txt', sha256: 'b'.repeat(64) }],
               completed_at: '2026-08-21T00:00:00Z',
@@ -275,6 +276,35 @@ test('refresh exposes two exact Tasks, hint-only selection, lineage, replay and 
   assert.deepEqual(
     fixture.calls.filter(call => [FORMAL_P3_TASK_METHODS.intent, FORMAL_P3_TASK_METHODS.confirmation, FORMAL_P3_TASK_METHODS.mutate].includes(call.method)),
     [],
+  );
+});
+
+test('available TaskResult binds to the terminal source event and rejects the TaskEvent record id with zero mutation', async () => {
+  const acceptedFixture = authoritativeFixture();
+  const acceptedOwner = new FormalP3TaskExperienceOwner({
+    enabled: true,
+    request: acceptedFixture.request,
+    store: acceptedFixture.store,
+  });
+
+  const accepted = await acceptedOwner.refresh(sessionId);
+
+  assert.equal(accepted.status, 'ready');
+  assert.equal(accepted.tasks.find(task => task.task_id === 'task-a').result_text, 'immutable predecessor result');
+
+  const rejectedFixture = authoritativeFixture({ resultSourceEventId: 'task-a:event:1' });
+  const rejectedOwner = new FormalP3TaskExperienceOwner({
+    enabled: true,
+    request: rejectedFixture.request,
+    store: rejectedFixture.store,
+  });
+
+  await assert.rejects(rejectedOwner.refresh(sessionId), /TaskResult identity mismatch/);
+  assert.equal(rejectedOwner.snapshot().status, 'failed');
+  assert.deepEqual(rejectedOwner.snapshot().tasks, []);
+  assert.equal(
+    rejectedFixture.calls.filter(call => call.method === FORMAL_P3_TASK_METHODS.intent).length,
+    0,
   );
 });
 
