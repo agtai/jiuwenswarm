@@ -537,6 +537,9 @@ def test_failure_population_retains_denominator_and_writes_artifacts_without_tim
     assert cell["request_to_first_pcm_ns"] == {"p50": None, "p90": None, "p95": None}
     assert (output / "attempts.jsonl").read_text(encoding="utf-8")
     assert "integrity_reliability" in (output / "report.md").read_text(encoding="utf-8")
+    assert "| LVL-10L-B2 | long_600 | first_pcm_regression | 0 | — | — |" in (
+        output / "report.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_report_markdown_contains_required_timing_and_decision_tables(
@@ -565,6 +568,9 @@ def test_report_markdown_contains_required_timing_and_decision_tables(
         assert heading in markdown
     assert "LVL-10L-B2 | long_2400" in markdown
     assert "Selected arm:" in markdown
+    assert "## Candidate first/reserve/duration decision inputs" in markdown
+    assert "| LVL-10L-B2 | long_2400 | first_pcm_regression | 1 |" in markdown
+    assert "| LVL-10L-B4 | long_1200 | audio_duration_delta | 1 |" in markdown
 
 
 def test_artifacts_serialize_candidate_regressions_duration_parity_and_b4_increment(

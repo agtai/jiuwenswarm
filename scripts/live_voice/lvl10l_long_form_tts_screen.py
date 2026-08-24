@@ -854,11 +854,18 @@ def _incremental_line(fixture: str, row: dict[str, Any]) -> str:
     return f"| {fixture} | {row['measured_denominator']} | {gain} | {percent} |"
 
 
+def _candidate_input_line(candidate: str, fixture: str, metric: str, row: dict[str, Any]) -> str:
+    absolute = "—" if row["p50_absolute_ns"] is None else f"{row['p50_absolute_ns'] / 1_000_000:.3f}"
+    percent = "—" if row["p50_percent"] is None else f"{row['p50_percent']:.3f}"
+    return f"| {candidate} | {fixture} | {metric} | {row['measured_denominator']} | {absolute} | {percent} |"
+
+
 def _markdown_report(
     report: Lvl10lReport,
     per_cell: dict[str, Any],
     paired: dict[str, Any],
     control_drift: dict[str, Any],
+    candidate_inputs: dict[str, Any],
     incremental: dict[str, Any],
     records: Sequence[AttemptRecord],
     observed_requests: int,
@@ -897,6 +904,14 @@ def _markdown_report(
             percent = "—" if value["percent"] is None else f"{value['percent']:.3f}"
             rendered.append(f"{absolute} / {percent}")
         drift_rows.append(f"| {fixture} | {' | '.join(rendered)} |")
+    decision_rows = [
+        "| Candidate | Fixture | Metric | Measured | p50 absolute ms | p50 percent |",
+        "| --- | --- | --- | ---: | ---: | ---: |",
+    ]
+    for role in (PopulationRole.B2, PopulationRole.B4):
+        for fixture in FIXTURE_IDS:
+            for metric in ("first_pcm_regression", "reserve_regression", "audio_duration_delta"):
+                decision_rows.append(_candidate_input_line(role.value, fixture, metric, candidate_inputs[role.value][fixture][metric]))
     return "\n".join((
         "# LVL-10L long-form TTS screen",
         "",
@@ -919,6 +934,10 @@ def _markdown_report(
         "## Control drift",
         "",
         *drift_rows,
+        "",
+        "## Candidate first/reserve/duration decision inputs",
+        "",
+        *decision_rows,
         "",
         "## B4 vs B2 incremental paired gain",
         "",
@@ -984,7 +1003,7 @@ def _write_artifacts(
         json.dumps(report_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
     (output_root / "report.md").write_text(
-        _markdown_report(report, per_cell, paired_completion, control_drift, incremental, records, observed_requests, expected_requests),
+        _markdown_report(report, per_cell, paired_completion, control_drift, candidate_inputs, incremental, records, observed_requests, expected_requests),
         encoding="utf-8",
     )
 
