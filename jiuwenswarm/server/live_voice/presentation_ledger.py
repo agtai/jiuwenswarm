@@ -563,6 +563,12 @@ class TaskPresentationRuntimeReceipt:
 TaskPresentationRuntimeAuthorityPort = Callable[
     [ResponseRef, str | None, str], TaskPresentationRuntimeReceipt
 ]
+TaskPresentationCommandPort = Callable[
+    [CommandEnvelope, TaskAuthorizationGrant], ResultEnvelope
+]
+AsyncTaskPresentationCommandPort = Callable[
+    [CommandEnvelope, TaskAuthorizationGrant], Awaitable[ResultEnvelope]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -988,12 +994,52 @@ class TaskPresentationConsumptionOwner:
         delivery: TaskPresentationDelivery,
         command: CommandEnvelope,
         authorization: TaskAuthorizationGrant,
-        command_port: Callable[
-            [CommandEnvelope, TaskAuthorizationGrant], ResultEnvelope
-        ],
+        command_port: TaskPresentationCommandPort,
     ) -> ResultEnvelope:
         """Invoke the sole durable mutation only after an exact presentation ACK."""
 
+        owned = self._prepare_consumption(
+            delivery,
+            command,
+            authorization,
+            command_port,
+        )
+        # Fresh authorization and the sole durable command Port are passed per
+        # call.  This owner retains neither credential nor Core/Store authority.
+        result = command_port(command, authorization)
+        return self._verify_consumption_result(owned, command, result)
+
+    async def consume_async(
+        self,
+        delivery: TaskPresentationDelivery,
+        command: CommandEnvelope,
+        authorization: TaskAuthorizationGrant,
+        command_port: AsyncTaskPresentationCommandPort,
+    ) -> ResultEnvelope:
+        """Await the sole durable mutation after the same exact product ACK.
+
+        The owner releases its lock before awaiting the injected Port. A call
+        that already passed the active Runtime receipt is linearized before a
+        later response close; exact retry remains the downstream authority's
+        responsibility.
+        """
+
+        owned = self._prepare_consumption(
+            delivery,
+            command,
+            authorization,
+            command_port,
+        )
+        result = await command_port(command, authorization)
+        return self._verify_consumption_result(owned, command, result)
+
+    def _prepare_consumption(
+        self,
+        delivery: TaskPresentationDelivery,
+        command: CommandEnvelope,
+        authorization: TaskAuthorizationGrant,
+        command_port: object,
+    ) -> TaskPresentationDelivery:
         with self._lock:
             owned = self._require_delivery(delivery)
             accepted = (
@@ -1066,9 +1112,14 @@ class TaskPresentationConsumptionOwner:
                     "CONSUMPTION_COMMAND_REWRITE",
                     "one delivery cannot be rebound to another durable command",
                 )
-        # Fresh authorization and the sole durable command Port are passed per
-        # call.  This owner retains neither credential nor Core/Store authority.
-        result = command_port(command, authorization)
+            return owned
+
+    @staticmethod
+    def _verify_consumption_result(
+        owned: TaskPresentationDelivery,
+        command: CommandEnvelope,
+        result: object,
+    ) -> ResultEnvelope:
         if not isinstance(result, ResultEnvelope):
             raise TaskPresentationViolation(
                 "CONSUMPTION_RESULT_INVALID",
