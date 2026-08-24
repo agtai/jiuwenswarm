@@ -2,8 +2,7 @@
 
 ## Disposition
 
-**PRE-SESSION ROLLBACK REPAIR SOURCE/AUTOMATION PASS — ONE FINAL TARGETED
-CONFIRMATION REQUIRED.**
+**SOURCE/AUTOMATION/INDEPENDENT REVIEW PASS — REAL PROVIDER PROBE NEXT.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -81,10 +80,12 @@ Product/test source `87b57a69cdb0ffd496468092463ebcf926fb6a10`
 connects that last entry to the existing `_FinalizationFailures` and two-attempt
 socket settlement. It settles resource, conformance and the unique open-failure
 fact before applying process-control, cancellation, cleanup and original-
-failure priority. It adds no session or second finalization task. The latest
-independent disposition remains **`C0/I1/M0`** until one detached reviewer
-confirms only this entry and the shared-helper regression; the completed module
-review must not be restarted, and no physical credit exists.
+failure priority. It adds no session or second finalization task. The final
+detached targeted review of exact clean docs HEAD
+`688ae114942ecd26bcfff8b37effe7ebb59998d9` returned
+**PASS — `C0/I0/M0`**. It confirmed only this entry and the shared-helper
+regression, so the source/automation/independent-review Gate is closed without
+restarting the completed module review. No physical credit exists.
 
 The cumulative review boundary is based on
 `2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the current product/test repair
@@ -479,6 +480,27 @@ factory composition and inherited deselected Gateway assertion were not rerun:
 the repair does not reach either seam, and the targeted reviewer had just
 confirmed the latter fails identically on baseline and candidate.
 
+The final detached confirmation used exact clean docs HEAD
+`688ae114942ecd26bcfff8b37effe7ebb59998d9` and returned
+**PASS — `C0/I0/M0`**. It ran only the two pre-session oracles plus the existing
+cancelled-registration, mechanical-final and parameterized recognition/
+synthesis shared-settlement regressions:
+
+```text
+uv run python -m pytest -q -o addopts="" tests/unit_tests/live_voice/test_openai_streaming_speech.py::test_failed_open_without_session_reports_incomplete_socket_settlement tests/unit_tests/live_voice/test_openai_streaming_speech.py::test_failed_open_without_session_retries_close_before_process_control tests/unit_tests/live_voice/test_openai_streaming_speech.py::test_cancelled_recognition_registration_rolls_back_exact_session tests/unit_tests/live_voice/test_openai_streaming_speech.py::test_native_realtime_final_requires_mechanical_transport_settlement tests/unit_tests/live_voice/test_openai_streaming_speech.py::test_session_cancel_retries_close_before_process_control_and_fact
+6 passed in 5.01s
+```
+
+The exact Ruff check, Ruff format check, targeted mypy, `py_compile` and both
+requested range `git diff --check` commands passed. Start and finish were clean
+detached HEAD in
+`C:\Users\admin\Desktop\live voice hx-openai-realtime-final-confirm-688ae114-20260824`;
+the branch ref matched, `git diff --exit-code` returned zero, and no untracked
+file, candidate mutation, commit, ref update or push occurred. The review did
+not expand to full Provider, Gateway, Web, project or real-device tests. It
+therefore closes only the source/automation/independent-review Gate and does not
+grant Provider, network, device, audibility, latency or quality credit.
+
 ## Cold complete-diff review
 
 The same-session substitute review corrected these issues before the final
@@ -513,15 +535,14 @@ LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
-The next acceptance trigger is one detached targeted Tier-3 confirmation of
-exact product/test source `87b57a69cdb0ffd496468092463ebcf926fb6a10`.
-It must reproduce the former pre-session constructor-failure setup and verify
-only incomplete-close truth, one-shot close process-control ordering,
-conformance/registry/fact settlement and the shared helper's already-covered
-session regression. It must not restart protocol, response-resource, event-
-ledger, PCM or complete lifecycle review. Only after that targeted confirmation
-passes may a shortest real server-to-server probe be followed by the existing
-microphone/Agent/playout journey. The physical run must record Provider/session
-model truth, final transcript, audible exact Agent text, cancel/degradation
-behaviour and fixed-corpus latency, and must not reuse the API key in browser
-state, logs or evidence.
+The source/automation/independent-review Gate is closed. The next acceptance
+trigger is a separately scoped shortest real server-to-server probe on the
+current exact candidate, using the Gateway-held standard API key boundary in
+the official Realtime WebSocket guide. It first proves real connection,
+effective session/model truth, one committed recognition final, exact
+authoritative-text synthesis, bounded cancel/degradation and clean transport
+settlement without a browser or physical device claim. Only after that passes
+may the existing microphone/Agent/playout journey and fixed-corpus latency run
+begin. Secrets and raw Provider payloads remain outside Git, logs and evidence;
+billing/account/project changes, browser-held credentials and public deployment
+remain excluded.
