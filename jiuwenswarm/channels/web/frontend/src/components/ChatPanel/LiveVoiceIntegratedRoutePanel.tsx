@@ -1516,6 +1516,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     receipt: string;
     input: UnifiedAuthoritativeFinal;
   }> | null>(null);
+  const readPendingUnifiedFinal = () => pendingUnifiedFinalRef.current;
   const pendingForegroundPresentationRef = useRef<PendingForegroundPresentationFence | null>(null);
   const pendingProductTurnRef = useRef<{
     owner: ProductWebP2ActivationOwner;
@@ -1763,6 +1764,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
     }, 0);
   };
+
+  useEffect(() => {
+    // Presentation ACK can settle one render before Product P1 publishes its
+    // final `playing -> recognized` transition. The first 0 ms capture wake is
+    // then correctly fenced by the still-playing owner; replay that idempotent
+    // wake only after both owners have authoritatively settled.
+    if (
+      p1VoiceStatus === 'recognized' &&
+      productTextStatus === 'acknowledged' &&
+      recognizedVoiceRef.current === null
+    ) {
+      scheduleProductVoiceLoopCapture();
+    }
+  }, [p1VoiceStatus, productTextStatus]);
 
   const resumeVoiceLoopAfterP2Successor = (binding: NonNullable<ProductWebP2ActivationSnapshot['binding']>) => {
     const predecessorGeneration = voiceLoopP2RefreshAfterGenerationRef.current;
@@ -3784,6 +3799,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       !binding ||
       !owner ||
       !journal ||
+      // The server publishes the authoritative presentation before
+      // unified.submit can return its exact response fence. Starting a
+      // pop-on-read poll in that interval can consume the response without an
+      // owner that is allowed to present or ACK it.
+      readPendingUnifiedFinal() !== null ||
       pendingPresentationAck !== null ||
       pendingPresentationAttemptRef.current !== null ||
       activeVoiceResponseRef.current !== null ||
@@ -3801,6 +3821,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const poll = async () => {
       while (!cancelled && activationOwnerRef.current === owner) {
         if (
+          readPendingUnifiedFinal() !== null ||
           activeVoiceResponseRef.current !== null ||
           ['starting', 'capturing', 'recognizing', 'playing'].includes(p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus)
         )
@@ -3863,15 +3884,68 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             scheduleProductVoiceLoopCapture();
             return;
           }
+          const previewResponse = recordValue(outcome.notification.response);
+          const previewResponseId = typeof previewResponse?.response_id === 'string' ? previewResponse.response_id : null;
+          const previewDisposition = classifyProductP2Notification(
+            outcome.notification,
+            previewResponseId !== null && presentedProductResponsesRef.current.has(previewResponseId),
+          );
+          const pendingUnified = readPendingUnifiedFinal();
+          if (pendingUnified !== null) {
+            if (previewDisposition.kind === 'presentation' && previewDisposition.task_notification) {
+              if (activationOwnerRef.current === owner && activeSessionRef.current === binding.session_id) {
+                adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
+              }
+              return;
+            }
+            // notification.next is pop-on-read, while unified.submit publishes
+            // before returning the exact response fence. Keep this delivery in
+            // the current poll continuation until the already-retained submit
+            // settles; do not present, ACK, or start another poll pre-fence.
+            await submittedVoiceFinalsRef.current
+              .get(pendingUnified.receipt)
+              ?.operation.catch(() => undefined);
+          }
+          if (
+            activationOwnerRef.current !== owner ||
+            activeSessionRef.current !== binding.session_id
+          ) {
+            return;
+          }
+          if (previewDisposition.kind === 'presentation' && previewDisposition.task_notification) {
+            const foregroundAttempt = pendingPresentationAttemptRef.current;
+            if (
+              foregroundAttempt?.owner === owner &&
+              foregroundAttempt.task_notification === null
+            ) {
+              await foregroundAttempt.playoutSettlement;
+              await settleProductPresentationAck(foregroundAttempt);
+              if (
+                activationOwnerRef.current !== owner ||
+                activeSessionRef.current !== binding.session_id
+              ) {
+                return;
+              }
+            }
+          }
+          const exactForegroundDelivery =
+            previewDisposition.kind === 'presentation' &&
+            !previewDisposition.task_notification &&
+            foregroundPresentationFenceMatchesResponse(
+              pendingForegroundPresentationRef.current,
+              owner.snapshot().binding,
+              previewDisposition.response,
+            );
+          if (pendingUnified !== null && !exactForegroundDelivery) return;
+          if (cancelled && !exactForegroundDelivery) return;
+          const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
           if (
             cancelled ||
-            activationOwnerRef.current !== owner ||
             voiceLoopGenerationRef.current !== notificationAdmission.voice_loop_generation ||
             voiceLoopP2RefreshAfterGenerationRef.current !== null
           ) {
             return;
           }
-          const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
           // A presentation owns the P2 lane until its TEXT ACK settles.  Do
           // not let an immediately rejected TTS attempt race a successor
           // notification long-poll and strand that ACK behind it.

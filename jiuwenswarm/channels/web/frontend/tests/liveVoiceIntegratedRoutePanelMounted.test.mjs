@@ -1225,6 +1225,7 @@ function mountedLifecycleProgress(
     unit_id: `mounted-unit-${taskId}-${seq}`,
     expected_event_head: seq,
     result_source_event_id: outcome === 'completed' ? `executor-a:${seq}` : null,
+    state,
     source_event: {
       event_id: sourceEventId,
       event_type: eventType,
@@ -3213,6 +3214,7 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
           'unit_id',
           'expected_event_head',
           'result_source_event_id',
+          'state',
         ]) {
           delete acceptedProgress[field];
         }
@@ -10366,6 +10368,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
   let currentTaskNonTerminal = false;
   let createEffects = 0;
   let cancelEffects = 0;
+  let releaseFirstUnifiedResponse = null;
   const queuedNotifications = [];
   const notificationWaiters = [];
   const publishNotification = notification => {
@@ -10482,6 +10485,11 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
           },
         },
       });
+      if (index === 0) {
+        await new Promise(resolve => {
+          releaseFirstUnifiedResponse = resolve;
+        });
+      }
       return {
         request_id: options.requestId,
         ok: true,
@@ -10549,6 +10557,30 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
           () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === index + 1,
           `turn ${index + 1} was not auto-submitted exactly once`,
         );
+        if (index === 0) {
+          await waitForMounted(
+            () => typeof releaseFirstUnifiedResponse === 'function',
+            'first unified response gate was not retained',
+          );
+          for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+          assert.equal(
+            calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length,
+            0,
+            'a pop-on-read foreground presentation must not be consumed before unified.submit returns its exact response fence',
+          );
+          assert.equal(
+            projectedMessages.filter(event => event.message.role === 'assistant').length,
+            0,
+            'a pre-fence foreground presentation must not enter visible history',
+          );
+          assert.equal(
+            calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length,
+            0,
+            'a pre-fence foreground presentation must not be ACKed',
+          );
+          releaseFirstUnifiedResponse();
+          releaseFirstUnifiedResponse = null;
+        }
         await waitForMounted(() => states.at(-1)?.p1_status === 'playing', `turn ${index + 1} was not read aloud`);
         await waitForMounted(() => browser.counts.sourceStarts === index + 1, `turn ${index + 1} did not schedule its authoritative browser audio`);
       });
@@ -10560,7 +10592,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
         await act(async () => {
           await waitForMounted(
             () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status),
-            `turn ${index + 1} did not automatically resume listening: ${states.map(state => `${state.p1_status}/${state.text_status}`).join(',')} calls=${calls.map(call => call.method).join(',')} sources=${browser.counts.sourceStarts}/${browser.counts.sourceEnds}`,
+            `turn ${index + 1} did not automatically resume listening: ${states.map(state => `${state.p1_status}/${state.text_status}/retained=${state.operation_retained}`).join(',')} calls=${calls.map(call => call.method).join(',')} sources=${browser.counts.sourceStarts}/${browser.counts.sourceEnds}`,
           );
         });
       }
@@ -10996,7 +11028,13 @@ test('mounted foreground status query restarts an idle P2 poll after background 
           true,
         ),
       );
-      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'background terminal announcement did not play after foreground ACK');
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'playing',
+        `background terminal announcement did not play after foreground ACK; states=${states
+          .slice(-16)
+          .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}/retained=${state.operation_retained}`)
+          .join(',')}; methods=${calls.slice(-24).map(call => call.method).join(',')}`,
+      );
       await waitForMounted(() => browser.counts.sourceStarts === 3, 'background terminal audio did not reach the browser');
       browser.endLatestSource();
       await waitForMounted(
