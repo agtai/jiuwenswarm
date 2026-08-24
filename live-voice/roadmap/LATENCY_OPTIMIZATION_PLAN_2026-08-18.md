@@ -1,7 +1,8 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** L0 IMPLEMENTATION AND AUTOMATED/PROVIDER-COMPONENT BASELINES
-> COMPLETE; FINAL TIER-3 REVIEW, PHYSICAL BASELINE AND OPTIMIZATION REMAIN OPEN.
+> **Plan status:** L0 IMPLEMENTATION, FIRST-REVIEW REPAIRS AND AUTOMATED/
+> PROVIDER-COMPONENT BASELINES COMPLETE; FOLLOW-UP TIER-3 REVIEW, PHYSICAL
+> BASELINE AND OPTIMIZATION REMAIN OPEN.
 > [STATUS](../STATUS.md) remains the only owner
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
@@ -17,13 +18,15 @@
 >
 > Date: 2026-08-18
 >
-> **2026-08-23 execution update:** the §3 correlated L0 source/automation layer,
+> **2026-08-24 execution update:** the §3 correlated L0 source/automation layer,
 > closed fixed corpus, injected baseline and real-Provider digital-loopback
 > component baseline are complete. The Provider component lifecycle is recorded
-> as unknown/uncontrolled rather than cold/warm. Physical Formal Web cold/warm
-> collection is still open, and final independent Tier-3 review has not yet
-> produced a PASS, so §4 and later optimization layers are not activated by
-> these non-physical results. See the
+> as unknown/uncontrolled rather than cold/warm. The first final-source review
+> found cross-sample label, Chrome endpoint-owner and Browser feature-off
+> allocation defects; all three are repaired and the baselines were regenerated
+> on `9a3a65fd0`. Physical Formal Web cold/warm collection and follow-up Tier-3
+> review are still open, so §4 and later optimization layers are not activated
+> by these non-physical results. See the
 > [L0 evidence](../evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
 
 ## 1. Outcome and judgement
@@ -128,9 +131,12 @@ thirteen required scenario categories, each formal profile requiring at least
 component baselines are reproducible on an exact source; JSONL aggregation also
 requires source-bound run metadata. The Provider component lifecycle remains
 unknown/uncontrolled and grants no cold/warm comparison. The physical portion
-of this batch remains incomplete: WebAudio render completion is not physical
-audibility, and cold/warm Formal Web profiles have not yet supplied 20
-correlated operator-confirmed successes each.
+of this batch remains incomplete. Exact response registration now freezes the
+owning sample labels across delayed callbacks, the Browser feature-off path
+allocates no measurement state/control, and CDP capture requires the launched
+Chrome profile/PID lineage plus an exact page nonce. WebAudio render completion
+is not physical audibility, and cold/warm Formal Web profiles have not yet
+supplied 20 correlated operator-confirmed successes each.
 
 ## 4. Remove avoidable waits on the existing authoritative path
 

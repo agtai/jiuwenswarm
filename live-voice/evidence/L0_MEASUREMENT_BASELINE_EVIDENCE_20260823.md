@@ -7,7 +7,7 @@
 - Baseline: `c31e85ade1a69e934d05bfb9c277568a1238663c` on
   `hx/0812_live_voice_w3`.
 - Measured product/test/corpus source:
-  `24e7e61065a609b30462dcca6b77515c6fa1fe56`.
+  `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789`.
   The later evidence-only commit changes documentation, not the measured
   product, test, corpus or runner trees.
 - Risk: Tier 3. The production hooks cross Browser, Gateway, Runtime and Agent
@@ -15,7 +15,8 @@
   lifecycle or mutation authority.
 - Overall disposition: **PARTIAL**. Correlated production instrumentation,
   fixed corpus, injected baseline and real-Provider digital-loopback component
-  baseline are implemented and automated. Final independent Tier-3 review and
+  baseline are implemented and automated. The first final-source independent
+  review's three findings are repaired; follow-up Tier-3 review and
   the required physical microphone, speaker and room cold/warm profiles remain
   open, so no module-Gate PASS, current physical p50/p95, audibility, AEC,
   stop-to-silence or feature-complete latency credit is claimed.
@@ -68,7 +69,10 @@ separately as fallback; silence remains failure.
   directory's closed metadata binds the same exact source commit.
 - `start_hands_free_demo.ps1 -L0Measurement` is an isolated
   `formal-web-validation` launcher path with a separate Chrome profile/debug
-  endpoint and dynamic closed labels. The ordinary launcher path is unchanged.
+  endpoint and dynamic closed labels. Session v5 rejects a pre-existing debug
+  listener, binds the exact launched Chrome/profile/PID lineage, requires a
+  per-launch page nonce and revalidates those facts before CDP capture. The
+  ordinary launcher path is unchanged.
 - `l0_browser_capture.py` takes no manual timestamps. It reads the browser CDP
   timeline automatically and asks the operator only for pass/fail/quit. A sample
   counts only when the operator passes, no browser record was dropped, all
@@ -111,7 +115,7 @@ therefore recorded as `unknown`/`uncontrolled`, not cold or warm:
 
 | Profile | Success | Batch synthesis completion p50 / p95 | Recognition p50 / p95 | In-memory loopback p50 / p95 |
 |---|---:|---:|---:|---:|
-| unknown / uncontrolled | `20/20` | `1516.0 / 2172.0 ms` | `375.0 / 797.0 ms` | `1968.0 / 2907.0 ms` |
+| unknown / uncontrolled | `20/20` | `1640.0 / 2203.0 ms` | `391.0 / 1906.0 ms` | `2046.0 / 3906.0 ms` |
 
 These numbers measure batch synthesis completion, not streaming first audio.
 Digital loopback is neither a physical microphone/speaker route nor the full
@@ -128,11 +132,11 @@ it identifies the configured field set without retaining values or credentials.
 | P — positive | Three injected profiles retain 20/20 successes each; the real-Provider unknown-lifecycle component retains 20/20; production Browser/Gateway/Runtime/Agent hooks are exercised by affected tests. |
 | N — negative | Closed shapes reject private/extra/invalid fields; wrong identity, generation, sample and Task facts have zero aggregation authority. |
 | B — boundary | At-least-20 formal samples, safe integers, bounded rounds/records/files/browser buffer, duplicate milestone and capacity rejection coverage. |
-| S — state | Feature-off allocates no sink/control; disabled labels, route close, stale generation and later records cannot revive authority. |
+| S — state | Feature-off allocates no sink, Browser measurement state or control; disabled labels, route close, stale generation and later records cannot revive authority. |
 | T — temporal | Duplicate/idempotent, conflict, reorder, missing, negative/regressive duration, future sample and cancel ordering fail closed or remain unknown. |
-| C — concurrency | Locked collector, process-sink serialization, exact response registry, pre-dispatch registration and Browser/Gateway/Agent races retain one response owner. |
-| R — restart/replay | Append-only fsync JSONL, deterministic reload/aggregate, dynamic labels and exact source/corpus hashes; no replay creates product effects. |
-| I — isolation | Exact Session/correlation/interaction/activation/response/turn/round and optional Task/Attempt binding; partial identity pins once and cannot rebind. |
+| C — concurrency | Locked collector, process-sink serialization, response registration with frozen run labels, pre-synthesis Browser/Gateway and pre-dispatch Runtime registration; delayed callbacks cannot cross samples. |
+| R — restart/replay | Append-only fsync JSONL, deterministic reload/aggregate, dynamic labels, exact source/corpus hashes and Chrome session-v5 profile/PID/nonce ownership; no replay creates product effects. |
+| I — isolation | Exact Session/correlation/interaction/activation/response/turn/round and optional Task/Attempt binding; partial identity pins once, response labels cannot rebind, and CDP cannot adopt a foreign loopback listener/page. |
 | F — feature/fallback | Ordinary path remains flag-off; failure/fallback/cancel are distinct and excluded; physical runner accepts only nominal non-injected success cases. |
 | K — compatibility | P2 production batch `16` and omitted single-pull compatibility remain covered; no shared schema or wire extension. |
 | X — cross-module | Formal Web, Browser Audio, Dedicated Media, Agent Bridge, Registry, launcher and Python/TypeScript privacy/aggregation tests cover the actual owner chain. |
@@ -140,12 +144,12 @@ it identifies the configured field set without retaining values or credentials.
 ## Verification
 
 - L0 collector/corpus/browser-capture plus affected Agent/Gateway/Registry/
-  launcher Python run: `376 passed / 6 failed`. The six failures are the same
+  launcher Python run: `430 passed / 6 failed`. The six failures are the same
   pre-existing P3 fixture/projection set reproduced on baseline `c31e85ade`;
-  the focused L0 run is `51/51` and all new production-hook
+  the focused L0/launcher run is `53/53` and all new production-hook
   tests pass.
 - Formal Integrated Web: `478/478`; Browser Audio I/O: `103/103`;
-  Dedicated Media: `27/27`; Browser L0: `4/4`.
+  Dedicated Media: `27/27`; Gateway Media: `38/38`; Browser L0: `5/5`.
 - Build profiles: `2/2`; TypeScript `--noEmit`, production Live Voice build,
   changed-Python Ruff/compileall, PowerShell AST and `git diff --check`: PASS.
   Existing duplicate locale-key, mixed-import and chunk-size warnings remain
@@ -158,14 +162,22 @@ it identifies the configured field set without retaining values or credentials.
 
 ## Independent Tier-3 review
 
-Iterative independent reviews before the exact measured source found ten, then
-seven, then four actionable issues across optional-hook isolation, CDP loopback
-confinement, cancellation/observability classification, aggregation, Tool
-authority, Provider temperature claims, source binding and evidence-path
-confinement. Every confirmed issue was repaired and regression-tested. A fresh
-review of the exact measured source was interrupted before it produced a final
-disposition; it grants no review credit. Final independent Tier-3 review remains
-required.
+Iterative reviews before the prior measured source found ten, then seven, then
+four actionable issues across optional-hook isolation, CDP loopback confinement,
+cancellation/observability classification, aggregation, Tool authority,
+Provider temperature claims, source binding and evidence-path confinement.
+The next independent review returned `FAIL` with no P0 and three bounded
+findings: P1 response callbacks could acquire the next sample's current labels;
+P2 loopback CDP did not prove that the listener belonged to the newly launched
+isolated Chrome; P3 ordinary Browser feature-off still allocated an empty
+buffer and full control object. Commit `9a3a65fd0` freezes labels in exact
+response registrations across Runtime/Gateway/Browser callbacks, moves Browser
+registration before synthesis awaits, binds CDP to the launched profile/PID
+lineage and page nonce, and lazily creates Browser measurement state/control
+only when opted in. The focused cross-sample, owner-lineage and feature-off
+regressions pass, and both baselines above were regenerated on that exact
+source. A follow-up independent Tier-3 review of `9a3a65fd0` remains required;
+the repair itself grants no review PASS.
 
 ## Physical acceptance still open
 
@@ -190,7 +202,7 @@ digest, corpus digest and sample identities are checked automatically.
 
 The injected oracle's largest modeled critical-path segment is Agent request to
 `chat.final` (`1572.0 / 1794.0 ms`), while the real Provider component's batch
-synthesis completion is `1516.0 / 2172.0 ms`. Neither is a physical end-to-end
+synthesis completion is `1640.0 / 2203.0 ms`. Neither is a physical end-to-end
 bottleneck claim. The next recommended packet is therefore the already-defined
 physical cold/warm fixed-corpus collection, not a production optimization. Only
 that evidence may choose among VAD finalization, browser startup buffering,
