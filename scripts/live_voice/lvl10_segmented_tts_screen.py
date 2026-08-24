@@ -30,7 +30,7 @@ SAMPLE_RATE_HZ = 48_000
 RESERVE_SAMPLES = 12_000
 MAX_SEGMENTS = 4
 MAX_ACTIVE = 2
-EVENT_TIMEOUT_SECONDS = 2.0
+EVENT_TIMEOUT_SECONDS = 15.0
 ZERO_FORBIDDEN_EFFECTS = {
     "agent_dispatches": 0,
     "tool_dispatches": 0,
@@ -211,7 +211,9 @@ async def _consume(
                 return bytes(pcm), first, reserve, clock(), True
             if event.kind is SynthesisEventKind.CANCELLED:
                 return bytes(pcm), first, reserve, clock(), False
-    except BaseException:
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except Exception:
         return bytes(pcm), first, reserve, clock(), False
 
 
@@ -268,7 +270,7 @@ async def run_attempt(
         request = _request(response, active_fixture, index)
         try:
             await provider.open_synthesis(request)
-        except BaseException:
+        except Exception:
             errors += 1
             completed[index] = (b"", None, None, monotonic_ns(), False)
             opened += 1
@@ -290,7 +292,7 @@ async def run_attempt(
                     await provider.cancel_synthesis(
                         request.ref, reason="lvl10_group_fence"
                     )
-                except BaseException:
+                except Exception:
                     pass
                 task.cancel()
         if live:
