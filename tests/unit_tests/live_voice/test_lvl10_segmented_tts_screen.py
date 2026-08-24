@@ -533,10 +533,24 @@ def test_report_artifacts_expose_sanitized_population_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     factory = ScriptedSseFactory()
-    provider = _provider(factory)
+    selected_providers: list[Any] = []
+    closed_providers: list[Any] = []
+
+    class TrackedProvider:
+        def __init__(self) -> None:
+            self._provider = _provider(factory)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._provider, name)
+
+        async def close(self) -> None:
+            await self._provider.close()
+            closed_providers.append(self)
 
     async def select_fake_streaming_speech(*, batch_available: bool) -> Any:
         assert batch_available is False
+        provider = TrackedProvider()
+        selected_providers.append(provider)
         return SimpleNamespace(
             tier=runner.SpeechRouteTier.STREAMING,
             provider=provider,
@@ -577,7 +591,10 @@ def test_report_artifacts_expose_sanitized_population_contract(
         "source_commit": "a" * 40,
         "source_state": "clean",
         "fixture_sha256": runner._sha256(MANIFEST_PATH),
+        "provider_instances": 3,
     }
+    assert len(selected_providers) == 3
+    assert closed_providers == selected_providers
     copied_manifest = output / "manifest.json"
     assert copied_manifest.read_bytes() == MANIFEST_PATH.read_bytes()
     manifest_sha256 = runner._sha256(copied_manifest)
