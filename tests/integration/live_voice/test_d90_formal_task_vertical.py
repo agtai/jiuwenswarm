@@ -673,7 +673,9 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         model_config_version="catalog-v1",
         dispatch_fence=fence,
     )
-    executor = DirectProjectCodeExecutorAdapter(_Resolver(binding), database)
+    executor = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding), database, clock=lambda: NOW
+    )
     store = SqliteTaskStore(database)
     core = PersistentTaskCore(store, executor)
     conversation_adapter = _SlowConversationAdapter()
