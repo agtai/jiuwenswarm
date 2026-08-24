@@ -644,3 +644,36 @@ The unchanged backend, Browser Audio, Browser Gateway Media and Browser
 Dedicated Media results retain their exact earlier-source credit. Physical
 acceptance remains **BLOCKED** until one independent one-finding follow-up of
 `dab64023..6559c38e` returns no unresolved finding. No remote ref was updated.
+
+## 12. 2026-08-24 final pending-successor follow-up result
+
+The independent targeted follow-up reviewed immutable repair candidate
+`6559c38eb61d32cc04e494b79598cfdfd51def53` against prior candidate
+`dab640239b1d3f1b887661ebea10266623b336e4`. An unrelated checkout moved during
+the review, but the object-qualified inputs and target worktree were unaffected.
+The reviewer found no actionable defect in the repaired seam or its required
+cumulative interaction and returned **PASS — C0 / I0 / M0**.
+
+The review confirmed that exact object ownership prevents a successfully
+revoked predecessor A from being resurrected when successor B settles. An
+in-flight revocation shares one promise; a failed revocation keeps A retained
+for bounded retry. B remains independently owned and is revoked exactly once.
+The deterministic oracle gates B activation, starts Exit, completes
+`close(A)`, settles B and asserts exact A/B close counts.
+
+The reviewer returned these exact results:
+
+| Review check | Result |
+|---|---|
+| Candidate Formal Integrated Web suite | `496/496` twice |
+| Red composition: `dab64023` code plus the new oracle | `594/595`; sole failure A exact close count `2 !== 1` |
+| `git diff --check` | PASS |
+| New tombstone/collection/protocol/policy/deadlock/unbounded-retention/authority/compatibility finding | None |
+
+The supplied review return did not include complete shell command strings, so
+this record does not invent them; it preserves the immutable objects and exact
+reported red/green results. This PASS closes the D-096 source review Gate only.
+No generation-interruption run has occurred on a real device, so audibility,
+false-trigger behaviour, full-utterance recognition, replacement accuracy,
+Task concurrency, latency, rollout and product-readiness credit remain open.
+The next Gate is the flag-on physical journey in handoff §5.

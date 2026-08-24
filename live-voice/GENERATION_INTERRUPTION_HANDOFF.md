@@ -2,7 +2,6 @@
 
 **Branch:** `hx/0823_generation_interruption`
 **Base (merge-base, not a ref):** `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789`
-**Current worktree:** `C:/Users/admin/Desktop/live voice hx-generation-interruption`
 
 The original implementation was verified by automation, but a 2026-08-24
 targeted closure review found two Important defects (`C0/I2/M0`). The atomic
@@ -17,8 +16,9 @@ prevents a late aborted request from cancelling twice. Its follow-up found one
 remaining pending-activation race (`C0/I1/M0`): a late successor could re-add an
 already revoked predecessor. `6559c38e` transfers that predecessor only while
 the owner still holds the exact object, so Exit closes A and B exactly once.
-**Nothing has run on a real device. One final one-finding follow-up of
-`dab64023..6559c38e` remains before physical acceptance.**
+The final targeted follow-up found no actionable defect and returned
+**PASS — C0/I0/M0**. **Nothing has run on a real device; the flag-on physical
+journey in §5 is now the next Gate.**
 
 ---
 
@@ -116,12 +116,16 @@ The original target `35537a9a` failed `C0/I5/M0`; its first repair target
 `4c1c7d68814c5a165c01c12d036b0b9adc347b66` then failed only the Exit/cancel
 seam at `C0/I1/M0`; `dab64023` repaired it, and that follow-up found only the
 pending-successor duplicate-revocation race at `C0/I1/M0`. The immutable current
-repair target is `6559c38eb61d32cc04e494b79598cfdfd51def53`. Do not ask the
-reviewer to reopen the accepted Exit/cancel repair, the four earlier repairs,
-the historical broad rounds or the full D-096 discovery review. Review only
-the duplicate-predecessor repair and its necessary cumulative interaction. Use
-the prepared
-[fix-only follow-up prompt](reviews/GENERATION_INTERRUPTION_CROSS_CAPTURE_TIER3_FOLLOWUP_PROMPT_2026-08-24.md).
+repair target is `6559c38eb61d32cc04e494b79598cfdfd51def53`.
+Its bounded final follow-up passed `C0/I0/M0`: exact ownership prevents a
+successfully revoked A from being resurrected, failed/in-flight revocation keeps
+A retryable and B remains independently revoked once. The deterministic red
+composition using `dab64023` code plus the new oracle failed only A's exact
+close count (`594/595`, `2 !== 1`); the candidate Formal Web suite passed
+`496/496` twice and `git diff --check` passed. The historical
+[follow-up prompt](reviews/GENERATION_INTERRUPTION_CROSS_CAPTURE_TIER3_FOLLOWUP_PROMPT_2026-08-24.md)
+is complete; do not restart it before physical acceptance without a newly
+reproduced defect.
 
 ## 4. Where the code is
 
@@ -157,17 +161,14 @@ Two invariants are worth stating in words, because both were defects first:
   window's reason to exist must retire it: Session switch, Exit, capture
   ownership surrender, and the exact response failing.
 
-## 5. Physical acceptance — blocked until one source review closes
+## 5. Physical acceptance
 
-Do not run this as acceptance yet. `6559c38e` now has an automated
-full-utterance/EOT oracle: the predecessor prefix and successor tail retain
-separate exact capture authorities, Gateway validates both, and one combined
-Batch final is returned. Physical credit is still blocked until one fix-only
-Tier-3 follow-up of `dab64023..6559c38e` closes with no unresolved finding.
-
-After that review, this physical run needs a person with headphones. Headphones remove the
-echo/double-talk risk entirely, so what is being judged is timing and accuracy,
-not acoustics.
+The source review Gate is closed on `6559c38e`. Its automated
+full-utterance/EOT oracle retains the predecessor prefix and successor tail
+under separate exact capture authorities, Gateway validates both, and one
+combined Batch final is returned. Run the physical journey next; it needs a
+person with headphones. Headphones remove the echo/double-talk risk entirely,
+so what is being judged is timing and accuracy, not acoustics.
 
 Turn on `VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` and run three
 scenarios:
@@ -188,21 +189,18 @@ While these run, the logs to watch are the `action_id` of each interruption, the
 `response_id` it names, and the `round_id` in the cancel command — they have to
 line up with the answer the user actually meant to stop.
 
-**Acceptance is complete only when:** the cross-capture source review is closed,
-all three scenarios behave, the affected suites still pass, and the flag can be
-turned back off with no residue.
+**Acceptance is complete only when:** all three scenarios behave, the affected
+suites still pass, and the flag can be turned back off with no residue.
 
 ## 6. What is knowingly not covered
 
 * **No physical run of any kind has happened yet.** No latency number is
   claimed, including for the listening window itself.
-* **The final pending-activation source repair is not independently accepted yet.**
-  `35537a9a` implements the D-096 two-authority Batch boundary; its review found
-  five Important gaps and `4c1c7d68` repairs them. Its follow-up accepted four
-  and found one remaining synchronous Exit/cancel defect; `dab64023` repairs
-  that seam. The next follow-up found one duplicate predecessor revoke while B
-  activation was pending; `6559c38e` repairs it. The final fix-only follow-up
-  and physical observation remain open.
+* **The source review is accepted, but no physical observation exists.**
+  `6559c38e` passed its final targeted follow-up at `C0/I0/M0`; this grants
+  source-review credit only and does not establish audibility, latency,
+  false-trigger behaviour, replacement accuracy or Task concurrency on a real
+  device.
 * Seven mutants survive, in two groups — two halves of one Exit repair that are
   redundant against each other (the combined mutant *is* killed), and five state
   hygiene guards whose external effect another guard already provides. Evidence
@@ -225,7 +223,8 @@ re-scoped D-096 candidate `35537a9a`. That candidate's bounded review returned
 `C0/I5/M0`; `4c1c7d68` repairs its five findings. The first fix-only follow-up
 returned `C0/I1/M0`, and `dab64023` repairs that final Exit/cancel finding. Only
 its follow-up's pending-activation race remained; `6559c38e` repairs that race.
-Only the bounded one-finding follow-up remains before physical acceptance.
+The bounded one-finding follow-up then passed `C0/I0/M0`; physical acceptance
+is the next Gate.
 Full narrative in
 [evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md), decision record
 in [D-095](decisions/DECISIONS.md).
