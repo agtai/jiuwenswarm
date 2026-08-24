@@ -418,3 +418,47 @@ cancel nothing: there is no fenceable live target at all.
   are unrelated to this change and are not repaired here.
 * This closes the implementation gap only. Feature-complete, controlled-candidate
   and product-readiness boundaries remain unchanged.
+
+## 7. 2026-08-24 targeted closure follow-up
+
+A targeted Tier-3 closure review of `b476873b` returned **FAIL — C0 / I2 /
+M0**. This dated section corrects, rather than rewrites, the earlier five-round
+record above.
+
+1. The purported single 256-entry interruption ledger still kept pending
+   futures in a separate table, so a scheduling burst could retain 256 settled
+   identities plus 16 pending identities. `30300f32` repairs this by making one
+   `_RetainedGenerationInterrupt` own the exact target, pending future and
+   settled result/error from admission through replay. Pending and settled
+   identities now share one hard bound; a full ledger fails closed with
+   `GENERATION_INTERRUPT_LEDGER_FULL` rather than creating a 257th identity.
+2. A provider speech-start arriving while `abandonCapture` releases a silent
+   generation window opens a real successor capture, but the existing route
+   clears predecessor frames and Batch Speech recognizes the successor capture
+   alone. The test proves that the old track ends and the new track is live; it
+   does not prove end-of-turn recognition of the full utterance. The user's
+   prefix can therefore be lost.
+
+The first repair has the following current-source evidence:
+
+| Check | Result |
+|---|---|
+| Ledger capacity/replay focused selection | `3 passed / 16 deselected` |
+| `test_generation_time_interruption.py` + `test_conversation_runtime_loop.py` | `54 passed` |
+| Original affected five-file backend set | `190 passed` |
+| Ruff on both changed Python files | PASS |
+| `git diff --check` | PASS (line-ending warnings only) |
+
+The second finding is not repaired in this packet. Predecessor and successor
+frames carry different exact capture, track and Media authority bindings, while
+the existing dedicated Media/Speech authorization and Batch WAV path accept one
+capture. Concatenating, relabeling or replaying frames in the browser would
+falsify that provenance. A truthful repair therefore requires a separately
+scoped Tier-3 multi-segment Media/Speech continuation boundary with positive
+full-transcript/EOT evidence and negative stale, cross-Session, cross-track,
+replay and zero-business-side-effect oracles.
+
+No frontend suite, full backend sweep, mutation run or physical journey was
+rerun for the Runtime-only repair. Historical results above retain only their
+exact-source credit. Physical acceptance is blocked until the cross-capture
+source boundary is accepted, implemented and reviewed.

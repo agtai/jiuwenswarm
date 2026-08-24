@@ -1086,3 +1086,10 @@
 - 第五轮独立评审修复（C0/I3/M3）：第四轮对“释放期迟到 speech-start”的修复只保住了逻辑状态——`stopCapture` 此时已经结束 MediaStream track，`capturing` 是假的，用户后半句根本没被采集；现改为给说话者开一次真正的后继采集（结算已上行帧、`#startConcurrentCapture` 换新租约、撤销旧媒体授权），用例断言旧 track 已 ended、新 track 为 live。第二项：围栏只作废了 effect，却没有清掉已经排进投递队列的 presentation，任何已认证 P2 消费者仍会渲染或朗读它（Web 端靠客户端 response-id 拒绝掩盖了这一点）；现在围栏成功时调用既有的 `discard_presentation(ref)`。第三项：`agent.failed` 分支清了前台围栏却没清生成期监听窗口，导致此后每个回答都静默失去自己的窗口，且一个已无待答 response 的采集继续占着 P2 轮询特权；现按精确 response 退休该窗口。三项各自的变异均被杀死。M2 指出 Group A 的“触发路径不可达”说法有误——复审用组合变异证明可达且被既有用例杀死，该措辞已撤回。M3 指出的文档结构损坏（评审轮次段落被拼接、证据开头警告重复）已修复。- 播报让位决定：Task 终态播报若落在用户插话说到一半时，不得抢话，也不得拆毁正在承载这句话的 P1 路由。生成期监听是让该竞态可达的唯一原因——在此之前回答未落地时从不开麦。播放改为拒绝而非尝试，且该拒绝被归类为「让位」而非「失败」：精确的已投递播报被原样保留，说话者结束后由既有仲裁重播，不重新拉取、不重建 P1、不做未播即 ACK。真实播放失败仍走原有恢复路径。
 - 明确非声明：未做真机麦克风/TTS 旅程；未测量生成期监听窗口的延迟；生成期开麦下的回声与 double-talk 行为未评估；无 flag-on 上线、A/B 或回退证据；浏览器 ownership 让出（`closeSession`，非 Exit 路径）已补前端用例，并因此发现该路径遗漏了生成期监听窗口的清理；该清理已补，但其变异体存活——残留在当前门控组合下不可观察，故记为纵深防御而非已覆盖。
 - 重新评估条件：需要让插话触及 `task.cancel` 或任何 Task authority；需要在 EOT 之前提交语音；需要第二个打断 authority 或让 barge-in 与生成期围栏合并；需要在窗口内做识别以判断是否释放；需要默认开启而无物理与延迟证据；或把本次自动化与变异证据冒充物理、feature-complete、controlled-candidate 或产品验收。
+
+### 2026-08-24 定向闭环复审更正
+
+- `b476873b` 上的定向 Tier-3 闭环复审判定为 **FAIL — C0/I2/M0**，因此上文“实现完成”只保留为当时记录，不再是当前 Gate 事实。复审发现两项：其一，Runtime 把最多 256 个已结算 identity 与最多 16 个 pending identity 分存，实际可达 272；其二，`abandonCapture` 释放期间迟到的 speech-start 虽会打开真实后继 capture，但前驱帧被清除，Batch Speech 只识别后继 capture，可能丢失用户话头。
+- 第一项已由 `30300f32` 修复：同一 `_RetainedGenerationInterrupt` 从准入到结算拥有精确 `ref`、pending future 与 result/error，pending/settled 共用一个 256-entry bound；受影响五文件后端集为 `190/190`，三项账本聚焦回归 `3/3`，Ruff 与 diff check 通过。
+- 第二项不能在原冻结的浏览器局部边界内诚实修复：前驱与后继帧分别绑定不同的 capture、track 与 Media authority，而现有 Speech 准入及 Batch WAV 只接受一个精确 capture。浏览器拼接、重标或重放会伪造 provenance。任何多段连续识别、跨 capture 授权或新的服务器组合权威都属于 Realtime Media/Speech 协议与 authority 扩界，必须先按 Tier 3 重新记录 owner、scope、负向零副作用和 acceptance，再实施。
+- 当前 disposition：生成期插话保持默认关闭且 **BLOCKED**；不得把 §5 真机旅程当作当前下一步或验收 PASS。物理验收只能在跨 capture 完整语句 oracle 与定向复审关闭之后进行。若不接受该扩界，只能改为显式失败并要求用户重说，不能声称无损生成期插话。

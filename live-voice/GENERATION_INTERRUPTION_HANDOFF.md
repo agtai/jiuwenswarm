@@ -4,8 +4,13 @@
 **Base (merge-base, not a ref):** `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789`
 **Worktree used so far:** `D:/XGG AI/openjiuwen/jiuwenswarm-gen-interrupt`
 
-Everything here is implemented and verified by automation. **Nothing has ever
-run on a real device.** The one remaining task is physical acceptance — §5.
+The original implementation was verified by automation, but a 2026-08-24
+targeted closure review found two Important defects (`C0/I2/M0`). The atomic
+Runtime-ledger defect is repaired on `30300f32`; the browser release race can
+still recognize only the successor capture and lose the start of the user's
+utterance. A truthful repair requires an explicitly re-scoped cross-capture
+Realtime Media/Speech authority boundary. **Nothing has run on a real device,
+and physical acceptance must not begin until that source boundary closes.**
 
 ---
 
@@ -119,11 +124,19 @@ Two invariants are worth stating in words, because both were defects first:
   window's reason to exist must retire it: Session switch, Exit, capture
   ownership surrender, and the exact response failing.
 
-## 5. The remaining task — physical acceptance
+## 5. Physical acceptance — blocked until source closure
 
-Automation is done. This is what is left, and it needs a person with headphones.
-Headphones remove the echo/double-talk risk entirely, so what is being judged is
-timing and accuracy, not acoustics.
+Do not run this as acceptance yet. If provider speech-start arrives while
+`abandonCapture` is releasing the old track, the route opens a real successor
+capture but recognizes only frames from that successor. Frames already recorded
+under the predecessor capture are cleared, so scenario 2 can submit only the
+tail of the utterance. The existing test proves old-track/new-track liveness,
+not end-of-turn recognition of the complete sentence.
+
+After a separately scoped Media/Speech continuation repair passes targeted
+review, this physical run needs a person with headphones. Headphones remove the
+echo/double-talk risk entirely, so what is being judged is timing and accuracy,
+not acoustics.
 
 Turn on `VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` and run three
 scenarios:
@@ -144,13 +157,19 @@ While these run, the logs to watch are the `action_id` of each interruption, the
 `response_id` it names, and the `round_id` in the cancel command — they have to
 line up with the answer the user actually meant to stop.
 
-**Acceptance is complete when:** all three scenarios behave, the suites in §3
-still pass, and the flag can be turned back off with no residue.
+**Acceptance is complete only when:** the cross-capture source Gate is closed,
+all three scenarios behave, the affected suites still pass, and the flag can be
+turned back off with no residue.
 
 ## 6. What is knowingly not covered
 
 * **No physical run of any kind has happened yet.** No latency number is
   claimed, including for the listening window itself.
+* **Late release-race speech can lose its prefix.** The predecessor and
+  successor frames have different exact capture/media authorities; current
+  Batch recognition accepts one capture. Relabeling or concatenating in the
+  browser would falsify provenance, so this is a Tier-3 re-scope rather than a
+  local state fix.
 * Seven mutants survive, in two groups — two halves of one Exit repair that are
   redundant against each other (the combined mutant *is* killed), and five state
   hygiene guards whose external effect another guard already provides. Evidence
@@ -165,9 +184,11 @@ still pass, and the flag can be turned back off with no residue.
 
 ## 7. History, if you need it
 
-Five independent Tier-3 reviews: `C0/I2/M0`, `C0/I6/M2`, `C0/I4/M3`,
-`C0/I3/M3`, `C0/I3/M3`. Every finding is repaired and each repair carries a
-mutation-sensitive oracle. Full narrative in
+Five broad independent Tier-3 reviews returned `C0/I2/M0`, `C0/I6/M2`,
+`C0/I4/M3`, `C0/I3/M3`, `C0/I3/M3`. A later targeted closure review on
+`b476873b` returned `C0/I2/M0`: its atomic-ledger finding is repaired on
+`30300f32`, while its full-utterance finding remains open pending explicit
+re-scope. Full narrative in
 [evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md), decision record
 in [D-095](decisions/DECISIONS.md).
 
