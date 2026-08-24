@@ -37,6 +37,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoop,
     ConversationRuntimeLoopViolation,
     GenerationInterruptionResult,
+    _RetainedGenerationInterrupt,
 )
 from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessRoundHandle,
@@ -866,14 +867,12 @@ async def test_interruption_replay_ledger_stays_bounded() -> None:
                 f"action-{index}", ResponseRef("interaction-1", f"response-{index}", index)
             )
         assert unknown.value.reason == "STALE_RESPONSE_REFERENCE"
-    # Private ledgers are asserted directly: they have no product surface, and
+    # The private ledger is asserted directly: it has no product surface, and
     # an unbounded one is exactly the defect this guards.
     assert (
-        len(loop._generation_interrupt_fingerprints)
+        len(loop._retained_generation_interrupts)
         <= _MAX_RETAINED_GENERATION_INTERRUPTS
     )
-    assert len(loop._generation_interrupt_errors) <= _MAX_RETAINED_GENERATION_INTERRUPTS
-    assert len(loop._generation_interrupt_order) <= _MAX_RETAINED_GENERATION_INTERRUPTS
     # The most recent action is still replayable.
     with pytest.raises(ConversationRuntimeLoopViolation):
         await loop.interrupt_generation(
@@ -898,36 +897,35 @@ async def test_bounded_ledger_skips_a_pending_action_without_exceeding_its_bound
     ref = ResponseRef("interaction-1", "response-pending", 0)
     pending_future: asyncio.Future[GenerationInterruptionResult] = running.create_future()
     loop._pending_generation_interrupt["pending-oldest"] = (ref, pending_future)
-    loop._generation_interrupt_order.append("pending-oldest")
-    loop._generation_interrupt_fingerprints["pending-oldest"] = ref
+    loop._retained_generation_interrupts["pending-oldest"] = (
+        _RetainedGenerationInterrupt(ref=ref)
+    )
     for index in range(_MAX_RETAINED_GENERATION_INTERRUPTS + 8):
         action_id = f"settled-{index}"
         settled_ref = ResponseRef("interaction-1", f"response-{index}", index + 1)
-        loop._generation_interrupt_order.append(action_id)
-        loop._generation_interrupt_fingerprints[action_id] = settled_ref
-        loop._generation_interrupt_results[action_id] = GenerationInterruptionResult(
-            action_id=action_id,
+        loop._retained_generation_interrupts[action_id] = _RetainedGenerationInterrupt(
             ref=settled_ref,
-            applied=True,
-            replayed=False,
-            interrupted_state=ResponseState.GENERATING,
-            cancel_requested=True,
-            effect_ids=(),
+            result=GenerationInterruptionResult(
+                action_id=action_id,
+                ref=settled_ref,
+                applied=True,
+                replayed=False,
+                interrupted_state=ResponseState.GENERATING,
+                cancel_requested=True,
+                effect_ids=(),
+            ),
         )
 
     loop._evict_retained_generation_interrupts()
 
     assert pending_future.done() is False
-    assert "pending-oldest" in loop._generation_interrupt_fingerprints
-    assert "pending-oldest" in loop._generation_interrupt_order
-    assert len(loop._generation_interrupt_order) <= _MAX_RETAINED_GENERATION_INTERRUPTS
+    assert "pending-oldest" in loop._retained_generation_interrupts
     assert (
-        len(loop._generation_interrupt_fingerprints)
+        len(loop._retained_generation_interrupts)
         <= _MAX_RETAINED_GENERATION_INTERRUPTS
     )
-    assert len(loop._generation_interrupt_results) <= _MAX_RETAINED_GENERATION_INTERRUPTS
     # The retained order keeps its oldest-first shape around the skipped entry.
-    assert loop._generation_interrupt_order[0] == "pending-oldest"
+    assert next(iter(loop._retained_generation_interrupts)) == "pending-oldest"
     pending_future.cancel()
 
 

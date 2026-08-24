@@ -360,6 +360,23 @@ Stated so they are not mistaken for covered:
   is killed (see §3.1), so the behaviour is covered; what has no oracle is
   either half in isolation.
 
+## 3.3 Convergence after five rounds
+
+Five rounds of point repairs left three shapes that invite the next defect, so
+they were collapsed before handing this over. Behaviour is unchanged: the full
+sweep is identical at `3961 passed / 11 failed`, Formal Web at `496/496`, and
+the mutants for the barrier, the failed-response retirement and the ledger
+eviction were re-run afterwards and are still killed.
+
+| Was | Now | Why it mattered |
+|---|---|---|
+| `pendingGenerationInterruptRef.current?.owner === X` repeated at 11 sites | `ownerHasUnsettledGenerationInterrupt(candidate)` | Round four found three of those sites still matching *any* pending interruption instead of the owner. Eleven copies of one question is how three of them stayed wrong through a round that claimed to have fixed all of them. |
+| `generationCaptureRef.current = null` at four unrelated paths, each added by a different round | `retireGenerationListening(matches?)` | Session switch, Exit, ownership surrender and response-failure each had to remember to retire the window, and each was a separate review finding. The complete set is now greppable from one name, with the reason on the function. |
+| Four parallel structures keyed by `action_id` (fingerprints, results, errors, an order deque) | one ordered `dict[str, _RetainedGenerationInterrupt]` | Round two's eviction defect existed because a sweep had to keep four structures in step. With one record per action, dropping an action from some structures but not others is unrepresentable. |
+
+The line count moves by `+131 / -92`; nearly all of the addition is the reason
+each helper exists, written where the next person will hit it.
+
 ## 4. Concurrency coverage
 
 | Concurrent owner | Covered by |

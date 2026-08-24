@@ -45,6 +45,15 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
 _MAX_RETAINED_GENERATION_INTERRUPTS = 256
 
 
+@dataclass
+class _RetainedGenerationInterrupt:
+    """One settled interruption action, kept so an exact replay is idempotent."""
+
+    ref: ResponseRef
+    result: GenerationInterruptionResult | None = None
+    error: Exception | None = None
+
+
 class ConversationRuntimeLoopViolation(ValueError):
     def __init__(self, reason: str, message: str, code: ErrorCode) -> None:
         super().__init__(message)
@@ -214,10 +223,11 @@ class ConversationRuntimeLoop:
             str, tuple[ResponseRef, asyncio.Future[ResponseCancelResult]]
         ] = {}
         self._playback_stopped: set[ResponseRef] = set()
-        self._generation_interrupt_fingerprints: dict[str, ResponseRef] = {}
-        self._generation_interrupt_results: dict[str, GenerationInterruptionResult] = {}
-        self._generation_interrupt_errors: dict[str, Exception] = {}
-        self._generation_interrupt_order: deque[str] = deque()
+        # One entry per action, in insertion order.  This was four parallel
+        # structures until review found the eviction sweep could drop an action
+        # from some of them and not others; a single record makes that class of
+        # defect unrepresentable.
+        self._retained_generation_interrupts: dict[str, _RetainedGenerationInterrupt] = {}
         self._pending_generation_interrupt: dict[
             str, tuple[ResponseRef, asyncio.Future[GenerationInterruptionResult]]
         ] = {}
@@ -611,20 +621,13 @@ class ConversationRuntimeLoop:
                     ErrorCode.CONFLICT,
                 )
             return future
-        prior_ref = self._generation_interrupt_fingerprints.get(action_id)
-        if prior_ref is not None:
-            if prior_ref != ref:
-                raise ConversationRuntimeLoopViolation(
-                    "GENERATION_INTERRUPT_ACTION_CONFLICT",
-                    "a generation interrupt action identifier cannot change target",
-                    ErrorCode.CONFLICT,
-                )
-            error = self._generation_interrupt_errors.get(action_id)
-            if error is not None:
-                return self._failed_future(running, error)
+        retained = self._require_same_generation_interrupt_target(action_id, ref)
+        if retained is not None:
+            if retained.error is not None:
+                return self._failed_future(running, retained.error)
+            assert retained.result is not None
             return self._resolved_future(
-                running,
-                replace(self._generation_interrupt_results[action_id], replayed=True),
+                running, replace(retained.result, replayed=True)
             )
         future = self._post(
             lambda: self._generation_interrupt(action_id, ref), control=True
@@ -914,29 +917,36 @@ class ConversationRuntimeLoop:
         self, action_id: str, ref: ResponseRef
     ) -> GenerationInterruptionResult:
         action_id = self._require_id(action_id, "action_id")
-        prior_ref = self._generation_interrupt_fingerprints.get(action_id)
-        if prior_ref is not None:
-            if prior_ref != ref:
-                raise ConversationRuntimeLoopViolation(
-                    "GENERATION_INTERRUPT_ACTION_CONFLICT",
-                    "a generation interrupt action identifier cannot change target",
-                    ErrorCode.CONFLICT,
-                )
-            prior_error = self._generation_interrupt_errors.get(action_id)
-            if prior_error is not None:
-                raise prior_error
-            return replace(self._generation_interrupt_results[action_id], replayed=True)
+        retained = self._require_same_generation_interrupt_target(action_id, ref)
+        if retained is not None:
+            if retained.error is not None:
+                raise retained.error
+            assert retained.result is not None
+            return replace(retained.result, replayed=True)
 
-        self._generation_interrupt_fingerprints[action_id] = ref
-        self._generation_interrupt_order.append(action_id)
+        entry = _RetainedGenerationInterrupt(ref=ref)
+        self._retained_generation_interrupts[action_id] = entry
         self._evict_retained_generation_interrupts()
         try:
-            result = self._apply_new_generation_interrupt(action_id, ref)
+            entry.result = self._apply_new_generation_interrupt(action_id, ref)
         except Exception as error:
-            self._generation_interrupt_errors[action_id] = error
+            entry.error = error
             raise
-        self._generation_interrupt_results[action_id] = result
-        return result
+        return entry.result
+
+    def _require_same_generation_interrupt_target(
+        self, action_id: str, ref: ResponseRef
+    ) -> _RetainedGenerationInterrupt | None:
+        """Return the retained action, refusing one that changed its target."""
+
+        retained = self._retained_generation_interrupts.get(action_id)
+        if retained is not None and retained.ref != ref:
+            raise ConversationRuntimeLoopViolation(
+                "GENERATION_INTERRUPT_ACTION_CONFLICT",
+                "a generation interrupt action identifier cannot change target",
+                ErrorCode.CONFLICT,
+            )
+        return retained
 
     def _evict_retained_generation_interrupts(self) -> None:
         """Bound the replay ledger across a long hands-free conversation.
@@ -949,20 +959,19 @@ class ConversationRuntimeLoop:
         settled entry behind it accumulate past the bound.
         """
 
-        if len(self._generation_interrupt_order) <= _MAX_RETAINED_GENERATION_INTERRUPTS:
+        evictable = (
+            len(self._retained_generation_interrupts)
+            - _MAX_RETAINED_GENERATION_INTERRUPTS
+        )
+        if evictable <= 0:
             return
-        retained: deque[str] = deque()
-        evictable = len(self._generation_interrupt_order) - _MAX_RETAINED_GENERATION_INTERRUPTS
-        while self._generation_interrupt_order:
-            candidate = self._generation_interrupt_order.popleft()
-            if evictable > 0 and candidate not in self._pending_generation_interrupt:
-                self._generation_interrupt_fingerprints.pop(candidate, None)
-                self._generation_interrupt_results.pop(candidate, None)
-                self._generation_interrupt_errors.pop(candidate, None)
-                evictable -= 1
+        for action_id in list(self._retained_generation_interrupts):
+            if evictable <= 0:
+                break
+            if action_id in self._pending_generation_interrupt:
                 continue
-            retained.append(candidate)
-        self._generation_interrupt_order = retained
+            del self._retained_generation_interrupts[action_id]
+            evictable -= 1
 
     def _apply_new_generation_interrupt(
         self, action_id: str, ref: ResponseRef

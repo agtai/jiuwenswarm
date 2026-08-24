@@ -1571,6 +1571,41 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     owner: ProductWebP2ActivationOwner;
     input: { action_id: string; response_id: string; response_generation: number };
   }> | null>(null);
+  /**
+   * Whether this exact activation still owns an interruption that has not
+   * settled. Five rounds of review turned this into the single question every
+   * barrier here has to ask: an unsettled interruption closes its own owner's
+   * capture, listening window, announcement arbitration and turn admission,
+   * while a retired activation's handle must close nothing at all -- matching
+   * on "any pending interruption" once fenced every later Session out of
+   * generation-time listening for the life of the page.
+   */
+  const ownerHasUnsettledGenerationInterrupt = (
+    candidate: ProductWebP2ActivationOwner | null,
+  ): boolean => candidate !== null && pendingGenerationInterruptRef.current?.owner === candidate;
+  /**
+   * Retire the generation-time listening window.
+   *
+   * The window is the one capture allowed to keep the P2 notification poll
+   * alive, and the next answer is refused a window of its own while one is
+   * retained -- so a window left behind does not merely leak, it silently
+   * disables the feature for the rest of the session. Four separate paths must
+   * retire it, each found by a different review round: Session switch, Exit,
+   * browser capture ownership surrender, and the exact response failing. They
+   * all go through here so the complete set stays greppable from one name.
+   *
+   * `matches` narrows the retirement to a window this caller owns; omit it to
+   * retire whatever is there.
+   */
+  const retireGenerationListening = (
+    matches?: (retained: { fence: PendingForegroundPresentationFence }) => boolean,
+  ): boolean => {
+    const retained = generationCaptureRef.current;
+    if (retained === null) return false;
+    if (matches !== undefined && !matches(retained)) return false;
+    generationCaptureRef.current = null;
+    return true;
+  };
   const generationInterruptSequenceRef = useRef(0);
   // Responses this route has interrupted. A fenced answer can still be in
   // flight from the server, so identity, not timing, is what refuses it.
@@ -2033,7 +2068,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
     pendingForegroundPresentationRef.current = null;
-    generationCaptureRef.current = null;
+    retireGenerationListening();
     // The interruption handle is deliberately kept here: while its activation
     // is still open, it is the only way the exact owner that issued the request
     // can still settle it. Every consumer matches on that owner, so a retired
@@ -2134,16 +2169,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // leaving it behind would refuse the next answer its own window for the
       // rest of the session and keep a capture that answers to nothing holding
       // the notification-poll privilege.
-      const listening = generationCaptureRef.current;
       if (
-        listening !== null &&
-        foregroundPresentationFenceMatchesResponse(
-          listening.fence,
-          presentationBinding,
-          disposition.response ?? null,
+        retireGenerationListening(listening =>
+          foregroundPresentationFenceMatchesResponse(
+            listening.fence,
+            presentationBinding,
+            disposition.response ?? null,
+          ),
         )
       ) {
-        generationCaptureRef.current = null;
         void settleCaptureBeforePlayout().catch(() => undefined);
       }
       const reason = stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
@@ -2534,7 +2568,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
    * interruption that no successor can ever settle.
    */
   const retireOwnerGenerationInterrupt = (retiring: ProductWebP2ActivationOwner) => {
-    if (pendingGenerationInterruptRef.current?.owner === retiring) {
+    if (ownerHasUnsettledGenerationInterrupt(retiring)) {
       pendingGenerationInterruptRef.current = null;
     }
   };
@@ -3600,7 +3634,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingProductTurnRef.current?.owner === closing ||
         pendingPresentationAttemptRef.current?.owner === closing ||
         pendingBargeInRef.current?.owner === closing ||
-        pendingGenerationInterruptRef.current?.owner === closing ||
+        ownerHasUnsettledGenerationInterrupt(closing) ||
         closing.hasPendingSubmission() ||
         closing.hasPendingPresentationAck() ||
         closing.hasPendingPresentationFailure() ||
@@ -3658,7 +3692,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // Matched on the current owner. A handle left behind by an activation
         // that has already retired belongs to no live foreground, and must not
         // report a successor busy forever.
-        pendingGenerationInterruptRef.current?.owner === activationOwnerRef.current ||
+        ownerHasUnsettledGenerationInterrupt(activationOwnerRef.current) ||
         activeVoiceResponseRef.current !== null ||
         productTextStatus === 'waiting' ||
         activationOwnerRef.current?.hasPendingSubmission() ||
@@ -4218,7 +4252,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingPresentationAck !== null ||
         pendingPresentationAttemptRef.current !== null ||
         pendingBargeInRef.current !== null ||
-        pendingGenerationInterruptRef.current?.owner === owner ||
+        ownerHasUnsettledGenerationInterrupt(owner) ||
         owner.hasPendingSubmission() ||
         owner.hasPendingPresentationAck() ||
         owner.hasPendingPresentationFailure() ||
@@ -4602,7 +4636,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       Boolean(activationOwnerRef.current?.hasPendingPresentationAck()) ||
       Boolean(activationOwnerRef.current?.hasPendingPresentationFailure()) ||
       Boolean(activationOwnerRef.current?.hasPendingBargeIn()) ||
-      pendingGenerationInterruptRef.current?.owner === activationOwnerRef.current ||
+      ownerHasUnsettledGenerationInterrupt(activationOwnerRef.current) ||
       Boolean(activationOwnerRef.current?.hasPendingGenerationInterrupt());
     const isCurrentBinding = () => {
       const activation = activationOwnerRef.current?.snapshot();
@@ -5252,7 +5286,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       fence === null ||
       retained.fence !== fence ||
       retained.loop_generation !== voiceLoopGenerationRef.current ||
-      pendingGenerationInterruptRef.current?.owner === p2Owner
+      ownerHasUnsettledGenerationInterrupt(p2Owner)
     ) {
       return;
     }
@@ -5352,7 +5386,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // Only this owner's own unsettled interruption closes its listening
       // window. A retired activation's handle cannot reach this foreground,
       // so letting it match here would block every successor Session forever.
-      pendingGenerationInterruptRef.current?.owner === owner ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       terminalAnnouncementStateRef.current !== 'idle'
     ) {
       return;
@@ -5419,7 +5453,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationBinding === null ||
       pendingProductTurnRef.current !== null ||
       pendingBargeInRef.current !== null ||
-      pendingGenerationInterruptRef.current?.owner === owner ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       owner.hasPendingSubmission() ||
       owner.hasPendingPresentationAck() ||
       owner.hasPendingPresentationFailure() ||
@@ -6293,7 +6327,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     unifiedInputOwnerRef.current?.hasPending() ||
     pendingPresentationAttemptRef.current ||
     pendingBargeInRef.current ||
-    pendingGenerationInterruptRef.current?.owner === activationOwnerRef.current ||
+    ownerHasUnsettledGenerationInterrupt(activationOwnerRef.current) ||
     activationOwnerRef.current?.hasPendingSubmission() ||
     activationOwnerRef.current?.hasPendingPresentationAck() ||
     activationOwnerRef.current?.hasPendingPresentationFailure() ||
@@ -6309,7 +6343,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
-      pendingGenerationInterruptRef.current?.owner === owner ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
@@ -6331,7 +6365,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
-      pendingGenerationInterruptRef.current?.owner === owner ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
@@ -6485,7 +6519,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     // behind is not merely untidy: the next loop refuses to open a new window
     // while one is retained, so generation-time interruption would be silently
     // dead for the rest of the session.
-    generationCaptureRef.current = null;
+    retireGenerationListening();
     setProductOutput(null);
     setProductTextReason(null);
     setProductTextStatus('idle');
@@ -6546,9 +6580,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // listening window belonged to the capture that was surrendered, and it
       // is the one thing that lets the notification poll run during a capture;
       // leaving it behind would grant that privilege to whatever starts next.
-      if (generationCaptureRef.current?.fence.session_id === sessionId) {
-        generationCaptureRef.current = null;
-      }
+      retireGenerationListening(listening => listening.fence.session_id === sessionId);
     }
   };
 
