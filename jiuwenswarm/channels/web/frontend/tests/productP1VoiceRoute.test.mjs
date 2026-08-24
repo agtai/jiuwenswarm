@@ -6745,7 +6745,8 @@ test('a generation-time release preserves the utterance and Exit fences its pend
   assert.equal(calls.some(([method]) => method.includes('agent') || method.includes('tool') || method.includes('task')), false);
 
   // Repeat the exact continuation, but keep the combined Batch request pending.
-  // Exit must locally fence it and send one cancel before either payload settles.
+  // Exit must synchronously own its one cancel and release both raw-audio and
+  // media-authority owners even when browser audio cleanup stalls.
   await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1',
     interaction_id: 'interaction-1',
@@ -6815,13 +6816,40 @@ test('a generation-time release preserves the utterance and Exit fences its pend
   }
   assert.notEqual(pendingAutomatic, null);
   const pendingBatch = calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').at(-1)[1];
+  const stalledAudioClose = deferred();
+  let stalledAudioCloseCalls = 0;
+  const openAudioContexts = environment.contexts.filter(context => context.state !== 'closed');
+  assert.ok(openAudioContexts.length > 0);
+  for (const context of openAudioContexts) {
+    context.close = async () => {
+      stalledAudioCloseCalls += 1;
+      await stalledAudioClose.promise;
+      context.state = 'closed';
+    };
+  }
   const closing = owner.close();
-  for (let turn = 0; turn < 20 && calls.every(([method]) => method !== 'live_voice.speech.cancel'); turn += 1) {
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.cancel').length, 1);
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.cancel')[0][1].target_operation_id, pendingBatch.operation_id);
+  assert.equal(owner.captureDiagnostics().frame_count, 0);
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-3').length,
+    1,
+  );
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-4').length,
+    1,
+  );
+  heldRecognition.reject(Object.assign(new Error('request aborted after Exit fence'), {
+    code: 'REQUEST_ABORTED',
+  }));
+  for (let turn = 0; turn < 20 && stalledAudioCloseCalls === 0; turn += 1) {
     await new Promise(resolve => setImmediate(resolve));
   }
-  const cancelCalls = calls.filter(([method]) => method === 'live_voice.speech.cancel');
-  assert.equal(cancelCalls.length, 1);
-  assert.equal(cancelCalls[0][1].target_operation_id, pendingBatch.operation_id);
+  assert.ok(stalledAudioCloseCalls > 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.cancel').length, 1);
+  assert.equal(owner.status().status, 'cleanup_pending');
+  stalledAudioClose.resolve();
   await closing;
   assert.deepEqual(owner.status(), { status: 'closed', reason: null });
   assert.equal(owner.captureDiagnostics().frame_count, 0);

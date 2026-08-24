@@ -30,6 +30,16 @@ function ids() {
   return () => `generated-${++value}`;
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolveValue, rejectValue) => {
+    resolve = resolveValue;
+    reject = rejectValue;
+  });
+  return { promise, resolve, reject };
+}
+
 function frame(generation = 1, seq = 0, value = 0.25, captureId = 'capture-1', trackId = 'track-1') {
   return {
     capture: {
@@ -824,6 +834,47 @@ test('transport timeout requests scoped cancellation and applies no recognition 
   assert.ok(cancel);
   assert.equal(cancel.params.scope.subject_id, 'alice');
   assert.equal(cancel.params.target_operation_id, calls[0].params.operation_id);
+});
+
+test('an explicit recognition fence owns the only cancel when the held request later aborts', async () => {
+  const heldRecognition = deferred();
+  const calls = [];
+  const transport = {
+    request(method, params) {
+      calls.push({ method, params });
+      if (method === SPEECH_CANCEL_METHOD) return Promise.resolve({ ok: true });
+      assert.equal(method, SPEECH_RECOGNIZE_BATCH_METHOD);
+      return heldRecognition.promise;
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+  const recognition = client.recognizeFinal({
+    frames: [frame(2, 0, 0.5, 'capture-tail', 'track-tail')],
+    predecessor: {
+      subjectId: 'subject-prefix',
+      frames: [frame(1, 0, -0.5, 'capture-prefix', 'track-prefix')],
+    },
+    locale: 'en-US',
+    correlationId: 'correlation-1',
+  });
+  const rejected = assert.rejects(
+    recognition,
+    error => error?.code === 'REQUEST_ABORTED',
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  const batch = calls.find(call => call.method === SPEECH_RECOGNIZE_BATCH_METHOD);
+  assert.ok(batch);
+
+  await client.fenceRecognition('capture-tail');
+  heldRecognition.reject(Object.assign(new Error('request aborted after explicit fence'), {
+    code: 'REQUEST_ABORTED',
+  }));
+  await rejected;
+  await new Promise(resolve => setImmediate(resolve));
+
+  const cancels = calls.filter(call => call.method === SPEECH_CANCEL_METHOD);
+  assert.equal(cancels.length, 1);
+  assert.equal(cancels[0].params.target_operation_id, batch.params.operation_id);
 });
 
 test('mismatched Provider rate and malformed capture fail closed before AIO application', async () => {

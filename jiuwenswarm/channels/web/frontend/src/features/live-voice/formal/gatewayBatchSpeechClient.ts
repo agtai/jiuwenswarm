@@ -999,10 +999,13 @@ export class GatewayBatchSpeechClient {
         { timeoutMs: timeoutMs + 1000, signal: input.signal }
       );
     } catch (error) {
-      if (this.#activeRecognition?.token === operation.token) this.#activeRecognition = null;
+      const ownsCancellation = this.#activeRecognition?.token === operation.token;
+      if (ownsCancellation) this.#activeRecognition = null;
       if (
-        input.signal?.aborted ||
-        (typeof error === 'object' && error !== null && ['REQUEST_TIMEOUT', 'REQUEST_ABORTED'].includes(String((error as { code?: unknown }).code)))
+        ownsCancellation && (
+          input.signal?.aborted ||
+          (typeof error === 'object' && error !== null && ['REQUEST_TIMEOUT', 'REQUEST_ABORTED'].includes(String((error as { code?: unknown }).code)))
+        )
       ) {
         void this.#cancelBestEffort(operation);
       }

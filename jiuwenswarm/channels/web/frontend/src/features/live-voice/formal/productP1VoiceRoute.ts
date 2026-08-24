@@ -380,6 +380,7 @@ export class ProductP1VoiceRouteOwner {
   #operationGeneration = 0;
   #mediaCloseBinding: Readonly<ProductP1MediaCloseBinding> | null = null;
   readonly #retainedMediaAuthorities = new Map<string, Readonly<ProductP1MediaCloseBinding>>();
+  readonly #mediaAuthorityRevocations = new Map<string, Promise<void>>();
   #closePromise: Promise<void> | null = null;
   #failureCleanupPromise: Promise<void> | null = null;
   #failureCleanupReason: string | null = null;
@@ -1443,12 +1444,18 @@ export class ProductP1VoiceRouteOwner {
     this.#status = 'cleanup_pending';
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
     this.#publish();
+    // Exit owns the remote fences before any browser cleanup can suspend. The
+    // request stack may still hold both continuation arrays until its abort is
+    // observed, but the owner drops its copies synchronously and cannot issue a
+    // second cancel for the same active Speech token.
+    const recognitionFence = this.#fenceRecognitionForRelease();
+    this.#releaseRecognitionFrames();
+    const authorityCleanup = this.#beginMediaAuthorityRelease();
+    // Browser resources still start closing promptly while a late activation
+    // registers. They are deliberately ordered after the remote fences, and
+    // the authoritative release below observes the same single-flight result.
+    void this.#audio.close().catch(() => undefined);
     const retained = Promise.resolve().then(async () => {
-      try {
-        await this.#audio.close();
-      } catch {
-        /* authoritative release retries below */
-      }
       const pendingActivation = this.#pendingMediaActivation;
       if (pendingActivation !== null) {
         try {
@@ -1464,7 +1471,12 @@ export class ProductP1VoiceRouteOwner {
           /* retry below */
         }
       }
-      await this.#releaseResources('formal_route_close');
+      await this.#releaseResources(
+        'formal_route_close',
+        null,
+        recognitionFence,
+        authorityCleanup,
+      );
       this.#closed = true;
       this.#setStatus('closed', null);
     })
@@ -2342,8 +2354,25 @@ export class ProductP1VoiceRouteOwner {
     );
   }
 
-  async #revokeMediaAuthority(binding: Readonly<ProductP1MediaCloseBinding> | null = this.#mediaCloseBinding): Promise<void> {
-    if (binding === null) return;
+  #revokeMediaAuthority(binding: Readonly<ProductP1MediaCloseBinding> | null = this.#mediaCloseBinding): Promise<void> {
+    if (binding === null) return Promise.resolve();
+    const inFlight = this.#mediaAuthorityRevocations.get(binding.subject_id);
+    if (inFlight !== undefined) return inFlight;
+    if (
+      this.#mediaCloseBinding?.subject_id !== binding.subject_id
+      && !this.#retainedMediaAuthorities.has(binding.subject_id)
+    ) return Promise.resolve();
+    let operation: Promise<void>;
+    operation = this.#revokeMediaAuthorityOnce(binding).finally(() => {
+      if (this.#mediaAuthorityRevocations.get(binding.subject_id) === operation) {
+        this.#mediaAuthorityRevocations.delete(binding.subject_id);
+      }
+    });
+    this.#mediaAuthorityRevocations.set(binding.subject_id, operation);
+    return operation;
+  }
+
+  async #revokeMediaAuthorityOnce(binding: Readonly<ProductP1MediaCloseBinding>): Promise<void> {
     const value = exactObject(
       await this.#request(PRODUCT_P1_MEDIA_CLOSE_METHOD, { ...binding }),
       ['status', 'reason_id', 'session_id', 'subject_id', 'correlation_id', 'interaction_id', 'activation_id', 'activation_generation'],
@@ -2599,15 +2628,44 @@ export class ProductP1VoiceRouteOwner {
     this.#publish();
   }
 
-  async #releaseResources(reason: string, pendingFailureReason: string | null = null): Promise<void> {
-    this.#operationGeneration += 1;
+  #fenceRecognitionForRelease(): Promise<void> {
     const recognitionGeneration = this.#route?.binding.generation;
-    const recognitionFence = (
+    return (
       this.#speech !== null
       && recognitionGeneration?.kind === 'capture'
     )
       ? this.#speech.fenceRecognition(recognitionGeneration.id)
       : Promise.resolve();
+  }
+
+  #releaseRecognitionFrames(): void {
+    this.#frames = [];
+    this.#recognitionContinuation = null;
+  }
+
+  #beginMediaAuthorityRelease(): Promise<readonly PromiseSettledResult<void>[]> {
+    const authorities = new Map(this.#retainedMediaAuthorities);
+    if (this.#mediaCloseBinding !== null) {
+      authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);
+    }
+    return Promise.allSettled(
+      [...authorities.values()].map(authority => this.#revokeMediaAuthority(authority)),
+    );
+  }
+
+  async #releaseResources(
+    reason: string,
+    pendingFailureReason: string | null = null,
+    startedRecognitionFence: Promise<void> | null = null,
+    startedAuthorityCleanup: Promise<readonly PromiseSettledResult<void>[]> | null = null,
+  ): Promise<void> {
+    this.#operationGeneration += 1;
+    const recognitionFence = startedRecognitionFence ?? this.#fenceRecognitionForRelease();
+    // Starting every exact revocation here, before browser audio cleanup, also
+    // catches an authority minted by a pending activation after close began.
+    // allSettled keeps an early remote failure handled while local cleanup is
+    // suspended; the final outcome remains retryable by close().
+    const authorityCleanup = this.#beginMediaAuthorityRelease();
     this.#captureReadinessPending = false;
     this.#captureReadinessPurpose = null;
     this.#captureStartupAudioReady = false;
@@ -2639,8 +2697,7 @@ export class ProductP1VoiceRouteOwner {
     // Raw PCM is local, memory-only recognition input. Release it before any
     // fallible browser or remote authority cleanup; retained close bindings are
     // sufficient for an exact retry and must never retain expired audio.
-    this.#frames = [];
-    this.#recognitionContinuation = null;
+    this.#releaseRecognitionFrames();
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
     this.#captureLocalActivityRecencyFrames = 0;
@@ -2656,11 +2713,14 @@ export class ProductP1VoiceRouteOwner {
       /* close remains authoritative */
     }
     await this.#audio.close();
-    const authorities = new Map(this.#retainedMediaAuthorities);
-    if (this.#mediaCloseBinding !== null) {
-      authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);
+    if (startedAuthorityCleanup !== null) await startedAuthorityCleanup;
+    const authorityOutcomes = await authorityCleanup;
+    const authorityFailure = authorityOutcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    if (authorityFailure !== undefined) {
+      throw authorityFailure.reason;
     }
-    for (const authority of authorities.values()) await this.#revokeMediaAuthority(authority);
   }
 
   #requireCurrent(operationGeneration: number): void {
