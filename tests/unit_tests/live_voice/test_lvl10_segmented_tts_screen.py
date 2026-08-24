@@ -5,7 +5,7 @@ import base64
 import importlib.util
 import json
 import sys
-from dataclasses import replace
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,37 +53,78 @@ main = runner.main
 
 
 class ScriptedSseStream:
-    def __init__(self, lines: tuple[str, ...], *, release: asyncio.Event | None = None) -> None:
+    def __init__(
+        self,
+        lines: tuple[str, ...],
+        *,
+        release: asyncio.Event | None = None,
+        before_done: asyncio.Event | None = None,
+        on_terminal: Callable[[], None],
+    ) -> None:
         self._lines = lines
         self._release = release
+        self._before_done = before_done
+        self._on_terminal = on_terminal
+        self._terminal = False
         self.closed = False
 
+    def _finish_once(self) -> None:
+        if not self._terminal:
+            self._terminal = True
+            self._on_terminal()
+
     async def __aiter__(self):
-        if self._release is not None:
-            await self._release.wait()
-        for line in self._lines:
-            await asyncio.sleep(0)
-            yield line
+        try:
+            if self._release is not None:
+                await self._release.wait()
+            for line in self._lines:
+                if self._before_done is not None and "speech.audio.done" in line:
+                    await self._before_done.wait()
+                await asyncio.sleep(0)
+                yield line
+        finally:
+            self._finish_once()
 
     async def aclose(self) -> None:
         self.closed = True
         if self._release is not None:
             self._release.set()
+        if self._before_done is not None:
+            self._before_done.set()
+        self._finish_once()
 
 
 class ScriptedSseFactory:
     """Test boundary: captures public Provider payloads, never real network."""
 
-    def __init__(self, *, fail_input_index: int | None = None, block_input_index: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_input_index: int | None = None,
+        block_input_index: int | None = None,
+        delay_done_input_index: int | None = None,
+    ) -> None:
         self.inputs: list[str] = []
         self.active = 0
         self.max_active = 0
         self.fail_input_index = fail_input_index
         self.block_input_index = block_input_index
+        self.delay_done_input_index = delay_done_input_index
         self.release = asyncio.Event()
+        self.allow_done = asyncio.Event()
         self.streams: list[ScriptedSseStream] = []
 
-    async def __call__(self, _endpoint: str, _headers: dict[str, str], payload: dict[str, object], _timeout: float) -> ScriptedSseStream:
+    def _deactivate_once(self) -> None:
+        assert self.active > 0
+        self.active -= 1
+
+    async def __call__(
+        self,
+        _endpoint: str,
+        _headers: dict[str, str],
+        payload: dict[str, object],
+        _timeout: float,
+    ) -> ScriptedSseStream:
         text = payload["input"]
         assert isinstance(text, str)
         index = len(self.inputs)
@@ -91,6 +132,7 @@ class ScriptedSseFactory:
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         if self.fail_input_index == index:
+            self._deactivate_once()
             raise ConnectionError("scripted-provider-failure")
         pcm = (index.to_bytes(2, "little", signed=True)) * 12_000
         lines = (
@@ -102,6 +144,8 @@ class ScriptedSseFactory:
         stream = ScriptedSseStream(
             lines,
             release=self.release if self.block_input_index == index else None,
+            before_done=self.allow_done if self.delay_done_input_index == index else None,
+            on_terminal=self._deactivate_once,
         )
         self.streams.append(stream)
         return stream
@@ -111,11 +155,10 @@ def _config() -> OpenAIStreamingSpeechConfig:
     return OpenAIStreamingSpeechConfig(
         api_key="lvl10-test-key",
         api_base="https://example.invalid/v1",
-        transcription_model="test-stt",
-        speech_model="test-tts",
-        speech_voice="test-voice",
+        stt_model="test-stt",
+        tts_model="test-tts",
+        tts_voice="test-voice",
         connect_timeout_seconds=1,
-        event_timeout_seconds=1,
     )
 
 
@@ -148,6 +191,21 @@ def test_manifest_rejects_invalid_offsets(tmp_path: Path, offsets: list[int]) ->
         load_fixture_manifest(_write_manifest(tmp_path, offsets=offsets))
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    (("sha256", "0" * 64), ("unknown_field", "must-reject")),
+)
+def test_manifest_rejects_bad_hash_and_unknown_fields(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document["fixtures"][0][field] = value
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="LVL10_CORPUS_INVALID"):
+        load_fixture_manifest(path)
+
+
 @pytest.mark.asyncio
 async def test_a1_sends_one_full_authoritative_final_request() -> None:
     fixture = load_fixture_manifest(MANIFEST_PATH)[1]
@@ -164,18 +222,48 @@ async def test_a1_sends_one_full_authoritative_final_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_b_sends_one_request_per_manifest_chunk_and_releases_in_order() -> None:
+async def test_b_prefetches_exactly_one_successor_and_releases_in_order() -> None:
     fixture = load_fixture_manifest(MANIFEST_PATH)[1]
-    factory = ScriptedSseFactory()
+    factory = ScriptedSseFactory(delay_done_input_index=0)
     provider = _provider(factory)
+    task = asyncio.create_task(
+        run_attempt(provider, fixture, PopulationRole.B, _identity(PopulationRole.B))
+    )
     try:
-        record = await run_attempt(provider, fixture, PopulationRole.B, _identity(PopulationRole.B))
+        while len(factory.inputs) < 2:
+            await asyncio.sleep(0)
+        assert factory.max_active == 2
+        factory.allow_done.set()
+        record = await task
         assert factory.inputs == list(fixture.chunks)
-        assert factory.max_active <= 2
+        assert factory.active == 0
         assert record.provider_request_count == len(fixture.chunks)
         assert record.released_chunk_indexes == tuple(range(len(fixture.chunks)))
         assert record.forbidden_effects == ZERO_FORBIDDEN_EFFECTS
     finally:
+        factory.allow_done.set()
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_b_buffers_successor_that_completes_before_predecessor_done() -> None:
+    fixture = load_fixture_manifest(MANIFEST_PATH)[1]
+    factory = ScriptedSseFactory(delay_done_input_index=0)
+    provider = _provider(factory)
+    task = asyncio.create_task(
+        run_attempt(provider, fixture, PopulationRole.B, _identity(PopulationRole.B))
+    )
+    try:
+        while len(factory.inputs) < 2:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert factory.max_active == 2
+        factory.allow_done.set()
+        record = await task
+        assert record.released_chunk_indexes == tuple(range(len(fixture.chunks)))
+        assert record.successor_pcm_released_before_predecessor_done == 0
+    finally:
+        factory.allow_done.set()
         await provider.close()
 
 
@@ -191,9 +279,11 @@ async def test_b_cancellation_releases_zero_pcm_after_fence() -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        # The runner must expose fence disposition through its deterministic
-        # cancellation helper instead of treating task cancellation as success.
-        record = await runner.cancel_during_successor(provider, fixture, _identity(PopulationRole.B, attempt_index=1))
+        # Benchmark-only deterministic test seam, not a product API. It must
+        # expose fence disposition instead of treating cancellation as success.
+        record = await runner.cancel_during_successor(
+            provider, fixture, _identity(PopulationRole.B, attempt_index=1)
+        )
         assert record.post_fence_sample_count == 0
         assert record.group_completed is False
         assert record.forbidden_effects == ZERO_FORBIDDEN_EFFECTS
@@ -226,9 +316,20 @@ def test_ordered_release_stall_counts_only_starvation_after_playback_eligibility
     assert derive_ordered_release_stall_ns(events) == 50_000_000
 
 
-def _record(role: Any, fixture_id: str, *, reserve_ms: float, first_pcm_ms: float, complete_ms: float, requests: int, stall_ms: float = 0, outcome: str = "completed") -> Any:
+def _record(
+    role: Any,
+    fixture_id: str,
+    *,
+    reserve_ms: float,
+    first_pcm_ms: float,
+    complete_ms: float,
+    requests: int,
+    stall_ms: float = 0,
+    outcome: str = "completed",
+    attempt_index: int = 0,
+) -> Any:
     return SimpleNamespace(
-        identity=_identity(role, fixture_id),
+        identity=_identity(role, fixture_id, attempt_index),
         request_to_reserve_ns=int(reserve_ms * 1_000_000),
         request_to_first_pcm_ns=int(first_pcm_ms * 1_000_000),
         request_to_complete_ns=int(complete_ms * 1_000_000),
@@ -244,25 +345,104 @@ def _record(role: Any, fixture_id: str, *, reserve_ms: float, first_pcm_ms: floa
     )
 
 
-def test_reducer_requires_100ms_and_ten_percent_medium_long_reserve_win() -> None:
+def _valid_population() -> list[Any]:
     records: list[Any] = []
-    for role, reserve in ((PopulationRole.A1, 1_200), (PopulationRole.B, 1_050), (PopulationRole.A2, 1_210)):
+    for role, reference_reserve, reference_first_pcm in (
+        (PopulationRole.A1, 1_200, 700),
+        (PopulationRole.B, 0, 0),
+        (PopulationRole.A2, 1_210, 710),
+    ):
         for fixture_id in ("short", "medium", "long"):
+            if role is PopulationRole.B:
+                # Medium/long: 150 ms and at least 10% better than both refs.
+                # Short is a one-request parity control, not a gain claim.
+                reserve = 1_200 if fixture_id == "short" else 1_050
+                first_pcm = 700 if fixture_id == "short" else 650
+                requests = {"short": 1, "medium": 3, "long": 4}[fixture_id]
+            else:
+                reserve = reference_reserve
+                first_pcm = reference_first_pcm
+                requests = 1
             for attempt in range(5):
-                records.append(replace(_record(role, fixture_id, reserve_ms=reserve, first_pcm_ms=700, complete_ms=1_500, requests=1 if fixture_id == "short" else (3 if role is PopulationRole.B else 1)), identity=_identity(role, fixture_id, attempt)))
-    report = reduce_records(records)
+                records.append(
+                    _record(
+                        role,
+                        fixture_id,
+                        reserve_ms=reserve,
+                        first_pcm_ms=first_pcm,
+                        complete_ms=1_500,
+                        requests=requests,
+                        attempt_index=attempt,
+                    )
+                )
+    return records
+
+
+def test_reducer_requires_100ms_and_ten_percent_medium_long_reserve_win() -> None:
+    report = reduce_records(_valid_population())
     assert report.decision == "PASS"
 
 
+def test_reducer_rejects_only_absolute_reserve_gate_miss() -> None:
+    records = _valid_population()
+    for record in records:
+        if record.identity.role is PopulationRole.B and record.identity.fixture_id == "medium":
+            record.request_to_reserve_ns = 1_151_000_000  # 49 ms vs A1, <100 ms.
+    assert reduce_records(records).decision == "NO_MATERIAL_GAIN"
+
+
+def test_reducer_rejects_only_relative_reserve_gate_miss() -> None:
+    records = _valid_population()
+    for record in records:
+        if record.identity.role is PopulationRole.B and record.identity.fixture_id == "long":
+            record.request_to_reserve_ns = 1_100_000_000  # 100 ms, but <10% vs A1.
+    assert reduce_records(records).decision == "NO_MATERIAL_GAIN"
+
+
 def test_reducer_rejects_completion_regression_and_request_bound_violation() -> None:
-    records = [_record(PopulationRole.B, "medium", reserve_ms=800, first_pcm_ms=500, complete_ms=2_000, requests=5)]
-    report = reduce_records(records)
-    assert report.decision in {"REJECTED", "INCONCLUSIVE"}
+    records = _valid_population()
+    for record in records:
+        if record.identity.role is PopulationRole.B and record.identity.fixture_id == "medium":
+            record.request_to_complete_ns = 1_700_000_000  # >10% slower than 1,500 ms.
+        if record.identity.role is PopulationRole.B and record.identity.fixture_id == "long":
+            record.provider_request_count = 5
+    assert reduce_records(records).decision == "REJECTED"
 
 
-def test_main_refuses_existing_output_and_never_serializes_secret(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_reducer_marks_a1_a2_drift_inconclusive() -> None:
+    records = _valid_population()
+    for record in records:
+        if record.identity.role is PopulationRole.A2:
+            record.request_to_reserve_ns = 1_500_000_000  # >250 ms and >20% drift.
+    assert reduce_records(records).decision == "INCONCLUSIVE"
+
+
+def test_main_refuses_existing_output_without_a_credential_cli_contract(tmp_path: Path) -> None:
     output = tmp_path / "existing"
     output.mkdir()
     with pytest.raises(FileExistsError):
-        main(["validate-corpus", "--manifest", str(MANIFEST_PATH), "--output-root", str(output), "--api-key", "lvl10-secret"])
-    assert "lvl10-secret" not in capsys.readouterr().out
+        main(
+            [
+                "run",
+                "--manifest",
+                str(MANIFEST_PATH),
+                "--output-root",
+                str(output),
+                "--run-id",
+                "lvl10-existing",
+                "--source-commit",
+                "a" * 40,
+                "--source-state",
+                "clean",
+                "--agent-core-commit",
+                "b" * 40,
+                "--environment-profile",
+                "deterministic-test",
+                "--attempts",
+                "1",
+            ]
+        )
+
+
+def test_injected_provider_config_hides_secret_from_serialization() -> None:
+    assert "lvl10-test-key" not in repr(_config())
