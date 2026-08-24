@@ -529,5 +529,82 @@ def test_main_refuses_existing_output_without_a_credential_cli_contract(tmp_path
         )
 
 
+def test_report_artifacts_expose_sanitized_population_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = ScriptedSseFactory()
+    provider = _provider(factory)
+
+    async def select_fake_streaming_speech(*, batch_available: bool) -> Any:
+        assert batch_available is False
+        return SimpleNamespace(
+            tier=runner.SpeechRouteTier.STREAMING,
+            provider=provider,
+        )
+
+    monkeypatch.setattr(
+        runner, "select_environment_streaming_speech", select_fake_streaming_speech
+    )
+    output = tmp_path / "lvl10-report"
+    assert (
+        main(
+            [
+                "run",
+                "--manifest",
+                str(MANIFEST_PATH),
+                "--output-root",
+                str(output),
+                "--run-id",
+                "lvl10-report-red",
+                "--source-commit",
+                "a" * 40,
+                "--source-state",
+                "clean",
+                "--agent-core-commit",
+                "b" * 40,
+                "--environment-profile",
+                "deterministic-test",
+                "--attempts",
+                "5",
+            ]
+        )
+        == 0
+    )
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == "live-voice.lvl10-report.v1"
+    assert report["provenance"] == {
+        "run_id": "lvl10-report-red",
+        "source_commit": "a" * 40,
+        "source_state": "clean",
+        "fixture_sha256": runner._sha256(MANIFEST_PATH),
+    }
+    assert report["artifact_hashes"]["attempts_sha256"]
+    assert report["denominators"] == {
+        role.value: {fixture: 5 for fixture in ("short", "medium", "long")}
+        for role in PopulationRole
+    }
+    for role in PopulationRole:
+        for fixture in ("short", "medium", "long"):
+            summary = report["per_role_fixture"][role.value][fixture]
+            assert summary["request_to_reserve_ms"]["p50"] >= 0
+            assert summary["request_to_reserve_ms"]["p95"] >= 0
+            assert summary["failure_count"] == 0
+            expected_requests = (
+                {"short": 1, "medium": 3, "long": 4}[fixture]
+                if role is PopulationRole.B
+                else 1
+            )
+            assert summary["provider_request_count"] == expected_requests
+    for fixture in ("medium", "long"):
+        assert report["b_vs_references"][fixture]["a1_reserve_delta_ms"]
+        assert report["b_vs_references"][fixture]["a2_reserve_delta_ms"]
+    serialized = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "run.json", output / "attempts.jsonl", output / "report.json", output / "report.md")
+    )
+    assert "lvl10-test-key" not in serialized
+    assert "Paris is the capital of France." not in serialized
+
+
 def test_injected_provider_config_hides_secret_from_serialization() -> None:
     assert "lvl10-test-key" not in repr(_config())
