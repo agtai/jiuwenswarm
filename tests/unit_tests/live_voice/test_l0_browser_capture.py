@@ -14,6 +14,7 @@ from scripts.live_voice.l0_browser_capture import (
     _browser_round_complete,
     _configured_run_labels,
     _correlated_success_counts,
+    _assert_browser_endpoint_owner,
     _discover_page,
     _invalidate_cold_eligibility,
     _labels,
@@ -47,6 +48,10 @@ def _session(tmp_path: Path, **updates: object) -> Path:
         "run_labels_file": str(tmp_path / "run-labels.json"),
         "browser_endpoint": "http://127.0.0.1:9223",
         "browser_page_origin": "http://localhost:5173",
+        "browser_profile_path": str(tmp_path.resolve()),
+        "browser_launch_process_id": 4101,
+        "browser_debugger_process_id": 4102,
+        "browser_launch_nonce": "2" * 32,
         "temperature_epoch_id": "1" * 32,
         "cold_sample_available": True,
         "environment_ref": ENVIRONMENT_REF,
@@ -226,31 +231,46 @@ def test_cdp_discovery_rejects_redirected_or_remote_websocket(
     )
     opener.response = _Response(
         final_url="http://evil.example/json",
-        page_url="http://localhost:5173/chat/new",
+        page_url=(
+            "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
+            f"&live_voice_l0_launch_nonce={'2' * 32}"
+        ),
         websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
     )
     with pytest.raises(ValueError, match="loopback-only"):
         _discover_page(
-            "http://127.0.0.1:9223", page_origin="http://localhost:5173"
+            "http://127.0.0.1:9223",
+            page_origin="http://localhost:5173",
+            launch_nonce="2" * 32,
         )
 
     opener.response = _Response(
         final_url="http://127.0.0.1:9223/json",
-        page_url="http://localhost:5173/chat/new",
+        page_url=(
+            "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
+            f"&live_voice_l0_launch_nonce={'2' * 32}"
+        ),
         websocket_url="ws://evil.example:9223/devtools/page/exact",
     )
     with pytest.raises(RuntimeError, match="non-loopback"):
         _discover_page(
-            "http://127.0.0.1:9223", page_origin="http://localhost:5173"
+            "http://127.0.0.1:9223",
+            page_origin="http://localhost:5173",
+            launch_nonce="2" * 32,
         )
 
     opener.response = _Response(
         final_url="http://127.0.0.1:9223/json",
-        page_url="http://localhost:5173/chat/session-after-spa-navigation",
+        page_url=(
+            "http://localhost:5173/chat/session-after-spa-navigation"
+            f"?live_voice_l0_measurement=1&live_voice_l0_launch_nonce={'2' * 32}"
+        ),
         websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
     )
     assert _discover_page(
-        "http://127.0.0.1:9223", page_origin="http://localhost:5173"
+        "http://127.0.0.1:9223",
+        page_origin="http://localhost:5173",
+        launch_nonce="2" * 32,
     ) == "ws://127.0.0.1:9223/devtools/page/exact"
 
     opener.response = _Response(
@@ -260,8 +280,95 @@ def test_cdp_discovery_rejects_redirected_or_remote_websocket(
     )
     with pytest.raises(RuntimeError, match="isolated Formal Web"):
         _discover_page(
-            "http://127.0.0.1:9223", page_origin="http://localhost:5173"
+            "http://127.0.0.1:9223",
+            page_origin="http://localhost:5173",
+            launch_nonce="2" * 32,
         )
+
+    opener.response = _Response(
+        final_url="http://127.0.0.1:9223/json",
+        page_url=(
+            "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
+            f"&live_voice_l0_launch_nonce={'3' * 32}"
+        ),
+        websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
+    )
+    with pytest.raises(RuntimeError, match="isolated Formal Web"):
+        _discover_page(
+            "http://127.0.0.1:9223",
+            page_origin="http://localhost:5173",
+            launch_nonce="2" * 32,
+        )
+
+
+def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _load_session(_session(tmp_path))
+
+    class _Address:
+        ip = "127.0.0.1"
+        port = 9223
+
+    class _Connection:
+        status = l0_browser_capture.psutil.CONN_LISTEN
+        pid = 4102
+        laddr = _Address()
+
+    class _Process:
+        def __init__(self, process_id: int) -> None:
+            assert process_id in {4101, 4102}
+            self.pid = process_id
+
+        def name(self) -> str:
+            return "chrome.exe"
+
+        def cmdline(self) -> list[str]:
+            return [
+                "chrome.exe",
+                f"--user-data-dir={tmp_path.resolve()}",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=9223",
+            ]
+
+        def parents(self) -> list["_Process"]:
+            return [_Process(4101)] if self.pid == 4102 else []
+
+    monkeypatch.setattr(
+        l0_browser_capture.psutil,
+        "net_connections",
+        lambda **_kwargs: [_Connection()],
+    )
+    monkeypatch.setattr(l0_browser_capture.psutil, "Process", _Process)
+    _assert_browser_endpoint_owner(session)
+
+    _Connection.pid = 9999
+    with pytest.raises(RuntimeError, match="listener owner"):
+        _assert_browser_endpoint_owner(session)
+    _Connection.pid = 4102
+
+    monkeypatch.setattr(
+        _Process,
+        "cmdline",
+        lambda _self: ["chrome.exe", "--remote-debugging-port=9223"],
+    )
+    with pytest.raises(RuntimeError, match="exact isolated profile"):
+        _assert_browser_endpoint_owner(session)
+
+    monkeypatch.setattr(
+        _Process,
+        "cmdline",
+        lambda _self: [
+            "chrome.exe",
+            f"--user-data-dir={tmp_path.resolve()}",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=9223",
+        ],
+    )
+    monkeypatch.setattr(_Process, "parents", lambda _self: [])
+    with pytest.raises(RuntimeError, match="not descended"):
+        _assert_browser_endpoint_owner(session)
 
 def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revision() -> None:
     source = LAUNCHER.read_text(encoding="utf-8-sig")
@@ -273,6 +380,12 @@ def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revisio
     assert "Join-Path $l0LogsRoot $L0MeasurementDirectory" in source
     assert "仓库内的 L0 证据目录必须位于已忽略的 logs 目录" in source
     assert "browser_page_origin = \"http://localhost:$FrontendPort\"" in source
+    assert "Get-ListeningOwners -Ports @($RemoteDebuggingPort)" in source
+    assert "browser_debugger_process_id = [int]$isolatedChrome.DebuggerProcessId" in source
+    assert "browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId" in source
+    assert "browser_profile_path = $isolatedChromeProfile" in source
+    assert "live_voice_l0_launch_nonce=$browserLaunchNonce" in source
+    assert "--remote-debugging-address=127.0.0.1" in source
 
 
 def test_default_physical_cases_exclude_injected_and_degraded_profiles() -> None:

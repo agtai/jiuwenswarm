@@ -17,17 +17,18 @@ import os
 import re
 import sys
 import urllib.request
-from urllib.parse import urlsplit
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Final
+from urllib.parse import parse_qsl, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import websockets  # noqa: E402
+import psutil  # noqa: E402
 
 from jiuwenswarm.server.live_voice.latency_measurement import (  # noqa: E402
     L0_RUN_LABELS_VERSION,
@@ -46,7 +47,7 @@ except ModuleNotFoundError as error:
     from l0_measurement_baseline import aggregate_jsonl, clean_source_head
 
 
-SESSION_VERSION: Final = "live-voice.l0-browser-session.v4"
+SESSION_VERSION: Final = "live-voice.l0-browser-session.v5"
 ACCEPTANCE_VERSION: Final = "live-voice.l0-physical-acceptance.v1"
 DEFAULT_CORPUS: Final = Path(__file__).with_name("l0_fixed_corpus.json")
 _SESSION_KEYS: Final = frozenset(
@@ -58,6 +59,10 @@ _SESSION_KEYS: Final = frozenset(
         "run_labels_file",
         "browser_endpoint",
         "browser_page_origin",
+        "browser_profile_path",
+        "browser_launch_process_id",
+        "browser_debugger_process_id",
+        "browser_launch_nonce",
         "temperature_epoch_id",
         "cold_sample_available",
         "environment_ref",
@@ -142,6 +147,22 @@ def _load_session(path: Path) -> dict[str, object]:
     endpoint = session["browser_endpoint"]
     _loopback_endpoint(endpoint)
     _loopback_page_origin(session["browser_page_origin"])
+    profile_value = session["browser_profile_path"]
+    if type(profile_value) is not str or not Path(profile_value).is_absolute():
+        raise ValueError("browser session profile path is invalid")
+    profile_path = Path(profile_value).resolve()
+    if not profile_path.is_dir():
+        raise ValueError("browser session profile path is unavailable")
+    for process_field in (
+        "browser_launch_process_id",
+        "browser_debugger_process_id",
+    ):
+        process_id = session[process_field]
+        if type(process_id) is not int or process_id <= 0:
+            raise ValueError("browser session process identity is invalid")
+    launch_nonce = session["browser_launch_nonce"]
+    if type(launch_nonce) is not str or not re.fullmatch(r"[0-9a-f]{32}", launch_nonce):
+        raise ValueError("browser session launch nonce is invalid")
     temperature_epoch_id = session["temperature_epoch_id"]
     if (
         type(temperature_epoch_id) is not str
@@ -223,6 +244,25 @@ def _page_has_origin(value: object, *, expected_origin: str) -> bool:
     return f"http://{parsed.hostname}:{port}" == expected_origin
 
 
+def _page_has_launch(
+    value: object,
+    *,
+    expected_origin: str,
+    launch_nonce: str,
+) -> bool:
+    if not _page_has_origin(value, expected_origin=expected_origin):
+        return False
+    assert isinstance(value, str)
+    try:
+        query = parse_qsl(urlsplit(value).query, keep_blank_values=True)
+    except ValueError:
+        return False
+    return query == [
+        ("live_voice_l0_measurement", "1"),
+        ("live_voice_l0_launch_nonce", launch_nonce),
+    ]
+
+
 def _loopback_websocket(value: object, *, expected_port: int) -> str:
     if not isinstance(value, str):
         raise RuntimeError("Chrome debugger returned a non-loopback WebSocket URL")
@@ -252,9 +292,57 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise RuntimeError("Chrome debugger endpoint must not redirect")
 
 
-def _discover_page(endpoint: str, *, page_origin: str) -> str:
+def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
+    _, port = _loopback_endpoint(session["browser_endpoint"])
+    expected_pid = int(session["browser_debugger_process_id"])
+    launch_pid = int(session["browser_launch_process_id"])
+    profile_path = Path(str(session["browser_profile_path"])).resolve()
+    try:
+        connections = psutil.net_connections(kind="tcp")
+    except psutil.Error as error:
+        raise RuntimeError("Chrome debugger listener identity is unavailable") from error
+    listener_pids = {
+        connection.pid
+        for connection in connections
+        if connection.status == psutil.CONN_LISTEN
+        and connection.pid is not None
+        and connection.laddr
+        and connection.laddr.port == port
+        and connection.laddr.ip in {"127.0.0.1", "::1"}
+    }
+    if listener_pids != {expected_pid}:
+        raise RuntimeError("Chrome debugger listener owner differs from the launched session")
+    try:
+        process = psutil.Process(expected_pid)
+        name = process.name().lower()
+        command_line = process.cmdline()
+        launch_process = psutil.Process(launch_pid)
+        launch_name = launch_process.name().lower()
+        launch_command_line = launch_process.cmdline()
+        debugger_parent_pids = {parent.pid for parent in process.parents()}
+    except psutil.Error as error:
+        raise RuntimeError("Chrome debugger process identity is unavailable") from error
+    expected_profile = f"--user-data-dir={profile_path}"
+    if (
+        name not in {"chrome", "chrome.exe"}
+        or expected_profile not in command_line
+        or f"--remote-debugging-port={port}" not in command_line
+        or "--remote-debugging-address=127.0.0.1" not in command_line
+    ):
+        raise RuntimeError("Chrome debugger process does not own the exact isolated profile")
+    if (
+        launch_name not in {"chrome", "chrome.exe"}
+        or expected_profile not in launch_command_line
+        or (launch_pid != expected_pid and launch_pid not in debugger_parent_pids)
+    ):
+        raise RuntimeError("Chrome debugger process is not descended from the launched Chrome")
+
+
+def _discover_page(endpoint: str, *, page_origin: str, launch_nonce: str) -> str:
     base, port = _loopback_endpoint(endpoint)
     expected_origin = _loopback_page_origin(page_origin)
+    if not re.fullmatch(r"[0-9a-f]{32}", launch_nonce):
+        raise ValueError("browser launch nonce is invalid")
     opener = urllib.request.build_opener(_NoRedirectHandler())
     with opener.open(f"{base}/json", timeout=3) as response:  # noqa: S310 - exact loopback URL, redirects rejected
         final_url, final_port = _loopback_endpoint(response.geturl().removesuffix("/json"))
@@ -268,7 +356,11 @@ def _discover_page(endpoint: str, *, page_origin: str) -> str:
         for item in pages
         if type(item) is dict
         and item.get("type") == "page"
-        and _page_has_origin(item.get("url"), expected_origin=expected_origin)
+        and _page_has_launch(
+            item.get("url"),
+            expected_origin=expected_origin,
+            launch_nonce=launch_nonce,
+        )
         and isinstance(item.get("webSocketDebuggerUrl"), str)
     ]
     if len(candidates) != 1:
@@ -796,6 +888,7 @@ async def _capture(args: argparse.Namespace) -> int:
     session = _load_session(session_path)
     if clean_source_head() != session["source_head"]:
         raise RuntimeError("current source HEAD differs from the launched Formal Web session")
+    _assert_browser_endpoint_owner(session)
     manifest, corpus_digest = load_l0_corpus_manifest(args.corpus.resolve())
     cases = _select_cases(manifest, args.scenario)
     profiles = {
@@ -832,6 +925,7 @@ async def _capture(args: argparse.Namespace) -> int:
     websocket_url = _discover_page(
         str(session["browser_endpoint"]),
         page_origin=str(session["browser_page_origin"]),
+        launch_nonce=str(session["browser_launch_nonce"]),
     )
     successful = 0
     attempted = 0

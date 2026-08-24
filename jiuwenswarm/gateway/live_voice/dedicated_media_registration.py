@@ -95,6 +95,7 @@ from jiuwenswarm.server.live_voice.latency_measurement import (
     L0RoundBinding,
     L0RoundClassification,
     emit_runtime_l0_milestone,
+    register_runtime_l0_binding,
 )
 from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnDetection,
@@ -2897,10 +2898,15 @@ class DedicatedMediaProductRegistry:
             ):
                 l0_parent = None
         if l0_parent is not None:
+            response_measurement_binding = _l0_media_binding(
+                l0_parent,
+                response=request.response,
+            )
+            register_runtime_l0_binding(response_measurement_binding)
             emit_runtime_l0_milestone(
                 component="gateway",
                 milestone=L0Milestone.TTS_REQUEST,
-                binding=_l0_media_binding(l0_parent, response=request.response),
+                binding=response_measurement_binding,
                 event_nonce=request.operation_id,
             )
         stream_identity = hashlib.sha256(

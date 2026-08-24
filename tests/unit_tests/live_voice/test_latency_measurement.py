@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import jiuwenswarm.server.live_voice.latency_measurement as latency_measurement
 
 from jiuwenswarm.server.live_voice.latency_measurement import (
     L0EvidenceSource,
@@ -1088,6 +1089,73 @@ def test_feature_off_process_sink_creates_no_directory_or_file(
     # Use a unique component so the process cache cannot contain a prior test value.
     assert process_l0_sink("feature-off-test") is None
     assert not target.exists()
+
+
+def test_registered_response_freezes_labels_and_conflicting_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels_a = (
+        "physical-formal-web-warm",
+        "short-no-tool-zh",
+        30,
+        L0RoundTemperature.WARM,
+        L0EvidenceSource.PHYSICAL,
+    )
+    labels_b = (
+        "physical-formal-web-warm",
+        "long-answer-zh",
+        31,
+        L0RoundTemperature.WARM,
+        L0EvidenceSource.PHYSICAL,
+    )
+    current_labels = [labels_a]
+    emitted = []
+
+    class _Sink:
+        def emit(self, record: object) -> bool:
+            emitted.append(record)
+            return True
+
+    monkeypatch.setattr(
+        latency_measurement,
+        "runtime_l0_run_labels",
+        lambda: current_labels[0],
+    )
+    monkeypatch.setattr(
+        latency_measurement,
+        "process_l0_sink",
+        lambda _component: _Sink(),
+    )
+    latency_measurement._RUNTIME_L0_BINDINGS.clear()
+    latency_measurement._RUNTIME_L0_BLOCKED.clear()
+    binding = _binding(30)
+    try:
+        assert latency_measurement.register_runtime_l0_binding(binding)
+        current_labels[0] = labels_b
+        assert latency_measurement.emit_runtime_l0_milestone(
+            component="agent",
+            milestone=L0Milestone.CHAT_FINAL,
+            binding=binding,
+            duration_ms=100.0,
+        )
+        assert len(emitted) == 1
+        assert emitted[0].profile_id == labels_a[0]
+        assert emitted[0].scenario_id == labels_a[1]
+        assert emitted[0].sample_index == labels_a[2]
+
+        assert latency_measurement.register_runtime_l0_binding(binding) is False
+        assert (
+            latency_measurement.resolve_runtime_l0_binding(
+                correlation_id=binding.correlation_id,
+                interaction_id=binding.interaction_id,
+                response_id=binding.response_id or "",
+                response_generation=binding.response_generation or 0,
+            )
+            is None
+        )
+    finally:
+        latency_measurement._RUNTIME_L0_BINDINGS.clear()
+        latency_measurement._RUNTIME_L0_BLOCKED.clear()
 
 
 def test_dynamic_run_labels_file_is_closed_content_free_and_fail_closed(

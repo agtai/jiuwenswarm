@@ -1637,9 +1637,12 @@ def process_l0_sink(component: str) -> L0ProcessJsonlSink | None:
         return sink
 
 
-def runtime_l0_run_labels() -> (
-    tuple[str, str, int, L0RoundTemperature, L0EvidenceSource] | None
-):
+_RuntimeL0RunLabels = tuple[
+    str, str, int, L0RoundTemperature, L0EvidenceSource
+]
+
+
+def runtime_l0_run_labels() -> _RuntimeL0RunLabels | None:
     """Read only non-secret, controlled-run labels from the process environment."""
 
     run_labels_path = os.getenv(L0_MEASUREMENT_RUN_LABELS_FILE_ENV)
@@ -1698,6 +1701,44 @@ def runtime_l0_run_labels() -> (
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeL0Registration:
+    binding: L0RoundBinding
+    labels: _RuntimeL0RunLabels
+
+
+_RUNTIME_L0_BINDING_CAPACITY: Final = 1_024
+_RUNTIME_L0_BINDINGS: OrderedDict[
+    tuple[str, str, str, int], _RuntimeL0Registration
+] = OrderedDict()
+_RUNTIME_L0_BLOCKED: set[tuple[str, str, str, int]] = set()
+_RUNTIME_L0_BINDINGS_LOCK = Lock()
+
+
+def _registered_runtime_l0_binding(
+    binding: L0RoundBinding,
+) -> _RuntimeL0Registration | None:
+    try:
+        checked = create_l0_round_binding(binding)
+        if checked.response_id is None or checked.response_generation is None:
+            return None
+        key = (
+            checked.correlation_id,
+            checked.interaction_id,
+            checked.response_id,
+            checked.response_generation,
+        )
+    except Exception:
+        return None
+    with _RUNTIME_L0_BINDINGS_LOCK:
+        registration = _RUNTIME_L0_BINDINGS.get(key)
+        if registration is None or not _binding_is_compatible(
+            registration.binding, checked
+        ):
+            return None
+        return registration
+
+
 def emit_runtime_l0_milestone(
     *,
     component: str,
@@ -1715,7 +1756,15 @@ def emit_runtime_l0_milestone(
     try:
         if binding is None:
             return False
-        labels = runtime_l0_run_labels()
+        checked = create_l0_round_binding(binding)
+        if checked.response_id is not None:
+            registration = _registered_runtime_l0_binding(checked)
+            if registration is None:
+                return False
+            checked = registration.binding
+            labels = registration.labels
+        else:
+            labels = runtime_l0_run_labels()
         sink = process_l0_sink(component)
         if labels is None or sink is None:
             return False
@@ -1729,7 +1778,7 @@ def emit_runtime_l0_milestone(
         return sink.emit(
             create_l0_milestone(
                 milestone=milestone,
-                binding=binding,
+                binding=checked,
                 profile_id=profile_id,
                 scenario_id=scenario_id,
                 sample_index=sample_index,
@@ -1746,24 +1795,16 @@ def emit_runtime_l0_milestone(
         return False
 
 
-_RUNTIME_L0_BINDING_CAPACITY: Final = 1_024
-_RUNTIME_L0_BINDINGS: OrderedDict[
-    tuple[str, str, str, int], L0RoundBinding
-] = OrderedDict()
-_RUNTIME_L0_BLOCKED: set[tuple[str, str, str, int]] = set()
-_RUNTIME_L0_BINDINGS_LOCK = Lock()
-
-
 def register_runtime_l0_binding(binding: L0RoundBinding) -> bool:
     """Retain one opt-in exact response binding for later Agent callbacks."""
 
     try:
         checked = create_l0_round_binding(binding)
+        labels = runtime_l0_run_labels()
         if (
             checked.response_id is None
             or checked.response_generation is None
-            or runtime_l0_run_labels() is None
-            or process_l0_sink("agent") is None
+            or labels is None
         ):
             return False
         key = (
@@ -1777,16 +1818,25 @@ def register_runtime_l0_binding(binding: L0RoundBinding) -> bool:
                 return False
             prior = _RUNTIME_L0_BINDINGS.get(key)
             if prior is not None:
-                if not _binding_is_compatible(prior, checked):
+                if (
+                    prior.labels != labels
+                    or not _binding_is_compatible(prior.binding, checked)
+                ):
                     _RUNTIME_L0_BINDINGS.pop(key, None)
                     if len(_RUNTIME_L0_BLOCKED) < _RUNTIME_L0_BINDING_CAPACITY:
                         _RUNTIME_L0_BLOCKED.add(key)
                     return False
-                _RUNTIME_L0_BINDINGS[key] = _merge_binding(prior, checked)
+                _RUNTIME_L0_BINDINGS[key] = _RuntimeL0Registration(
+                    binding=_merge_binding(prior.binding, checked),
+                    labels=prior.labels,
+                )
                 return True
             if len(_RUNTIME_L0_BINDINGS) >= _RUNTIME_L0_BINDING_CAPACITY:
                 return False
-            _RUNTIME_L0_BINDINGS[key] = checked
+            _RUNTIME_L0_BINDINGS[key] = _RuntimeL0Registration(
+                binding=checked,
+                labels=labels,
+            )
         return True
     except Exception:
         return False
@@ -1811,7 +1861,8 @@ def resolve_runtime_l0_binding(
     except Exception:
         return None
     with _RUNTIME_L0_BINDINGS_LOCK:
-        return _RUNTIME_L0_BINDINGS.get(key)
+        registration = _RUNTIME_L0_BINDINGS.get(key)
+        return None if registration is None else registration.binding
 
 
 def declarations_from_records(

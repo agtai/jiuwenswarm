@@ -76,6 +76,14 @@ type BrowserGlobal = typeof globalThis & {
   __JIUWENSWARM_LIVE_VOICE_L0__?: BrowserL0Control;
 };
 
+interface BrowserL0State {
+  labels: Readonly<BrowserL0RunLabels> | null;
+  sequence: number;
+  droppedRecords: number;
+  readonly records: Readonly<BrowserL0Envelope>[];
+  readonly responseLabels: Map<string, Readonly<BrowserL0RunLabels>>;
+}
+
 interface MarkerRule {
   readonly event_name: string;
   readonly segment_name: string;
@@ -103,11 +111,6 @@ const MARKERS: Readonly<Record<BrowserL0Milestone, Readonly<MarkerRule>>> = Obje
   fallback: Object.freeze({ event_name: 'route.selected', segment_name: 'route.fallback', source_component: 'measurement.runtime.fallback', reason_code: 'ROUTE_FALLBACK', route_class: 'fallback' }),
   discarded_work: Object.freeze({ event_name: 'fence.stale_dropped', segment_name: 'runtime.presentation', source_component: 'measurement.runtime.discarded_work', reason_code: 'STALE_GENERATION', error_code: 'STALE' }),
 });
-
-let labels: Readonly<BrowserL0RunLabels> | null = null;
-let sequence = 0;
-let droppedRecords = 0;
-const records: Readonly<BrowserL0Envelope>[] = [];
 
 function stableToken(value: unknown, field: string): string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
@@ -192,40 +195,72 @@ function queryEnabled(): boolean {
   }
 }
 
-const enabled = queryEnabled();
+function createBrowserL0State(): BrowserL0State {
+  return {
+    labels: null,
+    sequence: 0,
+    droppedRecords: 0,
+    records: [],
+    responseLabels: new Map(),
+  };
+}
 
-const control: BrowserL0Control = Object.freeze({
-  configure(value: Readonly<BrowserL0RunLabels>): boolean {
-    if (!enabled) return false;
-    try {
-      labels = normalizeLabels(value);
-      return true;
-    } catch {
-      labels = null;
-      return false;
-    }
-  },
-  disable(): void {
-    labels = null;
-    records.splice(0, records.length);
-    droppedRecords = 0;
-  },
-  clear(): void {
-    records.splice(0, records.length);
-    droppedRecords = 0;
-  },
-  snapshot(): Readonly<BrowserL0ControlSnapshot> {
-    return Object.freeze({
-      enabled: true,
-      configured: labels !== null,
-      accepted_records: records.length,
-      dropped_records: droppedRecords,
-      records: Object.freeze([...records]),
-    });
-  },
-});
+function sameLabels(
+  left: Readonly<BrowserL0RunLabels>,
+  right: Readonly<BrowserL0RunLabels>,
+): boolean {
+  return left.profile_id === right.profile_id
+    && left.scenario_id === right.scenario_id
+    && left.sample_index === right.sample_index
+    && left.temperature === right.temperature
+    && left.evidence_source === right.evidence_source;
+}
 
-if (enabled) {
+function responseKey(binding: Readonly<BrowserL0Binding>): string | null {
+  if (binding.response_id === null || binding.response_generation === null) return null;
+  return JSON.stringify([
+    binding.correlation_id,
+    binding.session_id,
+    binding.interaction_id,
+    binding.activation_generation,
+    binding.response_id,
+    binding.response_generation,
+  ]);
+}
+
+const state: BrowserL0State | null = queryEnabled() ? createBrowserL0State() : null;
+
+if (state !== null) {
+  const active = state;
+  const control: BrowserL0Control = Object.freeze({
+    configure(value: Readonly<BrowserL0RunLabels>): boolean {
+      try {
+        active.labels = normalizeLabels(value);
+        return true;
+      } catch {
+        active.labels = null;
+        return false;
+      }
+    },
+    disable(): void {
+      active.labels = null;
+      active.records.splice(0, active.records.length);
+      active.droppedRecords = 0;
+    },
+    clear(): void {
+      active.records.splice(0, active.records.length);
+      active.droppedRecords = 0;
+    },
+    snapshot(): Readonly<BrowserL0ControlSnapshot> {
+      return Object.freeze({
+        enabled: true,
+        configured: active.labels !== null,
+        accepted_records: active.records.length,
+        dropped_records: active.droppedRecords,
+        records: Object.freeze([...active.records]),
+      });
+    },
+  });
   Object.defineProperty(globalThis as BrowserGlobal, '__JIUWENSWARM_LIVE_VOICE_L0__', {
     configurable: false,
     enumerable: false,
@@ -235,7 +270,26 @@ if (enabled) {
 }
 
 export function browserL0Enabled(): boolean {
-  return enabled && labels !== null;
+  return state !== null && state.labels !== null;
+}
+
+export function registerBrowserL0Response(
+  value: Readonly<BrowserL0Binding>,
+): boolean {
+  const active = state;
+  if (active === null || active.labels === null) return false;
+  try {
+    const binding = normalizeBinding(value);
+    const key = responseKey(binding);
+    if (key === null) return false;
+    const prior = active.responseLabels.get(key);
+    if (prior !== undefined) return sameLabels(prior, active.labels);
+    if (active.responseLabels.size >= L0_BROWSER_CAPACITY) return false;
+    active.responseLabels.set(key, active.labels);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function recordBrowserL0Milestone(input: Readonly<{
@@ -246,10 +300,11 @@ export function recordBrowserL0Milestone(input: Readonly<{
   observed_at?: string;
   monotonic_ms?: number;
 }>): boolean {
-  if (!enabled || labels === null) return false;
+  const active = state;
+  if (active === null || active.labels === null) return false;
   try {
-    if (records.length >= L0_BROWSER_CAPACITY) {
-      droppedRecords += 1;
+    if (active.records.length >= L0_BROWSER_CAPACITY) {
+      active.droppedRecords += 1;
       return false;
     }
     const marker = MARKERS[input.milestone];
@@ -260,10 +315,20 @@ export function recordBrowserL0Milestone(input: Readonly<{
     if ((input.observed_at === undefined) !== (input.monotonic_ms === undefined)) return false;
     const observedAt = input.observed_at ?? new Date().toISOString();
     const monotonic = input.monotonic_ms ?? (typeof performance === 'undefined' ? Date.now() : performance.now());
-    sequence += 1;
+    const key = responseKey(binding);
+    let recordLabels = active.labels;
+    if (key !== null) {
+      const registeredLabels = active.responseLabels.get(key);
+      if (registeredLabels === undefined || !sameLabels(registeredLabels, active.labels)) {
+        active.droppedRecords += 1;
+        return false;
+      }
+      recordLabels = registeredLabels;
+    }
+    active.sequence += 1;
     const observation = createObservation({
       schema_version: OBSERVABILITY_SCHEMA_VERSION,
-      event_id: `l0-browser-${Date.now()}-${sequence}`,
+      event_id: `l0-browser-${Date.now()}-${active.sequence}`,
       event_name: marker.event_name,
       segment_name: marker.segment_name,
       observed_at: observedAt,
@@ -298,14 +363,14 @@ export function recordBrowserL0Milestone(input: Readonly<{
       milestone: input.milestone,
       binding,
       observation,
-      profile_id: labels.profile_id,
-      scenario_id: labels.scenario_id,
-      sample_index: labels.sample_index,
-      temperature: labels.temperature,
+      profile_id: recordLabels.profile_id,
+      scenario_id: recordLabels.scenario_id,
+      sample_index: recordLabels.sample_index,
+      temperature: recordLabels.temperature,
       classification: input.classification ?? 'unknown',
-      evidence_source: labels.evidence_source,
+      evidence_source: recordLabels.evidence_source,
     });
-    records.push(envelope);
+    active.records.push(envelope);
     return true;
   } catch {
     return false;

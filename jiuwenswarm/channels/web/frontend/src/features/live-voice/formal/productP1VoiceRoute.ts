@@ -33,6 +33,7 @@ import {
 import {
   browserL0Enabled,
   recordBrowserL0Milestone,
+  registerBrowserL0Response,
   type BrowserL0Binding,
 } from './l0Measurement.js';
 
@@ -1011,6 +1012,8 @@ export class ProductP1VoiceRouteOwner {
     let capturePreparation: Promise<Readonly<{ ready: boolean; reason: string | null }>> | null = null;
     try {
       const text = requiredText(input.text, 'agent_text');
+      const measurementBinding = this.#l0Binding(input.response);
+      if (measurementBinding !== null) registerBrowserL0Response(measurementBinding);
       const result = await speech.synthesizeAuthoritative({
         response: input.response,
         unitId: requiredText(input.unit_id, 'unit_id'),

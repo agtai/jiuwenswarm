@@ -94,6 +94,14 @@ function Start-IsolatedChrome(
     [string]$Url,
     [int]$RemoteDebuggingPort = 0
 ) {
+    if ($RemoteDebuggingPort -gt 0) {
+        $existingDebuggerOwners = @(
+            Get-ListeningOwners -Ports @($RemoteDebuggingPort)
+        )
+        if ($existingDebuggerOwners.Count -gt 0) {
+            Fail "L0 Chrome 调试端口 $RemoteDebuggingPort 已被占用；不会连接或停止未受管的本地调试服务。"
+        }
+    }
     $profileName = 'jiuwenswarm-live-voice-chrome-{0}-{1}' -f (
         Get-Date -Format 'yyyyMMdd-HHmmss'
     ), ([guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -112,6 +120,7 @@ function Start-IsolatedChrome(
         '--new-window'
     )
     if ($RemoteDebuggingPort -gt 0) {
+        $arguments += '--remote-debugging-address=127.0.0.1'
         $arguments += "--remote-debugging-port=$RemoteDebuggingPort"
     }
     $arguments += $Url
@@ -120,7 +129,38 @@ function Start-IsolatedChrome(
     if ($chrome.HasExited) {
         Fail "隔离 Chrome 启动后立即退出（exit=$($chrome.ExitCode)）。"
     }
-    return $profilePath
+    $debuggerProcessId = $null
+    if ($RemoteDebuggingPort -gt 0) {
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $debuggerOwners = @(
+                Get-ListeningOwners -Ports @($RemoteDebuggingPort)
+            )
+            if ($debuggerOwners.Count -gt 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+            $chrome.Refresh()
+        } while (-not $chrome.HasExited -and [DateTime]::UtcNow -lt $deadline)
+        if ($debuggerOwners.Count -ne 1) {
+            Fail "隔离 Chrome 未唯一取得 L0 调试端口 $RemoteDebuggingPort。"
+        }
+        $debuggerOwner = $debuggerOwners[0]
+        if (
+            $debuggerOwner.Name -notmatch '^chrome\.exe$' -or
+            $debuggerOwner.CommandLine -notlike "*$profilePath*" -or
+            $debuggerOwner.CommandLine -notlike '*--remote-debugging-address=127.0.0.1*' -or
+            $debuggerOwner.CommandLine -notlike "*--remote-debugging-port=$RemoteDebuggingPort*"
+        ) {
+            Fail 'L0 调试端口不属于本次启动的精确隔离 Chrome profile。'
+        }
+        $debuggerProcessId = [int]$debuggerOwner.ProcessId
+    }
+    return [pscustomobject]@{
+        ProfilePath      = $profilePath
+        LaunchProcessId  = [int]$chrome.Id
+        DebuggerProcessId = $debuggerProcessId
+    }
 }
 
 function Stop-ExistingIsolatedChrome([string]$ChromeExecutable) {
@@ -836,29 +876,37 @@ try {
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $runtimeContractPath -Encoding UTF8
     Write-Pass "已写入不含密钥的运行合同：$runtimeContractPath"
 
+    $isolatedChrome = $null
     $isolatedChromeProfile = $null
+    $browserLaunchNonce = $null
     if (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
         $browserUrl = "http://localhost:$FrontendPort"
         $remoteDebuggingPort = 0
         if ($L0Measurement) {
-            $browserUrl += '?live_voice_l0_measurement=1'
+            $browserLaunchNonce = [guid]::NewGuid().ToString('N')
+            $browserUrl += "?live_voice_l0_measurement=1&live_voice_l0_launch_nonce=$browserLaunchNonce"
             $remoteDebuggingPort = $L0MeasurementPort
         }
-        $isolatedChromeProfile = Start-IsolatedChrome `
+        $isolatedChrome = Start-IsolatedChrome `
             -ChromeExecutable $ChromeExecutable `
             -Url $browserUrl `
             -RemoteDebuggingPort $remoteDebuggingPort
+        $isolatedChromeProfile = [string]$isolatedChrome.ProfilePath
         Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
         if ($L0Measurement) {
             [ordered]@{
-                schema_version      = 'live-voice.l0-browser-session.v4'
+                schema_version      = 'live-voice.l0-browser-session.v5'
                 source_head         = (& git rev-parse HEAD).Trim()
                 runtime_profile     = $RuntimeProfile
                 evidence_directory = $L0MeasurementDirectory
                 run_labels_file    = $l0RunLabelsPath
                 browser_endpoint   = "http://127.0.0.1:$L0MeasurementPort"
                 browser_page_origin = "http://localhost:$FrontendPort"
+                browser_profile_path = $isolatedChromeProfile
+                browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId
+                browser_debugger_process_id = [int]$isolatedChrome.DebuggerProcessId
+                browser_launch_nonce = $browserLaunchNonce
                 temperature_epoch_id = ([guid]::NewGuid().ToString('N'))
                 cold_sample_available = $true
                 environment_ref     = $L0EnvironmentRef

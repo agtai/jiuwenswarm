@@ -43,6 +43,7 @@ test('flag off exposes no control and records no observation', async () => {
     }),
     false
   );
+  assert.equal(measurement.registerBrowserL0Response(binding(true)), false);
 });
 
 test('opt-in control retains only closed content-free production observations', async () => {
@@ -62,6 +63,7 @@ test('opt-in control retains only closed content-free production observations', 
     true
   );
   assert.equal(measurement.browserL0Enabled(), true);
+  assert.equal(measurement.registerBrowserL0Response(binding(true)), true);
   assert.equal(
     measurement.recordBrowserL0Milestone({
       milestone: 'browser_eot_receipt',
@@ -205,4 +207,63 @@ test('explicit disable clears records and prevents abandoned-label observations'
     }),
     false,
   );
+});
+
+test('response registration freezes sample ownership and rejects late cross-sample callbacks', async () => {
+  const control = globalThis.__JIUWENSWARM_LIVE_VOICE_L0__;
+  assert.ok(control);
+  const measurement = await import(`${moduleUrl}?enabled`);
+  const responseA = {
+    ...binding(true),
+    response_id: 'response:late:a',
+    response_generation: 7,
+  };
+  const responseB = {
+    ...binding(true),
+    response_id: 'response:current:b',
+    response_generation: 8,
+  };
+  assert.equal(
+    control.configure({
+      profile_id: 'physical-formal-web-warm',
+      scenario_id: 'short-no-tool-zh',
+      sample_index: 20,
+      temperature: 'warm',
+      evidence_source: 'physical',
+    }),
+    true,
+  );
+  assert.equal(measurement.registerBrowserL0Response(responseA), true);
+  control.disable();
+  assert.equal(
+    control.configure({
+      profile_id: 'physical-formal-web-warm',
+      scenario_id: 'long-answer-zh',
+      sample_index: 21,
+      temperature: 'warm',
+      evidence_source: 'physical',
+    }),
+    true,
+  );
+  assert.equal(
+    measurement.recordBrowserL0Milestone({
+      milestone: 'browser_first_frame',
+      binding: responseA,
+    }),
+    false,
+  );
+  assert.equal(measurement.registerBrowserL0Response(responseA), false);
+  assert.equal(measurement.registerBrowserL0Response(responseB), true);
+  assert.equal(
+    measurement.recordBrowserL0Milestone({
+      milestone: 'browser_first_frame',
+      binding: responseB,
+    }),
+    true,
+  );
+  const snapshot = control.snapshot();
+  assert.equal(snapshot.dropped_records, 1);
+  assert.equal(snapshot.accepted_records, 1);
+  assert.equal(snapshot.records[0].scenario_id, 'long-answer-zh');
+  assert.equal(snapshot.records[0].sample_index, 21);
 });
