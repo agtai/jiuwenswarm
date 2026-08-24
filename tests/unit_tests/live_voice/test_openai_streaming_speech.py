@@ -307,7 +307,7 @@ def config() -> OpenAIStreamingSpeechConfig:
 
 
 def native_config(
-    realtime_model: str = "gpt-realtime-1.5",
+    realtime_model: str = DEFAULT_REALTIME_MODEL,
 ) -> OpenAIStreamingSpeechConfig:
     return OpenAIStreamingSpeechConfig(
         api_base="https://api.openai.com/v1",
@@ -345,7 +345,7 @@ def native_session_updated_event(
         "event_id": "event-session-updated",
         "session": {
             "type": "realtime",
-            "model": "gpt-realtime-1.5",
+            "model": DEFAULT_REALTIME_MODEL,
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
@@ -3187,7 +3187,7 @@ async def test_default_socket_close_timeout_fits_cleanup_attempt_budget(
 async def test_selector_explicitly_enables_native_realtime_without_changing_legacy() -> (
     None
 ):
-    assert DEFAULT_REALTIME_MODEL == "gpt-realtime-1.5"
+    assert DEFAULT_REALTIME_MODEL == "gpt-realtime-2.1-mini"
     common = {
         STREAMING_SPEECH_FLAG: "true",
         SPEECH_API_BASE_ENV: "https://api.openai.com/v1",
@@ -3208,6 +3208,17 @@ async def test_selector_explicitly_enables_native_realtime_without_changing_lega
     )
     assert "server-only-key" not in repr(native.provider)
 
+    explicitly_pinned = await select_environment_streaming_speech(
+        environ={
+            **common,
+            SPEECH_PROVIDER_ENV: "openai-realtime",
+            SPEECH_REALTIME_MODEL_ENV: "gpt-realtime-1.5",
+        },
+        batch_available=True,
+    )
+    assert explicitly_pinned.provider is not None
+    assert explicitly_pinned.provider.synthesis_model == "gpt-realtime-1.5"
+
     legacy = await select_environment_streaming_speech(
         environ={**common, SPEECH_PROVIDER_ENV: "openai"},
         batch_available=True,
@@ -3218,6 +3229,7 @@ async def test_selector_explicitly_enables_native_realtime_without_changing_lega
     assert legacy.provider.capability.provider.provider_id == "openai-streaming-speech"
 
     await native.provider.close()
+    await explicitly_pinned.provider.close()
     await legacy.provider.close()
 
 
@@ -3266,7 +3278,7 @@ async def test_native_realtime_recognition_negotiates_no_response_or_tools() -> 
         timeout_seconds=1,
     )
     assert captured["url"] == (
-        "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
+        "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini"
     )
     assert captured["headers"] == {"Authorization": "Bearer private-test-key"}
     update = socket.sent[0]
