@@ -7,7 +7,7 @@
 - Baseline: `c31e85ade1a69e934d05bfb9c277568a1238663c` on
   `hx/0812_live_voice_w3`.
 - Current repaired product/test/corpus source:
-  `3421f919192e56ebfa9107efffe5a7846326225f`.
+  `e2c4e64f1e5b5ccd6a970b8fa2cc239203968fd4`.
   The deterministic injected baseline was regenerated on that exact source.
   The last real-Provider component result remains source-bound to
   `7f2b0b7ab9b9dc363cec21f83ac6e04ad53d221c`; no Provider was called for the
@@ -17,18 +17,24 @@
 - Risk: Tier 3. The production hooks cross Browser, Gateway, Runtime and Agent
   response ownership, although the evidence sink is local, opt-in and has no
   lifecycle or mutation authority.
-- Overall disposition: **PARTIAL**. Correlated production instrumentation,
+- Overall disposition: **SOURCE/AUTOMATED GATE PASS `C0/I0/M0`; PHYSICAL
+  PARTIAL**. Correlated production instrumentation,
   fixed corpus, injected baseline and real-Provider digital-loopback component
   baseline are implemented and automated. Three earlier independent review
   rounds found three, then two, then two bounded issues; all seven were repaired.
   A subsequent owner consolidation made the actual HTTP and WebSocket
   connections, rather than adjacent listener probes, the common CDP ownership
   invariant. The resulting broad review disclosed all six remaining actionable
-  findings in one batch; commit `3421f9191` repairs them. One focused independent
-  closure review and
-  the required physical microphone, speaker and room cold/warm profiles remain
-  open, so no module-Gate PASS, current physical p50/p95, audibility, AEC,
-  stop-to-silence or feature-complete latency credit is claimed.
+  findings in one batch; commit `3421f9191` repairs them, and its bounded focused
+  review passed. A subsequent sample-readiness convergence review found two
+  additional concrete blockers outside that six-item review contract: three
+  quality-failure markers could still be overridden by success, and an ordinary
+  feature-off Browser page still performed measurement-only hot-path work.
+  Commit `e2c4e64f` closes both without changing protocol or product policy; the
+  final browser review and independent closure review both pass with no open
+  P0-P2 (`C0/I0/M0`). The required physical microphone, speaker and room
+  cold/warm profiles remain open, so no current physical p50/p95, audibility,
+  AEC, stop-to-silence or feature-complete latency credit is claimed.
 
 ## Intended behaviour and exclusions
 
@@ -153,32 +159,35 @@ it identifies the configured field set without retaining values or credentials.
 | P — positive | Three injected profiles retain 20/20 successes each; the real-Provider unknown-lifecycle component retains 20/20; production Browser/Gateway/Runtime/Agent hooks are exercised by affected tests. |
 | N — negative | Closed shapes reject private/extra/invalid fields; wrong identity, generation, sample and Task facts have zero aggregation authority. |
 | B — boundary | At-least-20 formal samples, safe integers, bounded rounds/records/files/browser buffer, duplicate milestone and capacity rejection coverage. |
-| S — state | Feature-off allocates no sink, Browser measurement state or control; disabled labels, route close, stale generation and later records cannot revive authority. |
+| S — state | Feature-off allocates no sink, Browser measurement state or control, installs no measurement-only media callbacks and performs no per-frame/per-chunk measurement clock, closure or helper work; disabled labels, route close, stale generation and later records cannot revive authority. |
 | T — temporal | Duplicate/idempotent, conflict, reorder, missing, negative/regressive duration, future sample and cancel ordering fail closed or remain unknown. |
 | C — concurrency | Locked collector, process-sink serialization, response registration with frozen run labels, pre-synthesis Browser/Gateway and pre-dispatch Runtime registration; delayed callbacks cannot cross samples, including when the conflict-tombstone budget is full. |
 | R — restart/replay | Append-only fsync JSONL, deterministic reload/aggregate, dynamic labels, exact source/corpus hashes and Chrome session-v6 executable/profile/PID/nonce ownership; no replay creates product effects. |
 | I — isolation | Exact Session/correlation/interaction/activation/response/turn/round and optional Task/Attempt binding; partial identity pins once and response labels cannot rebind. CDP binds both HTTP discovery and WebSocket traffic to verified preconnected IPv4 sockets owned by the exact executable/profile/PID lineage; exact page/nonce selection remains closed. |
-| F — feature/fallback | Ordinary path remains flag-off; failure/fallback/cancel are distinct and excluded; physical runner accepts only nominal non-injected success cases. |
+| F — feature/fallback | Ordinary path remains flag-off; `failure`, `browser_failure`, `frame_loss`, `false_eot` and `missed_eot` all outrank success, while fallback/cancel remain distinct and excluded; physical runner accepts only nominal non-injected success cases. |
 | K — compatibility | P2 production batch `16` and omitted single-pull compatibility remain covered; no shared schema or wire extension. |
 | X — cross-module | Formal Web, Browser Audio, Dedicated Media, Agent Bridge, Registry, launcher and Python/TypeScript privacy/aggregation tests cover the actual owner chain. |
 
 ## Verification
 
-- L0 collector/corpus/browser-capture plus affected Agent/Gateway/Registry/
-  launcher Python run: `442 passed / 6 failed`. The six failures are the same
+- On repaired source `3421f9191`, the L0 collector/corpus/browser-capture plus
+  affected Agent/Gateway/Registry/launcher Python run was `442 passed / 6
+  failed`. The six failures are the same
   pre-existing P3 fixture/projection set reproduced on baseline `c31e85ade`;
   the focused L0/launcher set is `62/62` and all new production-hook
-  tests pass.
+  tests pass. On current source `e2c4e64f`, the focused latency/baseline/browser-
+  capture run is `65/65`; the current three-file latency/baseline set is included
+  in that result.
 - The declared `websockets==12.0` floor imports the capture runner and displays
   `--help`; current-lock supplied-socket ownership regressions pass. PowerShell
   argv probes reject decoy, prefixed and duplicate profile options, and the
   launcher AST has zero errors.
-- On the unchanged earlier source, Formal Integrated Web was `478/478`;
-  Browser Audio I/O was `103/103`;
-  Dedicated Media: `27/27`; Gateway Media: `38/38`; Browser L0: `5/5`.
-- No TypeScript blob changed in this repair batch, so those frontend suites were
-  not rerun. Changed-Python Ruff/compileall, PowerShell AST and
-  `git diff --check`: PASS.
+- On current source `e2c4e64f`, Formal Integrated Web is `479/479`, Browser
+  Audio I/O is `104/104`, Browser L0 is `5/5`, build profiles are `2/2`, strict
+  TypeScript compilation and the production Live Voice build pass. The
+  unchanged earlier Dedicated Media `27/27` and Gateway Media `38/38` results
+  remain in scope.
+- Changed-Python Ruff/compileall, PowerShell AST and `git diff --check`: PASS.
   Existing duplicate locale-key, mixed-import and chunk-size warnings remain
   unchanged.
 - Direct runner smoke: both `l0_browser_capture.py --help` and corpus validation
@@ -253,9 +262,23 @@ runner; marker facts join the existing classification precedence; a full-budget
 conflict becomes permanently unresolvable in-place; Chrome cleanup requires one
 exact managed profile argument; the public WebSocket API supports the declared
 12.0 floor; and a successful JSONL write is fsynced before close. Attack
-regressions cover each path. One focused independent closure review of
-`cc8d5c50c..3421f9191` remains required; this is not another open-ended finding
-round.
+regressions cover each path. The bounded independent closure review of
+`cc8d5c50c..3421f9191` then returned PASS `C0/I0/M0`; it was not another
+open-ended finding round.
+
+The later sample-readiness convergence review deliberately inspected only
+whether the accepted implementation could perturb or misclassify real cold/warm
+samples. It found one P1 classification gap and one P2 feature-off hot-path gap.
+`FRAME_LOSS`, `FALSE_EOT` and `MISSED_EOT` now join the existing failure-marker
+precedence and cannot enter success percentiles. Browser L0 availability is
+frozen from the page opt-in before labels are configured; ordinary pages do not
+install uplink/playout measurement callbacks, do not maintain L0 timing state,
+and do not enter first-frame or schedule helpers per frame/chunk. The adapter
+does only one callback-availability check before the unchanged `source.start`
+path. Current-source focused tests, full frontend regression and production
+build pass. The final browser review reports no remaining sample blocker, and a
+fresh independent review of the complete eight-file repair diff returns PASS
+`C0/I0/M0` with no direct regression, cross-scope or data-loss finding.
 
 ## Physical acceptance still open
 
@@ -281,10 +304,9 @@ digest, corpus digest and sample identities are checked automatically.
 The injected oracle's largest modeled critical-path segment is Agent request to
 `chat.final` (`1572.0 / 1794.0 ms`), while the real Provider component's batch
 synthesis completion is `1672.0 / 4125.0 ms`. Neither is a physical end-to-end
-bottleneck claim. The next required action is the focused independent closure
-review of the disclosed repair batch; after it passes, the next packet is the
-already-defined physical
-cold/warm fixed-corpus collection, not a production optimization. Only that
+bottleneck claim. The focused independent closure review is complete. The next
+packet is the already-defined physical cold/warm fixed-corpus collection, not a
+production optimization. Only that
 evidence may choose among VAD finalization, browser startup buffering,
 end-of-turn settlement or later sentence-level Agent→TTS overlap.
 
