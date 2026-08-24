@@ -45,6 +45,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     STREAMING_SPEECH_FLAG,
     _LOGGER,
     _DegradationSinkTaskOwner,
+    _RealtimeSocketTerminalEof,
     _StreamingLinearResampler,
     _TransportCleanupOwner,
     _default_socket_factory,
@@ -99,7 +100,14 @@ class FakeSocket:
         return value
 
     async def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
+        # A real WebSocket wakes an active recv owner with ConnectionClosed
+        # after all frames ordered before the close handshake.  Keep the fake's
+        # transport barrier equivalent so terminal-drain tests cannot confuse a
+        # successful close call with an empty receive queue.
+        self.incoming.put_nowait(_RealtimeSocketTerminalEof())
         self.closed_event.set()
 
 
@@ -455,7 +463,9 @@ def native_response_completion_events(
             "event_id": "event-response-done",
             "response": {
                 "id": response_id,
+                "object": "realtime.response",
                 "status": "completed",
+                "status_details": None,
                 "metadata": _native_response_metadata(request),
                 "conversation_id": None,
                 "output_modalities": ["audio"],
@@ -466,6 +476,26 @@ def native_response_completion_events(
                     }
                 },
                 "output": output,
+                "usage": {
+                    "total_tokens": 3,
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "input_token_details": {
+                        "audio_tokens": 0,
+                        "text_tokens": 1,
+                        "image_tokens": 0,
+                        "cached_tokens": 0,
+                        "cached_tokens_details": {
+                            "audio_tokens": 0,
+                            "text_tokens": 0,
+                            "image_tokens": 0,
+                        },
+                    },
+                    "output_token_details": {
+                        "audio_tokens": 1,
+                        "text_tokens": 1,
+                    },
+                },
             },
         },
     )
@@ -553,17 +583,19 @@ async def open_native_synthesis_for_test(
     *,
     facts: list[SpeechDegradationFact] | None = None,
     event_timeout_seconds: float = 1.0,
+    socket: FakeSocket | None = None,
 ) -> tuple[
     OpenAIStreamingSpeechProvider,
     FakeSocket,
     SynthesisStreamRequest,
 ]:
-    socket = FakeSocket(
-        (
-            native_session_created_event(),
-            native_synthesis_session_updated_event(),
+    if socket is None:
+        socket = FakeSocket(
+            (
+                native_session_created_event(),
+                native_synthesis_session_updated_event(),
+            )
         )
-    )
 
     async def socket_factory(*_args) -> FakeSocket:
         return socket
@@ -2782,7 +2814,24 @@ async def test_default_socket_close_timeout_fits_cleanup_attempt_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
-    marker = object()
+
+    class ClosedWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.closed = False
+
+        async def send(self, message: str) -> None:
+            self.sent.append(message)
+
+        async def recv(self) -> str:
+            from websockets.exceptions import ConnectionClosedOK
+
+            raise ConnectionClosedOK(None, None)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    marker = ClosedWebSocket()
 
     async def connect(url: str, **kwargs: object) -> object:
         captured["url"] = url
@@ -2794,11 +2843,17 @@ async def test_default_socket_close_timeout_fits_cleanup_attempt_budget(
         "wss://speech.invalid/realtime", {"Authorization": "redacted"}, 5.0
     )
 
-    assert result is marker
+    assert getattr(result, "_socket") is marker
     assert captured["close_timeout"] == REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS
     assert (
         REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS < TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
     )
+    await result.send("wire-message")
+    assert marker.sent == ["wire-message"]
+    with pytest.raises(_RealtimeSocketTerminalEof):
+        await result.recv()
+    await result.close()
+    assert marker.closed is True
 
 
 @pytest.mark.asyncio
@@ -2906,6 +2961,7 @@ async def test_native_realtime_recognition_negotiates_no_response_or_tools() -> 
     socket.push(
         {
             "type": "input_audio_buffer.speech_started",
+            "event_id": "event-recognition-speech-started",
             "item_id": "item-native",
             "audio_start_ms": 10,
         }
@@ -2913,14 +2969,22 @@ async def test_native_realtime_recognition_negotiates_no_response_or_tools() -> 
     socket.push(
         {
             "type": "input_audio_buffer.speech_stopped",
+            "event_id": "event-recognition-speech-stopped",
             "item_id": "item-native",
             "audio_end_ms": 240,
         }
     )
-    socket.push({"type": "input_audio_buffer.committed", "item_id": "item-native"})
+    socket.push(
+        {
+            "type": "input_audio_buffer.committed",
+            "event_id": "event-recognition-committed",
+            "item_id": "item-native",
+        }
+    )
     socket.push(
         {
             "type": "conversation.item.input_audio_transcription.completed",
+            "event_id": "event-recognition-transcription-completed",
             "content_index": 0,
             "item_id": "item-native",
             "transcript": "调用真实智能体",
@@ -3095,6 +3159,7 @@ async def test_native_realtime_recognition_rejects_output_before_negotiation() -
     socket.push(
         {
             "type": "conversation.item.input_audio_transcription.completed",
+            "event_id": "event-pre-negotiation-final",
             "content_index": 0,
             "item_id": "pre-negotiation-item",
             "transcript": "must not become final",
@@ -3108,6 +3173,195 @@ async def test_native_realtime_recognition_rejects_output_before_negotiation() -
     assert len(facts) == 1
     assert facts[0].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
     assert socket.closed is True
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_recognition_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "RECOGNITION_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_opening_recognition_cancel_settles_ready_once() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket()
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    open_task = asyncio.create_task(
+        provider.open_recognition(request, timeout_seconds=0.4)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if socket.sent:
+            break
+    assert socket.sent and socket.sent[0]["type"] == "session.update"
+
+    await provider.cancel_recognition(request.ref)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(open_task, timeout=0.05)
+
+    assert socket.closed is True
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_recognition_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "RECOGNITION_STREAM_NOT_FOUND"
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.parametrize("violation", ("missing", "replay"))
+@pytest.mark.asyncio
+async def test_native_realtime_recognition_requires_unique_server_event_id(
+    violation: str,
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket((native_session_updated_event(server_vad_wire()),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    await provider.open_recognition(request, timeout_seconds=1)
+    event: dict[str, object] = {"type": "rate_limits.updated", "rate_limits": []}
+    if violation == "replay":
+        event["event_id"] = "event-session-updated"
+    socket.push(event)
+
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_recognition_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "RECOGNITION_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_recognition_replayed_lifecycle_releases_no_final() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket((native_session_updated_event(server_vad_wire()),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    await provider.open_recognition(request, timeout_seconds=1)
+    session = provider._require_recognition(request.ref)
+    replayed_id = "event-replayed-recognition-lifecycle"
+    socket.push(
+        {
+            "type": "input_audio_buffer.speech_started",
+            "event_id": replayed_id,
+            "item_id": "item-replayed-recognition",
+            "audio_start_ms": 10,
+        }
+    )
+    socket.push(
+        {
+            "type": "input_audio_buffer.speech_stopped",
+            "event_id": replayed_id,
+            "item_id": "item-replayed-recognition",
+            "audio_end_ms": 20,
+        }
+    )
+    socket.push(
+        {
+            "type": "input_audio_buffer.committed",
+            "event_id": replayed_id,
+            "item_id": "item-replayed-recognition",
+        }
+    )
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "event_id": replayed_id,
+            "content_index": 0,
+            "item_id": "item-replayed-recognition",
+            "transcript": "replayed identity must not become final",
+        }
+    )
+
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    queued = []
+    while not session.events.empty():
+        queued.append(session.events.get_nowait())
+    assert all(event.kind is not RecognitionEventKind.FINAL for event in queued)
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_recognition_event_identity_ledger_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "MAX_NATIVE_SERVER_EVENT_IDS",
+        2,
+    )
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket((native_session_updated_event(server_vad_wire()),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    await provider.open_recognition(request, timeout_seconds=1)
+    socket.push(
+        {
+            "type": "rate_limits.updated",
+            "event_id": "event-recognition-ledger-exact-max",
+            "rate_limits": [],
+        }
+    )
+    socket.push(
+        {
+            "type": "rate_limits.updated",
+            "event_id": "event-recognition-ledger-over-limit",
+            "rate_limits": [],
+        }
+    )
+
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
     with pytest.raises(OpenAIStreamingSpeechError) as retired:
         await provider.next_recognition_event(request.ref, timeout_seconds=0.01)
     assert retired.value.reason == "RECOGNITION_STREAM_NOT_FOUND"
@@ -3332,6 +3586,126 @@ async def test_native_realtime_synthesis_late_after_terminal_releases_zero_audio
     await provider.close()
 
 
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_late_during_close_releases_zero_audio() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    socket = CoordinatedCloseSocket(
+        (
+            native_session_created_event(),
+            native_synthesis_session_updated_event(),
+        )
+    )
+    provider, _, request = await open_native_synthesis_for_test(
+        facts=facts,
+        socket=socket,
+    )
+    response_id = "provider-response-late-during-close"
+    native_response_prelude(socket, request, response_id)
+    encoded = base64.b64encode(struct.pack("<hhhh", 1, -1, 2, -2)).decode("ascii")
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta",
+            response_id,
+            event_id="event-audio-before-close",
+            delta=encoded,
+        )
+    )
+    socket.push(native_audio_event("response.output_audio.done", response_id))
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.done",
+            response_id,
+            transcript=request.spoken_text,
+        )
+    )
+    for event in native_response_completion_events(request, response_id):
+        socket.push(event)
+
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    socket.push(
+        native_audio_event(
+            "response.output_audio.delta",
+            response_id,
+            event_id="event-unique-late-during-close",
+            delta=encoded,
+        )
+    )
+    socket.release_close.set()
+
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if facts:
+            break
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    terminal_eof = socket.incoming.get_nowait()
+    assert isinstance(terminal_eof, _RealtimeSocketTerminalEof)
+    assert socket.incoming.empty()
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_close_drain_allows_rate_limits() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = CoordinatedCloseSocket(
+        (
+            native_session_created_event(),
+            native_synthesis_session_updated_event(),
+        )
+    )
+    provider, _, request = await open_native_synthesis_for_test(
+        facts=facts,
+        socket=socket,
+    )
+    response_id = "provider-response-rate-limits-during-close"
+    native_response_prelude(socket, request, response_id)
+    encoded = base64.b64encode(struct.pack("<hhhh", 1, -1, 2, -2)).decode("ascii")
+    socket.push(
+        native_audio_event("response.output_audio.delta", response_id, delta=encoded)
+    )
+    socket.push(native_audio_event("response.output_audio.done", response_id))
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.done",
+            response_id,
+            transcript=request.spoken_text,
+        )
+    )
+    for event in native_response_completion_events(request, response_id):
+        socket.push(event)
+
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    socket.push(
+        {
+            "type": "rate_limits.updated",
+            "event_id": "event-rate-limits-during-close",
+            "rate_limits": [],
+        }
+    )
+    socket.release_close.set()
+
+    chunks = []
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        if event.kind is SynthesisEventKind.CHUNK:
+            assert socket.closed is True
+            chunks.append(event)
+        if event.kind is SynthesisEventKind.COMPLETED:
+            break
+    assert chunks
+    assert not facts
+    assert socket.incoming.empty()
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
@@ -3396,6 +3770,67 @@ async def test_native_realtime_synthesis_rejects_changed_initial_response(
         )
     )
     for event in native_response_completion_events(request, response_id):
+        socket.push(event)
+
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    with pytest.raises(OpenAIStreamingSpeechError) as retired:
+        await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
+    assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "object",
+        "status_details",
+        "usage_type",
+        "usage_total",
+        "missing_usage",
+    ),
+)
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_rejects_contradictory_terminal_response(
+    mutation: str,
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    provider, socket, request = await open_native_synthesis_for_test(facts=facts)
+    response_id = "provider-response-invalid-terminal"
+    native_response_prelude(socket, request, response_id)
+    encoded = base64.b64encode(struct.pack("<hhhh", 1, -1, 2, -2)).decode("ascii")
+    socket.push(
+        native_audio_event("response.output_audio.delta", response_id, delta=encoded)
+    )
+    socket.push(native_audio_event("response.output_audio.done", response_id))
+    socket.push(
+        native_audio_event(
+            "response.output_audio_transcript.done",
+            response_id,
+            transcript=request.spoken_text,
+        )
+    )
+    completion = list(native_response_completion_events(request, response_id))
+    terminal = completion[-1]["response"]
+    assert isinstance(terminal, dict)
+    if mutation == "object":
+        terminal["object"] = "not.realtime.response"
+    elif mutation == "status_details":
+        terminal["status_details"] = {
+            "type": "failed",
+            "error": {"type": "server_error"},
+        }
+    elif mutation == "usage_type":
+        terminal["usage"] = "invalid-usage"
+    elif mutation == "usage_total":
+        usage = terminal["usage"]
+        assert isinstance(usage, dict)
+        usage["total_tokens"] = 4
+    else:
+        del terminal["usage"]
+    for event in completion:
         socket.push(event)
 
     await asyncio.wait_for(socket.closed_event.wait(), timeout=1)

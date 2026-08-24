@@ -31,6 +31,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     SpeechDegradationReason,
     SpeechRouteTier,
     StreamingSpeechSelection,
+    _RealtimeSocketTerminalEof,
 )
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
@@ -96,7 +97,7 @@ class _FakeSseStream:
 class _FakeRealtimeSocket:
     def __init__(self, initial: tuple[dict[str, object], ...]) -> None:
         self.sent: list[dict[str, object]] = []
-        self.incoming: asyncio.Queue[str] = asyncio.Queue()
+        self.incoming: asyncio.Queue[str | BaseException] = asyncio.Queue()
         self.closed = False
         for event in initial:
             self.push(event)
@@ -108,10 +109,16 @@ class _FakeRealtimeSocket:
         self.sent.append(json.loads(message))
 
     async def recv(self) -> str:
-        return await self.incoming.get()
+        value = await self.incoming.get()
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     async def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
+        self.incoming.put_nowait(_RealtimeSocketTerminalEof())
 
 
 class _FakeProvider(NativeStreamingSpeechProvider):
@@ -659,7 +666,9 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
             "event_id": "event-response-done",
             "response": {
                 "id": response_id,
+                "object": "realtime.response",
                 "status": "completed",
+                "status_details": None,
                 "metadata": metadata,
                 "conversation_id": None,
                 "output_modalities": ["audio"],
@@ -670,6 +679,26 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
                     }
                 },
                 "output": [completed_item],
+                "usage": {
+                    "total_tokens": 3,
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "input_token_details": {
+                        "audio_tokens": 0,
+                        "text_tokens": 1,
+                        "image_tokens": 0,
+                        "cached_tokens": 0,
+                        "cached_tokens_details": {
+                            "audio_tokens": 0,
+                            "text_tokens": 0,
+                            "image_tokens": 0,
+                        },
+                    },
+                    "output_token_details": {
+                        "audio_tokens": 1,
+                        "text_tokens": 1,
+                    },
+                },
             },
         }
     )

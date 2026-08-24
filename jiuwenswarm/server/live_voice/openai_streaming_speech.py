@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 from urllib.parse import urlencode, urlparse, urlunparse
 
 import httpx
@@ -231,6 +231,33 @@ class RealtimeSocket(Protocol):
     async def recv(self) -> str | bytes: ...
 
     async def close(self) -> None: ...
+
+
+class _RealtimeSocketTerminalEof(Exception):
+    """Internal proof that a locally closing WebSocket receive owner reached EOF."""
+
+
+class _WebSocketRealtimeSocket:
+    def __init__(self, socket: Any) -> None:
+        self._socket = socket
+
+    async def send(self, message: str) -> None:
+        await self._socket.send(message)
+
+    async def recv(self) -> str | bytes:
+        try:
+            return await self._socket.recv()
+        except BaseException as exc:
+            if _is_process_control(exc) or isinstance(exc, asyncio.CancelledError):
+                raise
+            from websockets.exceptions import ConnectionClosed
+
+            if isinstance(exc, ConnectionClosed):
+                raise _RealtimeSocketTerminalEof() from None
+            raise
+
+    async def close(self) -> None:
+        await self._socket.close()
 
 
 class SpeechSseStream(Protocol):
@@ -681,6 +708,7 @@ class _RecognitionSession:
     event_seq: int = 0
     committed: bool = False
     negotiated: bool = False
+    native_event_ids: set[str] = field(default_factory=set, repr=False)
     input_fenced: bool = False
     commit_owner: _RecognitionCommitOwner = _RecognitionCommitOwner.NONE
     closing: bool = False
@@ -817,7 +845,8 @@ async def _default_socket_factory(
         else "extra_headers"
     )
     kwargs[parameter] = dict(headers)
-    return await websockets.connect(url, **kwargs)
+    socket = await websockets.connect(url, **kwargs)
+    return _WebSocketRealtimeSocket(socket)
 
 
 async def _default_sse_factory(
@@ -1195,22 +1224,30 @@ class OpenAIStreamingSpeechProvider:
         self, ref: RecognitionStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
         session = self._require_recognition(ref)
-        self._conformance.request_recognition_cancel(ref, reason=reason)
-        session.closing = True
-        await self._close_socket(session.socket)
-        if session.receive_task is not None:
-            await self._transport_cleanup_tasks.cancel_task(
-                session.receive_task, kind="recognition-worker"
+        try:
+            self._conformance.request_recognition_cancel(ref, reason=reason)
+            session.closing = True
+            await self._close_socket(session.socket)
+            if session.receive_task is not None:
+                await self._transport_cleanup_tasks.cancel_task(
+                    session.receive_task, kind="recognition-worker"
+                )
+            self._conformance.provider_closed_recognition(ref)
+            session.terminal = True
+            await self._retire_recognition(session)
+            await self._emit_failure(
+                operation="recognition.cancel",
+                reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
+                started_at=None,
+                identity=f"{ref.session_id}:{ref.session_generation}",
             )
-        self._conformance.provider_closed_recognition(ref)
-        session.terminal = True
-        await self._retire_recognition(session)
-        await self._emit_failure(
-            operation="recognition.cancel",
-            reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
-            started_at=None,
-            identity=f"{ref.session_id}:{ref.session_generation}",
-        )
+        finally:
+            # ``open_recognition`` shields this Future while the registered
+            # session negotiates.  External cancel owns that opening session,
+            # so it must settle the waiter after cleanup instead of leaving the
+            # open call alive until its original Provider deadline.
+            if not session.ready.done():
+                session.ready.cancel()
 
     async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
         session: _SynthesisSession | None = None
@@ -1491,6 +1528,8 @@ class OpenAIStreamingSpeechProvider:
                 "recognition Provider message exceeds the limit",
             )
         event = _json_object(raw)
+        if self._config.realtime_model is not None:
+            self._accept_native_recognition_event_id(session, event)
         kind = event.get("type")
         if not session.negotiated and kind not in {
             "session.created",
@@ -1885,13 +1924,7 @@ class OpenAIStreamingSpeechProvider:
             raw = await self._recv_native_synthesis(session)
             if await self._consume_native_synthesis_message(session, raw):
                 await self._quarantine_native_terminal(session)
-                socket = session.socket
-                if socket is None or not await self._close_socket(socket):
-                    raise OpenAIStreamingSpeechError(
-                        "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
-                        "native Realtime synthesis terminal transport did not close",
-                    )
-                session.socket = None
+                await self._settle_native_terminal_transport(session)
                 await self._publish_native_audio_buffer(session)
                 return True
 
@@ -1909,12 +1942,103 @@ class OpenAIStreamingSpeechProvider:
                     raw = await self._recv_native_synthesis(session)
             except (TimeoutError, asyncio.TimeoutError):
                 return
-            event = _json_object(raw)
-            self._accept_native_event_id(session, event)
-            kind = event.get("type")
-            if kind == "rate_limits.updated":
-                continue
-            self._raise_native_phase(session, kind)
+            self._consume_native_terminal_observation(session, raw)
+
+    async def _settle_native_terminal_transport(
+        self, session: _SynthesisSession
+    ) -> None:
+        socket = session.socket
+        if socket is None:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                "native Realtime synthesis terminal transport is unavailable",
+            )
+        drain_task = asyncio.create_task(
+            self._drain_native_terminal_during_close(session, socket),
+            name=(
+                f"openai-native-terminal-drain-"
+                f"{session.request.ref.stream_id}-"
+                f"{session.request.ref.stream_generation}"
+            ),
+        )
+        try:
+            if not await self._close_socket(socket):
+                if drain_task.done():
+                    try:
+                        drain_task.result()
+                    except OpenAIStreamingSpeechError:
+                        raise
+                    except BaseException as exc:
+                        if _is_process_control(exc):
+                            raise exc from None
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                    "native Realtime synthesis terminal transport did not close",
+                )
+            session.socket = None
+            try:
+                async with asyncio.timeout(TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS):
+                    await asyncio.shield(drain_task)
+            except OpenAIStreamingSpeechError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, asyncio.TimeoutError) as exc:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                    "native Realtime terminal receive owner did not settle",
+                ) from exc
+            except _RealtimeSocketTerminalEof:
+                # The wrapper emits this only after the WebSocket protocol has
+                # delivered every frame ordered before its close boundary.
+                return
+            except BaseException as exc:
+                if _is_process_control(exc):
+                    raise exc from None
+                raise _safe_transport_exception(exc) from None
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                "native Realtime terminal receive owner ended without transport EOF",
+            )
+        finally:
+            if not drain_task.done():
+                await self._transport_cleanup_tasks.cancel_task(
+                    drain_task, kind="native-terminal-drain"
+                )
+            else:
+                # Observe an already-finished loser when close itself raised
+                # before the main path could await the drain outcome.
+                with suppress(BaseException):
+                    drain_task.exception()
+
+    async def _drain_native_terminal_during_close(
+        self,
+        session: _SynthesisSession,
+        socket: RealtimeSocket,
+    ) -> None:
+        while True:
+            raw = await socket.recv()
+            self._consume_native_terminal_observation(session, raw)
+
+    def _consume_native_terminal_observation(
+        self, session: _SynthesisSession, raw: str | bytes
+    ) -> None:
+        if type(raw) is not str:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_BINARY_CONTROL",
+                "native Realtime synthesis returned a binary control message",
+            )
+        if len(raw.encode("utf-8")) > MAX_WIRE_MESSAGE_BYTES:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_MESSAGE_LIMIT",
+                "native Realtime synthesis message exceeds the limit",
+            )
+        event = _json_object(raw)
+        self._accept_native_event_id(session, event)
+        kind = event.get("type")
+        if kind == "rate_limits.updated":
+            return
+        self._raise_native_phase(session, kind)
 
     async def _recv_native_synthesis(self, session: _SynthesisSession) -> str:
         if session.socket is None:
@@ -2189,18 +2313,40 @@ class OpenAIStreamingSpeechProvider:
     def _accept_native_event_id(
         self, session: _SynthesisSession, event: Mapping[str, object]
     ) -> None:
+        self._accept_bounded_native_event_id(
+            session.native_event_ids,
+            event,
+            operation="synthesis",
+        )
+
+    def _accept_native_recognition_event_id(
+        self, session: _RecognitionSession, event: Mapping[str, object]
+    ) -> None:
+        self._accept_bounded_native_event_id(
+            session.native_event_ids,
+            event,
+            operation="recognition",
+        )
+
+    @staticmethod
+    def _accept_bounded_native_event_id(
+        event_ids: set[str],
+        event: Mapping[str, object],
+        *,
+        operation: str,
+    ) -> None:
         event_id = _safe_label(event.get("event_id"), "event_id")
-        if event_id in session.native_event_ids:
+        if event_id in event_ids:
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_EVENT_REPLAY",
-                "native Realtime synthesis replayed a server event",
+                f"native Realtime {operation} replayed a server event",
             )
-        if len(session.native_event_ids) >= MAX_NATIVE_SERVER_EVENT_IDS:
+        if len(event_ids) >= MAX_NATIVE_SERVER_EVENT_IDS:
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_EVENT_LIMIT",
-                "native Realtime synthesis exceeded the event identity limit",
+                f"native Realtime {operation} exceeded the event identity limit",
             )
-        session.native_event_ids.add(event_id)
+        event_ids.add(event_id)
 
     def _note_native_progress(self, session: _SynthesisSession) -> None:
         session.native_progress_deadline = (
@@ -3259,6 +3405,20 @@ def _native_terminal_output_matches(
     expected_text: str,
     expected_voice: str,
 ) -> bool:
+    required_fields = {
+        "id",
+        "object",
+        "status",
+        "status_details",
+        "output",
+        "conversation_id",
+        "output_modalities",
+        "audio",
+        "usage",
+        "metadata",
+    }
+    if not required_fields.issubset(response):
+        return False
     output = response.get("output")
     if type(output) is not list or len(output) != 1 or expected_item_id is None:
         return False
@@ -3267,7 +3427,10 @@ def _native_terminal_output_matches(
     audio_output = audio.get("output") if type(audio) is dict else None
     audio_format = audio_output.get("format") if type(audio_output) is dict else None
     return (
-        response.get("conversation_id") is None
+        response.get("object") == "realtime.response"
+        and response.get("status_details") is None
+        and _native_terminal_usage_matches(response.get("usage"))
+        and response.get("conversation_id") is None
         and response.get("output_modalities") == ["audio"]
         and type(audio_output) is dict
         and type(audio_format) is dict
@@ -3280,6 +3443,85 @@ def _native_terminal_output_matches(
             expected_text=expected_text,
         )
     )
+
+
+def _native_terminal_usage_matches(value: object) -> bool:
+    if type(value) is not dict:
+        return False
+    required_fields = {
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "input_token_details",
+        "output_token_details",
+    }
+    if not required_fields.issubset(value):
+        return False
+    total_tokens = value.get("total_tokens")
+    input_tokens = value.get("input_tokens")
+    output_tokens = value.get("output_tokens")
+    input_details = value.get("input_token_details")
+    output_details = value.get("output_token_details")
+    if not all(
+        _is_nonnegative_int(count)
+        for count in (total_tokens, input_tokens, output_tokens)
+    ):
+        return False
+    if type(input_details) is not dict or type(output_details) is not dict:
+        return False
+    input_audio = input_details.get("audio_tokens")
+    input_text = input_details.get("text_tokens")
+    input_image = input_details.get("image_tokens", 0)
+    cached_tokens = input_details.get("cached_tokens")
+    output_audio = output_details.get("audio_tokens")
+    output_text = output_details.get("text_tokens")
+    if not all(
+        _is_nonnegative_int(count)
+        for count in (
+            input_audio,
+            input_text,
+            input_image,
+            cached_tokens,
+            output_audio,
+            output_text,
+        )
+    ):
+        return False
+    total_tokens = cast(int, total_tokens)
+    input_tokens = cast(int, input_tokens)
+    output_tokens = cast(int, output_tokens)
+    input_audio = cast(int, input_audio)
+    input_text = cast(int, input_text)
+    input_image = cast(int, input_image)
+    cached_tokens = cast(int, cached_tokens)
+    output_audio = cast(int, output_audio)
+    output_text = cast(int, output_text)
+    if (
+        total_tokens != input_tokens + output_tokens
+        or input_tokens != input_audio + input_text + input_image
+        or output_tokens != output_audio + output_text
+        or cached_tokens > input_tokens
+    ):
+        return False
+    cached_details = input_details.get("cached_tokens_details")
+    if cached_details is None:
+        return cached_tokens == 0
+    if type(cached_details) is not dict:
+        return False
+    cached_audio = cached_details.get("audio_tokens", 0)
+    cached_text = cached_details.get("text_tokens", 0)
+    cached_image = cached_details.get("image_tokens", 0)
+    return (
+        all(
+            _is_nonnegative_int(count)
+            for count in (cached_audio, cached_text, cached_image)
+        )
+        and cached_tokens == cached_audio + cached_text + cached_image
+    )
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
 
 
 def _native_output_message_matches(

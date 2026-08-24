@@ -2,7 +2,7 @@
 
 ## Disposition
 
-**SECOND REPAIR SOURCE/AUTOMATION PASS — THIRD INDEPENDENT REVIEW REQUIRED.**
+**THIRD REPAIR SOURCE/AUTOMATION PASS — FOURTH INDEPENDENT REVIEW REQUIRED.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -28,6 +28,20 @@ is required before any real Provider/device validation. No OpenAI credential,
 network session, microphone or speaker was used, so all physical claims remain
 open. No prior source/automation statement grants current PASS or independent
 review credit.
+
+A third detached review of exact second-repair source
+`21d3de2a4d05c5885f6c482856ec0f03bd835370` returned `C0/I4/M0`. It proved
+that a response-scoped frame received during the socket close handshake can
+escape the fixed terminal quarantine; opening recognition cancel does not
+settle `ready` and therefore emits a later false timeout; terminal
+`response.done` accepts contradictory object, status-details and usage facts;
+and native recognition accepts missing or replayed server event IDs without a
+bounded ledger. The third repair is limited to those four protocol/lifecycle
+seams and their exact positive, negative, concurrency, boundary and forbidden-
+effect oracles. Its source and affected automated matrix now pass, but no
+detached reviewer has inspected the repair. The latest independent result
+therefore remains `C0/I4/M0`; no current independent PASS or physical credit
+exists.
 
 The review covers the change based on
 `2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the containing commit is the
@@ -132,8 +146,8 @@ The repair is deliberately limited to the four reported findings:
    8 MiB aggregate acceptance versus `+2` rejection.
 
 These are implementer-run repair results, not an independent follow-up
-disposition. The second independent `C0/I3/M0` result remains the latest
-independent judgement until a detached reviewer inspects the second repair.
+disposition. The third independent `C0/I4/M0` result is the latest independent
+judgement until a detached reviewer inspects the third repair.
 
 ## Second repair response to the second independent findings
 
@@ -163,20 +177,50 @@ findings:
 These results are still implementer-run source/automation evidence. They do not
 change the last independent FAIL or authorize physical/provider acceptance.
 
+## Third repair response to the third independent findings
+
+The third repair is deliberately limited to the four reported Important
+findings:
+
+1. **I1 — close-handshake receive authority:** after the bounded terminal
+   quarantine, one drain task owns receive before local close begins. Buffered
+   PCM is published only after close succeeds and the production WebSocket
+   wrapper proves terminal receive EOF. A unique late response delta delivered
+   during close releases zero audio and emits one protocol fact; a unique
+   `rate_limits.updated` event in the same window remains legal.
+2. **I2 — opening cancel settlement:** external recognition cancel closes and
+   retires the registered opening session, records the single unacknowledged-
+   cancel fact, and then settles its shielded `ready` future. The opening call
+   wakes as cancellation within the bounded oracle and cannot later add a false
+   Provider-timeout fact.
+3. **I3 — complete terminal response truth:** `response.done` now requires the
+   complete terminal `realtime.response` shape, null status-details and a
+   nonnegative, internally consistent usage resource before any buffered PCM
+   can be released. Missing, mistyped, contradictory and arithmetically invalid
+   terminal facts fail closed.
+4. **I4 — recognition event identity:** every server event on the native
+   recognition route requires a safe unique `event_id` in the same bounded
+   per-session ledger used for native synthesis. Missing IDs, replay across the
+   speech-start/stop/commit/final lifecycle and ledger overflow emit protocol
+   degradation and cannot release a recognition final.
+
+These are implementer-run source/automation results only. They do not change
+the latest independent FAIL or authorize physical/provider acceptance.
+
 ## Verification
 
-Executed in the second-repair worktree on Windows after the second independent
+Executed in the third-repair worktree on Windows after the third independent
 findings:
 
 ```text
 uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
-116 passed in 5.46s; openai_streaming_speech.py 1864 statements, 210 missed, 89%
+128 passed in 5.51s; openai_streaming_speech.py 1986 statements, 232 missed, 88%
 
 uv run pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
-171 passed, 1 deselected in 5.27s
+171 passed, 1 deselected in 5.61s
 
 C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
-80 passed in 11.03s
+80 passed in 10.77s
 
 uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
@@ -238,8 +282,8 @@ LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
-The next acceptance trigger is a detached independent Tier-3 follow-up review
-of the exact repair commit and its complete boundary. Only after that review
+The next acceptance trigger is a fourth detached independent Tier-3 review of
+the exact third-repair commit and its complete boundary. Only after that review
 passes may a shortest real server-to-server probe be followed by the existing
 microphone/Agent/playout journey. The physical run must record Provider/session
 model truth, final transcript, audible exact Agent text, cancel/degradation
