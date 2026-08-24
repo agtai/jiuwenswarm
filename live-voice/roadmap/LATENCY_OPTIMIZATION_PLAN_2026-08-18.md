@@ -1,6 +1,6 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** L0 IMPLEMENTATION, TWO REVIEW-REPAIR ROUNDS AND AUTOMATED/
+> **Plan status:** L0 IMPLEMENTATION, THREE REVIEW-REPAIR ROUNDS AND AUTOMATED/
 > PROVIDER-COMPONENT BASELINES COMPLETE; FURTHER TIER-3 REVIEW, PHYSICAL
 > BASELINE AND OPTIMIZATION REMAIN OPEN.
 > [STATUS](../STATUS.md) remains the only owner
@@ -21,11 +21,12 @@
 > **2026-08-24 execution update:** the §3 correlated L0 source/automation layer,
 > closed fixed corpus, injected baseline and real-Provider digital-loopback
 > component baseline are complete. The Provider component lifecycle is recorded
-> as unknown/uncontrolled rather than cold/warm. Two independent review rounds
+> as unknown/uncontrolled rather than cold/warm. Three independent review rounds
 > found cross-sample label, Chrome endpoint-owner, Browser feature-off allocation,
-> full tombstone-capacity ownership and CDP discovery/connect race defects; all
-> five are repaired and the baselines were regenerated on `4b96f9823`. Physical
-> Formal Web cold/warm collection and a further Tier-3 review are still open, so
+> full tombstone-capacity ownership, CDP discovery/connect race and direct
+> proxy/redirect/listener/four-tuple defects; all seven are repaired and the
+> baselines were regenerated on `655226e99`. Physical Formal Web cold/warm
+> collection and another Tier-3 review are still open, so
 > §4 and later optimization layers are not activated
 > by these non-physical results. See the
 > [L0 evidence](../evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
@@ -376,7 +377,7 @@ integration, but activates no next packet. The `e1df8b452` physical run supplies
 a scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
 fixed-corpus baseline required by this plan. The STATUS-selected 2026-08-23 L0
 packet now supplies owner-scoped correlated instrumentation, the frozen corpus
-and non-physical baselines and is ready for a further Tier-3 review. It does not
+and non-physical baselines and is ready for another Tier-3 review. It does not
 activate an optimization batch: review closure and physical cold/warm Formal Web
 collection are the next dependencies. Only physical evidence may select VAD,
 startup-buffer, EOT settlement or sentence-overlap work. Any later assigned

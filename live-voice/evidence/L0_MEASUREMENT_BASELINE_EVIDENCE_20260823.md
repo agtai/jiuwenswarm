@@ -7,7 +7,7 @@
 - Baseline: `c31e85ade1a69e934d05bfb9c277568a1238663c` on
   `hx/0812_live_voice_w3`.
 - Measured product/test/corpus source:
-  `4b96f98231d272217e3d8ff501e5750b8101c2e6`.
+  `655226e99939edd86b52c3c78e187d696845572e`.
   The later evidence-only commit changes documentation, not the measured
   product, test, corpus or runner trees.
 - Risk: Tier 3. The production hooks cross Browser, Gateway, Runtime and Agent
@@ -15,8 +15,9 @@
   lifecycle or mutation authority.
 - Overall disposition: **PARTIAL**. Correlated production instrumentation,
   fixed corpus, injected baseline and real-Provider digital-loopback component
-  baseline are implemented and automated. Two independent review rounds found
-  three, then two bounded issues; all five are repaired. Further Tier-3 review and
+  baseline are implemented and automated. Three independent review rounds found
+  three, then two, then two bounded issues; all seven are repaired. Further
+  Tier-3 review and
   the required physical microphone, speaker and room cold/warm profiles remain
   open, so no module-Gate PASS, current physical p50/p95, audibility, AEC,
   stop-to-silence or feature-complete latency credit is claimed.
@@ -71,9 +72,11 @@ separately as fallback; silence remains failure.
   `formal-web-validation` launcher path with a separate Chrome profile/debug
   endpoint and dynamic closed labels. Session v6 rejects a pre-existing debug
   listener, binds the exact launched Chrome executable/profile/PID lineage,
-  requires a per-launch page nonce and revalidates those facts before and after
-  page discovery and after the WebSocket connection is established. The
-  ordinary launcher path is unchanged.
+  requires a per-launch page nonce, disables HTTP/WebSocket proxies and
+  redirects, and revalidates those facts before and after page discovery and
+  after the direct WebSocket connection is established. The established peer
+  and server-side four-tuple must also belong to the debugger PID. The ordinary
+  launcher path is unchanged.
 - `l0_browser_capture.py` takes no manual timestamps. It reads the browser CDP
   timeline automatically and asks the operator only for pass/fail/quit. A sample
   counts only when the operator passes, no browser record was dropped, all
@@ -116,7 +119,7 @@ therefore recorded as `unknown`/`uncontrolled`, not cold or warm:
 
 | Profile | Success | Batch synthesis completion p50 / p95 | Recognition p50 / p95 | In-memory loopback p50 / p95 |
 |---|---:|---:|---:|---:|
-| unknown / uncontrolled | `20/20` | `1641.0 / 2359.0 ms` | `422.0 / 703.0 ms` | `2234.0 / 3437.0 ms` |
+| unknown / uncontrolled | `20/20` | `1672.0 / 2719.0 ms` | `375.0 / 609.0 ms` | `2093.0 / 3109.0 ms` |
 
 These numbers measure batch synthesis completion, not streaming first audio.
 Digital loopback is neither a physical microphone/speaker route nor the full
@@ -137,7 +140,7 @@ it identifies the configured field set without retaining values or credentials.
 | T — temporal | Duplicate/idempotent, conflict, reorder, missing, negative/regressive duration, future sample and cancel ordering fail closed or remain unknown. |
 | C — concurrency | Locked collector, process-sink serialization, response registration with frozen run labels, pre-synthesis Browser/Gateway and pre-dispatch Runtime registration; delayed callbacks cannot cross samples, including when the conflict-tombstone budget is full. |
 | R — restart/replay | Append-only fsync JSONL, deterministic reload/aggregate, dynamic labels, exact source/corpus hashes and Chrome session-v6 executable/profile/PID/nonce ownership; no replay creates product effects. |
-| I — isolation | Exact Session/correlation/interaction/activation/response/turn/round and optional Task/Attempt binding; partial identity pins once, response labels cannot rebind, and CDP revalidates the exact executable/listener/page owner across discovery and connection. |
+| I — isolation | Exact Session/correlation/interaction/activation/response/turn/round and optional Task/Attempt binding; partial identity pins once, response labels cannot rebind, and CDP rejects proxies/redirects while revalidating the exact IPv4 listener, executable, profile, page, peer and established server four-tuple. |
 | F — feature/fallback | Ordinary path remains flag-off; failure/fallback/cancel are distinct and excluded; physical runner accepts only nominal non-injected success cases. |
 | K — compatibility | P2 production batch `16` and omitted single-pull compatibility remain covered; no shared schema or wire extension. |
 | X — cross-module | Formal Web, Browser Audio, Dedicated Media, Agent Bridge, Registry, launcher and Python/TypeScript privacy/aggregation tests cover the actual owner chain. |
@@ -145,9 +148,9 @@ it identifies the configured field set without retaining values or credentials.
 ## Verification
 
 - L0 collector/corpus/browser-capture plus affected Agent/Gateway/Registry/
-  launcher Python run: `436 passed / 6 failed`. The six failures are the same
+  launcher Python run: `439 passed / 6 failed`. The six failures are the same
   pre-existing P3 fixture/projection set reproduced on baseline `c31e85ade`;
-  the focused L0/launcher run is `56/56` and all new production-hook
+  the focused L0/launcher run is `59/59` and all new production-hook
   tests pass.
 - Formal Integrated Web: `478/478`; Browser Audio I/O: `103/103`;
   Dedicated Media: `27/27`; Gateway Media: `38/38`; Browser L0: `5/5`.
@@ -186,7 +189,19 @@ and verifies the exact Chrome executable, and revalidates ownership before and
 after page discovery and after WebSocket connection. The capacity, executable
 and both race-window regressions pass, and both baselines above were regenerated
 on that exact source. A further independent Tier-3 review of `4b96f9823`
-remains required; neither repair round grants a review PASS.
+returned `FAIL`, with no P0/P1/P3 and two P2 findings. HTTP and WebSocket
+connections could use environment proxies, WebSocket handshake redirects could
+leave the validated port, and the post-connect checks did not bind the actual
+stream. Launcher listener rows also omitted their local address and used a
+profile substring, while Python ignored unknown/non-loopback rows and treated
+`::1` as equivalent to the fixed IPv4 endpoint. Commit `655226e99` disables
+both proxy paths, rejects every handshake redirect, verifies the direct peer and
+Chrome-owned established four-tuple, requires one exact `127.0.0.1` listener,
+and parses Windows command lines before exact single-value option comparison.
+Proxy, redirect, peer/four-tuple, profile-prefix, wildcard, IPv6 and unknown-PID
+regressions pass, and both baselines above were regenerated on that exact
+source. Another independent Tier-3 review of `655226e99` remains required; no
+repair round grants a review PASS.
 
 ## Physical acceptance still open
 
@@ -211,8 +226,8 @@ digest, corpus digest and sample identities are checked automatically.
 
 The injected oracle's largest modeled critical-path segment is Agent request to
 `chat.final` (`1572.0 / 1794.0 ms`), while the real Provider component's batch
-synthesis completion is `1641.0 / 2359.0 ms`. Neither is a physical end-to-end
-bottleneck claim. The next required action is the further independent Tier-3
+synthesis completion is `1672.0 / 2719.0 ms`. Neither is a physical end-to-end
+bottleneck claim. The next required action is another independent Tier-3
 review; after it passes, the next packet is the already-defined physical
 cold/warm fixed-corpus collection, not a production optimization. Only that
 evidence may choose among VAD finalization, browser startup buffering,
