@@ -106,9 +106,9 @@ a frozen-corpus off/on waterfall.
 | `LVL-05` | Combined P2 + TTS checkpoint | Deterministic Gate A; controlled round total | W1 **8,000→6,985**, W2 **14,900→10,240**, W3 **17,150→8,580 ms**, `CONTROLLED` + `DERIVED` | Controlled checkpoint improved; raw product observer was not covered |
 | `LVL-06` | EOT/STT early-result waiter materiality | Deterministic Gate A; component total | Largest removable-gap p50 **0.885 ms**, fraction **0.015**, `MEASURED` + `DERIVED` | Stop: no material serial tail; no candidate B |
 | `LVL-07` | Stable-sentence Agent→TTS overlap | Real Agent + real Provider screen; projected perceived latency | Projected gain p50 **177.2 ms**, p95 **425.3 ms**, `DERIVED`; final-gated baseline `ESTIMATED` | Stop for tested workloads; failed all three latency materiality gates |
-| `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Next causal screen; retain 1200 ms fallback |
+| `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Queued after the activated LVL-10 screen; retain 1200 ms fallback |
 | `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser diagnostic; estimated schedule boundary | One unmatched-round schedule→start estimate **578.998→46.703 ms**, delta **-532.295 ms**, `MEASURED` + `DIAGNOSTIC` | Default remains 1000 ms; clean same-source/workload A1/B/A2 required |
-| `LVL-10` | Authoritative-final segmented TTS | Planned no-Browser real-Provider `A1/B/A2`; optional Batch/fallback `R0` non-causal | Numeric result `UNKNOWN`; current full-final TTS already streams SSE audio deltas | New candidate distinct from LVL-07; prospective spec/Provider PASS before conditional Browser Lane C or product wiring |
+| `LVL-10` | Authoritative-final segmented TTS | Specified no-Browser real-Provider `A1/B/A2`; optional Batch/fallback `R0` non-causal | Numeric result `UNKNOWN`; current full-final TTS already streams SSE audio deltas | Activated screen distinct from LVL-07; [prospective spec](../roadmap/AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md) review and Provider PASS before conditional Browser Lane C or product wiring |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -634,9 +634,10 @@ post-final segmentation. `LVL-10-R0` may inspect Batch/fallback configuration,
 but is excluded from the causal comparison.
 
 The screen measures first Provider PCM, one prospectively defined source
-playable reserve, completion, inter-segment gap and request count. The future
-spec must freeze reserve duration/sample rate/clock/measurement label plus the
-segment rule, maximum segments/requests, prefetch depth, ordered release and
+playable reserve, completion, inter-segment gap and request count. The
+[prospective LVL-10 specification](../roadmap/AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md)
+freezes reserve duration/sample rate/clock/measurement label plus the fixture
+segment offsets, maximum segments/requests, prefetch depth, ordered release and
 partial-failure disposition. Injected replacement/cancellation/failure must
 produce exact text/order, zero post-fence PCM, no stale or unauthorized speech,
 no Agent/Tool/Task/history effects and no false group completion/receipt.
@@ -688,20 +689,19 @@ artifact ledger. The repository stores only sanitized evidence.
 1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
    LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
    remains an evidence gap, not a repair packet.
-2. Repair or replace the manual driver before another physical population: a
+2. Review, implement and run the activated no-Browser LVL-10 materiality spec:
+   `LVL-10-A1/B/A2` compares current full-final SSE with bounded post-final
+   segmentation under one real Provider. Product wiring remains excluded until
+   a materiality/integrity PASS.
+3. Repair or replace the manual driver before another physical population: a
    beep must identify profile/round/terminal, advancement must reject a
    mismatched or extra batch, and shutdown must retire the complete process
    tree. LVL-00M3 grants localization only.
-3. Run the already specified Provider-native Semantic VAD causal
+4. Run the already specified Provider-native Semantic VAD causal
    screen with the 1200 ms fallback and natural-pause integrity gates.
-4. Run a clean same-source/same-workload LVL-09
+5. Run a clean same-source/same-workload LVL-09
    A1=1000/B=250/A2=1000 Browser screen. Do not change the default from the
    unmatched diagnostic.
-5. Write the prospective LVL-10 materiality spec, then compare
-   `LVL-10-A1/B/A2`: current full-final SSE against bounded post-final
-   segmentation with the same real Provider. Keep optional Batch/fallback R0
-   outside causal credit. Do not implement product wiring or invent a numeric
-   gate from the one-round 1561 ms TTS-to-downlink segment.
 6. Treat native speech-to-speech as a strategic architecture study requiring a
    separate authority decision, not as the next optimization packet.
 7. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested

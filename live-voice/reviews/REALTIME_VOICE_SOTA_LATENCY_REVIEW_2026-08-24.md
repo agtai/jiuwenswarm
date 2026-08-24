@@ -182,13 +182,15 @@ not capture or Browser scheduling. The declared comparison roles are:
 | Negative gates | Injected replacement, group cancellation, Provider failure and malformed segmentation produce zero post-fence PCM, stale/unauthorized speech, Agent/Tool/Task/history mutation or false group completion/receipt |
 | Stop rule | Do not build product wiring unless B materially improves the declared first-audio or continuity metric without integrity, reliability or cost regression |
 
-The prospective spec must define source playable reserve as the Gateway-owner
+The
+[prospective LVL-10 specification](../roadmap/AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md)
+defines source playable reserve as the runner-owner
 time at which cumulative ordered PCM reaches one exact declared duration at one
-declared sample rate. It must declare the reserve duration, sample accounting,
+declared sample rate. It freezes the reserve duration, sample accounting,
 clock owner and `MEASURED`/`DERIVED` label before A1. That boundary is not
 Browser first-audible credit.
 
-The same spec must freeze the segmentation rule, maximum segment count,
+The same spec freezes manifest offsets, maximum segment count,
 maximum simultaneous Provider requests, prefetch depth, ordered-release rule
 and intermediate-segment failure disposition. Physical microphone barge-in,
 audible first-word integrity and real playout ACK remain outside phase 1.

@@ -578,8 +578,10 @@ scoped human validation; the earlier authorization defect is closed for that
 declared run, while frozen-corpus p50/p95 remains open. EOT/STT found at most
 0.885 ms p50 removable tail and did not authorize a product change.
 Stable-sentence measured only 177.2 ms p50 projected gain for the tested
-workloads and stopped before product wiring. Provider-native Semantic VAD
-remains the next no-Chrome causal screen. Adaptive WebAudio at 250 ms has a
+workloads and stopped before product wiring. The user activated the distinct
+LVL-10 post-final TTS screen first under its
+[prospective specification](AUTHORITATIVE_FINAL_SEGMENTED_TTS_MATERIALITY_SPEC_2026-08-24.md).
+Provider-native Semantic VAD remains specified behind it. Adaptive WebAudio at 250 ms has a
 promising 532.295 ms one-round segment signal, but production remains at 1000 ms
 until a clean compatible A1/B/A2 and truthful underrun/rebuffer evidence pass.
 The 2026-08-24 SOTA review adds LVL-10, authoritative-final segmented TTS, as a
