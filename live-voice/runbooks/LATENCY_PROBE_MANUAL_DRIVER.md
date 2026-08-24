@@ -91,10 +91,22 @@ equal that worktree's `HEAD`; the driver fails before launch on a mismatch or
 dirty tree:
 
 ```bash
+export LV_WORKTREE=/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/adaptive-playout-lead-experiment
+RUN_ID="lvl09-webaudio-$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$LV_WORKTREE" rev-parse --short=9 HEAD)"
+/home/renan/openJiuwen-ai/live-voice-latency-harness/prepare_lvl09_run.sh \
+  "$RUN_ID" 'Chrome <exact-version>'
+
 LV_WORKTREE=/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/adaptive-playout-lead-experiment \
   /home/renan/openJiuwen-ai/live-voice-latency-runs/lv-driver.sh \
-  '<run-id>' --launch --lvl09-manifest='<arms.json>'
+  "$RUN_ID" --launch \
+  --lvl09-manifest="/home/renan/openJiuwen-ai/live-voice-latency-runs/$RUN_ID/lvl09-arms.json"
 ```
+
+The preparer creates `run.json` and the ordered A1/B/A2 manifest exclusively
+with mode 600 and refuses a dirty worktree or reused run ID. It prints the
+fixed phrase that the driver will show for every arm; the operator still owns
+opening the printed URL, speaking that phrase and confirming the physical
+audio outcome.
 
 Interactive commands: `[Enter]`=next stage · `b`=back one stage ·
 `r`=reset to stage 1 · `s`=status · `u`=reprint URL · `q`=finish
