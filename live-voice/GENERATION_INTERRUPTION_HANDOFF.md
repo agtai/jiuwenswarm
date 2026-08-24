@@ -9,8 +9,10 @@ targeted closure review found two Important defects (`C0/I2/M0`). The atomic
 Runtime-ledger defect is repaired on `30300f32`; the cross-capture release race
 is repaired by source candidate `35537a9a`, which retains an exact predecessor
 plus successor, composes one Batch final and fences both competing Streaming
-commit paths. **Nothing has run on a real device. One bounded independent
-Tier-3 review of `35537a9a` remains before physical acceptance.**
+commit paths. Its targeted review returned `C0/I5/M0`; fix-only candidate
+`4c1c7d68` closes those five authority/replay/Exit gaps. **Nothing has run on a
+real device. One bounded follow-up review of `35537a9a..4c1c7d68` remains
+before physical acceptance.**
 
 ---
 
@@ -93,24 +95,23 @@ under heavy parallel load the bounded rollback wait expires and the result
 becomes `ROLLBACK_FAILED`. It failed twice this way across the whole effort.
 Re-run it alone before treating it as a finding.
 
-### Current `35537a9a` continuation checks
+### Current `4c1c7d68` continuation checks
 
 The table above is the historical broad baseline. The exact new source boundary
 has these fresh results:
 
 | Check | Result |
 |---|---|
-| Batch Speech + Media registration/RPC + product authority + Streaming Speech + Python media transport | `257 passed` |
+| Batch Speech + Media registration/RPC + product authority + Streaming Speech + Python media transport | `261 passed` |
 | Formal Integrated Web | `496 passed` |
-| Browser Gateway Media / Browser Dedicated Media / Gateway Batch Speech | `38 / 27 / 30 passed` |
+| Browser Gateway Media / Browser Dedicated Media / Gateway Batch Speech | `38 / 27 / 31 passed` |
 | Ruff / `git diff --check` / `npm run build:live-voice` | PASS |
 
-The review target is the immutable code/test commit `35537a9a`; documentation
-may be a later commit. Do not ask the reviewer to reopen the five historical
-broad rounds. Review only the cross-capture request, media-authority chain,
-receipt fence, replay boundary and cleanup diff introduced by this candidate.
-Use the prepared
-[targeted review prompt](reviews/GENERATION_INTERRUPTION_CROSS_CAPTURE_TIER3_REVIEW_PROMPT_2026-08-24.md).
+The original target `35537a9a` failed `C0/I5/M0`; the immutable repair target is
+`4c1c7d68814c5a165c01c12d036b0b9adc347b66`. Do not ask the reviewer to reopen
+the five historical broad rounds or repeat the full D-096 discovery review.
+Review only the five repaired seams and their cumulative interaction with the
+accepted candidate. Use the prepared [fix-only follow-up prompt](reviews/GENERATION_INTERRUPTION_CROSS_CAPTURE_TIER3_FOLLOWUP_PROMPT_2026-08-24.md).
 
 ## 4. Where the code is
 
@@ -148,11 +149,11 @@ Two invariants are worth stating in words, because both were defects first:
 
 ## 5. Physical acceptance — blocked until one source review closes
 
-Do not run this as acceptance yet. `35537a9a` now has an automated
+Do not run this as acceptance yet. `4c1c7d68` now has an automated
 full-utterance/EOT oracle: the predecessor prefix and successor tail retain
 separate exact capture authorities, Gateway validates both, and one combined
-Batch final is returned. Physical credit is still blocked until one independent
-Tier-3 review of that exact commit closes with no unresolved finding.
+Batch final is returned. Physical credit is still blocked until one fix-only
+Tier-3 follow-up of `35537a9a..4c1c7d68` closes with no unresolved finding.
 
 After that review, this physical run needs a person with headphones. Headphones remove the
 echo/double-talk risk entirely, so what is being judged is timing and accuracy,
@@ -186,9 +187,9 @@ turned back off with no residue.
 * **No physical run of any kind has happened yet.** No latency number is
   claimed, including for the listening window itself.
 * **The late release-race source repair is not independently accepted yet.**
-  `35537a9a` implements the D-096 two-authority Batch boundary and its automated
-  oracle, but the required independent review and physical observation remain
-  open.
+  `35537a9a` implements the D-096 two-authority Batch boundary; its review found
+  five Important gaps and `4c1c7d68` repairs them. The fix-only follow-up and
+  physical observation remain open.
 * Seven mutants survive, in two groups — two halves of one Exit repair that are
   redundant against each other (the combined mutant *is* killed), and five state
   hygiene guards whose external effect another guard already provides. Evidence
@@ -207,7 +208,9 @@ Five broad independent Tier-3 reviews returned `C0/I2/M0`, `C0/I6/M2`,
 `C0/I4/M3`, `C0/I3/M3`, `C0/I3/M3`. A later targeted closure review on
 `b476873b` returned `C0/I2/M0`: its atomic-ledger finding is repaired on
 `30300f32`, while its full-utterance finding is implemented by the explicitly
-re-scoped D-096 candidate `35537a9a` and awaits one bounded independent review.
+re-scoped D-096 candidate `35537a9a`. That candidate's bounded review returned
+`C0/I5/M0`; `4c1c7d68` repairs its five findings and now awaits only the bounded
+fix-only follow-up.
 Full narrative in
 [evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md), decision record
 in [D-095](decisions/DECISIONS.md).

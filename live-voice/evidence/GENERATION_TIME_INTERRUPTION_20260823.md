@@ -513,3 +513,51 @@ source step is one bounded independent Tier-3 review of `35537a9a` and its
 exact diff; only findings in this changed authority boundary require repair and
 follow-up. If that review closes, run handoff §5 once on a real microphone and
 headphones. Do not restart the five historical broad review rounds.
+
+## 9. 2026-08-24 targeted cross-capture review repair
+
+The independent review of `35537a9a` returned **FAIL — C0 / I5 / M0**. This
+result supersedes §8's pending-review wording but does not reopen any historical
+broad review. The five findings and their bounded repairs on `4c1c7d68` are:
+
+1. Standalone Batch authorization is now rejected for both a continuation
+   predecessor and its linked successor, so neither segment can mint a partial
+   or competing receipt.
+2. Successor activation now validates and claims the predecessor under the
+   Registry lock. The retained predecessor records the one exact successor;
+   any sequential or concurrent second claim fails closed.
+3. Activation, Batch parsing, browser request construction and combined
+   authorization all require distinct predecessor/successor capture
+   generations.
+4. The advertised Batch identity-tombstone window is clamped to at least two,
+   preserving both identities of one combined request even when configured
+   with the former minimum of one. Exact predecessor replay remains stale and
+   does not reinvoke the Provider.
+5. Product P1 Exit now fences the current recognition through the existing
+   exact capture/operation cancel path. Local current and predecessor frame
+   owners are cleared before waiting for best-effort cancel completion, and
+   both media authorities are revoked without Agent/Tool/Task effects.
+
+The new regressions were first run against the failing source: Registry `3/3`,
+Batch `2/2`, and the pending-combined-Exit Web oracle all failed for the
+reviewed reasons. After the repairs, the current source has this evidence:
+
+| Check on `4c1c7d68` | Result |
+|---|---|
+| Six-file affected backend set | `261 passed` |
+| Batch Speech + dedicated-media registration files | `115 passed` |
+| Formal Integrated Web | `496 passed` |
+| Browser Gateway Media / Browser Dedicated Media / Gateway Batch Speech | `38 / 27 / 31 passed` |
+| Ruff and `git diff --check` | PASS (line-ending warnings only) |
+| `npm run build:live-voice` | PASS |
+
+Production code grew by 28 net lines across the four repaired seams; the rest
+of the diff is semantic regression evidence. No classifier, product policy,
+schema, third continuation segment, Agent/Tool/Task authority or default-on
+change was added.
+
+Current disposition remains **BLOCKED for physical acceptance**. The next step
+is one fix-only Tier-3 follow-up over `35537a9a..4c1c7d68`, limited to these five
+repairs and their cumulative interaction with the accepted D-096 candidate. A
+PASS closes the source review Gate; only then may handoff §5 physical acceptance
+run. No remote ref was updated.
