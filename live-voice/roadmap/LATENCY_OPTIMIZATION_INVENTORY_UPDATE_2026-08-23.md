@@ -1,8 +1,8 @@
 # Live Voice latency optimization inventory
 
-> Date: 2026-08-21 — **UPDATE PASS: 2026-08-23** (statuses re-set with change
-> sources; structure and all other content preserved verbatim)
-> Last synchronized: 2026-08-23
+> Date: 2026-08-21 — **DIAGNOSTIC UPDATE: 2026-08-24** (current source and
+> screen credit corrected without changing the historical experiment tables)
+> Last synchronized: 2026-08-24
 >
 > This is a dated optimization/evidence snapshot, not the authority for current
 > project status or execution priority. `live-voice/STATUS.md` remains the
@@ -28,14 +28,16 @@ sequential A reference is `1b0802cae9a6718c0d3326c1292f7475fdefe08c`. The
 checkpoint evidence documentation referenced here was recorded at
 `def1dc06bf93eaf9a35a2d6af0e8a7fcd9273c36`.
 
-On 2026-08-23 the P2 bounded-pull candidate was also merged onto Hongxing
-lifecycle tip `67381193a`. That product composition lives on
-`latency/hx-optimizations`, with `latency/p2-bounded-pull-b` fast-forwarded to
-the same tip. `0812_live_voice_w3_renan` and
-`latency_checkpoint_accepted_optimizations` later merged the same composed
-source; they remain first-parent owners of the catalog-close and LVL-05 /
-Semantic VAD evidence. This does not replace the checkpoint hashes above or
-close Gate C.
+On 2026-08-23 the latency lane first composed its P2 candidate with Hongxing's
+lifecycle source, then recomposed onto accepted Hongxing source `c31e85ade`.
+The latter owns the repaired atomic batch observation, D-094 default-on batch
+size 16 and the successful audible-TTS human validation. Conflicted P2
+product/test files were resolved in favour of `c31e85ade`; the earlier
+latency-lane P2 product candidate is superseded. The unified-submit probe
+instrumentation fix was subsequently propagated to `0812_live_voice_w3_renan`
+(`6384b67b7`), `latency/p2-bounded-pull-b` (`6dae211af`) and
+`latency_checkpoint_accepted_optimizations` (`6a5d5e723`). These integration
+commits do not replace the checkpoint hashes above or add product credit.
 
 The later EOT/STT materiality screen is bound separately to clean source
 `8e5dab8b8c6651b2be784cf103df9239a93814a0`; its reviewed documentation closure
@@ -373,6 +375,23 @@ Other rounds of this run were cancelled/failed (reload before settlement;
 the failed round hit the since-repaired `unified.submit` regression) and stay
 in the denominator without timeline credit.
 
+A later raw Browser batch in the same reused run directory recorded a completed
+`dialogue_no_tool` round after the 250 ms screen hook was introduced:
+
+| Screen observation | 1000 ms diagnostic round | 250 ms attributed round |
+|---|---:|---:|
+| Workload | `dialogue_with_tool` | `dialogue_no_tool` |
+| schedule→start estimate | 578.998 ms ±41 ms | 46.703 ms ±42 ms |
+| observed segment delta | — | **-532.295 ms / -91.9%** |
+
+This is a promising physical signal, not a valid A/B population. The surviving
+`run.json` still declares source `497831f58`, `product_code_dirty`, a 1000 ms
+lead and no experiment identity; the two rounds use different workloads; the
+250 ms batch was appended after the retained report was generated; and no
+separate source/config-bound candidate report survives. The audible check was
+clean, but candidate underrun/rebuffer counters are not bound in a regenerated
+report. Production default therefore remains 1000 ms.
+
 ## 6. Recommended next optimization candidates
 
 The reference numbers below are stable inventory labels, not execution
@@ -384,7 +403,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
 | 2 | Provider-native Semantic VAD with 1200 ms fallback | **BACKLOG #1 — SPEC READY, NOT EXECUTED** (today's EOT→STT measured 702 ms) | **250–400 ms hypothesis**, not accepted gain | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, no-Browser validation runner | Fixed 800/900 ms exposed 285–412 ms only on successful cases and failed natural-pause integrity. The approved Tier-3 screen compares separate `auto` and `high` A/B/A blocks without another RPC; product activation and Gate C remain excluded. The spec remains branch-bound at `latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`. |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
-| 4 | Adaptive WebAudio startup lead | **DONE — SCREEN PASSED AT 250 MS** (dead wait 579→46.7 ms, zero underrun/rebuffer, audible check clean; hook `VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS`, clamp [160,1000] ms, production default unchanged; branch `latency/playout-lead-screen`, commit `a556f0c5b`) | **700–840 ms estimated** | `browserAudioIOAdapter.ts`; current fixed `PLAYOUT_STARTUP_LEAD_SECONDS = 1.0` | Strongest remaining code-fact estimate, not measured physical headroom. A bounded 160–300 ms decoded reserve can be screened cheaply, but Chrome/device evidence is required for underrun and first-audible acceptance. |
+| 4 | Adaptive WebAudio startup lead | **DIAGNOSTIC SCREEN ONLY — DEFAULT REMAINS 1000 MS; CLEAN A1/B/A2 REQUIRED**. Hook `VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS` is clamped to [160,1000] ms on branch `latency/playout-lead-screen`, commit `a556f0c5b` | **532.295 ms measured segment delta in one unmatched-round comparison; population headroom UNKNOWN** | `browserAudioIOAdapter.ts`; production default `PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 1000` | One 250 ms-attributed Browser batch reduced schedule→start estimate from 578.998 to 46.703 ms and sounded clean, but the rounds used different workloads and the candidate lacks its own truthful manifest/report. Do not promote the default until clean same-source/same-workload A1=1000/B=250/A2=1000 evidence closes completion, underrun/rebuffer and audible-output gates. |
 | 5 | Separate receipt settlement from successor readiness | **DONE** — hx `1fec48027`, review in `c31e85ade` | Controlled wait exposed at approximately **254/754/1007 ms** for 250/750/1100 ms injected delays | `productP1VoiceRoute.ts`, P2 presentation ACK and next-turn ownership | First audio is already decoupled, but terminal receipt still follows successor readiness. Any optimization must retain truthful playout and interruption authority. |
 | 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP` FOR TESTED WORKLOADS** | Real three-case pilot: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%** | Pure policy and no-Chrome runner only; no Runtime/P2/Browser product wiring | Three of three real formal-Agent/real-TTS attempts completed with exact prefixes and zero forbidden effects, but failed the 500 ms headroom, 400 ms gain and 10% gates. The earlier 1.5–2.5 s ordinary estimate is not credited; any long-form retry requires a new reviewed hypothesis. |
 | 7 | Bounded next-sentence TTS prefetch | **PROPOSED** | **100–800 ms between sentences** | Conversation Runtime, streaming synthesis route, bounded semantic queue | Primarily improves continuity, not first-sentence latency. It must discard prefetched speech on replacement/barge-in. |
@@ -440,9 +459,11 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
 4. Use the deployed waterfall to choose between an Adaptive WebAudio startup
    spec (first-audible) and receipt-settlement authority design
    (turn-completion/next-turn). Do not add their headroom estimates together.
-   UPDATE 2026-08-23: receipt settlement is DONE (ref #5) and the Adaptive
-   WebAudio lead SCREEN PASSED at 250 ms (ref #4) — remaining decision is
-   whether to flip the production default after more long-form samples.
+   UPDATE 2026-08-24: receipt settlement is DONE (ref #5). Adaptive WebAudio
+   produced a promising one-round 250 ms diagnostic signal (ref #4), but the
+   surviving manifest/report cannot bind a compatible A/B result. Keep the
+   production default at 1000 ms and run clean same-source/same-workload
+   A1=1000/B=250/A2=1000 before any default decision.
 5. Keep stable-sentence stopped for the tested workloads. Reopen only after
    Hongxing reviews a new long-form workload/materiality solution. Keep
    sentence prefetch independent and measure continuity before product code.
@@ -509,16 +530,14 @@ listed as branch-bound paths rather than current-tree links.
 
 ## 11. Big-picture conclusion
 
-The combined checkpoint now proves that the composed P2 candidate and accepted
-TTS component change retain
-controlled full-round gains of 1.015–8.570 seconds across W1–W3, with longer
-notification-heavy workloads benefiting most, but deployed P2 validation also
-found a TTS-authorization workflow defect; the P2 change remains a causal
-candidate until repair and Gate C rerun. EOT/STT found at most 0.885 ms p50
-removable tail and did not authorize a product change. Stable-sentence measured
-only 177.2 ms p50 projected gain for the tested workloads and stopped before
-product wiring. The next no-Chrome screen is Provider-native Semantic VAD,
-while P2 repair and the deployed physical waterfall proceed as the product
-validation lane. Adaptive WebAudio startup remains the largest code-fact
-estimate, but its actual priority depends on that waterfall and physical
-Browser evidence.
+The controlled checkpoint proves that bounded P2 delivery and successor-ACK
+decoupling can coexist under its exact deterministic fixture. Hongxing source
+`c31e85ade` and D-094 now own the accepted P2 default-on implementation and its
+scoped human validation; the earlier authorization defect is closed for that
+declared run, while frozen-corpus p50/p95 remains open. EOT/STT found at most
+0.885 ms p50 removable tail and did not authorize a product change.
+Stable-sentence measured only 177.2 ms p50 projected gain for the tested
+workloads and stopped before product wiring. Provider-native Semantic VAD
+remains the next no-Chrome causal screen. Adaptive WebAudio at 250 ms has a
+promising 532.295 ms one-round segment signal, but production remains at 1000 ms
+until a clean compatible A1/B/A2 and truthful underrun/rebuffer evidence pass.

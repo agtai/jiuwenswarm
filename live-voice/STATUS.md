@@ -213,8 +213,14 @@ conflicted P2 product/test file in favour of `c31e85ade`. The latency catalog,
 its branch-bound evidence and the Semantic VAD spec remain owned by this lane.
 The former "repair atomic batch observation and rerun deployed Gate C"
 work items are closed by Hongxing's accepted run and are no longer queued
-here. Remaining latency work: the LVL-08 Provider-native Semantic VAD causal
-screen, then a waterfall-based choice of the next material residual.
+here. The later `VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS=250` physical round is
+diagnostic only: it reduced one estimated Browser schedule-to-start segment,
+but reused an incompatible dirty-source/1000-ms manifest and was appended after
+the retained report. Production `PLAYOUT_STARTUP_LEAD_DEFAULT_MS` therefore
+remains 1000; a clean same-source/same-workload A1=1000/B=250/A2=1000 is
+required before any default decision. Remaining latency work: the LVL-08
+Provider-native Semantic VAD causal screen and that compatible playout screen,
+then a waterfall-based choice of the next material residual.
 This composition grants no new physical, Gate C or product-readiness credit
 beyond the recorded D-094 acceptance.
 
