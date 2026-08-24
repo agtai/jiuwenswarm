@@ -4,8 +4,10 @@ import argparse
 import hashlib
 import json
 import asyncio
+import platform
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from statistics import median
@@ -71,6 +73,7 @@ class ChunkTimeline:
     released_ns: int | None
     sample_count: int
     terminal_outcome: str
+    terminal_reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,7 @@ class AttemptRecord:
     provider_request_count: int
     provider_error_count: int
     terminal_outcome: str
+    terminal_reason: str
     group_completed: bool
     exact_text_coverage: bool
     released_chunk_indexes: tuple[int, ...]
@@ -98,6 +102,8 @@ class Lvl10lReport:
     decision: str
     gate_reasons: tuple[str, ...]
     records: tuple[AttemptRecord, ...]
+    selected_arm: str | None = None
+    smallest_break_even: str | None = None
 
 
 SAMPLE_RATE_HZ = 48_000
@@ -256,15 +262,16 @@ def _request(
     identity: AttemptIdentity,
 ) -> SynthesisStreamRequest:
     start, end = offsets[index], offsets[index + 1]
-    token = "-".join(
+    stable_stream = "-".join((identity.run_id, identity.role.value, identity.fixture_id, str(index)))
+    unit_token = "-".join(
         (identity.role.value, identity.fixture_id, str(identity.round_index), str(index))
     )
     return SynthesisStreamRequest(
         SynthesisStreamRef(
-            f"lvl10l-stream-{token}",
+            f"lvl10l-stream-{stable_stream}",
             identity.round_index,
             response,
-            f"lvl10l-unit-{token}",
+            f"lvl10l-unit-{unit_token}",
             index,
         ),
         fixture.final_text[start:end],
@@ -292,7 +299,7 @@ async def _consume_chunk(
     request: SynthesisStreamRequest,
     *,
     clock: Callable[[], int],
-) -> tuple[int | None, int | None, int, int, str]:
+) -> tuple[int | None, int | None, int, int, str, str]:
     first_pcm_ns: int | None = None
     reserve_ns: int | None = None
     sample_count = 0
@@ -309,15 +316,15 @@ async def _consume_chunk(
                 if reserve_ns is None and sample_count >= RESERVE_SAMPLES:
                     reserve_ns = clock()
             if kind == "completed":
-                return first_pcm_ns, reserve_ns, clock(), sample_count, "completed"
+                return first_pcm_ns, reserve_ns, clock(), sample_count, "completed", "provider_completed"
             if kind == "cancelled":
-                return first_pcm_ns, reserve_ns, clock(), sample_count, "cancelled"
+                return first_pcm_ns, reserve_ns, clock(), sample_count, "cancelled", "provider_cancelled"
     except (KeyboardInterrupt, SystemExit, GeneratorExit):
         raise
     except asyncio.CancelledError:
         raise
-    except Exception:
-        return first_pcm_ns, reserve_ns, clock(), sample_count, "failed"
+    except Exception as exc:
+        return first_pcm_ns, reserve_ns, clock(), sample_count, "failed", f"provider_exception:{type(exc).__name__}"
 
 
 async def run_attempt(
@@ -338,7 +345,7 @@ async def run_attempt(
     provider.conformance.activate_response(response)
     started_ns = monotonic_ns()
     live: dict[int, tuple[SynthesisStreamRequest, asyncio.Task[Any]]] = {}
-    completed: dict[int, tuple[int | None, int | None, int, int, str]] = {}
+    completed: dict[int, tuple[int | None, int | None, int, int, str, str]] = {}
     timeline: dict[int, ChunkTimeline] = {}
     released: list[int] = []
     opened = 0
@@ -355,14 +362,14 @@ async def run_attempt(
             await provider.open_synthesis(request)
         except Exception:
             errors += 1
-            completed[index] = (None, None, monotonic_ns(), 0, "failed")
-            timeline[index] = ChunkTimeline(index, opened_at, None, monotonic_ns(), None, 0, "failed")
+            completed[index] = (None, None, monotonic_ns(), 0, "failed", "provider_open_exception")
+            timeline[index] = ChunkTimeline(index, opened_at, None, monotonic_ns(), None, 0, "failed", "provider_open_exception")
             return
         live[index] = (
             request,
             asyncio.create_task(_consume_chunk(provider, request, clock=monotonic_ns)),
         )
-        timeline[index] = ChunkTimeline(index, opened_at, None, None, None, 0, "opened")
+        timeline[index] = ChunkTimeline(index, opened_at, None, None, None, 0, "opened", "pending")
 
     async def fence_group(reason: str) -> None:
         nonlocal fenced
@@ -405,7 +412,7 @@ async def run_attempt(
                 del live[index]
                 prior = timeline[index]
                 timeline[index] = ChunkTimeline(
-                    index, prior.opened_ns, result[0], result[2], None, result[3], result[4]
+                    index, prior.opened_ns, result[0], result[2], None, result[3], result[4], result[5]
                 )
                 if result[4] != "completed":
                     errors += 1
@@ -422,6 +429,7 @@ async def run_attempt(
                     monotonic_ns(),
                     prior.sample_count,
                     prior.terminal_outcome,
+                    prior.terminal_reason,
                 )
                 released.append(next_release)
                 next_release += 1
@@ -441,11 +449,12 @@ async def run_attempt(
             None if chunk_zero is None or chunk_zero.first_pcm_ns is None else chunk_zero.first_pcm_ns - started_ns,
             None if not first_values else min(first_values) - started_ns,
             None if reserve_at is None else reserve_at - started_ns,
-            completed_at - started_ns,
+            None if outcome != "completed" else completed_at - started_ns,
             sum(row.sample_count for row in records if row.released_ns is not None) * 1_000_000_000 // SAMPLE_RATE_HZ,
             opened,
             errors,
             "cancelled" if cancellation else outcome,
+            "provider_completed" if outcome == "completed" else "group_fenced",
             outcome == "completed",
             "".join(fixture.final_text[start:end] for start, end in zip(offsets, offsets[1:])) == fixture.final_text,
             tuple(released),
@@ -459,7 +468,7 @@ async def run_attempt(
         records = tuple(timeline[index] for index in range(opened))
         return AttemptRecord(
             identity, started_ns, None, None, None, None, 0, opened, errors,
-            "cancelled", False, True, tuple(released), records, 0, _effects(provider)
+            "cancelled", "caller_cancelled", False, True, tuple(released), records, 0, _effects(provider)
         )
     finally:
         if live:
@@ -564,8 +573,59 @@ def _candidate_gate(
     )
 
 
+def _smallest_monotonic_break_even(
+    candidate: PopulationRole,
+    groups: dict[tuple[PopulationRole, str], list[Any]],
+) -> str:
+    passed_2400, _ = _candidate_gate(candidate, "long_2400", groups)
+    assert passed_2400
+    passed_1200, _ = _candidate_gate(candidate, "long_1200", groups)
+    passed_600, _ = _candidate_gate(candidate, "long_600", groups)
+    if passed_600 and not passed_1200:
+        return "NON_MONOTONIC"
+    if passed_600:
+        return "long_600"
+    if passed_1200:
+        return "long_1200"
+    return "long_2400"
+
+
+def _pilot_result(
+    groups: dict[tuple[PopulationRole, str], list[Any]], records: Sequence[AttemptRecord]
+) -> Lvl10lReport:
+    for fixture in ("long_1200", "long_2400"):
+        controls = [
+            groups[(PopulationRole.A1, fixture)][0].request_to_complete_ns,
+            groups[(PopulationRole.A2, fixture)][0].request_to_complete_ns,
+        ]
+        if not any(
+            groups[(candidate, fixture)][0].request_to_complete_ns < min(controls)
+            for candidate in (PopulationRole.B2, PopulationRole.B4)
+        ):
+            return Lvl10lReport("PILOT_FAILED", (f"pilot_faster_than_controls:{fixture}",), tuple(records))
+    for fixture in FIXTURE_IDS:
+        a1, a2 = groups[(PopulationRole.A1, fixture)][0], groups[(PopulationRole.A2, fixture)][0]
+        for candidate in (PopulationRole.B2, PopulationRole.B4):
+            row = groups[(candidate, fixture)][0]
+            for metric in ("request_to_first_pcm_ns", "request_to_reserve_ns"):
+                paired = interpolate_reference(row, a1, a2, metric)
+                regression = getattr(row, metric) - paired
+                if regression > 1_000_000_000 and regression * 100 > paired * 50:
+                    return Lvl10lReport("PILOT_FAILED", (f"pilot_regression:{fixture}:{metric}",), tuple(records))
+    b2_2400 = groups[(PopulationRole.B2, "long_2400")][0].request_to_complete_ns
+    b4_2400 = groups[(PopulationRole.B4, "long_2400")][0].request_to_complete_ns
+    selected = PopulationRole.B2 if b2_2400 <= b4_2400 else PopulationRole.B4
+    return Lvl10lReport(
+        "PILOT_PASS",
+        ("pilot_denominators_pass", "pilot_integrity_pass", "pilot_authorization_pass"),
+        tuple(records),
+        selected.value,
+        None,
+    )
+
+
 def reduce_records(
-    records: Sequence[AttemptRecord], *, expected_rounds: int
+    records: Sequence[AttemptRecord], *, expected_rounds: int, provenance_complete: bool = True
 ) -> Lvl10lReport:
     reasons: list[str] = []
     if expected_rounds not in (1, 10):
@@ -576,8 +636,12 @@ def reduce_records(
     expected_cells = [(role, fixture) for fixture in FIXTURE_IDS for role in PopulationRole]
     if any(len(groups.get(cell, ())) != expected_rounds for cell in expected_cells):
         return Lvl10lReport("INCONCLUSIVE", ("provenance_denominators",), tuple(records))
+    if not provenance_complete:
+        return Lvl10lReport("INCONCLUSIVE", ("provenance_incomplete",), tuple(records))
     if any(not _complete_integrity(record) for record in records):
         return Lvl10lReport("REJECTED", ("integrity_reliability",), tuple(records))
+    if expected_rounds == 1:
+        return _pilot_result(groups, records)
     for fixture in FIXTURE_IDS:
         a1, a2 = groups[(PopulationRole.A1, fixture)], groups[(PopulationRole.A2, fixture)]
         for metric, absolute_ns, relative_pct in (
@@ -609,8 +673,10 @@ def reduce_records(
         decision = "B2_MATERIAL"
     else:
         decision = "B4_MATERIAL"
-    reasons.extend(("provenance_denominators_pass", "integrity_reliability_pass", "control_drift_pass", "long_2400_materiality_pass", "whole_chunk_availability_diagnostic_only"))
-    return Lvl10lReport(decision, tuple(reasons), tuple(records))
+    selected = PopulationRole.B4 if decision == "B4_MATERIAL" else PopulationRole.B2
+    break_even = _smallest_monotonic_break_even(selected, groups)
+    reasons.extend(("provenance_denominators_pass", "integrity_reliability_pass", "control_drift_pass", "long_2400_materiality_pass", f"monotonic_bucket_walk:{break_even}", "whole_chunk_availability_diagnostic_only"))
+    return Lvl10lReport(decision, tuple(reasons), tuple(records), selected.value, break_even)
 
 
 def _file_sha256(path: Path) -> str:
@@ -620,7 +686,164 @@ def _file_sha256(path: Path) -> str:
 def _safe_record(record: AttemptRecord) -> dict[str, Any]:
     payload = asdict(record)
     payload["identity"]["role"] = record.identity.role.value
+    completed = [
+        row["completed_ns"]
+        for row in payload["chunk_timelines"]
+        if row["completed_ns"] is not None
+    ]
+    payload["whole_chunk_availability_gap_ns"] = (
+        None if len(completed) < 2 else max(completed) - min(completed)
+    )
     return payload
+
+
+def _nearest_rank(values: Sequence[int | float], percentile: int) -> float:
+    ordered = sorted(values)
+    return float(ordered[(len(ordered) * percentile + 99) // 100 - 1])
+
+
+def _timing_summary(rows: Sequence[Any], metric: str) -> dict[str, float | None]:
+    values = [getattr(row, metric) for row in rows if getattr(row, metric) is not None]
+    if not values:
+        return {"p50": None, "p90": None, "p95": None}
+    return {
+        "p50": float(median(values)),
+        "p90": _nearest_rank(values, 90),
+        "p95": _nearest_rank(values, 95),
+    }
+
+
+def _numeric_p50(rows: Sequence[Any], metric: str) -> float | None:
+    values = [getattr(row, metric) for row in rows if getattr(row, metric) is not None]
+    return None if not values else float(median(values))
+
+
+def _artifact_metrics(records: Sequence[AttemptRecord]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    groups: dict[tuple[PopulationRole, str], list[Any]] = {}
+    for record in records:
+        groups.setdefault((record.identity.role, record.identity.fixture_id), []).append(record)
+    per_cell: dict[str, Any] = {}
+    paired: dict[str, Any] = {}
+    control_drift: dict[str, Any] = {}
+    for role in PopulationRole:
+        per_cell[role.value] = {}
+        for fixture in FIXTURE_IDS:
+            rows = groups.get((role, fixture), [])
+            per_cell[role.value][fixture] = {
+                "denominator": len(rows),
+                "measured_denominator": sum(row.request_to_complete_ns is not None for row in rows),
+                "observed_request_count": sum(row.provider_request_count for row in rows),
+                "provider_error_count": sum(row.provider_error_count for row in rows),
+                "failure_count": sum(row.terminal_outcome != "completed" for row in rows),
+                "request_to_first_pcm_ns": _timing_summary(rows, "request_to_first_pcm_ns"),
+                "request_to_reserve_ns": _timing_summary(rows, "request_to_reserve_ns"),
+                "request_to_complete_ns": _timing_summary(rows, "request_to_complete_ns"),
+                "audio_duration_ns": _timing_summary(rows, "audio_duration_ns"),
+            }
+    for fixture in FIXTURE_IDS:
+        a1 = {row.identity.round_index: row for row in groups[(PopulationRole.A1, fixture)]}
+        a2 = {row.identity.round_index: row for row in groups[(PopulationRole.A2, fixture)]}
+        control_drift[fixture] = {}
+        for metric in ("request_to_first_pcm_ns", "request_to_reserve_ns", "request_to_complete_ns"):
+            one, two = _numeric_p50(list(a1.values()), metric), _numeric_p50(list(a2.values()), metric)
+            absolute = None if one is None or two is None else abs(one - two)
+            control_drift[fixture][metric] = {
+                "absolute_ns": absolute,
+                "percent": None if absolute is None or min(one, two) == 0 else absolute * 100 / min(one, two),
+            }
+        for role in (PopulationRole.B2, PopulationRole.B4):
+            paired.setdefault(role.value, {})[fixture] = {}
+            rows = groups[(role, fixture)]
+            comparable = [
+                row for row in rows
+                if row.request_to_complete_ns is not None
+                and a1[row.identity.round_index].request_to_complete_ns is not None
+                and a2[row.identity.round_index].request_to_complete_ns is not None
+            ]
+            references = [interpolate_reference(row, a1[row.identity.round_index], a2[row.identity.round_index], "request_to_complete_ns") for row in comparable]
+            gains = [reference - row.request_to_complete_ns for row, reference in zip(comparable, references)]
+            paired[role.value][fixture] = {
+                "measured_denominator": len(gains),
+                "p50_gain_ns": None if not gains else float(median(gains)),
+                "p50_gain_pct": None if not gains else float(median(gain * 100 / reference for gain, reference in zip(gains, references))),
+                "win_count": sum(gain > 0 for gain in gains),
+            }
+    return per_cell, paired, control_drift
+
+
+def _ms(summary: dict[str, float | None]) -> str:
+    return "/".join("—" if value is None else f"{value / 1_000_000:.3f}" for value in summary.values())
+
+
+def _markdown_report(
+    report: Lvl10lReport,
+    per_cell: dict[str, Any],
+    paired: dict[str, Any],
+    control_drift: dict[str, Any],
+    records: Sequence[AttemptRecord],
+    observed_requests: int,
+    expected_requests: int,
+) -> str:
+    timing_rows = [
+        "| Role | Fixture | n / measured | First p50/p90/p95 ms | Reserve p50/p90/p95 ms | Complete p50/p90/p95 ms | Duration p50/p90/p95 ms |",
+        "| --- | --- | ---: | --- | --- | --- | --- |",
+    ]
+    totals = ["| Role | Fixture | Requests | Provider errors | Failures |", "| --- | --- | ---: | ---: | ---: |"]
+    for role in PopulationRole:
+        for fixture in FIXTURE_IDS:
+            cell = per_cell[role.value][fixture]
+            timing_rows.append(
+                f"| {role.value} | {fixture} | {cell['denominator']} / {cell['measured_denominator']} | "
+                f"{_ms(cell['request_to_first_pcm_ns'])} | {_ms(cell['request_to_reserve_ns'])} | "
+                f"{_ms(cell['request_to_complete_ns'])} | {_ms(cell['audio_duration_ns'])} |"
+            )
+            totals.append(
+                f"| {role.value} | {fixture} | {cell['observed_request_count']} | "
+                f"{cell['provider_error_count']} | {cell['failure_count']} |"
+            )
+    paired_rows = ["| Candidate | Fixture | Measured | p50 completion gain ms | p50 gain % | Wins |", "| --- | --- | ---: | ---: | ---: | ---: |"]
+    for role in (PopulationRole.B2, PopulationRole.B4):
+        for fixture in FIXTURE_IDS:
+            row = paired[role.value][fixture]
+            gain = "—" if row["p50_gain_ns"] is None else f"{row['p50_gain_ns'] / 1_000_000:.3f}"
+            percent = "—" if row["p50_gain_pct"] is None else f"{row['p50_gain_pct']:.3f}"
+            paired_rows.append(f"| {role.value} | {fixture} | {row['measured_denominator']} | {gain} | {percent} | {row['win_count']} |")
+    drift_rows = ["| Fixture | First abs ms / % | Reserve abs ms / % | Complete abs ms / % |", "| --- | --- | --- | --- |"]
+    for fixture in FIXTURE_IDS:
+        rendered = []
+        for metric in ("request_to_first_pcm_ns", "request_to_reserve_ns", "request_to_complete_ns"):
+            value = control_drift[fixture][metric]
+            absolute = "—" if value["absolute_ns"] is None else f"{value['absolute_ns'] / 1_000_000:.3f}"
+            percent = "—" if value["percent"] is None else f"{value['percent']:.3f}"
+            rendered.append(f"{absolute} / {percent}")
+        drift_rows.append(f"| {fixture} | {' | '.join(rendered)} |")
+    return "\n".join((
+        "# LVL-10L long-form TTS screen",
+        "",
+        f"Decision: **{report.decision}**. Selected arm: **{report.selected_arm or 'none'}**. Smallest break-even: **{report.smallest_break_even or 'none'}**.",
+        f"Attempts: {len(records)}; requests: {observed_requests}/{expected_requests}.",
+        f"Gate reasons: {', '.join(report.gate_reasons)}.",
+        "",
+        "## Per-role/fixture timings",
+        "",
+        *timing_rows,
+        "",
+        "## Paired completion",
+        "",
+        *paired_rows,
+        "",
+        "## Request and failure totals",
+        "",
+        *totals,
+        "",
+        "## Control drift",
+        "",
+        *drift_rows,
+        "",
+        "Measured: Provider/source timings and terminal counts. Derived: paired gains, duration and whole-chunk availability diagnostics.",
+        "Browser and product latency are excluded. Whole-chunk availability is diagnostic only and does not decide materiality.",
+        "",
+    ))
 
 
 def _write_artifacts(
@@ -638,6 +861,7 @@ def _write_artifacts(
         _expected_requests(role) for role in PopulationRole
     )
     observed_requests = sum(record.provider_request_count for record in records)
+    per_cell, paired_completion, control_drift = _artifact_metrics(records)
     report_payload = {
         "schema_version": "live-voice.lvl10l-report.v1",
         "decision": report.decision,
@@ -653,11 +877,17 @@ def _write_artifacts(
             )
             for role in PopulationRole
         },
+        "selected_arm": report.selected_arm,
+        "smallest_break_even": report.smallest_break_even,
+        "per_cell": per_cell,
+        "paired_completion": paired_completion,
+        "control_drift": control_drift,
         "whole_chunk_availability": "diagnostic_only_non_gating",
         "artifact_hashes": {
             "run_sha256": _file_sha256(output_root / "run.json"),
             "manifest_sha256": _file_sha256(output_root / "manifest.json"),
             "attempts_sha256": _file_sha256(attempts),
+            "report_canonical_excludes": ["artifact_hashes.report_canonical_sha256"],
         },
     }
     canonical = json.dumps(report_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -666,10 +896,7 @@ def _write_artifacts(
         json.dumps(report_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
     (output_root / "report.md").write_text(
-        "# LVL-10L long-form TTS screen\n\n"
-        f"Decision: **{report.decision}**\n\n"
-        f"Attempts: {len(records)}; requests: {observed_requests}/{expected_requests}.\n\n"
-        "Whole-chunk availability is diagnostic only and does not decide materiality.\n",
+        _markdown_report(report, per_cell, paired_completion, control_drift, records, observed_requests, expected_requests),
         encoding="utf-8",
     )
 
@@ -686,6 +913,18 @@ async def run_population(
             if selection.tier is not SpeechRouteTier.STREAMING or selection.provider is None:
                 raise RuntimeError("LVL10L_STREAMING_PROVIDER_REQUIRED")
             providers[role] = selection.provider
+        run_path = args.output_root / "run.json"
+        run_document = json.loads(run_path.read_text(encoding="utf-8"))
+        run_document["provider_route"] = {
+            "adapter_classes": sorted(
+                {f"{type(provider).__module__}.{type(provider).__qualname__}" for provider in providers.values()}
+            ),
+            "synthesis_models": sorted({str(provider.synthesis_model) for provider in providers.values() if getattr(provider, "synthesis_model", None)}),
+            "synthesis_voices": sorted({str(provider.synthesis_voice) for provider in providers.values() if getattr(provider, "synthesis_voice", None)}),
+            "audio_format": "pcm_s16le",
+            "sample_rate_hz": SAMPLE_RATE_HZ,
+        }
+        run_path.write_text(json.dumps(run_document, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         by_id = {fixture.fixture_id: fixture for fixture in fixtures}
         for round_index in range(args.rounds):
             for role, fixture_id in scheduled_cells(round_index):
@@ -717,6 +956,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--output-root", type=Path, required=True)
     run.add_argument("--run-id", required=True)
     run.add_argument("--source-commit", required=True)
+    run.add_argument("--source-state", required=True)
     run.add_argument("--agent-core-commit", required=True)
     run.add_argument("--environment-profile", required=True)
     run.add_argument("--rounds", type=int, required=True)
@@ -727,6 +967,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.rounds not in (1, 10):
         raise ValueError("LVL10L_ROUNDS_INVALID")
+    if any(not getattr(args, field).strip() for field in ("run_id", "source_commit", "source_state", "agent_core_commit", "environment_profile")):
+        raise ValueError("LVL10L_PROVENANCE_INVALID")
     if args.output_root.exists():
         raise FileExistsError(args.output_root)
     with portalocker.Lock("/tmp/jiuwenswarm-lvl10-provider.lock", mode="a", timeout=0):
@@ -737,8 +979,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "schema_version": "live-voice.lvl10l-run.v1",
             "run_id": args.run_id,
             "source_commit": args.source_commit,
+            "source_state": args.source_state,
             "agent_core_commit": args.agent_core_commit,
             "environment_profile": args.environment_profile,
+            "utc_started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "runtime": {
+                "python_implementation": platform.python_implementation(),
+                "python_version": platform.python_version(),
+            },
             "corpus_sha256": _file_sha256(copied_manifest),
             "rounds": args.rounds,
             "expected_requests": args.rounds * len(FIXTURE_IDS) * 8,
@@ -747,6 +995,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "automatic_retries": 0,
             "provider_lock": "/tmp/jiuwenswarm-lvl10-provider.lock",
             "clock": "time.monotonic_ns",
+            "role_schedule": [
+                [role.value, fixture]
+                for round_index in range(args.rounds)
+                for role, fixture in scheduled_cells(round_index)
+            ],
+            "frozen_gates": {
+                "sample_rate_hz": SAMPLE_RATE_HZ,
+                "reserve_samples": RESERVE_SAMPLES,
+                "max_active_requests": MAX_ACTIVE_REQUESTS,
+                "event_timeout_seconds": EVENT_TIMEOUT_SECONDS,
+                "automatic_retries": 0,
+            },
         }
         (args.output_root / "run.json").write_text(
             json.dumps(run_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"

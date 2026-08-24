@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import sys
@@ -8,6 +9,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    OpenAIStreamingSpeechConfig,
+    OpenAIStreamingSpeechProvider,
+)
 
 
 ROOT = Path(__file__).parents[3]
@@ -33,6 +39,7 @@ scheduled_cells = runner.scheduled_cells
 interpolate_reference = runner.interpolate_reference
 reduce_records = runner.reduce_records
 main = runner.main
+run_population = runner.run_population
 
 
 def _mutated_manifest(tmp_path: Path, mutation: str) -> Path:
@@ -108,6 +115,7 @@ class ScriptedProvider:
         self.fail_index = fail_index
         self.events: dict[str, list[Any]] = {}
         self.cancelled: list[str] = []
+        self.closed = False
 
     async def open_synthesis(self, request: Any) -> None:
         index = len(self.inputs)
@@ -137,7 +145,7 @@ class ScriptedProvider:
         self.events[ref.stream_id] = [SimpleNamespace(kind="cancelled", pcm_s16le=None)]
 
     async def close(self) -> None:
-        return None
+        self.closed = True
 
 
 class MidStreamFailureProvider(ScriptedProvider):
@@ -156,6 +164,11 @@ class BlockingProvider(ScriptedProvider):
     async def next_synthesis_event(self, ref: Any, *, timeout_seconds: float) -> Any:
         await self.blocked.wait()
         return await super().next_synthesis_event(ref, timeout_seconds=timeout_seconds)
+
+
+class CancelledProvider(ScriptedProvider):
+    async def next_synthesis_event(self, ref: Any, *, timeout_seconds: float) -> Any:
+        return SimpleNamespace(kind="cancelled", pcm_s16le=None)
 
 
 def _identity(role: Any, fixture_id: str, round_index: int = 0) -> Any:
@@ -238,6 +251,15 @@ async def test_caller_cancellation_fences_every_live_chunk() -> None:
     assert record.group_completed is False
     assert record.post_fence_sample_count == 0
     assert record.forbidden_effects == ZERO_FORBIDDEN_EFFECTS
+
+
+@pytest.mark.asyncio
+async def test_provider_cancelled_event_fences_buffered_successor_with_reason_code() -> None:
+    fixture = load_fixture_manifest(MANIFEST_PATH)[1]
+    record = await run_attempt(CancelledProvider(), fixture, _identity(PopulationRole.B2, fixture.fixture_id))
+    assert record.terminal_outcome == "failed"
+    assert record.terminal_reason == "group_fenced"
+    assert record.chunk_timelines[0].terminal_reason == "provider_cancelled"
 
 
 def _roles_for(cells: tuple[tuple[Any, str], ...], fixture_id: str) -> list[Any]:
@@ -338,7 +360,7 @@ def test_cli_rejects_non_pilot_non_formal_round_count(tmp_path: Path) -> None:
             [
                 "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(tmp_path / "run"),
                 "--run-id", "unit-run", "--source-commit", "a" * 40,
-                "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "2",
+                "--source-state", "clean", "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "2",
             ]
         )
 
@@ -360,7 +382,7 @@ def test_cli_writes_immutable_sanitized_artifacts_without_real_provider_calls(
         [
             "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
             "--run-id", "unit-run", "--source-commit", "a" * 40,
-            "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+            "--source-state", "clean", "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
         ]
     ) == 0
     assert len(providers) == 4
@@ -376,3 +398,239 @@ def test_cli_writes_immutable_sanitized_artifacts_without_real_provider_calls(
     )
     assert "A careful explanation helps" not in serialized
     assert "api_key" not in serialized
+
+
+def test_exact_run_command_records_safe_complete_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider())
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    output = tmp_path / "exact-command"
+    assert main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "unit-run", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "deterministic-test", "--rounds", "1",
+    ]) == 0
+    run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    assert run["source_state"] == "clean"
+    assert run["utc_started_at"].endswith("Z")
+    assert run["role_schedule"] == [[role.value, fixture] for role, fixture in scheduled_cells(0)]
+    assert run["frozen_gates"]["sample_rate_hz"] == 48_000
+    assert "api_key" not in json.dumps(run)
+
+
+def test_artifacts_pin_per_cell_metrics_paired_deltas_and_timeline_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider())
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    output = tmp_path / "artifact-shape"
+    main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "unit-run", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+    ])
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["per_cell"]["LVL-10L-B4"]["long_2400"]["denominator"] == 1
+    assert set(report["per_cell"]["LVL-10L-B4"]["long_2400"]["request_to_complete_ns"]) == {"p50", "p90", "p95"}
+    assert report["paired_completion"]["LVL-10L-B2"]["long_2400"]["win_count"] in (0, 1)
+    attempt = json.loads((output / "attempts.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert "terminal_reason" in attempt
+    assert "whole_chunk_availability_gap_ns" in attempt
+    assert set(attempt["chunk_timelines"][0]) >= {"opened_ns", "first_pcm_ns", "completed_ns", "released_ns", "terminal_outcome"}
+    assert report["artifact_hashes"]["report_canonical_excludes"] == ["artifact_hashes.report_canonical_sha256"]
+
+
+def test_existing_output_performs_zero_provider_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = tmp_path / "already-there"
+    output.mkdir()
+    calls = 0
+
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider())
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    with pytest.raises(FileExistsError):
+        main([
+            "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+            "--run-id", "unit-run", "--source-commit", "a" * 40, "--source-state", "clean",
+            "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+        ])
+    assert calls == 0
+
+
+def test_selection_failure_closes_already_created_adapters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = ScriptedProvider()
+    calls = 0
+
+    async def select_then_fail(*, batch_available: bool) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=first)
+        return SimpleNamespace(tier="fallback", provider=None)
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_then_fail)
+    with pytest.raises(RuntimeError, match="LVL10L_STREAMING_PROVIDER_REQUIRED"):
+        main([
+            "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(tmp_path / "selection-failure"),
+            "--run-id", "unit-run", "--source-commit", "a" * 40, "--source-state", "clean",
+            "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+        ])
+    assert first.closed is True
+
+
+def test_shared_lock_collision_creates_no_output_directory(tmp_path: Path) -> None:
+    output = tmp_path / "locked-run"
+    with runner.portalocker.Lock("/tmp/jiuwenswarm-lvl10-provider.lock", mode="a", timeout=0):
+        with pytest.raises(Exception):
+            main([
+                "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+                "--run-id", "unit-run", "--source-commit", "a" * 40, "--source-state", "clean",
+                "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+            ])
+    assert output.exists() is False
+
+
+def test_failure_population_retains_denominator_and_writes_artifacts_without_timing_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def select_failing_provider(*, batch_available: bool) -> Any:
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider(fail_index=0))
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_failing_provider)
+    output = tmp_path / "failed-run"
+    assert main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "failed-run", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+    ]) == 0
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    cell = report["per_cell"][PopulationRole.A1.value]["long_600"]
+    assert report["decision"] == "REJECTED"
+    assert cell["measured_denominator"] == 0
+    assert cell["provider_error_count"] == cell["failure_count"] == 1
+    assert cell["request_to_first_pcm_ns"] == {"p50": None, "p90": None, "p95": None}
+    assert (output / "attempts.jsonl").read_text(encoding="utf-8")
+    assert "integrity_reliability" in (output / "report.md").read_text(encoding="utf-8")
+
+
+def test_report_markdown_contains_required_timing_and_decision_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider())
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    output = tmp_path / "markdown-report"
+    main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "markdown-run", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+    ])
+    markdown = (output / "report.md").read_text(encoding="utf-8")
+    for heading in (
+        "## Per-role/fixture timings",
+        "## Paired completion",
+        "## Request and failure totals",
+        "## Control drift",
+        "Measured: Provider/source timings",
+        "Derived: paired gains",
+        "Browser and product latency are excluded",
+    ):
+        assert heading in markdown
+    assert "LVL-10L-B2 | long_2400" in markdown
+    assert "Selected arm:" in markdown
+
+
+@pytest.mark.asyncio
+async def test_formal_b4_reuses_twelve_stream_identities_with_round_generations() -> None:
+    provider = ScriptedProvider()
+    fixtures = load_fixture_manifest(MANIFEST_PATH)
+    for round_index in range(10):
+        for fixture in fixtures:
+            record = await run_attempt(
+                provider,
+                fixture,
+                _identity(PopulationRole.B4, fixture.fixture_id, round_index),
+            )
+            assert record.group_completed
+    requests = [request for request in provider.requests if request.ref.response.response_id.startswith("lvl10l-response-unit-run-LVL-10L-B4")]
+    assert len(requests) == 120
+    assert len({request.ref.stream_id for request in requests}) == 12
+    assert {request.ref.stream_generation for request in requests} == set(range(10))
+
+
+def test_pilot_requires_exact_authorization_predicate_not_formal_materiality() -> None:
+    pilot = [record for record in _formal_population() if record.identity.round_index == 0]
+    report = reduce_records(pilot, expected_rounds=1)
+    assert report.decision == "PILOT_PASS"
+    assert report.selected_arm == PopulationRole.B2.value
+
+
+def test_pilot_fails_when_long_candidate_is_not_faster_than_both_controls() -> None:
+    pilot = [record for record in _formal_population() if record.identity.round_index == 0]
+    for record in pilot:
+        if record.identity.fixture_id == "long_2400" and record.identity.role in (PopulationRole.B2, PopulationRole.B4):
+            record.request_to_complete_ns = 2_000_000_000
+    assert reduce_records(pilot, expected_rounds=1).decision == "PILOT_FAILED"
+
+
+def test_monotonic_bucket_walk_and_b4_incremental_preference_are_reported() -> None:
+    records = _formal_population()
+    for record in records:
+        if record.identity.role is PopulationRole.B4:
+            record.request_to_complete_ns = 100_000_000
+    report = reduce_records(records, expected_rounds=10)
+    assert report.decision == "B4_MATERIAL"
+    assert report.selected_arm == PopulationRole.B4.value
+    assert report.smallest_break_even == "long_600"
+
+
+class AdapterSse:
+    async def __aiter__(self):
+        pcm = base64.b64encode(b"\x00\x00" * 100).decode("ascii")
+        yield "data: " + json.dumps({"type": "speech.audio.delta", "audio": pcm})
+        yield ""
+        yield 'data: {"type":"speech.audio.done","usage":{}}'
+        yield ""
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_actual_conformance_capacity_completes_formal_b4_with_twelve_retained_stream_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    providers: list[OpenAIStreamingSpeechProvider] = []
+
+    async def sse_factory(*_args: Any) -> AdapterSse:
+        return AdapterSse()
+
+    async def select_actual_adapter(*, batch_available: bool) -> Any:
+        assert batch_available is False
+        provider = OpenAIStreamingSpeechProvider(
+            OpenAIStreamingSpeechConfig(api_base="https://api.openai.com/v1", api_key="test-key"),
+            sse_factory=sse_factory,
+        )
+        providers.append(provider)
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=provider)
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_actual_adapter)
+    output = tmp_path / "formal-capacity"
+    assert main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "capacity-run", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "10",
+    ]) == 0
+    b4 = providers[2].conformance.snapshot()
+    assert b4.retained_synthesis == 0
+    assert b4.retained_identity_tombstones <= 64
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["observed_requests"] == report["expected_requests"] == 240
