@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http.client
 import json
 import os
 import re
+import socket as network_socket
 import sys
-import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -286,27 +287,40 @@ def _loopback_websocket(value: object, *, expected_port: int) -> str:
         or parsed.username is not None
         or parsed.password is not None
         or port != expected_port
-        or not parsed.path.startswith("/devtools/page/")
+        or not re.fullmatch(r"/devtools/page/[A-Za-z0-9_-]{1,128}", parsed.path)
+        or parsed.query
         or parsed.fragment
     ):
         raise RuntimeError("Chrome debugger returned a non-loopback WebSocket URL")
     return value
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise RuntimeError("Chrome debugger endpoint must not redirect")
+def _command_line_option_values(command_line: list[str], name: str) -> list[str]:
+    prefix = f"{name}="
+    return [
+        argument[len(prefix) :]
+        for argument in command_line
+        if argument.casefold().startswith(prefix.casefold())
+    ]
 
 
-class _NoRedirectWebSocketConnect(WebSocketConnect):
-    """A direct WebSocket connection that rejects every handshake redirect."""
-
-    def process_redirect(self, exc: Exception) -> Exception | str:
-        result = super().process_redirect(exc)
-        if isinstance(result, str):
-            return RuntimeError("Chrome debugger WebSocket must not redirect")
-        return result
+def _has_exact_debugger_options(
+    command_line: list[str],
+    *,
+    profile_path: Path,
+    port: int,
+) -> bool:
+    profiles = _command_line_option_values(command_line, "--user-data-dir")
+    if len(profiles) != 1 or not Path(profiles[0]).is_absolute():
+        return False
+    return (
+        os.path.normcase(str(Path(profiles[0]).resolve()))
+        == os.path.normcase(str(profile_path))
+        and _command_line_option_values(command_line, "--remote-debugging-port")
+        == [str(port)]
+        and _command_line_option_values(command_line, "--remote-debugging-address")
+        == ["127.0.0.1"]
+    )
 
 
 def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
@@ -344,21 +358,26 @@ def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
         debugger_parent_pids = {parent.pid for parent in process.parents()}
     except psutil.Error as error:
         raise RuntimeError("Chrome debugger process identity is unavailable") from error
-    expected_profile = f"--user-data-dir={profile_path}"
     if (
         name not in {"chrome", "chrome.exe"}
         or os.path.normcase(str(executable))
         != os.path.normcase(str(expected_executable))
-        or expected_profile not in command_line
-        or f"--remote-debugging-port={port}" not in command_line
-        or "--remote-debugging-address=127.0.0.1" not in command_line
+        or not _has_exact_debugger_options(
+            command_line,
+            profile_path=profile_path,
+            port=port,
+        )
     ):
         raise RuntimeError("Chrome debugger process does not own the exact isolated profile")
     if (
         launch_name not in {"chrome", "chrome.exe"}
         or os.path.normcase(str(launch_executable))
         != os.path.normcase(str(expected_executable))
-        or expected_profile not in launch_command_line
+        or not _has_exact_debugger_options(
+            launch_command_line,
+            profile_path=profile_path,
+            port=port,
+        )
         or (launch_pid != expected_pid and launch_pid not in debugger_parent_pids)
     ):
         raise RuntimeError("Chrome debugger process is not descended from the launched Chrome")
@@ -366,30 +385,24 @@ def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
 
 def _socket_address(value: object, *, label: str) -> tuple[str, int]:
     if type(value) is not tuple or len(value) != 2:
-        raise RuntimeError(f"Chrome debugger WebSocket {label} is not exact IPv4")
+        raise RuntimeError(f"Chrome debugger connection {label} is not exact IPv4")
     host, port = value
     if type(host) is not str or type(port) is not int:
-        raise RuntimeError(f"Chrome debugger WebSocket {label} is invalid")
+        raise RuntimeError(f"Chrome debugger connection {label} is invalid")
     return host, port
 
 
 def _assert_browser_socket_owner(
     session: dict[str, object],
-    socket: object,
+    connection: network_socket.socket,
 ) -> None:
-    """Bind the established CDP stream to the frozen Chrome process."""
+    """Bind one preconnected stream to the frozen Chrome process."""
 
     _, expected_port = _loopback_endpoint(session["browser_endpoint"])
     expected_pid = int(session["browser_debugger_process_id"])
-    transport = getattr(socket, "transport", None)
-    if transport is None or not callable(getattr(transport, "get_extra_info", None)):
-        raise RuntimeError("Chrome debugger WebSocket transport identity is unavailable")
-    peer_ip, peer_port = _socket_address(
-        transport.get_extra_info("peername"),
-        label="peer",
-    )
+    peer_ip, peer_port = _socket_address(connection.getpeername(), label="peer")
     local_ip, local_port = _socket_address(
-        transport.get_extra_info("sockname"),
+        connection.getsockname(),
         label="local endpoint",
     )
     if (
@@ -399,11 +412,11 @@ def _assert_browser_socket_owner(
         or local_port <= 0
         or local_port > 65535
     ):
-        raise RuntimeError("Chrome debugger WebSocket escaped the exact loopback endpoint")
+        raise RuntimeError("Chrome debugger connection escaped the exact loopback endpoint")
     try:
         connections = psutil.net_connections(kind="tcp")
     except psutil.Error as error:
-        raise RuntimeError("Chrome debugger WebSocket owner is unavailable") from error
+        raise RuntimeError("Chrome debugger connection owner is unavailable") from error
     server_rows = [
         connection
         for connection in connections
@@ -417,24 +430,69 @@ def _assert_browser_socket_owner(
     ]
     if len(server_rows) != 1 or server_rows[0].pid != expected_pid:
         raise RuntimeError(
-            "Chrome debugger WebSocket is not owned by the launched session"
+            "Chrome debugger connection is not owned by the launched session"
         )
 
 
-def _discover_page(endpoint: str, *, page_origin: str, launch_nonce: str) -> str:
-    base, port = _loopback_endpoint(endpoint)
-    expected_origin = _loopback_page_origin(page_origin)
-    if not re.fullmatch(r"[0-9a-f]{32}", launch_nonce):
-        raise ValueError("browser launch nonce is invalid")
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _NoRedirectHandler(),
-    )
-    with opener.open(f"{base}/json", timeout=3) as response:  # noqa: S310 - exact loopback URL, redirects rejected
-        final_url, final_port = _loopback_endpoint(response.geturl().removesuffix("/json"))
-        if final_url != base or final_port != port:
-            raise RuntimeError("Chrome debugger response escaped the exact loopback endpoint")
-        pages = json.loads(response.read().decode("utf-8"))
+def _connect_owned_browser_socket(
+    session: dict[str, object],
+) -> network_socket.socket:
+    """Open one direct IPv4 connection and prove its server-side owner."""
+
+    _, port = _loopback_endpoint(session["browser_endpoint"])
+    _assert_browser_endpoint_owner(session)
+    try:
+        connection = network_socket.create_connection(
+            ("127.0.0.1", port),
+            timeout=3,
+        )
+    except OSError as error:
+        raise RuntimeError("Chrome debugger direct connection failed") from error
+    try:
+        _assert_browser_endpoint_owner(session)
+        _assert_browser_socket_owner(session, connection)
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+
+def _read_browser_pages(session: dict[str, object]) -> object:
+    _, port = _loopback_endpoint(session["browser_endpoint"])
+    connected_socket = _connect_owned_browser_socket(session)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+    connection.sock = connected_socket
+    try:
+        connection.request(
+            "GET",
+            "/json",
+            headers={
+                "Accept": "application/json",
+                "Connection": "close",
+                "Host": f"127.0.0.1:{port}",
+            },
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            raise RuntimeError("Chrome debugger endpoint must return HTTP 200")
+        payload = response.read(1024 * 1024 + 1)
+        if len(payload) > 1024 * 1024:
+            raise RuntimeError("Chrome debugger page list is too large")
+    except (OSError, http.client.HTTPException) as error:
+        raise RuntimeError("Chrome debugger HTTP request failed") from error
+    finally:
+        connection.close()
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Chrome debugger returned an invalid page list") from error
+
+
+def _discover_page(session: dict[str, object]) -> str:
+    _, port = _loopback_endpoint(session["browser_endpoint"])
+    expected_origin = _loopback_page_origin(session["browser_page_origin"])
+    launch_nonce = str(session["browser_launch_nonce"])
+    pages = _read_browser_pages(session)
     if type(pages) is not list:
         raise RuntimeError("Chrome debugger returned an invalid page list")
     candidates = [
@@ -457,29 +515,38 @@ def _discover_page(endpoint: str, *, page_origin: str, launch_nonce: str) -> str
     )
 
 
+def _browser_websocket_connect(
+    websocket_url: str,
+    connected_socket: network_socket.socket,
+) -> WebSocketConnect:
+    # A supplied socket bypasses proxy selection and makes redirects impossible.
+    return WebSocketConnect(
+        websocket_url,
+        sock=connected_socket,
+        max_size=4 * 1024 * 1024,
+    )
+
+
 @asynccontextmanager
 async def _owned_browser_socket(
     session: dict[str, object],
 ) -> AsyncIterator[object]:
-    """Connect only while the frozen Chrome still owns the exact endpoint."""
+    """Use only preconnected streams owned by the frozen Chrome process."""
 
-    _assert_browser_endpoint_owner(session)
-    websocket_url = _discover_page(
-        str(session["browser_endpoint"]),
-        page_origin=str(session["browser_page_origin"]),
-        launch_nonce=str(session["browser_launch_nonce"]),
-    )
-    _assert_browser_endpoint_owner(session)
-    async with _NoRedirectWebSocketConnect(
-        websocket_url,
-        proxy=None,
-        max_size=4 * 1024 * 1024,
-    ) as socket:
-        # A later listener replacement cannot take over this established TCP
-        # and WebSocket stream after the post-connect owner check succeeds.
-        _assert_browser_endpoint_owner(session)
-        _assert_browser_socket_owner(session, socket)
-        yield socket
+    websocket_url = _discover_page(session)
+    connected_socket = await asyncio.to_thread(_connect_owned_browser_socket, session)
+    try:
+        connected_socket.setblocking(False)
+        async with _browser_websocket_connect(
+            websocket_url,
+            connected_socket,
+        ) as connection:
+            # A supplied socket cannot follow redirects or be transferred by a
+            # later listener replacement; re-check it immediately before use.
+            _assert_browser_socket_owner(session, connected_socket)
+            yield connection
+    finally:
+        connected_socket.close()
 
 
 class _CdpClient:

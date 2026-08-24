@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
@@ -13,10 +14,11 @@ from websockets.http11 import Response
 from scripts.live_voice.l0_browser_capture import (
     ACCEPTANCE_VERSION,
     SESSION_VERSION,
-    _NoRedirectWebSocketConnect,
     _aggregate_cold_evidence,
     _assert_browser_socket_owner,
+    _browser_websocket_connect,
     _browser_round_complete,
+    _connect_owned_browser_socket,
     _configured_run_labels,
     _correlated_success_counts,
     _assert_browser_endpoint_owner,
@@ -26,6 +28,7 @@ from scripts.live_voice.l0_browser_capture import (
     _load_session,
     _loopback_websocket,
     _owned_browser_socket,
+    _read_browser_pages,
     _scenario_matrix_complete,
     _select_cases,
     _validate_temperature_capture_policy,
@@ -195,141 +198,74 @@ def test_capture_session_is_loopback_closed_and_cannot_escape_evidence_directory
         _load_session(_session(tmp_path, environment_ref="a" * 65))
 
 
-def test_cdp_discovery_rejects_redirected_or_remote_websocket(
+def test_cdp_page_selection_requires_exact_origin_nonce_and_websocket(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _Response:
-        def __init__(
-            self, *, final_url: str, page_url: str, websocket_url: str
-        ) -> None:
-            self._final_url = final_url
-            self._page_url = page_url
-            self._websocket_url = websocket_url
-
-        def __enter__(self) -> "_Response":
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def geturl(self) -> str:
-            return self._final_url
-
-        def read(self) -> bytes:
-            return json.dumps(
-                [
-                    {
-                        "type": "page",
-                        "url": self._page_url,
-                        "webSocketDebuggerUrl": self._websocket_url,
-                    }
-                ]
-            ).encode("utf-8")
-
-    class _Opener:
-        response: _Response
-
-        def open(self, *_args: object, **_kwargs: object) -> _Response:
-            return self.response
-
-    opener = _Opener()
-    opener_handlers: list[object] = []
-
-    def build_opener(*handlers: object) -> _Opener:
-        opener_handlers[:] = handlers
-        return opener
-
-    monkeypatch.setenv("http_proxy", "http://127.0.0.1:65530")
-    monkeypatch.setenv("https_proxy", "http://127.0.0.1:65530")
-    monkeypatch.setattr(
-        l0_browser_capture.urllib.request,
-        "build_opener",
-        build_opener,
-    )
-    opener.response = _Response(
-        final_url="http://evil.example/json",
-        page_url=(
-            "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
-            f"&live_voice_l0_launch_nonce={'2' * 32}"
-        ),
-        websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
-    )
-    with pytest.raises(ValueError, match="loopback-only"):
-        _discover_page(
-            "http://127.0.0.1:9223",
-            page_origin="http://localhost:5173",
-            launch_nonce="2" * 32,
-        )
-    proxy_handlers = [
-        handler
-        for handler in opener_handlers
-        if isinstance(handler, l0_browser_capture.urllib.request.ProxyHandler)
-    ]
-    assert len(proxy_handlers) == 1
-    assert proxy_handlers[0].proxies == {}
-
-    opener.response = _Response(
-        final_url="http://127.0.0.1:9223/json",
-        page_url=(
-            "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
-            f"&live_voice_l0_launch_nonce={'2' * 32}"
-        ),
-        websocket_url="ws://evil.example:9223/devtools/page/exact",
-    )
-    with pytest.raises(RuntimeError, match="non-loopback"):
-        _discover_page(
-            "http://127.0.0.1:9223",
-            page_origin="http://localhost:5173",
-            launch_nonce="2" * 32,
-        )
-    opener.response = _Response(
-        final_url="http://127.0.0.1:9223/json",
-        page_url=(
+    session = _load_session(_session(tmp_path))
+    page = {
+        "type": "page",
+        "url": (
             "http://localhost:5173/chat/session-after-spa-navigation"
             f"?live_voice_l0_measurement=1&live_voice_l0_launch_nonce={'2' * 32}"
         ),
-        websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
+        "webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/page/exact",
+    }
+    pages: object = [page]
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_read_browser_pages",
+        lambda _session: pages,
     )
-    assert _discover_page(
-        "http://127.0.0.1:9223",
-        page_origin="http://localhost:5173",
-        launch_nonce="2" * 32,
-    ) == "ws://127.0.0.1:9223/devtools/page/exact"
+    assert _discover_page(session) == page["webSocketDebuggerUrl"]
 
-    opener.response = _Response(
-        final_url="http://127.0.0.1:9223/json",
-        page_url="http://evil.example/chat/new",
-        websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
-    )
-    with pytest.raises(RuntimeError, match="isolated Formal Web"):
-        _discover_page(
-            "http://127.0.0.1:9223",
-            page_origin="http://localhost:5173",
-            launch_nonce="2" * 32,
-        )
-
-    opener.response = _Response(
-        final_url="http://127.0.0.1:9223/json",
-        page_url=(
-            "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
-            f"&live_voice_l0_launch_nonce={'3' * 32}"
-        ),
-        websocket_url="ws://127.0.0.1:9223/devtools/page/exact",
-    )
-    with pytest.raises(RuntimeError, match="isolated Formal Web"):
-        _discover_page(
-            "http://127.0.0.1:9223",
-            page_origin="http://localhost:5173",
-            launch_nonce="2" * 32,
-        )
+    for updates in (
+        {"url": "http://evil.example/chat/new"},
+        {
+            "url": (
+                "http://localhost:5173/chat/new?live_voice_l0_measurement=1"
+                f"&live_voice_l0_launch_nonce={'3' * 32}"
+            )
+        },
+        {"webSocketDebuggerUrl": "ws://evil.example:9223/devtools/page/exact"},
+        {"webSocketDebuggerUrl": "ws://127.0.0.1:9224/devtools/page/exact"},
+        {"webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/page/exact?x=1"},
+    ):
+        pages = [{**page, **updates}]
+        with pytest.raises(RuntimeError):
+            _discover_page(session)
 
 
-def test_cdp_websocket_disables_proxy_and_rejects_handshake_redirect() -> None:
-    connector = _NoRedirectWebSocketConnect(
+@pytest.mark.asyncio
+async def test_preconnected_websocket_disables_proxy_and_structurally_rejects_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ws_proxy", "http://127.0.0.1:65530")
+    connected_socket = object()
+    connector = _browser_websocket_connect(  # type: ignore[arg-type]
         "ws://127.0.0.1:9223/devtools/page/exact",
-        proxy=None,
+        connected_socket,
     )
-    assert connector.proxy is None
+    assert connector.connection_kwargs["sock"] is connected_socket
+
+    direct_connection = object()
+    create_calls: list[dict[str, object]] = []
+
+    async def create_connection(
+        _factory: object,
+        **kwargs: object,
+    ) -> tuple[object, object]:
+        create_calls.append(kwargs)
+        return object(), direct_connection
+
+    monkeypatch.setattr(
+        asyncio.get_running_loop(),
+        "create_connection",
+        create_connection,
+    )
+    assert await connector.create_connection() is direct_connection
+    assert create_calls == [{"sock": connected_socket}]
+
     redirect = InvalidStatus(
         Response(
             302,
@@ -342,8 +278,87 @@ def test_cdp_websocket_disables_proxy_and_rejects_handshake_redirect() -> None:
         )
     )
     result = connector.process_redirect(redirect)
-    assert isinstance(result, RuntimeError)
-    assert str(result) == "Chrome debugger WebSocket must not redirect"
+    assert isinstance(result, ValueError)
+    assert "preexisting socket" in str(result)
+
+
+def test_http_discovery_uses_only_the_preconnected_owned_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _load_session(_session(tmp_path))
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:65530")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:65530")
+    requests: list[tuple[object, ...]] = []
+    response_status = 200
+
+    class _RawSocket:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    raw_sockets: list[_RawSocket] = []
+
+    class _Response:
+        @property
+        def status(self) -> int:
+            return response_status
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps([{"type": "page"}]).encode("utf-8")
+
+    class _HttpConnection:
+        def __init__(self, host: str, port: int, *, timeout: int) -> None:
+            assert (host, port, timeout) == ("127.0.0.1", 9223, 3)
+            self.sock: _RawSocket | None = None
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            headers: dict[str, str],
+        ) -> None:
+            requests.append((method, path, headers, self.sock))
+
+        def getresponse(self) -> _Response:
+            return _Response()
+
+        def close(self) -> None:
+            assert self.sock is not None
+            self.sock.close()
+
+    def connect(_session: dict[str, object]) -> _RawSocket:
+        value = _RawSocket()
+        raw_sockets.append(value)
+        return value
+
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_connect_owned_browser_socket",
+        connect,
+    )
+    monkeypatch.setattr(
+        l0_browser_capture.http.client,
+        "HTTPConnection",
+        _HttpConnection,
+    )
+    assert _read_browser_pages(session) == [{"type": "page"}]
+    method, path, headers, used_socket = requests[-1]
+    assert (method, path) == ("GET", "/json")
+    assert headers == {
+        "Accept": "application/json",
+        "Connection": "close",
+        "Host": "127.0.0.1:9223",
+    }
+    assert used_socket is raw_sockets[-1]
+    assert raw_sockets[-1].closed
+
+    response_status = 302
+    with pytest.raises(RuntimeError, match="HTTP 200"):
+        _read_browser_pages(session)
+    assert raw_sockets[-1].closed
 
 
 def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
@@ -440,6 +455,25 @@ def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
     with pytest.raises(RuntimeError, match="exact isolated profile"):
         _assert_browser_endpoint_owner(session)
 
+    exact_arguments = [
+        "chrome.exe",
+        f"--user-data-dir={tmp_path.resolve()}",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=9223",
+    ]
+    for conflicting_duplicate in (
+        f"--user-data-dir={tmp_path.resolve()}-attacker",
+        "--remote-debugging-address=0.0.0.0",
+        "--remote-debugging-port=9224",
+    ):
+        monkeypatch.setattr(
+            _Process,
+            "cmdline",
+            lambda _self, extra=conflicting_duplicate: [*exact_arguments, extra],
+        )
+        with pytest.raises(RuntimeError, match="exact isolated profile"):
+            _assert_browser_endpoint_owner(session)
+
     monkeypatch.setattr(
         _Process,
         "cmdline",
@@ -487,15 +521,15 @@ def test_browser_socket_owner_requires_exact_peer_and_server_four_tuple(
 ) -> None:
     session = _load_session(_session(tmp_path))
 
-    class _Transport:
+    class _RawSocket:
         peer = ("127.0.0.1", 9223)
         local = ("127.0.0.1", 50123)
 
-        def get_extra_info(self, name: str) -> object:
-            return self.peer if name == "peername" else self.local
+        def getpeername(self) -> tuple[str, int]:
+            return self.peer
 
-    class _Socket:
-        transport = _Transport()
+        def getsockname(self) -> tuple[str, int]:
+            return self.local
 
     class _Address:
         def __init__(self, ip: str, port: int) -> None:
@@ -513,70 +547,85 @@ def test_browser_socket_owner_requires_exact_peer_and_server_four_tuple(
         "net_connections",
         lambda **_kwargs: [_Connection()],
     )
-    _assert_browser_socket_owner(session, _Socket())
+    _assert_browser_socket_owner(session, _RawSocket())  # type: ignore[arg-type]
 
-    _Socket.transport.peer = ("127.0.0.1", 9224)
+    _RawSocket.peer = ("127.0.0.1", 9224)
     with pytest.raises(RuntimeError, match="escaped"):
-        _assert_browser_socket_owner(session, _Socket())
-    _Socket.transport.peer = ("127.0.0.1", 9223)
+        _assert_browser_socket_owner(session, _RawSocket())  # type: ignore[arg-type]
+    _RawSocket.peer = ("127.0.0.1", 9223)
 
     _Connection.pid = None
     with pytest.raises(RuntimeError, match="not owned"):
-        _assert_browser_socket_owner(session, _Socket())
+        _assert_browser_socket_owner(session, _RawSocket())  # type: ignore[arg-type]
     _Connection.pid = 4102
 
     _Connection.raddr = _Address("127.0.0.1", 50124)
     with pytest.raises(RuntimeError, match="not owned"):
-        _assert_browser_socket_owner(session, _Socket())
+        _assert_browser_socket_owner(session, _RawSocket())  # type: ignore[arg-type]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("owner_failure_call", [2, 3])
-async def test_owned_browser_socket_revalidates_after_discovery_and_connection(
+def test_direct_socket_connect_revalidates_listener_and_closes_on_owner_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    owner_failure_call: int,
 ) -> None:
     session = _load_session(_session(tmp_path))
-    owner_calls = 0
-    connection_enters = 0
+    endpoint_owner_calls = 0
+    socket_owner_calls: list[object] = []
+    reject_socket_owner = False
 
-    def assert_owner(_session: dict[str, object]) -> None:
-        nonlocal owner_calls
-        owner_calls += 1
-        if owner_calls == owner_failure_call:
-            raise RuntimeError("listener owner changed")
+    class _RawSocket:
+        closed = False
 
-    class _Connection:
-        async def __aenter__(self) -> object:
-            nonlocal connection_enters
-            connection_enters += 1
-            return object()
+        def close(self) -> None:
+            self.closed = True
 
-        async def __aexit__(self, *_args: object) -> None:
-            return None
+    created: list[_RawSocket] = []
+
+    def create_connection(
+        address: tuple[str, int],
+        *,
+        timeout: int,
+    ) -> _RawSocket:
+        assert (address, timeout) == (("127.0.0.1", 9223), 3)
+        value = _RawSocket()
+        created.append(value)
+        return value
+
+    def assert_endpoint_owner(_session: dict[str, object]) -> None:
+        nonlocal endpoint_owner_calls
+        endpoint_owner_calls += 1
+
+    def assert_socket_owner(_session: dict[str, object], value: object) -> None:
+        socket_owner_calls.append(value)
+        if reject_socket_owner:
+            raise RuntimeError("wrong established owner")
 
     monkeypatch.setattr(
         l0_browser_capture,
         "_assert_browser_endpoint_owner",
-        assert_owner,
+        assert_endpoint_owner,
     )
     monkeypatch.setattr(
         l0_browser_capture,
-        "_discover_page",
-        lambda *_args, **_kwargs: "ws://127.0.0.1:9223/devtools/page/exact",
+        "_assert_browser_socket_owner",
+        assert_socket_owner,
     )
     monkeypatch.setattr(
-        l0_browser_capture,
-        "_NoRedirectWebSocketConnect",
-        lambda *_args, **_kwargs: _Connection(),
+        l0_browser_capture.network_socket,
+        "create_connection",
+        create_connection,
     )
 
-    with pytest.raises(RuntimeError, match="listener owner changed"):
-        async with _owned_browser_socket(session):
-            pass
-    assert owner_calls == owner_failure_call
-    assert connection_enters == (1 if owner_failure_call == 3 else 0)
+    connected = _connect_owned_browser_socket(session)
+    assert connected is created[0]
+    assert endpoint_owner_calls == 2
+    assert socket_owner_calls == [connected]
+    assert not connected.closed
+
+    reject_socket_owner = True
+    with pytest.raises(RuntimeError, match="wrong established owner"):
+        _connect_owned_browser_socket(session)
+    assert created[-1].closed
 
 
 @pytest.mark.asyncio
@@ -585,30 +634,37 @@ async def test_owned_browser_socket_binds_the_established_direct_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _load_session(_session(tmp_path))
-    socket = object()
-    owner_calls = 0
+    connection = object()
+    connector_inputs: list[tuple[str, object]] = []
     socket_owner_calls: list[object] = []
-    connector_kwargs: dict[str, object] = {}
 
-    def assert_owner(_session: dict[str, object]) -> None:
-        nonlocal owner_calls
-        owner_calls += 1
+    class _RawSocket:
+        blocking: bool | None = None
+        closed = False
+
+        def setblocking(self, value: bool) -> None:
+            self.blocking = value
+
+        def close(self) -> None:
+            self.closed = True
+
+    raw_socket = _RawSocket()
 
     class _Connection:
         async def __aenter__(self) -> object:
-            return socket
+            return connection
 
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    def connect(*_args: object, **kwargs: object) -> _Connection:
-        connector_kwargs.update(kwargs)
+    def connect(websocket_url: str, value: object) -> _Connection:
+        connector_inputs.append((websocket_url, value))
         return _Connection()
 
     monkeypatch.setattr(
         l0_browser_capture,
-        "_assert_browser_endpoint_owner",
-        assert_owner,
+        "_discover_page",
+        lambda _session: "ws://127.0.0.1:9223/devtools/page/exact",
     )
     monkeypatch.setattr(
         l0_browser_capture,
@@ -617,20 +673,23 @@ async def test_owned_browser_socket_binds_the_established_direct_stream(
     )
     monkeypatch.setattr(
         l0_browser_capture,
-        "_discover_page",
-        lambda *_args, **_kwargs: "ws://127.0.0.1:9223/devtools/page/exact",
+        "_connect_owned_browser_socket",
+        lambda _session: raw_socket,
     )
     monkeypatch.setattr(
         l0_browser_capture,
-        "_NoRedirectWebSocketConnect",
+        "_browser_websocket_connect",
         connect,
     )
 
     async with _owned_browser_socket(session) as connected:
-        assert connected is socket
-    assert owner_calls == 3
-    assert socket_owner_calls == [socket]
-    assert connector_kwargs["proxy"] is None
+        assert connected is connection
+    assert connector_inputs == [
+        ("ws://127.0.0.1:9223/devtools/page/exact", raw_socket)
+    ]
+    assert socket_owner_calls == [raw_socket]
+    assert raw_socket.blocking is False
+    assert raw_socket.closed
 
 
 def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revision() -> None:
