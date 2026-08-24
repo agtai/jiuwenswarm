@@ -392,6 +392,38 @@ separate source/config-bound candidate report survives. The audible check was
 clean, but candidate underrun/rebuffer counters are not bound in a regenerated
 report. Production default therefore remains 1000 ms.
 
+### 5.9 Current-source muted manual pilot — partial localization only
+
+Two manual attempts on `37da36e68` used real Windows Chrome microphone input.
+The first reproduced unintended barge-in; the second muted Windows output and
+produced two completed dialogue batches plus four cancelled Task batches. No
+true `task_cancel` batch was exported. Muted playout grants no physical
+audibility credit, and the run is not a fixed-corpus baseline.
+
+Cancelled batches retain useful observed mark pairs. The sanitized evidence
+uses `0*` only as a display sentinel for a missing pair; canonical reports keep
+those cells `unknown`, and zeros never enter statistics. Excluding missing
+pairs, cross-profile diagnostic medians were:
+
+| Boundary | Observed range | Diagnostic median | Credit |
+|---|---:|---:|---|
+| EOT -> STT final | 489.3–733.6 ms | **587.6 ms** | Partial localization only |
+| TTS request -> first downlink | 1,360.4–1,572.3 ms | **1,518.3 ms** | Partial localization only |
+| Schedule -> first-start estimate | 716.7–744.9 ms | **728.0 ms** | Partial localization only |
+| Submit -> presentation | 1,229.2–122,981.3 ms | **1,753.0 ms** | Mixed workload/Agent/Task; not pure Live Voice |
+
+For the two completed dialogues, TTS request→first Provider PCM was 1,216.9 /
+1,151.8 ms; transport-open→first PCM was 13.1 / 12.3 ms; first PCM→first send
+was 323.0 / 326.7 ms. These facts localize waits but do not re-authorize the
+rejected connection-reuse candidate or prove a specific cause.
+
+The attempt exposed a harness Gate: the current beep includes cancelled
+batches, snapshots use the current stage rather than the batch profile and
+wrapper shutdown can leave child processes. Another credited manual population
+requires terminal/profile/round-aware advancement and complete process-tree
+cleanup. See the
+[sanitized pilot evidence](../evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md).
+
 ## 6. Recommended next optimization candidates
 
 The reference numbers below are stable inventory labels, not execution
@@ -531,6 +563,8 @@ listed as branch-bound paths rather than current-tree links.
     (validated run.json; generated report; browser.jsonl, 6 batches).
   - Driver/procedure: `<archive-root>/lv-driver.sh`;
     [LATENCY_PROBE_MANUAL_DRIVER](../runbooks/LATENCY_PROBE_MANUAL_DRIVER.md).
+  - Current-source human/muted pilot:
+    [MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68](../evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md).
   - Hongxing closures: `c31e85ade` (atomic batch observation, default-on,
     D-094, reviews), `1fec48027` (receipt/successor decoupling).
   - Lane probe reconciliation: `6f288de93`, `497831f58`.
@@ -554,3 +588,9 @@ current full-final SSE path remains A1/A2, bounded post-final segmentation is
 B, and optional Batch/fallback R0 is diagnostic only. The real-Provider screen
 must show whether B improves first PCM or source reserve without request,
 prosody, ordering or cancellation regressions before Browser Lane C.
+The current-source muted pilot adds partial localization at approximately
+587.6 ms EOT/STT, 1,518.3 ms TTS-to-downlink and 728.0 ms schedule-to-start
+diagnostic medians, but only two dialogue rounds completed. Four Task batches
+cancelled, no true cancel batch exported, and driver terminal/profile/process
+handling failed its workflow Gate. These figures do not close the baseline or
+change any candidate status.

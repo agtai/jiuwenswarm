@@ -96,6 +96,7 @@ a frozen-corpus off/on waterfall.
 | ID | Experiment or episode | Lane and total class | Headline result | Decision / next gate |
 |---|---|---|---|---|
 | `LVL-00` | Windows Chrome/WSL physical diagnostic A–G | Physical Browser; full experience and Browser-clock code E2E | EOT→ACK **9,832–25,234 ms**; capture-ready→ACK **15,352–32,512 ms**, `MEASURED` | Preliminary diagnostic only; incompatible manifest, dirty source and no formal population |
+| `LVL-00M3` | Current-source manual muted pilot v2/v3 | Human microphone + muted logical Browser playout; partial same-clock reconstruction | Two completed dialogue rounds plus four cancelled Task rounds; partial diagnostic medians EOT/STT **587.6 ms**, TTS/downlink **1,518.3 ms**, schedule/start **728.0 ms** | Diagnostic localization only; no audibility, p50/p95 or baseline credit; terminal-aware driver repair before retry |
 | `LVL-01` | P2 one-notification-per-RPC → bounded pull 16 | Deterministic Gate A; component total | p50 **864→86 / 4,348→344 / 8,658→615 ms** for 10/50/100 notifications, `MEASURED` | Causal candidate accepted; later scoped product follow-up is LVL-01D |
 | `LVL-01C` | Hongxing deployed P2 validation | Deployed product episode; affected output failed | About **46%** faster response completion, `REPORTED_EXTERNAL`; TTS failed | Failed Gate C; repair atomic Media batch observation and rerun |
 | `LVL-01D` | Atomic Media batch repair and default-on P2 follow-up | Deployed product episode; scoped human functional validation | Short/medium/long samples **10.65 / 7.05 / 2.78–3.14 s**, with audible TTS, `MEASURED` for the declared run | Scoped functional acceptance and D-094 default-on; no frozen-corpus off/on p50/p95 credit |
@@ -189,6 +190,30 @@ directories. One older `edbee4d3d/...T104805Z...` directory contains a reduced
 report, but it is not the A–G population and cannot replace the documented
 Browser reconstruction. All such artifacts remain `DIAGNOSTIC` or
 `FAILED_WORKFLOW`.
+
+### 4.5 LVL-00M3 current-source muted pilot
+
+On source `37da36e68`, a human-microphone pilot first reproduced false
+barge-in with audible output, then repeated with Windows output muted. The
+muted run produced six Browser batches: two completed dialogue rounds, two
+cancelled create rounds, two cancelled status rounds and no true cancel batch.
+Muted output preserves logical Browser scheduling but grants no physical
+audibility credit.
+
+Observed same-clock boundaries inside cancelled batches remain useful partial
+timestamps even though the canonical reducer correctly reports their complete
+segments as `unknown`. A display-only `0*` sentinel identifies missing pairs and
+is excluded from all statistics. Across five observed pairs, diagnostic medians
+were EOT→STT **587.6 ms**, TTS request→first downlink **1,518.3 ms**, and
+schedule→first-start estimate **728.0 ms**. Submit→presentation varied from
+1,229.2 to 122,981.3 ms and remains workload/Agent/Task dependent.
+
+The pilot also demonstrated that `beep != completed`: the driver beeped for
+cancelled batches, attributed snapshots to the current UI stage rather than
+the batch profile and left child processes after wrapper shutdown. No further
+credited population may use that driver behaviour. Full tables, artifact
+hashes and non-claims are in the
+[manual muted pilot evidence](MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md).
 
 ## 5. LVL-01/LVL-01C — P2 bounded notification pull
 
@@ -644,6 +669,7 @@ artifact ledger. The repository stores only sanitized evidence.
 | Experiment | Artifact state |
 |---|---|
 | LVL-00 | Diagnostic/failed-workflow directories survive; no compatible A–G raw population |
+| LVL-00M3 | v2/v3 private JSONL/reports survive with hashes bound in sanitized evidence; two completed and four cancelled v3 batches, no baseline population |
 | LVL-01 | Credited A1/B/A2 reports survive with freshly verified hashes; earlier A1 reports are diagnostic |
 | LVL-01C | No locally bound raw artifact; external report only |
 | LVL-01D | Sanitized source/check/result evidence is repository-bound; private raw product artifacts are not catalogued here |
@@ -662,22 +688,26 @@ artifact ledger. The repository stores only sanitized evidence.
 1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
    LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
    remains an evidence gap, not a repair packet.
-2. Run the already specified Provider-native Semantic VAD causal
+2. Repair or replace the manual driver before another physical population: a
+   beep must identify profile/round/terminal, advancement must reject a
+   mismatched or extra batch, and shutdown must retire the complete process
+   tree. LVL-00M3 grants localization only.
+3. Run the already specified Provider-native Semantic VAD causal
    screen with the 1200 ms fallback and natural-pause integrity gates.
-3. Run a clean same-source/same-workload LVL-09
+4. Run a clean same-source/same-workload LVL-09
    A1=1000/B=250/A2=1000 Browser screen. Do not change the default from the
    unmatched diagnostic.
-4. Write the prospective LVL-10 materiality spec, then compare
+5. Write the prospective LVL-10 materiality spec, then compare
    `LVL-10-A1/B/A2`: current full-final SSE against bounded post-final
    segmentation with the same real Provider. Keep optional Batch/fallback R0
    outside causal credit. Do not implement product wiring or invent a numeric
    gate from the one-round 1561 ms TTS-to-downlink segment.
-5. Treat native speech-to-speech as a strategic architecture study requiring a
+6. Treat native speech-to-speech as a strategic architecture study requiring a
    separate authority decision, not as the next optimization packet.
-6. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
+7. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
    stable-sentence packet closed unless a new reviewed mechanism or workload
    hypothesis changes the materiality question.
-7. Keep batch-32, server push and coalescing frozen until a deployed waterfall
+8. Keep batch-32, server push and coalescing frozen until a deployed waterfall
    demonstrates material residual P2 backlog.
 
 Every future result uses

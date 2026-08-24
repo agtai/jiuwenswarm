@@ -13,7 +13,7 @@
 
 - launches the full stack with the complete environment contract (below);
 - prints the stage URL for each declared profile/case (no browser auto-open);
-- monitors `<run-dir>/browser.jsonl` and beeps when a round exports;
+- monitors `<run-dir>/browser.jsonl` and beeps when a batch exports;
 - snapshots every exported batch to `snapshots/stage<N>-round<K>.json`;
 - keeps progress in `snapshots/state.json` (survives restarts);
 - performs graceful shutdown (SIGINT → bounded drain → SIGTERM) and runs
@@ -59,11 +59,17 @@ Topology note: in dev there are exactly THREE processes. The Gateway binds
   registered disposable project. Task stages have real side effects there.
 - Keep the same tab for all stages; reload between stages preserves the
   per-profile `round_index` in `sessionStorage`.
-- A round exports ONLY after playout ACK + successor capture ready (beep +
-  `[probe] N batches exported`). Reloading earlier cancels the round
-  (recorded as `cancelled`, stays in the denominator).
-- Failed/cancelled rounds produce no segment timeline; only `completed`
-  rounds yield waterfall measurements.
+- A `completed` round reaches export after playout ACK + successor capture
+  ready. Reloading, barge-in or advancing earlier can export a `cancelled`
+  batch instead.
+- In the current driver, the beep and `[probe] N batches exported` count every
+  new JSONL batch; **beep does not mean completed**. Before advancing, inspect
+  `terminal_outcome`, `profile_id` and `round_index` in the exported batch.
+- Failed/cancelled rounds do not receive complete-round credit. Observed
+  same-clock mark pairs may be preserved as explicitly partial diagnostics;
+  absent pairs remain `unknown` and must not enter p50/p95 or A/B/A summaries.
+- The current stage-number snapshot name is operator state, not authoritative
+  batch identity. Do not infer profile or round from the filename alone.
 
 ## 4. Usage
 
@@ -98,7 +104,9 @@ plus `DATA_DIR=`). Logs: `<run-dir>/logs/{agentserver,gateway,vite,driver}.log`.
 | Startup fails closed, path error | `P3 database must remain under the application-owned P3 directory` | DB path must be under `<DATA_DIR>/live_voice/p3alpha/` |
 | Page stuck at "Loading conversation history…" | gateway log: `未连接 AgentServer，请先调用 connect(uri)` | Gateway lost its AgentServer link (driver died) — relaunch the stack |
 | Voice recovery failed (text, `UNIFIED_INPUT_FAILED`) | agentserver: `handle_unified_submit() got an unexpected keyword argument 'latency_probe'` | Merge regression — fixed on `497831f58+`; keep registry/server in sync |
-| Rounds come out `cancelled` | batch `terminal_outcome: cancelled` | Reloaded/advanced before playout ACK + successor ready — wait for the beep |
+| Beep occurs but round is `cancelled` | batch `terminal_outcome: cancelled` | Current beep detects export, not success. Inspect terminal/profile/round; do not advance or credit the round |
+| Snapshot is labelled for the next stage | filename stage differs from batch `profile_id` | Current snapshots use operator stage. Treat the batch payload as authoritative |
+| Vite/Gateway remains after driver exit | port still bound after `q` | Current wrapper-PID shutdown may leave child processes. Stop the complete process group/tree before starting a new run |
 | Port 19000 bind conflict (`Errno 98`) | two services racing | Do not run `app_web` in dev; Gateway owns 19000 |
 
 ## 6. Non-claims
@@ -108,3 +116,9 @@ Diagnostic evidence only. No baseline credit without the §7.6 conditions
 separation, full denominators, frozen corpus). Remote refs, credentials and
 project registration state remain outside Git and require their own
 authority.
+
+The driver version bound in
+[the 2026-08-24 muted pilot](../evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md)
+also lacks terminal/profile/round-aware advance and complete process-tree
+shutdown. Close those orchestration defects before using it for a credited
+Browser population.
