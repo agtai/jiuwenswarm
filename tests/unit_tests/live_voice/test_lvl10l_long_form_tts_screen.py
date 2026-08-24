@@ -166,6 +166,18 @@ class BlockingProvider(ScriptedProvider):
         return await super().next_synthesis_event(ref, timeout_seconds=timeout_seconds)
 
 
+class BufferedSuccessorProvider(ScriptedProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.predecessor_blocked = __import__("asyncio").Event()
+
+    async def next_synthesis_event(self, ref: Any, *, timeout_seconds: float) -> Any:
+        request = next(item for item in self.requests if item.ref == ref)
+        if request.ref.unit_seq == 0:
+            await self.predecessor_blocked.wait()
+        return await super().next_synthesis_event(ref, timeout_seconds=timeout_seconds)
+
+
 class CancelledProvider(ScriptedProvider):
     async def next_synthesis_event(self, ref: Any, *, timeout_seconds: float) -> Any:
         return SimpleNamespace(kind="cancelled", pcm_s16le=None)
@@ -259,7 +271,7 @@ async def test_provider_cancelled_event_fences_buffered_successor_with_reason_co
     record = await run_attempt(CancelledProvider(), fixture, _identity(PopulationRole.B2, fixture.fixture_id))
     assert record.terminal_outcome == "failed"
     assert record.terminal_reason == "group_fenced"
-    assert record.chunk_timelines[0].terminal_reason == "provider_cancelled"
+    assert record.chunk_timelines[0].terminal_reason.startswith("group_fenced:")
 
 
 def _roles_for(cells: tuple[tuple[Any, str], ...], fixture_id: str) -> list[Any]:
@@ -484,6 +496,12 @@ def test_selection_failure_closes_already_created_adapters(tmp_path: Path, monke
             "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
         ])
     assert first.closed is True
+    output = tmp_path / "selection-failure"
+    assert (output / "attempts.jsonl").read_text(encoding="utf-8") == ""
+    terminal = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert terminal["decision"] == "INCONCLUSIVE"
+    assert terminal["gate_reasons"] == ["provider_setup_failed"]
+    assert "provider_setup_failed" in (output / "report.md").read_text(encoding="utf-8")
 
 
 def test_shared_lock_collision_creates_no_output_directory(tmp_path: Path) -> None:
@@ -547,6 +565,64 @@ def test_report_markdown_contains_required_timing_and_decision_tables(
         assert heading in markdown
     assert "LVL-10L-B2 | long_2400" in markdown
     assert "Selected arm:" in markdown
+
+
+def test_artifacts_serialize_candidate_regressions_duration_parity_and_b4_increment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=ScriptedProvider())
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    output = tmp_path / "decision-inputs"
+    main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "decision-run", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
+    ])
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    inputs = report["candidate_decision_inputs"][PopulationRole.B2.value]["long_2400"]
+    assert set(inputs) >= {"first_pcm_regression", "reserve_regression", "audio_duration_delta"}
+    assert inputs["first_pcm_regression"]["measured_denominator"] == 1
+    assert set(inputs["audio_duration_delta"]) >= {"p50_absolute_ns", "p50_percent", "measured_denominator"}
+    assert set(report["b4_incremental_vs_b2"]) >= {"p50_gain_delta_ns", "p50_gain_delta_pct", "measured_denominator"}
+    assert "B4 vs B2 incremental paired gain" in (output / "report.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_fence_terminalizes_buffered_successor_timelines_for_jsonl_without_post_fence_release() -> None:
+    fixture = load_fixture_manifest(MANIFEST_PATH)[1]
+    provider = BufferedSuccessorProvider()
+    task = __import__("asyncio").create_task(
+        run_attempt(provider, fixture, _identity(PopulationRole.B2, fixture.fixture_id))
+    )
+    while len(provider.inputs) < 2:
+        await __import__("asyncio").sleep(0)
+    while provider.active != 1:
+        await __import__("asyncio").sleep(0)
+    task.cancel()
+    record = await task
+    row = json.loads(json.dumps(runner._safe_record(record)))
+    assert row["released_chunk_indexes"] == []
+    assert all(chunk["terminal_outcome"] != "opened" for chunk in row["chunk_timelines"])
+    assert row["chunk_timelines"][0]["terminal_reason"].startswith("group_fenced:")
+    assert row["chunk_timelines"][1]["terminal_reason"].startswith("group_fenced:")
+
+
+def test_non_monotonic_bucket_walk_is_recorded_after_2400_pass_and_1200_fail() -> None:
+    records = _formal_population()
+    for record in records:
+        if record.identity.role is PopulationRole.B2:
+            record.request_to_complete_ns = {
+                "long_2400": 1_000_000_000,
+                "long_1200": 1_900_000_000,
+                "long_600": 1_000_000_000,
+            }[record.identity.fixture_id]
+        if record.identity.role is PopulationRole.B4:
+            record.request_to_complete_ns = 2_000_000_000
+    report = reduce_records(records, expected_rounds=10)
+    assert report.smallest_break_even == "NON_MONOTONIC"
+    assert "monotonic_bucket_walk:NON_MONOTONIC" in report.gate_reasons
 
 
 @pytest.mark.asyncio

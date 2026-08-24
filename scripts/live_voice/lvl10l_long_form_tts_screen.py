@@ -377,6 +377,16 @@ async def run_attempt(
             return
         fenced = True
         current = tuple(live.items())
+        for index, (_request, task) in current:
+            if task.done() and not task.cancelled():
+                try:
+                    result = task.result()
+                except Exception:
+                    continue
+                prior = timeline[index]
+                timeline[index] = ChunkTimeline(
+                    index, prior.opened_ns, result[0], result[2], None, result[3], result[4], result[5]
+                )
         for _index, (request, task) in current:
             if not task.done():
                 try:
@@ -386,6 +396,29 @@ async def run_attempt(
                 task.cancel()
         if current:
             await asyncio.gather(*(task for _, (_, task) in current), return_exceptions=True)
+        for index, (_request, task) in current:
+            if task.cancelled() or not task.done():
+                continue
+            try:
+                result = task.result()
+            except Exception:
+                continue
+            prior = timeline[index]
+            timeline[index] = ChunkTimeline(
+                index, prior.opened_ns, result[0], result[2], None, result[3], result[4], result[5]
+            )
+        for index, prior in tuple(timeline.items()):
+            if prior.released_ns is None:
+                timeline[index] = ChunkTimeline(
+                    prior.chunk_index,
+                    prior.opened_ns,
+                    prior.first_pcm_ns,
+                    prior.completed_ns,
+                    None,
+                    prior.sample_count,
+                    "fenced",
+                    f"group_fenced:{reason}",
+                )
         live.clear()
 
     try:
@@ -718,13 +751,15 @@ def _numeric_p50(rows: Sequence[Any], metric: str) -> float | None:
     return None if not values else float(median(values))
 
 
-def _artifact_metrics(records: Sequence[AttemptRecord]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _artifact_metrics(records: Sequence[AttemptRecord]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     groups: dict[tuple[PopulationRole, str], list[Any]] = {}
     for record in records:
         groups.setdefault((record.identity.role, record.identity.fixture_id), []).append(record)
     per_cell: dict[str, Any] = {}
     paired: dict[str, Any] = {}
     control_drift: dict[str, Any] = {}
+    candidate_inputs: dict[str, Any] = {}
+    incremental: dict[str, Any] = {}
     for role in PopulationRole:
         per_cell[role.value] = {}
         for fixture in FIXTURE_IDS:
@@ -768,11 +803,55 @@ def _artifact_metrics(records: Sequence[AttemptRecord]) -> tuple[dict[str, Any],
                 "p50_gain_pct": None if not gains else float(median(gain * 100 / reference for gain, reference in zip(gains, references))),
                 "win_count": sum(gain > 0 for gain in gains),
             }
-    return per_cell, paired, control_drift
+            candidate_inputs.setdefault(role.value, {})[fixture] = {}
+            for label, metric in (
+                ("first_pcm_regression", "request_to_first_pcm_ns"),
+                ("reserve_regression", "request_to_reserve_ns"),
+                ("audio_duration_delta", "audio_duration_ns"),
+            ):
+                comparable_metric = [
+                    row for row in rows
+                    if getattr(row, metric) is not None
+                    and getattr(a1[row.identity.round_index], metric) is not None
+                    and getattr(a2[row.identity.round_index], metric) is not None
+                ]
+                references_metric = [
+                    interpolate_reference(row, a1[row.identity.round_index], a2[row.identity.round_index], metric)
+                    for row in comparable_metric
+                ]
+                deltas = [getattr(row, metric) - reference for row, reference in zip(comparable_metric, references_metric)]
+                percentages = [
+                    delta * 100 / reference
+                    for delta, reference in zip(deltas, references_metric)
+                    if reference != 0
+                ]
+                candidate_inputs[role.value][fixture][label] = {
+                    "measured_denominator": len(deltas),
+                    "p50_absolute_ns": None if not deltas else float(median(deltas)),
+                    "p50_percent": None if not percentages else float(median(percentages)),
+                }
+        b2 = paired[PopulationRole.B2.value][fixture]
+        b4 = paired[PopulationRole.B4.value][fixture]
+        if b2["p50_gain_ns"] is None or b4["p50_gain_ns"] is None:
+            incremental[fixture] = {"measured_denominator": 0, "p50_gain_delta_ns": None, "p50_gain_delta_pct": None}
+        else:
+            delta = b4["p50_gain_ns"] - b2["p50_gain_ns"]
+            incremental[fixture] = {
+                "measured_denominator": min(b2["measured_denominator"], b4["measured_denominator"]),
+                "p50_gain_delta_ns": delta,
+                "p50_gain_delta_pct": None if b2["p50_gain_ns"] == 0 else delta * 100 / b2["p50_gain_ns"],
+            }
+    return per_cell, paired, control_drift, candidate_inputs, incremental
 
 
 def _ms(summary: dict[str, float | None]) -> str:
     return "/".join("—" if value is None else f"{value / 1_000_000:.3f}" for value in summary.values())
+
+
+def _incremental_line(fixture: str, row: dict[str, Any]) -> str:
+    gain = "—" if row["p50_gain_delta_ns"] is None else f"{row['p50_gain_delta_ns'] / 1_000_000:.3f}"
+    percent = "—" if row["p50_gain_delta_pct"] is None else f"{row['p50_gain_delta_pct']:.3f}"
+    return f"| {fixture} | {row['measured_denominator']} | {gain} | {percent} |"
 
 
 def _markdown_report(
@@ -780,6 +859,7 @@ def _markdown_report(
     per_cell: dict[str, Any],
     paired: dict[str, Any],
     control_drift: dict[str, Any],
+    incremental: dict[str, Any],
     records: Sequence[AttemptRecord],
     observed_requests: int,
     expected_requests: int,
@@ -840,6 +920,12 @@ def _markdown_report(
         "",
         *drift_rows,
         "",
+        "## B4 vs B2 incremental paired gain",
+        "",
+        "| Fixture | Measured | p50 gain delta ms | p50 gain delta % |",
+        "| --- | ---: | ---: | ---: |",
+        *(_incremental_line(fixture, row) for fixture, row in incremental.items()),
+        "",
         "Measured: Provider/source timings and terminal counts. Derived: paired gains, duration and whole-chunk availability diagnostics.",
         "Browser and product latency are excluded. Whole-chunk availability is diagnostic only and does not decide materiality.",
         "",
@@ -861,7 +947,7 @@ def _write_artifacts(
         _expected_requests(role) for role in PopulationRole
     )
     observed_requests = sum(record.provider_request_count for record in records)
-    per_cell, paired_completion, control_drift = _artifact_metrics(records)
+    per_cell, paired_completion, control_drift, candidate_inputs, incremental = _artifact_metrics(records)
     report_payload = {
         "schema_version": "live-voice.lvl10l-report.v1",
         "decision": report.decision,
@@ -882,6 +968,8 @@ def _write_artifacts(
         "per_cell": per_cell,
         "paired_completion": paired_completion,
         "control_drift": control_drift,
+        "candidate_decision_inputs": candidate_inputs,
+        "b4_incremental_vs_b2": incremental["long_2400"],
         "whole_chunk_availability": "diagnostic_only_non_gating",
         "artifact_hashes": {
             "run_sha256": _file_sha256(output_root / "run.json"),
@@ -896,7 +984,37 @@ def _write_artifacts(
         json.dumps(report_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
     (output_root / "report.md").write_text(
-        _markdown_report(report, per_cell, paired_completion, control_drift, records, observed_requests, expected_requests),
+        _markdown_report(report, per_cell, paired_completion, control_drift, incremental, records, observed_requests, expected_requests),
+        encoding="utf-8",
+    )
+
+
+def _write_setup_failure_artifacts(output_root: Path, args: argparse.Namespace) -> None:
+    attempts = output_root / "attempts.jsonl"
+    attempts.write_text("", encoding="utf-8")
+    payload = {
+        "schema_version": "live-voice.lvl10l-report.v1",
+        "decision": "INCONCLUSIVE",
+        "gate_reasons": ["provider_setup_failed"],
+        "attempt_count": 0,
+        "expected_requests": args.rounds * len(FIXTURE_IDS) * sum(_expected_requests(role) for role in PopulationRole),
+        "observed_requests": 0,
+        "request_totals_by_role": {role.value: 0 for role in PopulationRole},
+        "selected_arm": None,
+        "smallest_break_even": None,
+        "setup_failure": "provider_setup_failed",
+        "artifact_hashes": {
+            "run_sha256": _file_sha256(output_root / "run.json"),
+            "manifest_sha256": _file_sha256(output_root / "manifest.json"),
+            "attempts_sha256": _file_sha256(attempts),
+            "report_canonical_excludes": ["artifact_hashes.report_canonical_sha256"],
+        },
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    payload["artifact_hashes"]["report_canonical_sha256"] = hashlib.sha256(canonical).hexdigest()
+    (output_root / "report.json").write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    (output_root / "report.md").write_text(
+        "# LVL-10L long-form TTS screen\n\nDecision: **INCONCLUSIVE**.\n\nGate reasons: provider_setup_failed.\n",
         encoding="utf-8",
     )
 
@@ -907,6 +1025,7 @@ async def run_population(
     providers: dict[PopulationRole, NativeStreamingSpeechProvider] = {}
     records: list[AttemptRecord] = []
     identities: dict[PopulationRole, int] = {role: 0 for role in PopulationRole}
+    setup_complete = False
     try:
         for role in PopulationRole:
             selection = await select_environment_streaming_speech(batch_available=False)
@@ -925,6 +1044,7 @@ async def run_population(
             "sample_rate_hz": SAMPLE_RATE_HZ,
         }
         run_path.write_text(json.dumps(run_document, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        setup_complete = True
         by_id = {fixture.fixture_id: fixture for fixture in fixtures}
         for round_index in range(args.rounds):
             for role, fixture_id in scheduled_cells(round_index):
@@ -942,6 +1062,10 @@ async def run_population(
         report = reduce_records(records, expected_rounds=args.rounds)
         _write_artifacts(args.output_root, args, report, records)
         return report
+    except Exception:
+        if not setup_complete:
+            _write_setup_failure_artifacts(args.output_root, args)
+        raise
     finally:
         await asyncio.gather(*(provider.close() for provider in providers.values()), return_exceptions=True)
 
