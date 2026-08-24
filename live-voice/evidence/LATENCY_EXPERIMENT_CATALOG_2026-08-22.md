@@ -107,7 +107,7 @@ a frozen-corpus off/on waterfall.
 | `LVL-07` | Stable-sentence Agent→TTS overlap | Real Agent + real Provider screen; projected perceived latency | Projected gain p50 **177.2 ms**, p95 **425.3 ms**, `DERIVED`; final-gated baseline `ESTIMATED` | Stop for tested workloads; failed all three latency materiality gates |
 | `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Next causal screen; retain 1200 ms fallback |
 | `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser diagnostic; estimated schedule boundary | One unmatched-round schedule→start estimate **578.998→46.703 ms**, delta **-532.295 ms**, `MEASURED` + `DIAGNOSTIC` | Default remains 1000 ms; clean same-source/workload A1/B/A2 required |
-| `LVL-10` | Authoritative-final segmented TTS | Planned real-Provider materiality screen | Numeric result `UNKNOWN`; current full-final TTS already streams SSE audio deltas | New candidate distinct from LVL-07; prospective spec and screen before product wiring |
+| `LVL-10` | Authoritative-final segmented TTS | Planned no-Browser real-Provider `A1/B/A2`; optional Batch/fallback `R0` non-causal | Numeric result `UNKNOWN`; current full-final TTS already streams SSE audio deltas | New candidate distinct from LVL-07; prospective spec/Provider PASS before conditional Browser Lane C or product wiring |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -602,13 +602,26 @@ PCM. Splitting may reduce Provider text preprocessing or inter-sentence gaps,
 but may instead add handshakes, requests, rate-limit exposure and prosody
 discontinuity. The proposed 400–800 ms range receives no credit.
 
-The first gate is a no-Browser real-Provider A1/B/A2 screen using the same
-final text, model, voice, format, network policy and warm/cold class. It must
-measure first Provider PCM, first playable reserve, completion, inter-segment
-gap and request count, with exact text/order and zero stale audio,
-unauthorized speech, false ACK or Agent/Tool/Task/history effects under
-cancellation and replacement. Product wiring is excluded until a prospective
-spec declares a materiality threshold and the screen passes it. See the
+The first gate is a no-Browser real-Provider `LVL-10-A1/B/A2` screen using the
+same final text, model, voice, format, network policy and warm/cold class.
+A1/A2 are the existing one-request full-final SSE route; B is bounded ordered
+post-final segmentation. `LVL-10-R0` may inspect Batch/fallback configuration,
+but is excluded from the causal comparison.
+
+The screen measures first Provider PCM, one prospectively defined source
+playable reserve, completion, inter-segment gap and request count. The future
+spec must freeze reserve duration/sample rate/clock/measurement label plus the
+segment rule, maximum segments/requests, prefetch depth, ordered release and
+partial-failure disposition. Injected replacement/cancellation/failure must
+produce exact text/order, zero post-fence PCM, no stale or unauthorized speech,
+no Agent/Tool/Task/history effects and no false group completion/receipt.
+
+Physical barge-in, audible first word and real playout ACK are not phase-1
+credit. Only a passing Provider screen may enter a separate Browser Lane C for
+first-downlink, schedule/start, underrun/rebuffer, audible-output, physical
+barge-in and receipt truth. Product wiring is excluded until a prospective
+spec declares its materiality thresholds before A1 and the screen passes them.
+Neither `>600 ms` nor the 400–800 ms idea is a current gate. See the
 [SOTA latency review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md).
 
 ## 15. What has and has not been measured end to end
@@ -654,10 +667,11 @@ artifact ledger. The repository stores only sanitized evidence.
 3. Run a clean same-source/same-workload LVL-09
    A1=1000/B=250/A2=1000 Browser screen. Do not change the default from the
    unmatched diagnostic.
-4. Write the prospective LVL-10 materiality spec, then compare full-final SSE
-   streaming against bounded post-final segmentation with the same real
-   Provider. Do not implement product wiring from the one-round 1561 ms
-   TTS-to-downlink segment.
+4. Write the prospective LVL-10 materiality spec, then compare
+   `LVL-10-A1/B/A2`: current full-final SSE against bounded post-final
+   segmentation with the same real Provider. Keep optional Batch/fallback R0
+   outside causal credit. Do not implement product wiring or invent a numeric
+   gate from the one-round 1561 ms TTS-to-downlink segment.
 5. Treat native speech-to-speech as a strategic architecture study requiring a
    separate authority decision, not as the next optimization packet.
 6. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested

@@ -372,7 +372,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; the suggested **400–800 ms is not credited** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: wait for complete `chat.final`, then compare bounded sentence/clause synthesis against the current full-final SSE stream. Measure first PCM/playable reserve, continuity, completion, requests, ordering and cancellation before product wiring. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
+| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; **400–800 ms and `>600 ms` are not credited gates** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: after complete `chat.final`, compare `LVL-10-A1/A2` current one-request full-final SSE with `LVL-10-B` bounded ordered segmentation. Optional `LVL-10-R0` Batch/fallback is diagnostic only. The future spec freezes source-reserve/sample/clock, segmentation/concurrency/prefetch/failure rules and thresholds before A1; Browser Lane C is conditional after Provider PASS. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
 
 ## 7. Residual P2 candidates
 
@@ -417,9 +417,11 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
 3. Run the clean Adaptive WebAudio A1=1000/B=250/A2=1000 screen with the same
    source, workload and manifest. Keep 1000 ms as the production default until
    physical completion, underrun/rebuffer and audible-output gates pass.
-4. Specify and run the no-Browser real-Provider authoritative-final segmented
-   TTS materiality screen. The current full-final path already streams SSE;
-   product wiring requires a prospective materiality and integrity PASS.
+4. Specify and run the no-Browser real-Provider `LVL-10-A1/B/A2` materiality
+   screen: unchanged full-final SSE vs bounded post-final segmentation. Keep
+   optional Batch/fallback R0 outside causality. The spec must freeze
+   source-reserve, group policy and numeric gates before A1; Browser Lane C and
+   product wiring require a Provider materiality/integrity PASS.
 5. Keep stable-sentence stopped for the tested workloads. Reopen only after
    Hongxing reviews a new long-form workload/materiality solution. Keep
    LVL-10 independent because it starts only after authoritative final.
@@ -495,5 +497,6 @@ Provider-native Semantic VAD is the next no-Browser causal screen. Adaptive
 WebAudio 250 ms has only one unmatched diagnostic signal and the default stays
 1000 ms. The new LVL-10 post-final segmented-TTS candidate preserves speech
 authority but receives no numeric credit because the current full-final path
-already streams Provider audio; it must pass its own real-Provider materiality
-screen before product code.
+already streams Provider audio. A1/A2 retain that SSE reference, B is bounded
+segmentation and optional Batch/fallback R0 is non-causal; Provider PASS must
+precede Browser Lane C or product code.

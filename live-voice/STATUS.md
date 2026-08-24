@@ -222,9 +222,13 @@ required before any default decision. Remaining latency work: the LVL-08
 Provider-native Semantic VAD causal screen, that compatible LVL-09 playout
 screen and a prospective no-Browser LVL-10 materiality screen comparing the
 current full-final SSE TTS against bounded segmentation after authoritative
-`chat.final`. LVL-10 is distinct from the stopped pre-final LVL-07 packet and
-has no numeric credit. Native speech-to-speech remains a strategic architecture
-study requiring a separate authority decision, not a current packet. See the
+`chat.final`. `LVL-10-A1/A2` own the unchanged SSE reference, `LVL-10-B` owns
+the candidate and optional Batch/fallback `LVL-10-R0` is diagnostic only. The
+future spec must freeze source-reserve/group/threshold rules before A1; a
+separate Browser Lane C is conditional on Provider PASS. LVL-10 is distinct
+from the stopped pre-final LVL-07 packet and has no numeric credit. Native
+speech-to-speech remains a strategic architecture study requiring a separate
+authority decision, not a current packet. See the
 [2026-08-24 SOTA review](reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md).
 This composition grants no new physical, Gate C or product-readiness credit
 beyond the recorded D-094 acceptance.

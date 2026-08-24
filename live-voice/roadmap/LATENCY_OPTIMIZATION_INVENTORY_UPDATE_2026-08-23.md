@@ -411,7 +411,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; proposed **400–800 ms is not credited** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: accept complete `chat.final`, then run B0=batch vs S1=current one-request full-final SSE; build S2=ordered sentence/clause group only if S1 leaves >600 ms first-PCM/playable delay. Measure Provider first PCM, ticket, browser playable reserve, source completion, continuity/prosody, request count/cost, ordered receipt and group cancellation before product wiring. Legacy `splitLiveVoiceTtsText`/`liveVoiceStreamingSpeech` is a provisional Demo queue, not a Formal implementation base. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
+| 12 | Authoritative-final segmented TTS | **PLANNED — REAL-PROVIDER MATERIALITY SCREEN FIRST** | `UNKNOWN`; **400–800 ms and `>600 ms` are not credited gates** | `openai_streaming_speech.py`, streaming synthesis route and bounded segment owner | Distinct from LVL-07: after complete `chat.final`, compare `LVL-10-A1/A2` current one-request full-final SSE with `LVL-10-B` bounded ordered segmentation. Optional `LVL-10-R0` Batch/fallback is diagnostic only. The future spec freezes source-reserve/sample/clock, segmentation/concurrency/prefetch/failure rules and thresholds before A1; Browser Lane C is conditional after Provider PASS. Legacy `splitLiveVoiceTtsText`/`liveVoiceStreamingSpeech` remains a provisional Demo queue, not a Formal implementation base. See the [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md). |
 
 ## 7. Residual P2 candidates
 
@@ -469,11 +469,12 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    shortens Task completion, and both retain Task/Presentation authority risk.
 7. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
    demonstrates real P2 backlog.
-8. Specify and run the real-Provider B0/S1 screen before any segmented-TTS
-   product wiring: B0=batch vs S1=current full-final SSE, with Provider first
-   PCM, media ticket, browser playable reserve and source completion measured.
-   Build S2=ordered sentence group only if S1 leaves >600 ms first-PCM/playable
-   delay. The one-round 1561 ms batch segment grants no projected gain.
+8. Specify and run the no-Browser real-Provider `LVL-10-A1/B/A2` screen before
+   any segmented-TTS product wiring: unchanged current full-final SSE vs
+   bounded post-final segmentation. Keep optional Batch/fallback R0 outside
+   causal credit. Freeze source-reserve, group policy, reliability/cost and
+   numeric materiality gates before A1. The one-round 1561 ms segment grants no
+   projected gain; Browser Lane C is conditional on Provider PASS.
 9. Treat native speech-to-speech as a strategic architecture study requiring a
    separate Registry/Tool/Task/presentation-authority decision.
 
@@ -549,6 +550,7 @@ promising 532.295 ms one-round segment signal, but production remains at 1000 ms
 until a clean compatible A1/B/A2 and truthful underrun/rebuffer evidence pass.
 The 2026-08-24 SOTA review adds LVL-10, authoritative-final segmented TTS, as a
 separate materiality question from LVL-07. It has no numeric credit: the
-current full-final path already streams Provider audio deltas, so a real-
-Provider A1/B/A2 must show whether segmentation improves first PCM or
-continuity without request, prosody, ordering or cancellation regressions.
+current full-final SSE path remains A1/A2, bounded post-final segmentation is
+B, and optional Batch/fallback R0 is diagnostic only. The real-Provider screen
+must show whether B improves first PCM or source reserve without request,
+prosody, ordering or cancellation regressions before Browser Lane C.

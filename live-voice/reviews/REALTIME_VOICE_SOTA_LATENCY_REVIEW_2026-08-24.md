@@ -162,23 +162,46 @@ No 400–800 ms gain is accepted or estimated from current evidence.
 
 The candidate receives identifier `LVL-10` and remains `PLANNED`. Its first
 screen requires no Browser because it changes the Provider synthesis boundary,
-not capture or Browser scheduling.
+not capture or Browser scheduling. The declared comparison roles are:
+
+| Role | Identifier | Route | Credit |
+|---|---|---|---|
+| Causal reference | `LVL-10-A1` / `LVL-10-A2` | Existing one-request, full-authoritative-`chat.final` SSE stream | Primary comparator |
+| Candidate | `LVL-10-B` | Complete authoritative final split after `chat.final`; bounded ordered sentence/clause synthesis group | Candidate only |
+| Optional diagnostic | `LVL-10-R0` | Batch/fallback route | Configuration/fallback diagnosis only; excluded from A1/B/A2 causality |
 
 | Field | Required contract |
 |---|---|
-| A1/A2 | Existing one-request, full-authoritative-final streaming path |
+| A1/A2 | Existing one-request, full-authoritative-final SSE streaming path |
 | B | Same final text split after `chat.final`, with bounded ordered synthesis |
 | Dependencies | Same source, Agent final text, Provider, model, voice, format, region/network and warm/cold policy |
 | Workloads | Short, medium and long final texts, including multi-sentence punctuation and an abbreviation/decimal integrity case |
-| Primary timing | TTS request -> first Provider PCM and TTS request -> first playable reserve |
+| Primary timing | TTS request -> first Provider PCM and TTS request -> source playable reserve |
 | Secondary timing | Complete audio ready, final playout duration projection, inter-segment gap, request count and Provider errors |
 | Integrity | Exact final text coverage, exact segment order, no duplicate/omitted speech, bounded memory/requests |
-| Negative gates | Replacement, cancellation, barge-in and malformed segmentation produce zero stale audio, unauthorized speech, Agent/Tool/Task/history effects or false ACK |
+| Negative gates | Injected replacement, group cancellation, Provider failure and malformed segmentation produce zero post-fence PCM, stale/unauthorized speech, Agent/Tool/Task/history mutation or false group completion/receipt |
 | Stop rule | Do not build product wiring unless B materially improves the declared first-audio or continuity metric without integrity, reliability or cost regression |
 
-Any future numeric gate belongs in a separate prospective spec before the run.
-This review intentionally does not invent a threshold from the one-round
-1561 ms diagnostic segment.
+The prospective spec must define source playable reserve as the Gateway-owner
+time at which cumulative ordered PCM reaches one exact declared duration at one
+declared sample rate. It must declare the reserve duration, sample accounting,
+clock owner and `MEASURED`/`DERIVED` label before A1. That boundary is not
+Browser first-audible credit.
+
+The same spec must freeze the segmentation rule, maximum segment count,
+maximum simultaneous Provider requests, prefetch depth, ordered-release rule
+and intermediate-segment failure disposition. Physical microphone barge-in,
+audible first-word integrity and real playout ACK remain outside phase 1.
+
+Only after phase 1 passes its predeclared materiality/integrity gates may a
+separate Browser Lane C measure first downlink, schedule/start, underrun,
+rebuffer, audible first word, physical barge-in and receipt truth. It does not
+retroactively redefine phase 1 as a Browser experiment.
+
+Any future numeric gate belongs in that separate prospective spec before the
+run. This review intentionally does not invent `>600 ms` or another threshold
+from the one-round 1561 ms diagnostic segment. The 400–800 ms idea remains
+uncredited.
 
 ## 6. Updated optimization route
 
@@ -188,9 +211,10 @@ This review intentionally does not invent a threshold from the one-round
 2. Run a clean same-source, same-workload playout-lead
    A1=1000/B=250/A2=1000. The current default stays at 1000 ms until physical
    completion, underrun/rebuffer and audible-output gates pass.
-3. Specify and execute the LVL-10 authoritative-final segmented-TTS
-   materiality screen. It is independent of the rejected LVL-07 pre-final
-   overlap.
+3. Specify and execute the no-Browser `LVL-10-A1/B/A2`
+   authoritative-final segmented-TTS materiality screen, keeping optional
+   Batch/fallback R0 outside causal credit. It is independent of the rejected
+   LVL-07 pre-final overlap; Browser Lane C is conditional on Provider PASS.
 4. Treat native speech-to-speech as a strategic architecture study only. It
    would require an explicit decision about committed conversation truth,
    Registry/composition, Tool/Task execution, cancellation and presentation

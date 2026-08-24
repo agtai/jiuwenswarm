@@ -386,11 +386,20 @@ Agent deltas and is therefore distinct from the stopped LVL-07 proposal.
 Current TTS already sends the complete final text to a Provider SSE stream and
 publishes each `speech.audio.delta` as it arrives. Segmentation receives no
 assumed 400–800 ms gain. Before product code, a no-Browser real-Provider
-A1/B/A2 must compare the existing full-final stream with post-final segments
-under the same text/model/voice/network/warmth, measuring first PCM, first
-playable reserve, completion, inter-segment gaps, requests, order, cancellation
-and zero forbidden effects. The prospective spec must declare its numeric
-materiality and reliability gates before the run.
+`LVL-10-A1/B/A2` must compare the existing full-final SSE stream with bounded
+post-final segments under the same text/model/voice/network/warmth. Optional
+`LVL-10-R0` Batch/fallback is configuration diagnosis only and receives no
+causal credit.
+
+The prospective spec must define source playable reserve as the Gateway-owner
+time at which cumulative ordered PCM reaches one exact declared duration and
+sample rate; declare its clock and measurement label; and freeze segmentation,
+maximum segments/concurrent requests, prefetch, ordered release, intermediate
+failure, numeric materiality, drift, reliability and cost rules before A1.
+Phase 1 measures first PCM, source reserve, completion, inter-segment gaps,
+requests, order, injected cancellation and zero forbidden effects. Physical
+barge-in, audible first word and real playout ACK belong only to a conditional
+Browser Lane C after Provider PASS.
 
 ## 6. Agent-path work after pipeline evidence
 
@@ -418,7 +427,9 @@ Current latency work should be packetized in this dependency order:
    natural-pause/false-EOT gates;
 3. execute a clean LVL-09 Browser A1=1000/B=250/A2=1000 using the same source,
    workload and manifest; keep 1000 ms as default until it passes;
-4. specify and execute the no-Browser real-Provider LVL-10 materiality screen;
+4. specify and execute the no-Browser real-Provider `LVL-10-A1/B/A2`
+   materiality screen, keeping optional Batch/fallback R0 non-causal; enter
+   Browser Lane C only after Provider PASS;
 5. consider authoritative acknowledgements for genuinely long Task operations
    only when perceived latency is the product priority;
 6. change Agent/model/tool paths only where compatible measurements still show
@@ -441,7 +452,8 @@ Initial targets are deliberately relative to the fresh baseline:
   least 1.0 second, with no p95 false-EOT, underrun, fallback or cancel
   regression;
 - LVL-10 receives no threshold from this historical plan; its prospective spec
-  must freeze a material first-PCM or continuity gate before the Provider run;
+  must freeze first-PCM/source-reserve, continuity, drift, reliability and cost
+  gates plus bounded group policy before A1;
 - truthful acknowledgement, where applicable, has a working perceived-response
   target of 3–4 seconds;
 - Task create/status/cancel receive a 3–5 second working target only after the
