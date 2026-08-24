@@ -103,6 +103,7 @@ class ScriptedSseFactory:
         fail_input_index: int | None = None,
         block_input_index: int | None = None,
         delay_done_input_index: int | None = None,
+        sample_count: int = 12_000,
     ) -> None:
         self.inputs: list[str] = []
         self.active = 0
@@ -110,6 +111,7 @@ class ScriptedSseFactory:
         self.fail_input_index = fail_input_index
         self.block_input_index = block_input_index
         self.delay_done_input_index = delay_done_input_index
+        self.sample_count = sample_count
         self.release = asyncio.Event()
         self.allow_done = asyncio.Event()
         self.streams: list[ScriptedSseStream] = []
@@ -134,7 +136,7 @@ class ScriptedSseFactory:
         if self.fail_input_index == index:
             self._deactivate_once()
             raise ConnectionError("scripted-provider-failure")
-        pcm = (index.to_bytes(2, "little", signed=True)) * 12_000
+        pcm = (index.to_bytes(2, "little", signed=True)) * self.sample_count
         lines = (
             "data: " + json.dumps({"type": "speech.audio.delta", "audio": base64.b64encode(pcm).decode("ascii")}),
             "",
@@ -217,6 +219,20 @@ async def test_a1_sends_one_full_authoritative_final_request() -> None:
         assert record.provider_request_count == 1
         assert record.provider_error_count == 0
         assert record.forbidden_effects == ZERO_FORBIDDEN_EFFECTS
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_short_audio_records_completion_as_reserve_when_250ms_is_unreached() -> None:
+    fixture = load_fixture_manifest(MANIFEST_PATH)[0]
+    provider = _provider(ScriptedSseFactory(sample_count=100))
+    try:
+        record = await run_attempt(
+            provider, fixture, PopulationRole.A1, _identity(PopulationRole.A1, "short")
+        )
+        assert record.short_of_reserve is True
+        assert record.request_to_reserve_ns == record.request_to_complete_ns
     finally:
         await provider.close()
 
