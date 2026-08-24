@@ -221,7 +221,10 @@ remains 1000; a clean same-source/same-workload A1=1000/B=250/A2=1000 is
 required before any default decision. Remaining latency work begins with the
 LVL-08 Provider-native Semantic VAD causal screen and the later compatible
 LVL-09 playout screen. Completed LVL-10/LVL-10L receive no product/Browser
-credit; long-duration chunking work is stopped. Native
+credit; long-duration chunking work is stopped. The local
+[Semantic VAD spec](roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md)
+and [plan](roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_IMPLEMENTATION_PLAN_2026-08-21.md)
+own the next no-Browser packet. Native
 speech-to-speech remains a strategic architecture study requiring a separate
 authority decision, not a current packet.
 
