@@ -1246,31 +1246,34 @@ export class BrowserAudioIOAdapter {
       playback.sources.set(sourceKey, record);
       source.onended = () => this.#handlePlaybackEnded(playback, record);
       const startAt = Math.max(context.currentTime, playback.nextStartTime);
-      const startDelayMs = Math.max(0, (startAt - context.currentTime) * 1_000);
-      const scheduledFromMonotonic = typeof this.#observer.onPlayoutScheduled === 'function'
-        ? readMonotonicNow(this.#monotonicNowMs)
-        : null;
-      const scheduledStartClock = scheduledFromMonotonic === null
-        ? null
-        : Object.freeze({
-            observed_at: new Date(Date.now() + startDelayMs).toISOString(),
-            monotonic_ms: scheduledFromMonotonic + startDelayMs,
-          });
-      sourceStartAttempted = true;
-      source.start(startAt);
-      this.#notifyPlayoutScheduled(
-        playback,
-        chunk.unit_id,
-        chunk.seq,
-        startDelayMs,
-        scheduledStartClock,
-        () => (
-          this.#playback === playback
-          && !playback.stopped
-          && context.state === 'running'
-          && context.currentTime >= startAt
-        )
-      );
+      if (typeof this.#observer.onPlayoutScheduled === 'function') {
+        const startDelayMs = Math.max(0, (startAt - context.currentTime) * 1_000);
+        const scheduledFromMonotonic = readMonotonicNow(this.#monotonicNowMs);
+        const scheduledStartClock = scheduledFromMonotonic === null
+          ? null
+          : Object.freeze({
+              observed_at: new Date(Date.now() + startDelayMs).toISOString(),
+              monotonic_ms: scheduledFromMonotonic + startDelayMs,
+            });
+        sourceStartAttempted = true;
+        source.start(startAt);
+        this.#notifyPlayoutScheduled(
+          playback,
+          chunk.unit_id,
+          chunk.seq,
+          startDelayMs,
+          scheduledStartClock,
+          () => (
+            this.#playback === playback
+            && !playback.stopped
+            && context.state === 'running'
+            && context.currentTime >= startAt
+          )
+        );
+      } else {
+        sourceStartAttempted = true;
+        source.start(startAt);
+      }
       playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
     } catch {
       playback.sources.delete(sourceKey);

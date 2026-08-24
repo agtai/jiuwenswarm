@@ -2383,6 +2383,32 @@ test('exact local stop fences late playout callbacks without widening business c
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
+test('playout without a schedule observer performs only the availability check', async () => {
+  const fake = fakeEnvironment();
+  let measurementClockReads = 0;
+  let scheduleObserverReads = 0;
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    monotonicNowMs: () => {
+      measurementClockReads += 1;
+      return 100;
+    },
+    observer: {
+      onPlayoutState: () => undefined,
+      get onPlayoutScheduled() {
+        scheduleObserverReads += 1;
+        return undefined;
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(measurementClockReads, 0);
+  assert.equal(scheduleObserverReads, 1);
+});
+
 test('exact local stop confirms the fenced tuple, prior cursors, source calls, timing, and zero business cancel', async () => {
   const fake = fakeEnvironment();
   const events = [];

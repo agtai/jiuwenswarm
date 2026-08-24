@@ -4744,10 +4744,41 @@ test('formal P1 L0 records uplink send only after the dedicated socket drains it
   );
 });
 
+test('formal P1 installs measurement hot-path hooks only on an L0 opt-in page', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /#l0Available = browserL0Available\(\);/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /\.\.\.\(this\.#l0Available[\s\S]*?onPlayoutScheduled:/,
+  );
+  assert.equal(
+    [...productP1VoiceRouteSource.matchAll(/\.\.\.\(this\.#l0Available\s*\?\s*\{\s*on_uplink_frame_sent:/g)].length,
+    2,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /#l0Binding\([\s\S]*?!this\.#l0Available[\s\S]*?return null;/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /#stageL0PlayoutCompletion\([\s\S]*?if \(!this\.#l0Available\) return;/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /if \(this\.#l0Available\) \{[\s\S]*?renderMonotonicMs = monotonicNowMs\(\);[\s\S]*?pending\.lastRenderedClock = Object\.freeze/,
+  );
+  assert.equal(
+    [...productP1VoiceRouteSource.matchAll(/if \(this\.#l0Available && (?:frame|chunk)\.seq === 0\) \{\s*this\.#observeBrowserFirstFrame/g)].length,
+    2,
+  );
+});
+
 test('formal P1 L0 barge-in clocks bracket the exact local playout fence', () => {
   assert.match(
     productP1VoiceRouteSource,
-    /requestedClock = l0ClockNow\(\);.*?stopPlayoutExact\(.*?local_fence_established.*?#l0Record\('barge_in'.*?#l0Record\(.*?'fence_cancel_completion'/s,
+    /requestedClock = this\.#l0Available \? l0ClockNow\(\) : null;.*?stopPlayoutExact\(.*?local_fence_established.*?if \(requestedClock !== null\).*?#l0Record\('barge_in'.*?#l0Record\(.*?'fence_cancel_completion'/s,
   );
 });
 

@@ -1063,9 +1063,14 @@ def _classification_for(records: Sequence[L0MeasurementEnvelope]) -> L0RoundClas
         if record.classification is not L0RoundClassification.UNKNOWN
     }
     milestones = {record.milestone for record in records}
-    if (
-        L0Milestone.FAILURE in milestones
-        or L0Milestone.BROWSER_FAILURE in milestones
+    if milestones.intersection(
+        {
+            L0Milestone.FAILURE,
+            L0Milestone.BROWSER_FAILURE,
+            L0Milestone.FRAME_LOSS,
+            L0Milestone.FALSE_EOT,
+            L0Milestone.MISSED_EOT,
+        }
     ):
         classifications.add(L0RoundClassification.FAILURE)
     if L0Milestone.FALLBACK in milestones:

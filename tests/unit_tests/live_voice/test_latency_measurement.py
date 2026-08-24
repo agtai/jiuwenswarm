@@ -803,6 +803,9 @@ def test_browser_failure_is_content_free_and_classified_as_failure() -> None:
     ("milestone", "expected_classification"),
     (
         (L0Milestone.BROWSER_FAILURE, "failure"),
+        (L0Milestone.FRAME_LOSS, "failure"),
+        (L0Milestone.FALSE_EOT, "failure"),
+        (L0Milestone.MISSED_EOT, "failure"),
         (L0Milestone.FALLBACK, "fallback"),
         (L0Milestone.FENCE_CANCEL_COMPLETION, "cancelled"),
     ),

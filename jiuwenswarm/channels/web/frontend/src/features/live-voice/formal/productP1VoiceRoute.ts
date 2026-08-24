@@ -31,6 +31,7 @@ import {
   type GatewaySpeechProvider,
 } from './gatewayBatchSpeechClient.js';
 import {
+  browserL0Available,
   browserL0Enabled,
   recordBrowserL0Milestone,
   registerBrowserL0Response,
@@ -404,6 +405,7 @@ export class ProductP1VoiceRouteOwner {
   #captureRotationSourceId: string | null = null;
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
   #captureStopExpected = false;
+  #l0Available: boolean;
   #l0PlayoutStartedAtMs: number | null = null;
   #l0PlayoutResponseKey: string | null = null;
   #l0PlayoutCompleted: Readonly<{
@@ -438,6 +440,7 @@ export class ProductP1VoiceRouteOwner {
     this.#onConcurrentCaptureStarted = input.on_concurrent_capture_started;
     this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
+    this.#l0Available = browserL0Available();
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
@@ -477,7 +480,9 @@ export class ProductP1VoiceRouteOwner {
           }
         },
         onPlayoutState: event => this.#observePlayout(event),
-        onPlayoutScheduled: event => this.#observePlayoutScheduled(event),
+        ...(this.#l0Available
+          ? { onPlayoutScheduled: (event: Readonly<BrowserAudioPlayoutScheduledEvent>) => this.#observePlayoutScheduled(event) }
+          : {}),
       },
     });
     this.#publish();
@@ -505,7 +510,8 @@ export class ProductP1VoiceRouteOwner {
 
   #l0Binding(response: Readonly<AudioResponseRef> | null = null): Readonly<BrowserL0Binding> | null {
     if (
-      this.#sessionId === null
+      !this.#l0Available
+      || this.#sessionId === null
       || this.#correlationId === null
       || this.#interactionId === null
       || this.#activationGeneration <= 0
@@ -531,6 +537,7 @@ export class ProductP1VoiceRouteOwner {
     classification?: Parameters<typeof recordBrowserL0Milestone>[0]['classification'],
     clock?: Readonly<{ observedAt: string; monotonicMs: number }>,
   ): boolean {
+    if (!this.#l0Available) return false;
     const binding = this.#l0Binding(response);
     if (binding === null) return false;
     return recordBrowserL0Milestone({
@@ -631,8 +638,10 @@ export class ProductP1VoiceRouteOwner {
         deviceSelection.output_device_id ? { deviceId: deviceSelection.output_device_id } : {}
       );
       this.#requireCurrent(operationGeneration);
-      this.#l0CaptureStartedAtMs = monotonicNowMs();
-      this.#l0LastFrameSentClock = null;
+      if (this.#l0Available) {
+        this.#l0CaptureStartedAtMs = monotonicNowMs();
+        this.#l0LastFrameSentClock = null;
+      }
       const metadata = await this.#audio.startCapture(deviceSelection.input_device_id ? { deviceId: deviceSelection.input_device_id } : {});
       this.#captureActualProcessing = metadata.actual_processing;
       this.#captureStartupAudioReady = true;
@@ -722,9 +731,13 @@ export class ProductP1VoiceRouteOwner {
           transport_available: typeof WebSocket === 'function',
           socket_factory: this.#socketFactory,
           on_audio_frame: () => undefined,
-          on_uplink_frame_sent: seq => {
-            if (ownedRoute !== null) this.#observeUplinkFrameSent(ownedRoute, seq);
-          },
+          ...(this.#l0Available
+            ? {
+                on_uplink_frame_sent: (seq: number) => {
+                  if (ownedRoute !== null) this.#observeUplinkFrameSent(ownedRoute, seq);
+                },
+              }
+            : {}),
           on_terminal: event => {
             if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
           },
@@ -1116,11 +1129,13 @@ export class ProductP1VoiceRouteOwner {
         this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
         this.#requireCurrent(operationGeneration);
       }
-      this.#l0PlayoutStartedAtMs = monotonicNowMs();
-      this.#l0PlayoutResponseKey = l0ResponseKey(result.response);
-      this.#l0PlayoutCompleted = null;
-      this.#l0ScheduledResponseKey = null;
-      this.#l0FirstFrameResponseKey = null;
+      if (this.#l0Available) {
+        this.#l0PlayoutStartedAtMs = monotonicNowMs();
+        this.#l0PlayoutResponseKey = l0ResponseKey(result.response);
+        this.#l0PlayoutCompleted = null;
+        this.#l0ScheduledResponseKey = null;
+        this.#l0FirstFrameResponseKey = null;
+      }
       this.#audio.beginPlayout(result.response);
       this.#fillPlayoutQueue(pendingPlayout);
       this.#deliverBargeInSpeechStart(operationGeneration, this.#route);
@@ -1214,7 +1229,7 @@ export class ProductP1VoiceRouteOwner {
     )
       return false;
     this.#pendingPlayout = null;
-    const requestedClock = l0ClockNow();
+    const requestedClock = this.#l0Available ? l0ClockNow() : null;
     const stopReceipt = this.#audio.stopPlayoutExact(
       response,
       'formal_product_barge_in'
@@ -1223,28 +1238,30 @@ export class ProductP1VoiceRouteOwner {
       this.#pendingPlayout = pending;
       return false;
     }
-    const confirmedMonotonicMs = stopReceipt.timing.confirmed_at_monotonic_ms;
-    const confirmedClock =
-      stopReceipt.timing.status === 'confirmed'
-      && confirmedMonotonicMs !== null
-      && confirmedMonotonicMs >= requestedClock.monotonicMs
-        ? Object.freeze({
-            observedAt: new Date(
-              Date.parse(requestedClock.observedAt)
-              + confirmedMonotonicMs
-              - requestedClock.monotonicMs,
-            ).toISOString(),
-            monotonicMs: confirmedMonotonicMs,
-          })
-        : l0ClockNow();
-    this.#l0Record('barge_in', response, undefined, undefined, requestedClock);
-    this.#l0Record(
-      'fence_cancel_completion',
-      response,
-      undefined,
-      'cancelled',
-      confirmedClock,
-    );
+    if (requestedClock !== null) {
+      const confirmedMonotonicMs = stopReceipt.timing.confirmed_at_monotonic_ms;
+      const confirmedClock =
+        stopReceipt.timing.status === 'confirmed'
+        && confirmedMonotonicMs !== null
+        && confirmedMonotonicMs >= requestedClock.monotonicMs
+          ? Object.freeze({
+              observedAt: new Date(
+                Date.parse(requestedClock.observedAt)
+                + confirmedMonotonicMs
+                - requestedClock.monotonicMs,
+              ).toISOString(),
+              monotonicMs: confirmedMonotonicMs,
+            })
+          : l0ClockNow();
+      this.#l0Record('barge_in', response, undefined, undefined, requestedClock);
+      this.#l0Record(
+        'fence_cancel_completion',
+        response,
+        undefined,
+        'cancelled',
+        confirmedClock,
+      );
+    }
     pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
     pending.reject(
       Object.assign(new Error('formal playout was interrupted'), {
@@ -1438,8 +1455,10 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
-    this.#l0CaptureStartedAtMs = monotonicNowMs();
-    this.#l0LastFrameSentClock = null;
+    if (this.#l0Available) {
+      this.#l0CaptureStartedAtMs = monotonicNowMs();
+      this.#l0LastFrameSentClock = null;
+    }
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
     );
@@ -1526,9 +1545,13 @@ export class ProductP1VoiceRouteOwner {
         transport_available: true,
         socket_factory: this.#socketFactory,
         on_audio_frame: () => undefined,
-        on_uplink_frame_sent: seq => {
-          if (ownedRoute !== null) this.#observeUplinkFrameSent(ownedRoute, seq);
-        },
+        ...(this.#l0Available
+          ? {
+              on_uplink_frame_sent: (seq: number) => {
+                if (ownedRoute !== null) this.#observeUplinkFrameSent(ownedRoute, seq);
+              },
+            }
+          : {}),
         on_terminal: event => {
           if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
         },
@@ -1763,7 +1786,9 @@ export class ProductP1VoiceRouteOwner {
       frame.seq >= (pending.frameCount ?? MAX_STREAMING_PLAYOUT_FRAMES)
     )
       throw new Error('dedicated media downlink frame is stale or non-contiguous');
-    this.#observeBrowserFirstFrame(pending.response, frame.seq);
+    if (this.#l0Available && frame.seq === 0) {
+      this.#observeBrowserFirstFrame(pending.response, frame.seq);
+    }
     pending.chunks.push(
       Object.freeze({
         response: pending.response,
@@ -1784,7 +1809,9 @@ export class ProductP1VoiceRouteOwner {
     try {
       while (pending.nextChunkIndex < pending.chunks.length && pending.nextChunkIndex - pending.renderedChunks < PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY) {
         const chunk = pending.chunks[pending.nextChunkIndex];
-        this.#observeBrowserFirstFrame(pending.response, chunk.seq);
+        if (this.#l0Available && chunk.seq === 0) {
+          this.#observeBrowserFirstFrame(pending.response, chunk.seq);
+        }
         pending.nextChunkIndex += 1;
         const depthAfterEnqueue = pending.nextChunkIndex - pending.renderedChunks;
         if (!this.#audio.enqueuePlayout(chunk)) {
@@ -1962,18 +1989,20 @@ export class ProductP1VoiceRouteOwner {
       return;
     }
     if (event.state !== 'playing' || event.reason !== 'render_completed' || event.unit_id === null || event.through_seq === null) return;
-    const renderMonotonicMs = monotonicNowMs();
-    const priorRenderedClock = pending.lastRenderedClock;
-    if (
-      event.unit_id === pending.unitId
-      && (priorRenderedClock === null || event.through_seq >= priorRenderedClock.throughSeq)
-    ) {
-      pending.lastRenderedClock = Object.freeze({
-        unitId: event.unit_id,
-        throughSeq: event.through_seq,
-        observedAt: new Date().toISOString(),
-        monotonicMs: renderMonotonicMs,
-      });
+    if (this.#l0Available) {
+      const renderMonotonicMs = monotonicNowMs();
+      const priorRenderedClock = pending.lastRenderedClock;
+      if (
+        event.unit_id === pending.unitId
+        && (priorRenderedClock === null || event.through_seq >= priorRenderedClock.throughSeq)
+      ) {
+        pending.lastRenderedClock = Object.freeze({
+          unitId: event.unit_id,
+          throughSeq: event.through_seq,
+          observedAt: new Date().toISOString(),
+          monotonicMs: renderMonotonicMs,
+        });
+      }
     }
     pending.observed.set(event.unit_id, Math.max(pending.observed.get(event.unit_id) ?? -1, event.through_seq));
     pending.renderedChunks = pending.frameCount === null
@@ -2002,6 +2031,7 @@ export class ProductP1VoiceRouteOwner {
     response: Readonly<AudioResponseRef>,
     renderClock: Readonly<{ observedAt: string; monotonicMs: number }> | null = null,
   ): void {
+    if (!this.#l0Available) return;
     const responseKey = l0ResponseKey(response);
     if (
       this.#l0PlayoutCompleted !== null
@@ -2029,7 +2059,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #observeBrowserFirstFrame(response: Readonly<AudioResponseRef>, seq: number): void {
-    if (seq !== 0) return;
+    if (!this.#l0Available || seq !== 0) return;
     const key = l0ResponseKey(response);
     if (this.#l0FirstFrameResponseKey === key) return;
     if (this.#l0Record('browser_first_frame', response)) {
@@ -2038,7 +2068,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #observePlayoutScheduled(event: Readonly<BrowserAudioPlayoutScheduledEvent>): void {
-    if (event.seq !== 0) return;
+    if (!this.#l0Available || event.seq !== 0) return;
     const key = l0ResponseKey(event.response);
     if (this.#l0ScheduledResponseKey === key) return;
     if (!this.#l0Record('webaudio_first_frame_scheduled', event.response)) return;
@@ -2353,7 +2383,8 @@ export class ProductP1VoiceRouteOwner {
     seq: number,
   ): void {
     if (
-      route !== this.#route
+      !this.#l0Available
+      || route !== this.#route
       || !Number.isSafeInteger(seq)
       || seq < 0
       || seq >= this.#frames.length

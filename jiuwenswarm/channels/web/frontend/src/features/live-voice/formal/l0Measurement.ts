@@ -273,6 +273,10 @@ export function browserL0Enabled(): boolean {
   return state !== null && state.labels !== null;
 }
 
+export function browserL0Available(): boolean {
+  return state !== null;
+}
+
 export function registerBrowserL0Response(
   value: Readonly<BrowserL0Binding>,
 ): boolean {
