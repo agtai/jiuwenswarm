@@ -799,6 +799,60 @@ def test_browser_failure_is_content_free_and_classified_as_failure() -> None:
     assert "private" not in json.dumps(report)
 
 
+@pytest.mark.parametrize(
+    ("milestone", "expected_classification"),
+    (
+        (L0Milestone.BROWSER_FAILURE, "failure"),
+        (L0Milestone.FALLBACK, "fallback"),
+        (L0Milestone.FENCE_CANCEL_COMPLETION, "cancelled"),
+    ),
+)
+def test_unknown_failure_fallback_or_cancel_marker_overrides_terminal_success(
+    milestone: L0Milestone,
+    expected_classification: str,
+) -> None:
+    collector = L0MeasurementCollector()
+    binding, records = _successful_round(
+        0,
+        profile_id="physical-formal-web-warm",
+        temperature=L0RoundTemperature.WARM,
+        evidence_source=L0EvidenceSource.PHYSICAL,
+    )
+    _register(
+        collector,
+        binding=binding,
+        profile_id="physical-formal-web-warm",
+        scenario_id="short-no-tool-zh",
+        sample_index=0,
+        temperature=L0RoundTemperature.WARM,
+        evidence_source=L0EvidenceSource.PHYSICAL,
+    )
+    assert all(collector.consume(record) for record in records)
+    assert collector.consume(
+        _record(
+            milestone,
+            binding=binding,
+            profile_id="physical-formal-web-warm",
+            scenario_id="short-no-tool-zh",
+            sample_index=0,
+            temperature=L0RoundTemperature.WARM,
+            offset_ms=9_000,
+            evidence_source=L0EvidenceSource.PHYSICAL,
+        )
+    )
+
+    report = build_l0_measurement_report(
+        collector,
+        source_head=SOURCE_HEAD,
+        environment_ref="environment-physical-local",
+        corpus_sha256=CORPUS_SHA,
+    )
+    assert report["rounds"][0]["classification"] == expected_classification
+    assert report["rounds"][0]["success_eligible"] is False
+    assert report["profiles"][0][f"{expected_classification}_count"] == 1
+    assert report["profiles"][0]["success_eligible_count"] == 0
+
+
 def test_recovered_fallback_stays_fallback_and_cancel_span_uses_cancelled_round() -> None:
     collector = L0MeasurementCollector()
     fallback_binding, fallback_records = _successful_round(
@@ -910,7 +964,7 @@ def test_private_content_unknown_fields_and_unmeasured_completed_duration_fail_c
 
 
 def test_jsonl_sink_roundtrip_is_content_free_and_declarations_reject_mixed_identity(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     binding = _binding(7)
     record = _record(
@@ -922,8 +976,17 @@ def test_jsonl_sink_roundtrip_is_content_free_and_declarations_reject_mixed_iden
         temperature=L0RoundTemperature.WARM,
         offset_ms=0,
     )
+    fsync_calls: list[int] = []
+    real_fsync = latency_measurement.os.fsync
+
+    def fsync(descriptor: int) -> None:
+        fsync_calls.append(descriptor)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(latency_measurement.os, "fsync", fsync)
     sink = L0ProcessJsonlSink(tmp_path, component="gateway")
     assert sink.emit(record)
+    assert len(fsync_calls) == 1
     loaded = load_l0_jsonl((sink.path,))
     assert loaded == (record,)
     assert declarations_from_records(loaded)[0].binding == binding
@@ -1196,6 +1259,11 @@ def test_conflicting_response_cannot_rebind_after_tombstone_capacity_exhaustion(
     latency_measurement._RUNTIME_L0_BINDINGS.clear()
     latency_measurement._RUNTIME_L0_BLOCKED.clear()
     binding = _binding(100)
+    conflicting_binding = replace(
+        binding,
+        session_id="session-conflicting",
+        activation_generation=binding.activation_generation + 1,
+    )
     try:
         latency_measurement._RUNTIME_L0_BLOCKED.update(
             (
@@ -1208,17 +1276,30 @@ def test_conflicting_response_cannot_rebind_after_tombstone_capacity_exhaustion(
         )
         assert latency_measurement.register_runtime_l0_binding(binding)
         current_labels[0] = labels_b
-        assert latency_measurement.register_runtime_l0_binding(binding) is False
-        assert latency_measurement.register_runtime_l0_binding(binding) is False
-        assert latency_measurement.emit_runtime_l0_milestone(
+        assert (
+            latency_measurement.register_runtime_l0_binding(conflicting_binding)
+            is False
+        )
+        assert (
+            latency_measurement.register_runtime_l0_binding(conflicting_binding)
+            is False
+        )
+        assert (
+            latency_measurement.resolve_runtime_l0_binding(
+                correlation_id=binding.correlation_id,
+                interaction_id=binding.interaction_id,
+                response_id=binding.response_id or "",
+                response_generation=binding.response_generation or 0,
+            )
+            is None
+        )
+        assert not latency_measurement.emit_runtime_l0_milestone(
             component="agent",
             milestone=L0Milestone.CHAT_FINAL,
             binding=binding,
             duration_ms=100.0,
         )
-        assert len(emitted) == 1
-        assert emitted[0].sample_index == labels_a[2]
-        assert emitted[0].scenario_id == labels_a[1]
+        assert emitted == []
     finally:
         latency_measurement._RUNTIME_L0_BINDINGS.clear()
         latency_measurement._RUNTIME_L0_BLOCKED.clear()

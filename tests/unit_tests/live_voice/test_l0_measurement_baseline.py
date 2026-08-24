@@ -26,6 +26,8 @@ from jiuwenswarm.server.live_voice.latency_measurement import (
 
 SOURCE_HEAD = "c31e85ade1a69e934d05bfb9c277568a1238663c"
 CORPUS = Path("scripts/live_voice/l0_fixed_corpus.json")
+ENVIRONMENT_REF = "environment-physical-test"
+CONFIGURATION_SHA256 = "b" * 64
 
 
 def test_direct_cli_imports_the_current_repository_implementation() -> None:
@@ -83,12 +85,22 @@ def _write_records(tmp_path: Path, records: list[dict[str, object]]) -> Path:
     return path
 
 
-def _write_source_metadata(tmp_path: Path, *, source_head: str = SOURCE_HEAD) -> None:
+def _write_source_metadata(
+    tmp_path: Path,
+    *,
+    source_head: str = SOURCE_HEAD,
+    environment_ref: str = ENVIRONMENT_REF,
+    configuration_sha256: str = CONFIGURATION_SHA256,
+) -> None:
     (tmp_path / "browser-session.json").write_text(
         json.dumps(
             {
+                "schema_version": "live-voice.l0-browser-session.v6",
                 "source_head": source_head,
                 "evidence_directory": str(tmp_path.resolve()),
+                "environment_ref": environment_ref,
+                "configuration_sha256": configuration_sha256,
+                "physical_evidence": "pending-user-run",
             }
         ),
         encoding="utf-8",
@@ -102,7 +114,10 @@ def test_aggregate_accepts_only_profile_scenario_and_source_from_fixed_corpus(
         inputs=(_write_record(tmp_path, _record()),),
         corpus_path=CORPUS,
         source_head=SOURCE_HEAD,
-        environment_ref="environment-physical-test",
+        environment_ref=ENVIRONMENT_REF,
+        accepted_round_keys=frozenset(
+            {("physical-formal-web-warm", "short-no-tool-zh", 0)}
+        ),
     )
     assert report["rounds"][0]["expected_route"] == "dialogue"
 
@@ -112,7 +127,10 @@ def test_aggregate_accepts_only_profile_scenario_and_source_from_fixed_corpus(
             inputs=(tmp_path / "records.jsonl",),
             corpus_path=CORPUS,
             source_head=SOURCE_HEAD,
-            environment_ref="environment-physical-test",
+            environment_ref=ENVIRONMENT_REF,
+            accepted_round_keys=frozenset(
+                {("physical-formal-web-warm", "short-no-tool-zh", 0)}
+            ),
         )
     _write_source_metadata(tmp_path)
 
@@ -128,8 +146,82 @@ def test_aggregate_accepts_only_profile_scenario_and_source_from_fixed_corpus(
                 inputs=(_write_record(tmp_path, record),),
                 corpus_path=CORPUS,
                 source_head=SOURCE_HEAD,
-                environment_ref="environment-physical-test",
+                environment_ref=ENVIRONMENT_REF,
+                accepted_round_keys=frozenset(
+                    {("physical-formal-web-warm", "short-no-tool-zh", 0)}
+                ),
             )
+
+
+def test_physical_aggregate_requires_acceptance_and_exact_session_provenance(
+    tmp_path: Path,
+) -> None:
+    path = _write_record(tmp_path, _record())
+
+    with pytest.raises(RuntimeError, match="verified operator acceptance"):
+        aggregate_jsonl(
+            inputs=(path,),
+            corpus_path=CORPUS,
+            source_head=SOURCE_HEAD,
+            environment_ref=ENVIRONMENT_REF,
+        )
+
+    accepted_keys = frozenset(
+        {("physical-formal-web-warm", "short-no-tool-zh", 0)}
+    )
+    report = aggregate_jsonl(
+        inputs=(path,),
+        corpus_path=CORPUS,
+        source_head=SOURCE_HEAD,
+        environment_ref=ENVIRONMENT_REF,
+        accepted_round_keys=accepted_keys,
+    )
+    assert report["physical_configuration_sha256"] == CONFIGURATION_SHA256
+    assert report["physical_profile_success_targets"] == {
+        "physical-formal-web-warm": 20
+    }
+    assert report["physical_capture_complete"] is False
+    assert report["physical_profile_complete"] is False
+
+    with pytest.raises(RuntimeError, match="requested environment"):
+        aggregate_jsonl(
+            inputs=(path,),
+            corpus_path=CORPUS,
+            source_head=SOURCE_HEAD,
+            environment_ref="environment-other",
+            accepted_round_keys=accepted_keys,
+        )
+
+    other = tmp_path / "other"
+    other.mkdir()
+    other_path = _write_record(other, _record(1))
+    _write_source_metadata(other, configuration_sha256="c" * 64)
+    with pytest.raises(RuntimeError, match="environment and configuration"):
+        aggregate_jsonl(
+            inputs=(path, other_path),
+            corpus_path=CORPUS,
+            source_head=SOURCE_HEAD,
+            environment_ref=ENVIRONMENT_REF,
+            accepted_round_keys=accepted_keys,
+        )
+
+    (tmp_path / "browser-session.json").write_text(
+        json.dumps(
+            {
+                "source_head": SOURCE_HEAD,
+                "evidence_directory": str(tmp_path.resolve()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="metadata is invalid"):
+        aggregate_jsonl(
+            inputs=(path,),
+            corpus_path=CORPUS,
+            source_head=SOURCE_HEAD,
+            environment_ref=ENVIRONMENT_REF,
+            accepted_round_keys=accepted_keys,
+        )
 
 
 def test_aggregate_percentiles_and_quality_use_only_operator_accepted_rounds(
@@ -143,7 +235,7 @@ def test_aggregate_percentiles_and_quality_use_only_operator_accepted_rounds(
         inputs=(path,),
         corpus_path=CORPUS,
         source_head=SOURCE_HEAD,
-        environment_ref="environment-physical-test",
+        environment_ref=ENVIRONMENT_REF,
         accepted_round_keys=frozenset(
             {("physical-formal-web-warm", "short-no-tool-zh", 0)}
         ),

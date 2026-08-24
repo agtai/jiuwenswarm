@@ -1062,6 +1062,16 @@ def _classification_for(records: Sequence[L0MeasurementEnvelope]) -> L0RoundClas
         for record in records
         if record.classification is not L0RoundClassification.UNKNOWN
     }
+    milestones = {record.milestone for record in records}
+    if (
+        L0Milestone.FAILURE in milestones
+        or L0Milestone.BROWSER_FAILURE in milestones
+    ):
+        classifications.add(L0RoundClassification.FAILURE)
+    if L0Milestone.FALLBACK in milestones:
+        classifications.add(L0RoundClassification.FALLBACK)
+    if L0Milestone.FENCE_CANCEL_COMPLETION in milestones:
+        classifications.add(L0RoundClassification.CANCELLED)
     for classification in (
         L0RoundClassification.FAILURE,
         L0RoundClassification.FALLBACK,
@@ -1070,13 +1080,6 @@ def _classification_for(records: Sequence[L0MeasurementEnvelope]) -> L0RoundClas
     ):
         if classification in classifications:
             return classification
-    milestones = {record.milestone for record in records}
-    if L0Milestone.FAILURE in milestones:
-        return L0RoundClassification.FAILURE
-    if L0Milestone.FALLBACK in milestones:
-        return L0RoundClassification.FALLBACK
-    if L0Milestone.FENCE_CANCEL_COMPLETION in milestones:
-        return L0RoundClassification.CANCELLED
     return L0RoundClassification.UNKNOWN
 
 
@@ -1607,6 +1610,7 @@ class L0ProcessJsonlSink:
                 )
                 try:
                     written = os.write(descriptor, encoded)
+                    os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
             return written == len(encoded)
@@ -1705,6 +1709,7 @@ def runtime_l0_run_labels() -> _RuntimeL0RunLabels | None:
 class _RuntimeL0Registration:
     binding: L0RoundBinding
     labels: _RuntimeL0RunLabels
+    conflicted: bool = False
 
 
 _RUNTIME_L0_BINDING_CAPACITY: Final = 1_024
@@ -1732,8 +1737,10 @@ def _registered_runtime_l0_binding(
         return None
     with _RUNTIME_L0_BINDINGS_LOCK:
         registration = _RUNTIME_L0_BINDINGS.get(key)
-        if registration is None or not _binding_is_compatible(
-            registration.binding, checked
+        if (
+            registration is None
+            or registration.conflicted
+            or not _binding_is_compatible(registration.binding, checked)
         ):
             return None
         return registration
@@ -1819,16 +1826,19 @@ def register_runtime_l0_binding(binding: L0RoundBinding) -> bool:
             prior = _RUNTIME_L0_BINDINGS.get(key)
             if prior is not None:
                 if (
-                    prior.labels != labels
+                    prior.conflicted
+                    or prior.labels != labels
                     or not _binding_is_compatible(prior.binding, checked)
                 ):
                     if len(_RUNTIME_L0_BLOCKED) < _RUNTIME_L0_BINDING_CAPACITY:
                         _RUNTIME_L0_BINDINGS.pop(key, None)
                         _RUNTIME_L0_BLOCKED.add(key)
-                    # Once the tombstone budget is exhausted, keep the first
-                    # frozen owner.  Capacity pressure may disable new
-                    # measurement, but it must never reopen this response key
-                    # for a conflicting sample.
+                    else:
+                        _RUNTIME_L0_BINDINGS[key] = _RuntimeL0Registration(
+                            binding=prior.binding,
+                            labels=prior.labels,
+                            conflicted=True,
+                        )
                     return False
                 _RUNTIME_L0_BINDINGS[key] = _RuntimeL0Registration(
                     binding=_merge_binding(prior.binding, checked),
@@ -1866,7 +1876,11 @@ def resolve_runtime_l0_binding(
         return None
     with _RUNTIME_L0_BINDINGS_LOCK:
         registration = _RUNTIME_L0_BINDINGS.get(key)
-        return None if registration is None else registration.binding
+        return (
+            None
+            if registration is None or registration.conflicted
+            else registration.binding
+        )
 
 
 def declarations_from_records(

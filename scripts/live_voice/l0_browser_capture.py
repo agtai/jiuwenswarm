@@ -29,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import psutil  # noqa: E402
-from websockets.asyncio.client import connect as WebSocketConnect  # noqa: E402
+from websockets import connect as WebSocketConnect  # noqa: E402
 
 from jiuwenswarm.server.live_voice.latency_measurement import (  # noqa: E402
     L0_RUN_LABELS_VERSION,

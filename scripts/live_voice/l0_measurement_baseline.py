@@ -44,6 +44,7 @@ INJECTED_ENVIRONMENT_REF = "environment-injected-current-tree"
 PROVIDER_ENVIRONMENT_REF = "environment-provider-machine-current"
 _LOCAL_NONSOURCE_PREFIXES = (".codex_tmp/",)
 _RUN_SOURCE_METADATA_NAME = "browser-session.json"
+_BROWSER_SESSION_VERSION = "live-voice.l0-browser-session.v6"
 _BASE_TIME = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
 _COMPLETED = frozenset(
     {
@@ -561,10 +562,12 @@ async def build_provider_component_baseline(
     return report, complete
 
 
-def _source_head_from_input_metadata(inputs: Sequence[Path]) -> str:
+def _provenance_from_input_metadata(inputs: Sequence[Path]) -> tuple[str, str, str]:
     if not inputs:
         raise RuntimeError("aggregation requires at least one input")
     source_heads: set[str] = set()
+    environment_refs: set[str] = set()
+    configuration_sha256s: set[str] = set()
     for directory in {path.resolve().parent for path in inputs}:
         metadata_path = directory / _RUN_SOURCE_METADATA_NAME
         try:
@@ -577,17 +580,35 @@ def _source_head_from_input_metadata(inputs: Sequence[Path]) -> str:
             raise RuntimeError("input source metadata is invalid")
         source_head = metadata.get("source_head")
         evidence_directory = metadata.get("evidence_directory")
+        environment_ref = metadata.get("environment_ref")
+        configuration_sha256 = metadata.get("configuration_sha256")
         if (
-            type(source_head) is not str
+            metadata.get("schema_version") != _BROWSER_SESSION_VERSION
+            or type(source_head) is not str
             or not re.fullmatch(r"[0-9a-f]{40}", source_head)
             or type(evidence_directory) is not str
             or Path(evidence_directory).resolve() != directory
+            or type(environment_ref) is not str
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", environment_ref)
+            or type(configuration_sha256) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", configuration_sha256)
+            or metadata.get("physical_evidence") != "pending-user-run"
         ):
             raise RuntimeError("input source metadata is invalid")
         source_heads.add(source_head)
+        environment_refs.add(environment_ref)
+        configuration_sha256s.add(configuration_sha256)
     if len(source_heads) != 1:
         raise RuntimeError("input runs do not share one exact source HEAD")
-    return next(iter(source_heads))
+    if len(environment_refs) != 1 or len(configuration_sha256s) != 1:
+        raise RuntimeError(
+            "input runs do not share one exact environment and configuration"
+        )
+    return (
+        next(iter(source_heads)),
+        next(iter(environment_refs)),
+        next(iter(configuration_sha256s)),
+    )
 
 
 def aggregate_jsonl(
@@ -598,9 +619,17 @@ def aggregate_jsonl(
     environment_ref: str,
     accepted_round_keys: frozenset[tuple[str, str, int]] | None = None,
 ) -> dict[str, object]:
-    input_source_head = _source_head_from_input_metadata(inputs)
+    (
+        input_source_head,
+        input_environment_ref,
+        input_configuration_sha256,
+    ) = _provenance_from_input_metadata(inputs)
     if input_source_head != source_head:
         raise RuntimeError("input run source HEAD differs from the requested source")
+    if input_environment_ref != environment_ref:
+        raise RuntimeError(
+            "input run environment differs from the requested environment"
+        )
     manifest, digest = load_l0_corpus_manifest(corpus_path)
     profiles = {
         str(profile["profile_id"]): profile for profile in manifest["profiles"]
@@ -618,6 +647,15 @@ def aggregate_jsonl(
             or declaration.temperature.value != profile["temperature_policy"]
         ):
             raise RuntimeError("input record profile labels conflict with the corpus")
+    physical_profiles = {
+        declaration.profile_id
+        for declaration in all_declarations
+        if declaration.evidence_source is L0EvidenceSource.PHYSICAL
+    }
+    if physical_profiles and accepted_round_keys is None:
+        raise RuntimeError(
+            "physical aggregation requires verified operator acceptance"
+        )
     collector = L0MeasurementCollector()
     declarations = declarations_from_records(all_records)
     for declaration in declarations:
@@ -626,7 +664,7 @@ def aggregate_jsonl(
     for record in all_records:
         if not collector.consume(record):
             raise RuntimeError("input record failed exact run isolation")
-    return build_l0_measurement_report(
+    report = build_l0_measurement_report(
         collector,
         source_head=source_head,
         environment_ref=environment_ref,
@@ -642,6 +680,19 @@ def aggregate_jsonl(
         ),
         accepted_round_keys=accepted_round_keys,
     )
+    if physical_profiles:
+        physical_targets = {
+            profile_id: int(profiles[profile_id]["minimum_successful_rounds"])
+            for profile_id in sorted(physical_profiles)
+        }
+        report["physical_configuration_sha256"] = input_configuration_sha256
+        report["physical_profile_success_targets"] = physical_targets
+        # Only the dedicated browser capture path may promote this after it
+        # validates the acceptance log and its complete scenario matrix.
+        report["physical_capture_complete"] = False
+        report["physical_profile_complete"] = False
+        canonical_json_bytes(report)
+    return report
 
 
 def _parser() -> argparse.ArgumentParser:

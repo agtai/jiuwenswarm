@@ -133,6 +133,47 @@ function Test-ExactCommandLineOption(
     )
 }
 
+function Get-ManagedIsolatedChromeProfile([string[]]$Arguments) {
+    $prefix = '--user-data-dir='
+    $matches = @(
+        $Arguments | Where-Object {
+            $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    if ($matches.Count -ne 1) {
+        return $null
+    }
+    $profilePath = $matches[0].Substring($prefix.Length)
+    if ([string]::IsNullOrWhiteSpace($profilePath)) {
+        return $null
+    }
+    try {
+        $canonicalProfile = [System.IO.Path]::GetFullPath($profilePath).TrimEnd('\')
+        $temporaryRoot = [System.IO.Path]::GetFullPath(
+            [System.IO.Path]::GetTempPath()
+        ).TrimEnd('\')
+    } catch {
+        return $null
+    }
+    if (
+        [System.IO.Path]::GetDirectoryName($canonicalProfile) -ine $temporaryRoot -or
+        [System.IO.Path]::GetFileName($canonicalProfile) -notmatch '^jiuwenswarm-live-voice-chrome-\d{8}-\d{6}-[0-9a-f]{8}$'
+    ) {
+        return $null
+    }
+    return $canonicalProfile
+}
+
+function Get-ExistingManagedIsolatedChrome {
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $arguments = @(ConvertFrom-WindowsCommandLine ([string]$_.CommandLine))
+                $null -ne (Get-ManagedIsolatedChromeProfile -Arguments $arguments)
+            }
+    )
+}
+
 function Get-ChromeExecutable {
     $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     $candidateRoots = @(
@@ -230,11 +271,7 @@ function Start-IsolatedChrome(
 }
 
 function Stop-ExistingIsolatedChrome([string]$ChromeExecutable) {
-    $profilePrefix = Join-Path ([System.IO.Path]::GetTempPath()) 'jiuwenswarm-live-voice-chrome-'
-    $processes = @(
-        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like "*$profilePrefix*" }
-    )
+    $processes = @(Get-ExistingManagedIsolatedChrome)
     if ($processes.Count -eq 0) {
         return
     }
@@ -253,10 +290,7 @@ function Stop-ExistingIsolatedChrome([string]$ChromeExecutable) {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 250
-        $remaining = @(
-            Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -like "*$profilePrefix*" }
-        )
+        $remaining = @(Get-ExistingManagedIsolatedChrome)
     } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
     if ($remaining.Count -gt 0) {
         Fail "仍有 $($remaining.Count) 个旧隔离 Chrome 进程未退出。"

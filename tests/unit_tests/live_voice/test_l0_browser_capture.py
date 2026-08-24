@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -718,6 +720,55 @@ def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revisio
     assert "browser_profile_path = $isolatedChromeProfile" in source
     assert "live_voice_l0_launch_nonce=$browserLaunchNonce" in source
     assert "--remote-debugging-address=127.0.0.1" in source
+    assert "Get-ManagedIsolatedChromeProfile" in source
+    assert "CommandLine -like \"*$profilePrefix*\"" not in source
+
+
+def test_launcher_cleanup_selects_only_exact_managed_user_data_dir() -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    launcher = str(LAUNCHER.resolve()).replace("'", "''")
+    probe = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{launcher}', [ref]$tokens, [ref]$errors
+)
+$definition = $ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-ManagedIsolatedChromeProfile'
+}}, $true) | Select-Object -First 1
+if ($null -eq $definition -or $errors.Count -ne 0) {{ exit 10 }}
+Invoke-Expression $definition.Extent.Text
+$managed = Join-Path ([System.IO.Path]::GetTempPath()) 'jiuwenswarm-live-voice-chrome-20260824-010203-1234abcd'
+$ordinary = Join-Path ([System.IO.Path]::GetTempPath()) 'ordinary-profile'
+$exact = Get-ManagedIsolatedChromeProfile -Arguments @('chrome.exe', "--user-data-dir=$managed")
+if ($exact -ine [System.IO.Path]::GetFullPath($managed).TrimEnd('\')) {{ exit 11 }}
+if ($null -ne (Get-ManagedIsolatedChromeProfile -Arguments @(
+    'chrome.exe', "--user-data-dir=$ordinary", "--log-file=$managed-decoy.log"
+))) {{ exit 12 }}
+if ($null -ne (Get-ManagedIsolatedChromeProfile -Arguments @(
+    'chrome.exe', "--user-data-dir=$managed-attacker"
+))) {{ exit 13 }}
+if ($null -ne (Get-ManagedIsolatedChromeProfile -Arguments @(
+    'chrome.exe', "--user-data-dir=$managed", "--user-data-dir=$ordinary"
+))) {{ exit 14 }}
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-Command", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_browser_capture_uses_websockets_public_api_at_declared_floor() -> None:
+    source = Path(l0_browser_capture.__file__).read_text(encoding="utf-8")
+    assert "from websockets import connect as WebSocketConnect" in source
+    assert "websockets.asyncio.client" not in source
 
 
 def test_default_physical_cases_exclude_injected_and_degraded_profiles() -> None:
