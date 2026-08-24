@@ -45,6 +45,11 @@
   orders Demo, fails before launch on a missing dependency and emits a
   credential-free runtime contract. Ad-hoc split-service commands are diagnostic
   only and grant no acceptance credit.
+  The P3-9 implementation and automated task scope is now migrated onto the W3
+  line at product/test source `edcc55d4351dac0fbd909c279fb5443faf2a062b`.
+  The remaining Gate is the required human acceptance followed by final
+  independent Tier-3 review. Until both complete, no P3-9,
+  controlled-candidate or physical PASS is granted.
 - **Accepted historical baseline:** `PASS — INTEGRATED WEB ALPHA` remains bound
   only to `d33b520e0d21ae0829d30814d77a01cc18256f09`. Later source and broader
   functionality do not inherit that result.
@@ -110,14 +115,17 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** the consolidated P1/P2 lifecycle repair packet
-  is closed; do not reopen its four frozen production boundaries without a new
+- **Current highest priority:** finish the active P3-9 cumulative one-product
+  acceptance packet below. Its implementation and automated task scope is
+  migrated; only human acceptance and final independent Tier-3 review remain.
+  The consolidated P1/P2 lifecycle repair packet is closed; do not reopen its
+  four frozen production boundaries without a new
   reproduced defect. The older successor-capture/playout-receipt decoupling
   seams now also pass bounded independent Tier-3 review. Preserve the integrated
-  bounded P2 notification pull and legacy single-pull compatibility. Remaining
-  product work is the still-open physical fixed-corpus/generalization evidence,
-  generation-time interruption and P3-9 cumulative product acceptance. The L0
-  packet is now closed under D-097's bounded warm steady-state scope: the 8/8
+  bounded P2 notification pull and legacy single-pull compatibility.
+  Generation-time interruption and physical fixed-corpus/generalization remain
+  separate follow-up work and are not P3-9 blockers or claims. The L0 packet is
+  closed under D-097's bounded warm steady-state scope: the 8/8
   ordinary-Chrome journey, authoritative terminal-response barge rerun and
   first-audio/barge warm `20/20 + 20/20` aggregate are recorded. Do not treat
   Browser digital percentiles as strict physical-acoustic or product latency
@@ -213,7 +221,7 @@ risks, dependencies, acceptance and integration order.
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is evaluated only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` remain stable unsupported or terminal conflict with zero protected effect | Broader language/policy generalization and P3-9 cumulative acceptance; positive provide-input/pause/resume remain outside the current Direct profile unless a later real primitive is accepted | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus and D-093 zero-effect decision |
 | Integrated Web product experience | **PARTIAL overall; the four P1/P2 lifecycle repair module Gates and the bounded decoupling review PASS `C0/I0/M0`.** Same-tab recovery, exact Speech timeout/signal forwarding, browser-global capture ownership, retained predecessor ACK settlement and playout/capture decoupling are closed at their scoped source/automation boundaries. The exact consolidated product/test tree passed same-tab A -> B -> A, Exit/immediate re-enable, ordinary forward/reverse two-tab takeover and the cumulative microphone/Agent/playout journey. Production P2 notification pulls now use batch size `16`, with the validation-branch feature-on prompts audibly accepted | Real Provider degradation/fallback longer than 15 seconds remains a physical non-claim; continue generation-time interruption, fixed-corpus latency/generalization, P3-9 and complete product acceptance | [lifecycle closure](#p1p2-lifecycle-repair-closure), [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), scoped decoupling review and remaining P1/P2/P3-9 completion; no controlled-candidate credit |
 | Observability, benchmark and latency | **PARTIAL overall; bounded D-095 warm steady-state L0 PASS under D-097.** The exact production timeline, closed corpus, failure precedence, response/run isolation and feature-off zero-hot-path boundary retain source/automated `C0/I0/M0` credit. Ordinary installed Chrome adds one accepted warm run: 20/20 first-audio, 20/20 dedicated barge-in, zero failure/drop and a sanitized 40-round/860-record aggregate. D-096's cold runner remains source-tested but its real warm→cold lifecycle is neither fixed nor accepted; D-097 removes it from this L0 gate. The existing physical collector and ordinary Browser metrics keep separate provenance | Optional later work includes cold/cold-minus-warm, physical-acoustic first-audible/silence, AEC/double-talk, Provider/network and device/room generalization, and any latency SLO. External/persistent telemetry requires separate scope | [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md), [L0 baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md), [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md), D-097 and D-094 |
-| Automated verification and product acceptance | **PARTIAL overall; L0 source/automated Gate, ordinary-Chrome basic 8/8, authoritative terminal barge and warm real-path closure PASS.** The D-096 source boundary retains exact query/provenance/failure/recovery/cold-epoch tests. Affected Formal Web `479/479`, Browser L0 `5/5`, ordinary batch `5/5`, build profiles `2/2`, Python/portable launchers `76/76`, production build, Ruff, compileall, PowerShell AST and diff checks pass. Behaviour source `ba06d9825c` additionally passes the real warm 20+20 sequence and cancel-log review | P3-9 cumulative verification and controlled product-candidate acceptance remain open. Cold automation, formal background-Task/recovery and strict physical-acoustic evidence are separately deferred rather than L0 failures | [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md), [D-096 review](reviews/L0_ORDINARY_CHROME_BATCH_AUTOMATION_REVIEW_20260824.md), [cancel review](reviews/L0_SPEECH_CANCEL_OBSERVABILITY_REPAIR_REVIEW_20260825.md) and [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md); no P3-9 or product-readiness credit |
+| Automated verification and product acceptance | **PARTIAL overall; the bounded L0 Gate remains closed and the P3-9 implementation/automated task scope is integrated.** The D-096 L0 source boundary and its accepted warm real-path evidence remain unchanged. P3-9 preserves the migrated Registry/current-projection, presentation-ownership, frozen release-create and source-event-result oracles on product/test source `edcc55d4` | Complete the P3-9 human acceptance and final independent Tier-3 review. Cold L0 automation, formal background-Task/recovery and strict physical-acoustic evidence remain separately deferred rather than P3-9 failures | [active P3-9 packet](#p3-9-cumulative-one-product-acceptance), [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md) and scoped prior evidence; no P3-9 or product-readiness credit until the two remaining Gates pass |
 | Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off and the controlled launcher owns the complete non-secret contract. D-092 keeps its three-item P3 retirement boundary. D-094 separately retires only the two validation-only P2 notification switches: production Web is fixed at `16`, A/B injects `1` or `16`, and omitted server input remains legacy single-pull compatibility. The Exit packet retains only exact fences/barriers/timers/cleanup | Each retained manifest row still requires its own Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-092/D-093 evidence, [D-094](decisions/DECISIONS.md) and the [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -261,6 +269,54 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### P3-9 cumulative one-product acceptance
+
+- **Status/source:** **ACTIVE / PARTIAL** on integrated product/test source
+  `edcc55d4351dac0fbd909c279fb5443faf2a062b`, transplanted onto W3 baseline
+  `510f616d18a315bfe7f2ec702dba4419541de44a`. The original nine P3-9 commits
+  `cd93abff` → `7e70ba45` → `215910d1` → `543350c9` → `007e9e2e` →
+  `c2302222` → `15bef847` → `3fe7fb77` → `e462abda` map patch-for-patch to
+  `ba35c34c` → `1dd68551` → `2b2e8199` → `41360bc1` → `a84ac124` →
+  `7f1973c9` → `4d208e17` → `aab8259f` → `edcc55d4`. The obsolete P3-9
+  sibling L0 baseline `5415a3d3` was deliberately excluded because W3 already
+  contains the later D-097 L0 line.
+- **Capability/risk/dependencies:** cumulative P3 product-candidate boundary,
+  Tier 3. It depends on accepted P3-1 through P3-8B, D-093, the frozen Direct D2
+  profile, the Integrated Web carrier and the accepted P1/P2/L0 seams. The
+  transplant itself is behaviour-preserving and introduces no new product
+  policy, shared protocol, schema, authority, Executor profile or migration.
+- **Frozen authority:** retain one Task Core/SQLite Store, Product Registry,
+  Event/Result owner, presentation/ACK owner and confirmation owner. The formal
+  journey remains Direct Store-backed D2; no D1, second authority or positive
+  unsupported-operation claim is introduced. Stop, barge-in, response cancel,
+  Exit and Session/tab switching never imply Task cancellation.
+- **Closed implementation scope:** the cumulative Registry fixtures and current
+  projections are aligned; dequeued admission truth is retained; stale Task
+  audio and foreground presentation are fenced; exact presentation ownership
+  recovers; the frozen release-create phrase routes; and available TaskResult
+  truth binds to the terminal TaskEvent's `source_event_id`. The migrated
+  commits retain the original patch IDs, including the mutation-sensitive
+  old-comparator RED and repaired `16/16` projection result.
+- **Remaining Gate:** implementation and automated task work are complete. Run
+  the required human acceptance, including the visible formal P3 panel and the
+  separate user-confirmed real voice journey, then obtain final independent
+  Tier-3 review over the integrated candidate. Record one sanitized cumulative
+  evidence result and synchronize STATUS only after those Gates actually run.
+  Any unexplained failure or flake keeps the packet PARTIAL/FAIL.
+- **Resume boundary:** re-read actual Git, the controlled runtime contract,
+  Store/lease state and the normal Chrome page before acceptance; process
+  liveness, credentials, browser state and private runtime paths are not
+  restored by Git. Follow the owning
+  [product acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md),
+  [showcase](demo/PRODUCT_READINESS_SHOWCASE.md) and
+  [runbook](runbooks/E2E_RUNBOOK.md). The panel does not replace microphone,
+  ASR, TTS, audibility or targeting evidence.
+- **Strict non-claims:** no P3-9 or controlled-product PASS precedes the two
+  remaining Gates. Generation-time interruption, fixed-corpus p50/p95, long
+  Provider degradation, production auth/tenancy/deployment/SLO, D1,
+  host-crash/real-production-failure credit, feature complete and Production
+  ready remain outside P3-9.
 
 ### L0 correlated measurement baseline — CLOSED under D-097 warm steady-state scope
 
@@ -364,7 +420,6 @@ EventEnvelope/order/cursor-ACK, D2 receipt/reconcile, real Agent/file-Tool crash
 injection, migration, canary and duplicate deletion remain later packets and
 receive no credit here. Main is the sole shared-semantics, integration,
 documentation and Git-history owner; parallel workers are read-only.
-
 ### P1/P2 lifecycle repair closure
 
 All four repair boundaries preserve the product/test tree of pre-consolidation
