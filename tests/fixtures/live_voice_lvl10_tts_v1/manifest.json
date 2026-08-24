@@ -1,0 +1,23 @@
+{
+  "schema_version": "live-voice.lvl10-corpus.v1",
+  "fixtures": [
+    {
+      "fixture_id": "short",
+      "final_text": "Paris is the capital of France.",
+      "offsets": [0, 31],
+      "sha256": "557be7eca214f1889cdb6dfa348eb7c937648c9d6be72bfc1b8204adf7552a43"
+    },
+    {
+      "fixture_id": "medium",
+      "final_text": "The water cycle moves water continuously between Earth's surface and atmosphere. Evaporation and transpiration lift water vapor, which cools and condenses into clouds. Precipitation returns water as rain or snow, and runoff or infiltration carries it back to rivers, soil, and oceans.",
+      "offsets": [0, 80, 167, 284],
+      "sha256": "549d6140de0f261ff081c905b66b73b16a69bf016334e57805ac2919ed632d26"
+    },
+    {
+      "fixture_id": "long",
+      "final_text": "Planning a three-day visit to Washington, D.C., works best when each day focuses on one area, because the U.S. capital has major sites spread across several neighborhoods. On the first day, walk from the Capitol and Library of Congress toward the museums of the National Mall, allowing enough time for security lines and indoor exhibits. On the second day, explore the memorials and the Tidal Basin; a 3.14-mile walking loop gives you a useful planning estimate without forcing a rushed pace. On the final day, visit Georgetown and Rock Creek Park, then leave a flexible evening window for weather changes, restaurant waits, or one museum you wanted to revisit.",
+      "offsets": [0, 171, 337, 492, 661],
+      "sha256": "4dea077a8786e1ca01383b5ad60204629200c3047dbb98a8008c8f701db48c53"
+    }
+  ]
+}
