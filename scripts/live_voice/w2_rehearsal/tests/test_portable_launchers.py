@@ -85,6 +85,12 @@ def test_formal_web_validation_uses_the_controlled_runtime_profile() -> None:
     assert "-RuntimeProfile formal-web-validation -RestartExisting" in wrapper
     assert "P3_AUTH_TOKEN" not in wrapper
     assert "SPEECH_API_KEY" not in wrapper
+    assert "[switch]$L0Measurement" in launcher
+    assert "JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_DIR" in launcher
+    assert "JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_RUN_LABELS_FILE" in launcher
+    assert "--remote-debugging-port=$RemoteDebuggingPort" in launcher
+    assert "?live_voice_l0_measurement=1" in launcher
+    assert "l0_browser_capture.py" in launcher
 
 
 def test_formal_web_runtime_probe_binds_critical_receipt_and_rejects_forgery(

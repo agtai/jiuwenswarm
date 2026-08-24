@@ -18,6 +18,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
 )
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
+    MediaAck,
     MediaAudioFrame,
     MediaDetach,
     MediaDetachReason,
@@ -49,6 +50,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechAuthorizationBinding,
     SpeechRpcContext,
 )
+from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 
 
 ORIGIN = "https://voice.example.test"
@@ -915,6 +917,83 @@ async def test_completed_media_socket_retains_recognition_content(
 
     assert record.route_completed is True
     assert record.recognition_content_sha256 is not None
+
+
+def test_production_gateway_completion_emits_content_free_l0_ack_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        dedicated_media_registration,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    record = _pending_record(registry, _media_ticket(activation))
+    registry.accept_frame(
+        record,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+    )
+    registry.observe_uplink_ack_sent(
+        record,
+        MediaAck(record.binding.lease_id, record.binding.generation.value, 0),
+    )
+    registry.complete_route(
+        record,
+        SimpleNamespace(activated=True, accepted_frames=1),
+    )
+
+    assert [item["milestone"] for item in emitted] == [
+        L0Milestone.LAST_FRAME_ACKED,
+        L0Milestone.UPLINK_CLOSED,
+    ]
+    assert emitted[0]["binding"].session_id == "session-1"
+    assert emitted[0]["binding"].activation_generation == 1
+    assert emitted[0]["duration_ms"] >= 0
+    assert emitted[0]["observed_at"] == record.last_uplink_ack_observed_at
+    assert emitted[0]["monotonic_ms"] == record.last_uplink_ack_monotonic_ms
+    assert "samples" not in repr(emitted)
+    assert "pcm" not in repr(emitted).lower()
+
+
+def test_optional_l0_binding_never_rejects_wider_product_media_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        dedicated_media_registration,
+        "emit_runtime_l0_milestone",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(correlation_id="correlation with space"),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    record = _pending_record(registry, _media_ticket(activation))
+    registry.accept_frame(
+        record,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+    )
+    registry.observe_uplink_ack_sent(
+        record,
+        MediaAck(record.binding.lease_id, record.binding.generation.value, 0),
+    )
+    registry.complete_route(
+        record,
+        SimpleNamespace(activated=True, accepted_frames=1),
+    )
+
+    assert record.route_completed is True
+    assert [item["binding"] for item in emitted] == [None, None]
 
 
 @pytest.mark.asyncio

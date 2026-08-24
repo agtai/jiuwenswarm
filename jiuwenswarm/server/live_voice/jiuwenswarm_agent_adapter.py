@@ -16,6 +16,28 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
 )
 
 
+def _tool_result_succeeded(payload: dict[str, object]) -> bool | None:
+    event_type = payload.get("event_type")
+    if event_type != "chat.tool_result":
+        return None
+    success = payload.get("success")
+    is_error = payload.get("is_error")
+    status = payload.get("status")
+    status_value = status.strip().casefold() if isinstance(status, str) else ""
+    succeeded = success is True or is_error is False or status_value in {
+        "completed",
+        "ok",
+        "success",
+        "succeeded",
+    }
+    failed = success is False or is_error is True or status_value in {
+        "error",
+        "failed",
+        "failure",
+    }
+    return succeeded and not failed
+
+
 class JiuWenSwarmAgentAdapter:
     """Maps Agent chunks while carrying Harness lifecycle events unchanged."""
 
@@ -61,6 +83,7 @@ class JiuWenSwarmAgentAdapter:
                 text=content if isinstance(content, str) else None,
                 capability="agent.chat",
                 error_reason=error if isinstance(error, str) else None,
+                tool_result_succeeded=_tool_result_succeeded(payload),
             )
             agent_seq += 1
 

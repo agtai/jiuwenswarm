@@ -1,0 +1,239 @@
+{
+  "schema_version": "live-voice.l0-corpus.v1",
+  "corpus_id": "formal-web-l0-20260823",
+  "description": "Fixed content and controlled actions for correlated Live Voice L0 measurement.",
+  "profiles": [
+    {
+      "profile_id": "injected-nominal-cold",
+      "evidence_source": "injected",
+      "network_profile_ref": "network-nominal-local",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "cold",
+      "physical_required": false
+    },
+    {
+      "profile_id": "injected-nominal-warm",
+      "evidence_source": "injected",
+      "network_profile_ref": "network-nominal-local",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "warm",
+      "physical_required": false
+    },
+    {
+      "profile_id": "injected-degraded-warm",
+      "evidence_source": "injected",
+      "network_profile_ref": "network-delay80-jitter20-loss1",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "warm",
+      "physical_required": false
+    },
+    {
+      "profile_id": "real-provider-digital-loopback-cold",
+      "evidence_source": "real_provider",
+      "network_profile_ref": "network-machine-current",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "cold",
+      "physical_required": false
+    },
+    {
+      "profile_id": "real-provider-digital-loopback-warm",
+      "evidence_source": "real_provider",
+      "network_profile_ref": "network-machine-current",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "warm",
+      "physical_required": false
+    },
+    {
+      "profile_id": "physical-formal-web-cold",
+      "evidence_source": "physical",
+      "network_profile_ref": "network-room-current",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "cold",
+      "physical_required": true
+    },
+    {
+      "profile_id": "physical-formal-web-warm",
+      "evidence_source": "physical",
+      "network_profile_ref": "network-room-current",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "warm",
+      "physical_required": true
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "short-no-tool-zh",
+      "category": "short_no_tool",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-short-no-tool-zh-v1",
+      "stimulus_text": "请用一句话说明巴黎在哪个国家。",
+      "action_sequence": ["submit", "await-audio"],
+      "expected_route": "dialogue",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "long-answer-zh",
+      "category": "long_answer",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-long-answer-zh-v1",
+      "stimulus_text": "请分五点介绍巴黎，每点两句话。",
+      "action_sequence": ["submit", "await-audio"],
+      "expected_route": "dialogue",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "real-tool-file-read-zh",
+      "category": "real_tool",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-tool-file-read-zh-v1",
+      "stimulus_text": "请读取隔离项目中的基准说明文件，并告诉我其中的版本号。",
+      "action_sequence": ["submit", "await-tool", "await-audio"],
+      "expected_route": "tool",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": true
+    },
+    {
+      "case_id": "task-create-zh",
+      "category": "task_create",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-task-create-zh-v1",
+      "stimulus_text": "创建一个任务，检查隔离项目的基准说明文件并报告版本号。",
+      "action_sequence": ["submit", "await-task-created", "await-audio"],
+      "expected_route": "task",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": true
+    },
+    {
+      "case_id": "task-status-zh",
+      "category": "task_status",
+      "locale": "zh-CN",
+      "input_mode": "control",
+      "fixture_ref": "fixture-task-status-zh-v1",
+      "stimulus_text": "刚才创建的任务现在是什么状态？",
+      "action_sequence": ["target-task", "submit", "await-audio"],
+      "expected_route": "task",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": true
+    },
+    {
+      "case_id": "task-cancel-zh",
+      "category": "task_cancel",
+      "locale": "zh-CN",
+      "input_mode": "control",
+      "fixture_ref": "fixture-task-cancel-zh-v1",
+      "stimulus_text": "取消刚才创建的任务。",
+      "action_sequence": ["target-task", "submit", "await-terminal", "await-audio"],
+      "expected_route": "task",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": true
+    },
+    {
+      "case_id": "chinese-breath-pause-zh",
+      "category": "chinese_breath_pause",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-breath-pause-zh-v1",
+      "stimulus_text": "请介绍巴黎……停顿……再补充一个适合散步的地方。",
+      "action_sequence": ["submit-with-breath-pause", "await-audio"],
+      "expected_route": "dialogue",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "playout-barge-in-zh",
+      "category": "barge_in",
+      "locale": "zh-CN",
+      "input_mode": "physical_voice",
+      "fixture_ref": "fixture-barge-in-zh-v1",
+      "stimulus_text": "停一下，我换一个问题。",
+      "action_sequence": ["submit-long", "wait-playout", "speak-barge-in", "await-fence"],
+      "expected_route": "dialogue",
+      "expected_classification": "cancelled",
+      "requires_physical_audio": true,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "silence-no-valid-speech",
+      "category": "silence",
+      "locale": "none",
+      "input_mode": "injected",
+      "fixture_ref": "fixture-silence-v1",
+      "stimulus_text": "",
+      "action_sequence": ["start-capture", "inject-silence", "await-rejection"],
+      "expected_route": "none",
+      "expected_classification": "failure",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "mid-pause-truncation-zh",
+      "category": "mid_pause_truncation",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-mid-pause-truncation-zh-v1",
+      "stimulus_text": "请介绍巴黎的交通，然后……",
+      "action_sequence": ["submit-truncated", "await-classification"],
+      "expected_route": "dialogue",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "provider-slow-zh",
+      "category": "provider_slow",
+      "locale": "zh-CN",
+      "input_mode": "injected",
+      "fixture_ref": "fixture-provider-slow-zh-v1",
+      "stimulus_text": "请简要介绍巴黎。",
+      "action_sequence": ["inject-provider-delay", "submit", "await-bounded-result"],
+      "expected_route": "dialogue",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "provider-failure-zh",
+      "category": "provider_failure",
+      "locale": "zh-CN",
+      "input_mode": "injected",
+      "fixture_ref": "fixture-provider-failure-zh-v1",
+      "stimulus_text": "请简要介绍巴黎。",
+      "action_sequence": ["inject-provider-failure", "submit", "await-fail-closed"],
+      "expected_route": "dialogue",
+      "expected_classification": "fallback",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    },
+    {
+      "case_id": "degraded-network-zh",
+      "category": "degraded_network",
+      "locale": "zh-CN",
+      "input_mode": "prerecorded",
+      "fixture_ref": "fixture-degraded-network-zh-v1",
+      "stimulus_text": "请用一句话介绍巴黎。",
+      "action_sequence": ["apply-network-profile", "submit", "await-audio"],
+      "expected_route": "dialogue",
+      "expected_classification": "success",
+      "requires_physical_audio": false,
+      "requires_registered_disposable_project": false
+    }
+  ],
+  "non_claims": [
+    "Injected and digital-loopback samples do not prove physical room acoustics.",
+    "Provider component samples do not prove complete microphone-to-speaker latency.",
+    "Fixtures do not authorize a project with a remote or a non-isolated data directory."
+  ]
+}

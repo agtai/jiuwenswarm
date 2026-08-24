@@ -698,6 +698,7 @@ async def run_dedicated_media_socket_leaf(
     socket: DedicatedMediaSocket,
     on_audio_frame: Callable[[MediaAudioFrame], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    on_uplink_ack_sent: Callable[[MediaAck], None] | None = None,
     next_speech_start: Callable[[], Awaitable[MediaSpeechStart]] | None = None,
     next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
     cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
@@ -727,6 +728,10 @@ async def run_dedicated_media_socket_leaf(
     if on_complete is not None and not callable(on_complete):
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "uplink completion consumer must be callable"
+        )
+    if on_uplink_ack_sent is not None and not callable(on_uplink_ack_sent):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "uplink ACK observer must be callable"
         )
     if next_end_of_turn is not None and not callable(next_end_of_turn):
         raise MediaTransportViolation(
@@ -1168,6 +1173,13 @@ async def run_dedicated_media_socket_leaf(
         if not await send_control(control):
             closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
             return await terminate(closed)
+        if isinstance(control, MediaAck) and on_uplink_ack_sent is not None:
+            try:
+                on_uplink_ack_sent(control)
+            except BaseException:
+                # This optional diagnostic cannot alter media authority or
+                # turn a successfully-sent ACK into a transport failure.
+                pass
         if isinstance(control, MediaDetach):
             closed = session.close(control.reason_id)
             return await terminate(closed)

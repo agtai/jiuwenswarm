@@ -289,7 +289,9 @@ test('sender enforces bounded pressure and retains sent frames until ACK', () =>
   activation = active({ maxPendingFrames: 1 });
   owner = activation.owner;
   owner.enqueue(frame());
-  assert.equal(owner.drain(() => 'sent').sent_frames, 1);
+  const sentSequences = [];
+  assert.equal(owner.drain(() => 'sent', seq => sentSequences.push(seq)).sent_frames, 1);
+  assert.deepEqual(sentSequences, [0]);
   assert.equal(owner.acknowledge({
     type: 'media.ack', lease_id: activation.binding.lease_id, generation: 7, through_seq: 0,
   }), null);

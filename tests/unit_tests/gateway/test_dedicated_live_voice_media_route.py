@@ -863,6 +863,7 @@ async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_
             serialize_media_control(peer_detach),
         ]
     )
+    sent_acknowledgements: list[MediaAck] = []
 
     result = await run_dedicated_media_socket_leaf(
         _request(binding),
@@ -870,6 +871,7 @@ async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_
         on_audio_frame=lambda _frame: effects.__setitem__(
             "audio", effects["audio"] + 1
         ),
+        on_uplink_ack_sent=sent_acknowledgements.append,
     )
 
     controls = [deserialize_media_control(item) for item in socket.sent]
@@ -890,7 +892,30 @@ async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_
     assert result.formal_route_ready is False
     assert socket.close_calls == [(1000, "live-voice media leaf closed")]
     assert effects["audio"] == 1
+    assert sent_acknowledgements == [
+        MediaAck(binding.lease_id, binding.generation.value, 0)
+    ]
     assert all(effects[name] == 0 for name in effects if name != "audio")
+
+
+@pytest.mark.asyncio
+async def test_uplink_ack_observer_runs_only_after_successful_socket_send() -> None:
+    binding = _binding()
+    socket = _FakeDedicatedSocket(
+        [encode_audio_frame(binding, _frame())],
+        fail_send_at=1,
+    )
+    sent_acknowledgements: list[MediaAck] = []
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+        on_uplink_ack_sent=sent_acknowledgements.append,
+    )
+
+    assert result.reason_id is MediaDetachReason.TRANSPORT_SEND_FAILED
+    assert sent_acknowledgements == []
 
 
 @pytest.mark.asyncio

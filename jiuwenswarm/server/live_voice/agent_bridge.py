@@ -40,6 +40,7 @@ class AgentEvent:
     text: str | None = None
     capability: str | None = None
     error_reason: str | None = None
+    tool_result_succeeded: bool | None = None
 
 
 class AgentHandler(Protocol):

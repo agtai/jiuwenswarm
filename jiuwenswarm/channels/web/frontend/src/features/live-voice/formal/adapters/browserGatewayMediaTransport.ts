@@ -1071,7 +1071,10 @@ export class BoundedMediaSender {
     return { accepted: true, reason_id: 'MEDIA_ENQUEUED' };
   }
 
-  drain(trySendBinary: (binary: Uint8Array) => BinarySendDisposition): MediaDrainResult {
+  drain(
+    trySendBinary: (binary: Uint8Array) => BinarySendDisposition,
+    onFrameSent?: (seq: number) => void
+  ): MediaDrainResult {
     if (this.closedState) {
       return {
         sent_frames: 0, pending_frames: this.queue.length, pending_bytes: this.pendingByteCount, reason_id: 'MEDIA_LEASE_CLOSED',
@@ -1099,6 +1102,11 @@ export class BoundedMediaSender {
       }
       item.sent = true;
       sentFrames += 1;
+      try {
+        onFrameSent?.(item.metadata.seq);
+      } catch {
+        // Optional transport diagnostics cannot alter sender ownership.
+      }
     }
     return {
       sent_frames: sentFrames,
@@ -1343,7 +1351,10 @@ export class BrowserGatewayMediaRegistrationOwner {
     return result;
   }
 
-  drain(trySendBinary: (binary: Uint8Array) => BinarySendDisposition): MediaDrainResult {
+  drain(
+    trySendBinary: (binary: Uint8Array) => BinarySendDisposition,
+    onFrameSent?: (seq: number) => void
+  ): MediaDrainResult {
     if (this.#closedState) {
       return {
         sent_frames: 0,
@@ -1352,7 +1363,7 @@ export class BrowserGatewayMediaRegistrationOwner {
         reason_id: this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED',
       };
     }
-    const result = this.#sender.drain(trySendBinary);
+    const result = this.#sender.drain(trySendBinary, onFrameSent);
     if (this.#closedState) {
       return {
         sent_frames: 0,

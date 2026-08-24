@@ -162,6 +162,7 @@ function active({
   highWater,
   deferDownlinkAck,
   onTerminal,
+  onUplinkFrameSent,
   drainRetryDelayMs,
   maxDrainStallRetries,
   drainScheduler,
@@ -191,6 +192,7 @@ function active({
     socket_high_water_bytes: highWater,
     defer_downlink_ack: deferDownlinkAck,
     on_terminal: onTerminal,
+    on_uplink_frame_sent: onUplinkFrameSent,
     drain_retry_delay_ms: drainRetryDelayMs,
     max_drain_stall_retries: maxDrainStallRetries,
     schedule_drain_retry: drainScheduler?.schedule,
@@ -327,12 +329,20 @@ test('socket leaf cannot bypass the same-origin activation factory', () => {
 
 test('socket bufferedAmount backpressure autonomously drains without retrying or dropping a frame', () => {
   const drainScheduler = new FakeDrainScheduler();
-  const route = active({ maxPendingFrames: 1, highWater: 1024, drainScheduler, drainRetryDelayMs: 7 });
+  const sentSequences = [];
+  const route = active({
+    maxPendingFrames: 1,
+    highWater: 1024,
+    drainScheduler,
+    drainRetryDelayMs: 7,
+    onUplinkFrameSent: seq => sentSequences.push(seq),
+  });
   attach(route);
   route.socket.bufferedAmount = 1024;
 
   assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame()).accepted, true);
   assert.equal(route.socket.sent.length, 0);
+  assert.deepEqual(sentSequences, []);
   assert.deepEqual(route.activation.leaf.sendCaptureFrame(capturedFrame(1)), {
     accepted: false,
     reason_id: 'MEDIA_BACKPRESSURE_LIMIT',
@@ -346,6 +356,7 @@ test('socket bufferedAmount backpressure autonomously drains without retrying or
   route.socket.bufferedAmount = 0;
   drainScheduler.run(2);
   assert.equal(route.socket.sent.length, 1);
+  assert.deepEqual(sentSequences, [0]);
   assert.equal(decodeAudioFrame(route.activation.binding, route.socket.sent[0]).seq, 0);
 
   route.socket.message(

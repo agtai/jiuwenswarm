@@ -10,6 +10,11 @@ param(
     [switch]$RestartExisting,
     [switch]$AllowDirtyProject,
     [switch]$NoBrowser,
+    [switch]$L0Measurement,
+    [ValidateRange(9222, 9322)]
+    [int]$L0MeasurementPort = 9223,
+    [string]$L0MeasurementDirectory,
+    [string]$L0EnvironmentRef,
     [ValidateRange(30, 300)]
     [int]$ReadyTimeoutSeconds = 120
 )
@@ -65,6 +70,110 @@ function Fail([string]$Text) {
     throw $Text
 }
 
+function ConvertFrom-WindowsCommandLine([string]$CommandLine) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return @()
+    }
+    if (-not ('LiveVoiceWindowsCommandLine' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class LiveVoiceWindowsCommandLine {
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(
+        [MarshalAs(UnmanagedType.LPWStr)] string commandLine,
+        out int argumentCount
+    );
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    public static string[] Split(string commandLine) {
+        int argumentCount;
+        IntPtr argumentVector = CommandLineToArgvW(commandLine, out argumentCount);
+        if (argumentVector == IntPtr.Zero) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            string[] arguments = new string[argumentCount];
+            for (int index = 0; index < argumentCount; index++) {
+                IntPtr argument = Marshal.ReadIntPtr(
+                    argumentVector,
+                    index * IntPtr.Size
+                );
+                arguments[index] = Marshal.PtrToStringUni(argument);
+            }
+            return arguments;
+        } finally {
+            LocalFree(argumentVector);
+        }
+    }
+}
+'@
+    }
+    return @([LiveVoiceWindowsCommandLine]::Split($CommandLine))
+}
+
+function Test-ExactCommandLineOption(
+    [string[]]$Arguments,
+    [string]$Name,
+    [string]$ExpectedValue
+) {
+    $prefix = "$Name="
+    $matches = @(
+        $Arguments | Where-Object {
+            $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    return (
+        $matches.Count -eq 1 -and
+        $matches[0].Substring($prefix.Length) -ieq $ExpectedValue
+    )
+}
+
+function Get-ManagedIsolatedChromeProfile([string[]]$Arguments) {
+    $prefix = '--user-data-dir='
+    $matches = @(
+        $Arguments | Where-Object {
+            $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    if ($matches.Count -ne 1) {
+        return $null
+    }
+    $profilePath = $matches[0].Substring($prefix.Length)
+    if ([string]::IsNullOrWhiteSpace($profilePath)) {
+        return $null
+    }
+    try {
+        $canonicalProfile = [System.IO.Path]::GetFullPath($profilePath).TrimEnd('\')
+        $temporaryRoot = [System.IO.Path]::GetFullPath(
+            [System.IO.Path]::GetTempPath()
+        ).TrimEnd('\')
+    } catch {
+        return $null
+    }
+    if (
+        [System.IO.Path]::GetDirectoryName($canonicalProfile) -ine $temporaryRoot -or
+        [System.IO.Path]::GetFileName($canonicalProfile) -notmatch '^jiuwenswarm-live-voice-chrome-\d{8}-\d{6}-[0-9a-f]{8}$'
+    ) {
+        return $null
+    }
+    return $canonicalProfile
+}
+
+function Get-ExistingManagedIsolatedChrome {
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $arguments = @(ConvertFrom-WindowsCommandLine ([string]$_.CommandLine))
+                $null -ne (Get-ManagedIsolatedChromeProfile -Arguments $arguments)
+            }
+    )
+}
+
 function Get-ChromeExecutable {
     $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     $candidateRoots = @(
@@ -84,7 +193,19 @@ function Get-ChromeExecutable {
     Fail '找不到 Google Chrome。请安装桌面版 Google Chrome，或使用 -NoBrowser 仅启动服务。'
 }
 
-function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
+function Start-IsolatedChrome(
+    [string]$ChromeExecutable,
+    [string]$Url,
+    [int]$RemoteDebuggingPort = 0
+) {
+    if ($RemoteDebuggingPort -gt 0) {
+        $existingDebuggerOwners = @(
+            Get-ListeningOwners -Ports @($RemoteDebuggingPort)
+        )
+        if ($existingDebuggerOwners.Count -gt 0) {
+            Fail "L0 Chrome 调试端口 $RemoteDebuggingPort 已被占用；不会连接或停止未受管的本地调试服务。"
+        }
+    }
     $profileName = 'jiuwenswarm-live-voice-chrome-{0}-{1}' -f (
         Get-Date -Format 'yyyyMMdd-HHmmss'
     ), ([guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -100,23 +221,57 @@ function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-background-mode',
-        '--new-window',
-        $Url
+        '--new-window'
     )
+    if ($RemoteDebuggingPort -gt 0) {
+        $arguments += '--remote-debugging-address=127.0.0.1'
+        $arguments += "--remote-debugging-port=$RemoteDebuggingPort"
+    }
+    $arguments += $Url
     $chrome = Start-Process -FilePath $ChromeExecutable -ArgumentList $arguments -WindowStyle Normal -PassThru
     Start-Sleep -Milliseconds 750
     if ($chrome.HasExited) {
         Fail "隔离 Chrome 启动后立即退出（exit=$($chrome.ExitCode)）。"
     }
-    return $profilePath
+    $debuggerProcessId = $null
+    if ($RemoteDebuggingPort -gt 0) {
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $debuggerOwners = @(
+                Get-ListeningOwners -Ports @($RemoteDebuggingPort)
+            )
+            if ($debuggerOwners.Count -gt 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+            $chrome.Refresh()
+        } while (-not $chrome.HasExited -and [DateTime]::UtcNow -lt $deadline)
+        if ($debuggerOwners.Count -ne 1) {
+            Fail "隔离 Chrome 未唯一取得 L0 调试端口 $RemoteDebuggingPort。"
+        }
+        $debuggerOwner = $debuggerOwners[0]
+        $debuggerArguments = @($debuggerOwner.CommandLineArguments)
+        if (
+            $debuggerOwner.LocalAddress -cne '127.0.0.1' -or
+            $debuggerOwner.Name -notmatch '^chrome\.exe$' -or
+            $debuggerOwner.ExecutablePath -ine $ChromeExecutable -or
+            -not (Test-ExactCommandLineOption -Arguments $debuggerArguments -Name '--user-data-dir' -ExpectedValue $profilePath) -or
+            -not (Test-ExactCommandLineOption -Arguments $debuggerArguments -Name '--remote-debugging-address' -ExpectedValue '127.0.0.1') -or
+            -not (Test-ExactCommandLineOption -Arguments $debuggerArguments -Name '--remote-debugging-port' -ExpectedValue ([string]$RemoteDebuggingPort))
+        ) {
+            Fail 'L0 调试端口不属于本次启动的精确隔离 Chrome profile。'
+        }
+        $debuggerProcessId = [int]$debuggerOwner.ProcessId
+    }
+    return [pscustomobject]@{
+        ProfilePath      = $profilePath
+        LaunchProcessId  = [int]$chrome.Id
+        DebuggerProcessId = $debuggerProcessId
+    }
 }
 
 function Stop-ExistingIsolatedChrome([string]$ChromeExecutable) {
-    $profilePrefix = Join-Path ([System.IO.Path]::GetTempPath()) 'jiuwenswarm-live-voice-chrome-'
-    $processes = @(
-        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like "*$profilePrefix*" }
-    )
+    $processes = @(Get-ExistingManagedIsolatedChrome)
     if ($processes.Count -eq 0) {
         return
     }
@@ -135,10 +290,7 @@ function Stop-ExistingIsolatedChrome([string]$ChromeExecutable) {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 250
-        $remaining = @(
-            Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -like "*$profilePrefix*" }
-        )
+        $remaining = @(Get-ExistingManagedIsolatedChrome)
     } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
     if ($remaining.Count -gt 0) {
         Fail "仍有 $($remaining.Count) 个旧隔离 Chrome 进程未退出。"
@@ -206,14 +358,21 @@ function Get-ListeningOwners([int[]]$Ports) {
         foreach ($listener in $listeners) {
             $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
             $rows += [pscustomobject]@{
-                Port        = $port
-                ProcessId   = [int]$listener.OwningProcess
-                Name        = if ($null -ne $process) { [string]$process.Name } else { '' }
-                CommandLine = if ($null -ne $process) { [string]$process.CommandLine } else { '' }
+                Port           = $port
+                LocalAddress   = [string]$listener.LocalAddress
+                ProcessId      = [int]$listener.OwningProcess
+                Name           = if ($null -ne $process) { [string]$process.Name } else { '' }
+                ExecutablePath = if ($null -ne $process) { [string]$process.ExecutablePath } else { '' }
+                CommandLine    = if ($null -ne $process) { [string]$process.CommandLine } else { '' }
+                CommandLineArguments = if ($null -ne $process) {
+                    @(ConvertFrom-WindowsCommandLine -CommandLine ([string]$process.CommandLine))
+                } else {
+                    @()
+                }
             }
         }
     }
-    return @($rows | Sort-Object ProcessId, Port -Unique)
+    return @($rows | Sort-Object ProcessId, Port, LocalAddress -Unique)
 }
 
 function Stop-ExistingDemoServices {
@@ -322,6 +481,66 @@ try {
         }
         Write-Warn "源码工作区存在 $($sourceDirty.Count) 项未提交修改；脚本会按当前源码构建，不会提交或覆盖它们。"
     }
+    $l0RunLabelsPath = $null
+    $l0ConfigurationSha256 = $null
+    if ($L0Measurement) {
+        $l0LogsRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'logs'))
+        if ($RuntimeProfile -ne 'formal-web-validation') {
+            Fail 'L0 物理采集只允许 formal-web-validation profile。'
+        }
+        if ($NoBrowser) {
+            Fail 'L0 物理采集需要隔离 Chrome，不能同时使用 -NoBrowser。'
+        }
+        if (
+            [string]::IsNullOrWhiteSpace($L0EnvironmentRef) -or
+            $L0EnvironmentRef -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$'
+        ) {
+            Fail 'L0 物理采集需要显式、安全的 -L0EnvironmentRef（例如 lab-a-room-1）。'
+        }
+        if ([string]::IsNullOrWhiteSpace($L0MeasurementDirectory)) {
+            $L0MeasurementDirectory = Join-Path $l0LogsRoot (
+                'l0-physical-{0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+            )
+        } elseif (-not [System.IO.Path]::IsPathRooted($L0MeasurementDirectory)) {
+            $L0MeasurementDirectory = Join-Path $l0LogsRoot $L0MeasurementDirectory
+        }
+        $L0MeasurementDirectory = [System.IO.Path]::GetFullPath($L0MeasurementDirectory)
+        $repoPrefix = $RepoRoot.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ) + [System.IO.Path]::DirectorySeparatorChar
+        $logsPrefix = $l0LogsRoot.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ) + [System.IO.Path]::DirectorySeparatorChar
+        $insideRepo = (
+            $L0MeasurementDirectory -ieq $RepoRoot -or
+            $L0MeasurementDirectory.StartsWith(
+                $repoPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        $insideIgnoredLogs = (
+            $L0MeasurementDirectory -ieq $l0LogsRoot -or
+            $L0MeasurementDirectory.StartsWith(
+                $logsPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        if ($insideRepo -and -not $insideIgnoredLogs) {
+            Fail '仓库内的 L0 证据目录必须位于已忽略的 logs 目录；也可使用仓库外的绝对路径。'
+        }
+        if (Test-Path -LiteralPath $L0MeasurementDirectory) {
+            $existingEvidence = @(Get-ChildItem -LiteralPath $L0MeasurementDirectory -Force)
+            if ($existingEvidence.Count -gt 0) {
+                Fail "L0 采集目录必须为空或不存在：$L0MeasurementDirectory"
+            }
+        } else {
+            New-Item -ItemType Directory -Path $L0MeasurementDirectory | Out-Null
+        }
+        $l0RunLabelsPath = Join-Path $L0MeasurementDirectory 'run-labels.json'
+        Write-Pass "L0 内容无关证据目录已隔离：$L0MeasurementDirectory"
+    }
 
     # Keep the machine selection at one stable path so a non-default data
     # directory can still be discovered by the next no-argument launch.
@@ -413,6 +632,15 @@ try {
     } else {
         Write-Pass "$RuntimeProfileLabel Git 项目干净且无 remote"
     }
+    if ($L0Measurement -and $projectStatus.Count -gt 0) {
+        Fail 'L0 物理采集要求项目精确绑定到干净 revision；-AllowDirtyProject 不能放宽该证据边界。'
+    }
+    $projectRevision = (@(
+        Invoke-Git -Arguments @('-C', $ProjectPath, 'rev-parse', 'HEAD')
+    ))[0].Trim().ToLowerInvariant()
+    if ($projectRevision -notmatch '^[0-9a-f]{40}$') {
+        Fail '无法取得项目的精确 Git revision。'
+    }
     Write-Pass "项目注册与 P3 绑定一致（$ProjectId）"
 
     if ($SaveConfiguration) {
@@ -451,6 +679,38 @@ try {
     if ($speechBase.TrimEnd('/') -ne 'https://api.openai.com/v1') { Fail 'Demo 要求 LIVE_VOICE_SPEECH_API_BASE=https://api.openai.com/v1。' }
     if ($sttModel -ne 'gpt-4o-mini-transcribe-2025-12-15') { Fail 'STT 模型不是已验证的 Demo 模型。' }
     if ($ttsModel -ne 'gpt-4o-mini-tts-2025-12-15') { Fail 'TTS 模型不是已验证的 Demo 模型。' }
+    if ($L0Measurement) {
+        $agentConfigurationSha256 = (
+            Get-FileHash -LiteralPath $ConfigYamlPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        $l0ConfigurationFacts = [ordered]@{
+            runtime_profile = $RuntimeProfile
+            executor_profile = $ExecutorProfile
+            agent_configuration_sha256 = $agentConfigurationSha256
+            project = [ordered]@{
+                project_id = $ProjectId
+                revision = $projectRevision
+            }
+            speech = [ordered]@{
+                provider = 'openai'
+                api_base = $speechBase.TrimEnd('/')
+                stt_model = $sttModel
+                tts_model = $ttsModel
+                tts_voice = 'marin'
+            }
+        } | ConvertTo-Json -Compress -Depth 10
+        $l0ConfigurationHasher = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $l0ConfigurationBytes = [System.Text.Encoding]::UTF8.GetBytes(
+                $l0ConfigurationFacts
+            )
+            $l0ConfigurationSha256 = [System.BitConverter]::ToString(
+                $l0ConfigurationHasher.ComputeHash($l0ConfigurationBytes)
+            ).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $l0ConfigurationHasher.Dispose()
+        }
+    }
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_SPEECH_TTS_VOICE', 'marin', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED', '1', 'Process')
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED', '1', 'Process')
@@ -506,6 +766,18 @@ try {
     }
     foreach ($entry in $featureEnvironment.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+    }
+    if ($L0Measurement) {
+        [Environment]::SetEnvironmentVariable(
+            'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_DIR',
+            $L0MeasurementDirectory,
+            'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_RUN_LABELS_FILE',
+            $l0RunLabelsPath,
+            'Process'
+        )
     }
     foreach ($entry in $ExpectedPorts.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
@@ -711,11 +983,50 @@ try {
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $runtimeContractPath -Encoding UTF8
     Write-Pass "已写入不含密钥的运行合同：$runtimeContractPath"
 
+    $isolatedChrome = $null
     $isolatedChromeProfile = $null
+    $browserLaunchNonce = $null
     if (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
-        $isolatedChromeProfile = Start-IsolatedChrome -ChromeExecutable $ChromeExecutable -Url "http://localhost:$FrontendPort"
+        $browserUrl = "http://localhost:$FrontendPort"
+        $remoteDebuggingPort = 0
+        if ($L0Measurement) {
+            $browserLaunchNonce = [guid]::NewGuid().ToString('N')
+            $browserUrl += "?live_voice_l0_measurement=1&live_voice_l0_launch_nonce=$browserLaunchNonce"
+            $remoteDebuggingPort = $L0MeasurementPort
+        }
+        $isolatedChrome = Start-IsolatedChrome `
+            -ChromeExecutable $ChromeExecutable `
+            -Url $browserUrl `
+            -RemoteDebuggingPort $remoteDebuggingPort
+        $isolatedChromeProfile = [string]$isolatedChrome.ProfilePath
         Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
+        if ($L0Measurement) {
+            [ordered]@{
+                schema_version      = 'live-voice.l0-browser-session.v6'
+                source_head         = (& git rev-parse HEAD).Trim()
+                runtime_profile     = $RuntimeProfile
+                evidence_directory = $L0MeasurementDirectory
+                run_labels_file    = $l0RunLabelsPath
+                browser_endpoint   = "http://127.0.0.1:$L0MeasurementPort"
+                browser_page_origin = "http://localhost:$FrontendPort"
+                browser_executable_path = $ChromeExecutable
+                browser_profile_path = $isolatedChromeProfile
+                browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId
+                browser_debugger_process_id = [int]$isolatedChrome.DebuggerProcessId
+                browser_launch_nonce = $browserLaunchNonce
+                temperature_epoch_id = ([guid]::NewGuid().ToString('N'))
+                cold_sample_available = $true
+                environment_ref     = $L0EnvironmentRef
+                configuration_sha256 = $l0ConfigurationSha256
+                physical_evidence  = 'pending-user-run'
+                raw_audio_retained = $false
+                transcript_retained = $false
+            } | ConvertTo-Json | Set-Content `
+                -LiteralPath (Join-Path $L0MeasurementDirectory 'browser-session.json') `
+                -Encoding UTF8
+            Write-Pass "L0 自动采集端点已就绪：127.0.0.1:$L0MeasurementPort"
+        }
     }
 
     Write-Host "`n============================================================" -ForegroundColor Green
@@ -725,6 +1036,12 @@ try {
     Write-Host "  Log: $logPath" -ForegroundColor DarkGray
     if ($null -ne $isolatedChromeProfile) {
         Write-Host "  Isolated Chrome: $isolatedChromeProfile" -ForegroundColor DarkGray
+    }
+    if ($L0Measurement) {
+        Write-Host "  L0 Evidence: $L0MeasurementDirectory" -ForegroundColor DarkGray
+        Write-Host "  Capture: & '$Python' scripts\live_voice\l0_browser_capture.py --session '$L0MeasurementDirectory\browser-session.json'" -ForegroundColor Yellow
+        Write-Host "  Cold shard: add --profile physical-formal-web-cold --temperature cold --successful-rounds 1 --scenario <case-id> --sample-index-start <unique-index>" -ForegroundColor Yellow
+        Write-Host "  Cold aggregate: use --aggregate-cold, repeat --evidence-directory <cold-epoch-dir>, and set --output <report.json>" -ForegroundColor Yellow
     }
     Write-Host '  首次进入页面仍需由浏览器授予麦克风权限并选择该项目。' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green
