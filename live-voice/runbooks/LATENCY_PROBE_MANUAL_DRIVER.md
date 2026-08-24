@@ -14,7 +14,8 @@
 - launches the full stack with the complete environment contract (below);
 - prints the stage URL for each declared profile/case (no browser auto-open);
 - monitors `<run-dir>/browser.jsonl` and beeps when a batch exports;
-- snapshots every exported batch to `snapshots/stage<N>-round<K>.json`;
+- snapshots every exported batch using its authoritative profile, case, round
+  and terminal outcome;
 - keeps progress in `snapshots/state.json` (survives restarts);
 - performs graceful shutdown (SIGINT → bounded drain → SIGTERM) and runs
   `latency_probe_report report` on finish.
@@ -62,14 +63,15 @@ Topology note: in dev there are exactly THREE processes. The Gateway binds
 - A `completed` round reaches export after playout ACK + successor capture
   ready. Reloading, barge-in or advancing earlier can export a `cancelled`
   batch instead.
-- In the current driver, the beep and `[probe] N batches exported` count every
-  new JSONL batch; **beep does not mean completed**. Before advancing, inspect
-  `terminal_outcome`, `profile_id` and `round_index` in the exported batch.
+- Ordinary runs retain every new JSONL batch. In LVL-09 manifest mode, only an
+  exact profile/case/round match with `terminal_outcome=completed` produces the
+  advance-eligible beep; mismatched, failed and cancelled rows are retained but
+  cannot advance the arm.
 - Failed/cancelled rounds do not receive complete-round credit. Observed
   same-clock mark pairs may be preserved as explicitly partial diagnostics;
   absent pairs remain `unknown` and must not enter p50/p95 or A/B/A summaries.
-- The current stage-number snapshot name is operator state, not authoritative
-  batch identity. Do not infer profile or round from the filename alone.
+- Snapshot names derive from batch identity. The JSON payload remains the
+  authority when inspecting or reducing an artifact.
 
 ## 4. Usage
 
@@ -81,6 +83,17 @@ lv-driver.sh <run-id> --smoke      # non-interactive: start, validate ports,
 lv-driver.sh <run-id> --launch --lvl09-manifest=/private/arms.json
                                    # LVL-09 only: strict A1/B/A2 arm source,
                                    # profile/case/round and build-time lead contract
+```
+
+LVL-09 also requires `LV_WORKTREE` to name the exact clean experiment
+worktree. The manifest `source_commit` and `run.json.git_commit` must both
+equal that worktree's `HEAD`; the driver fails before launch on a mismatch or
+dirty tree:
+
+```bash
+LV_WORKTREE=/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/adaptive-playout-lead-experiment \
+  /home/renan/openJiuwen-ai/live-voice-latency-runs/lv-driver.sh \
+  '<run-id>' --launch --lvl09-manifest='<arms.json>'
 ```
 
 Interactive commands: `[Enter]`=next stage · `b`=back one stage ·
@@ -107,9 +120,9 @@ plus `DATA_DIR=`). Logs: `<run-dir>/logs/{agentserver,gateway,vite,driver}.log`.
 | Startup fails closed, path error | `P3 database must remain under the application-owned P3 directory` | DB path must be under `<DATA_DIR>/live_voice/p3alpha/` |
 | Page stuck at "Loading conversation history…" | gateway log: `未连接 AgentServer，请先调用 connect(uri)` | Gateway lost its AgentServer link (driver died) — relaunch the stack |
 | Voice recovery failed (text, `UNIFIED_INPUT_FAILED`) | agentserver: `handle_unified_submit() got an unexpected keyword argument 'latency_probe'` | Merge regression — fixed on `497831f58+`; keep registry/server in sync |
-| Beep occurs but round is `cancelled` | batch `terminal_outcome: cancelled` | Current beep detects export, not success. Inspect terminal/profile/round; do not advance or credit the round |
-| Snapshot is labelled for the next stage | filename stage differs from batch `profile_id` | Current snapshots use operator stage. Treat the batch payload as authoritative |
-| Vite/Gateway remains after driver exit | port still bound after `q` | Current wrapper-PID shutdown may leave child processes. Stop the complete process group/tree before starting a new run |
+| LVL-09 row is retained but cannot advance | batch identity differs from the manifest arm, or outcome is not `completed` | Preserve the row; correct the operator/session state and use a fresh run if the frozen contract changed |
+| LVL-09 fails before launch | `LVL09_SOURCE_MISMATCH`, `LVL09_RUN_SOURCE_MISMATCH` or `LVL09_WORKTREE_DIRTY` | Bind manifest and run config to the exact clean `LV_WORKTREE` HEAD |
+| Vite/Gateway remains after driver exit | port still bound after `q` | Treat as cleanup failure; the repaired driver signals complete process groups and must leave no owned group alive |
 | Port 19000 bind conflict (`Errno 98`) | two services racing | Do not run `app_web` in dev; Gateway owns 19000 |
 
 ## 6. Non-claims
@@ -120,8 +133,8 @@ separation, full denominators, frozen corpus). Remote refs, credentials and
 project registration state remain outside Git and require their own
 authority.
 
-The driver version bound in
+The historical driver version bound in
 [the 2026-08-24 muted pilot](../evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md)
-also lacks terminal/profile/round-aware advance and complete process-tree
-shutdown. Close those orchestration defects before using it for a credited
-Browser population.
+lacked terminal/profile/round-aware advance and complete process-tree shutdown.
+The 2026-08-25 setup repairs those orchestration defects and source binding;
+it grants no Browser timing credit until the physical A1/B/A2 population runs.
