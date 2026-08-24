@@ -1081,3 +1081,14 @@
 - 排除：本批不实现 browser WebRTC/直连 OpenAI、Provider-native tool calling、OpenAI 直接产生产品回答、绕过 Agent Bridge/Voice–Task Bridge/确认、Agent 生成期打断、跨回合单一持久 Native session、默认开启、编辑账户/billing/key、公开部署、物理 PASS 或 remote ref update。
 - 官方协议依据：[Realtime WebSocket](https://developers.openai.com/api/docs/guides/realtime-websocket)、[Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)、[`gpt-realtime-1.5`](https://developers.openai.com/api/docs/models/gpt-realtime-1.5) 与 [Realtime 模型目录](https://developers.openai.com/api/docs/models)。
 - 重新评估条件：需要单一持久 Native session 跨输入/输出保留语韵上下文；Realtime transcript 无法满足可审计 committed-text 契约；原生音频输出无法保持 authoritative Agent 语义；需要新 InteractionAction/shared schema；或固定语料证明 native/cascade 在安全、延迟、质量、隐私、成本上的产品选择应改变。
+
+## D-096 OpenAI Realtime Native Adapter 默认模型切换为 GPT-Realtime-2.1 mini
+
+- 日期：2026-08-24
+- 状态：Accepted scoped default-model decision（用户在 D-095 Adapter 的 source/automation/independent-review Gate 关闭后，明确指定 `gpt-realtime-2.1-mini` 为默认验证和运行目标）。
+- 默认与兼容：当且仅当 formal streaming 已启用、`LIVE_VOICE_SPEECH_PROVIDER=openai-realtime` 且未提供 `LIVE_VOICE_SPEECH_REALTIME_MODEL` 时，Adapter 使用 `gpt-realtime-2.1-mini`。显式环境值继续优先，可固定 `gpt-realtime-1.5` 或另一个通过既有 voice-purpose predicate 的兼容 `gpt-realtime` family 成员；translate/whisper 变体仍被拒绝。这个选择不默认开启 Native Adapter，也不改变既有 `openai` cascade。
+- 协议与权威不变：官方模型页确认 `gpt-realtime-2.1-mini` 支持音频输入/输出以及 server-to-server WebSocket。模型切换不改变 D-095 的 negotiation、committed-final、authoritative Agent text、transcript-gated PCM、identity、cancel、settlement、零 Agent/Tool/Task/history 副作用或 Provider-tools-disabled 契约。
+- 凭据与探针：Gateway 使用进程私有的标准 OpenAI API key，通过 WebSocket `Authorization: Bearer` 头认证；浏览器、Git、日志和 evidence 不保存 key。最短真实探针显式以 `gpt-realtime-2.1-mini` 验证账户/项目访问、effective model/session、一个 recognition final、一个 exact-text synthesis、cancel/degradation 和 clean settlement。源代码或配置标签不授予真实 Provider、设备、听感、质量或延迟 credit。
+- 实现与验证：产品/测试源 `750d5529620bc11b4fc3f8d5eac5bb1fe91c2b0c` 只修改默认常量和直接 default/effective-URL/explicit-override oracles；Provider 文件 `160/160`、production Web-factory focus、Ruff、format、isolated mypy、compile 和 diff checks 通过。该 Tier-1 默认选择不重新开启已关闭的 Tier-3 settlement module review。
+- 官方依据：[`gpt-realtime-2.1-mini`](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini) 与 [Realtime WebSocket](https://developers.openai.com/api/docs/guides/realtime-websocket)。
+- 重新评估条件：官方移除或弃用该 alias；真实探针证明项目不可用或协议不兼容；固定语料/成本/延迟/音质证据支持不同 family member；或 Adapter 的用途与权威契约改变。重新评估默认模型不自动扩大 Provider、账户、billing、部署或产品验收范围。

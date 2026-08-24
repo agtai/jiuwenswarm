@@ -4,6 +4,20 @@
 
 **SOURCE/AUTOMATION/INDEPENDENT REVIEW PASS — REAL PROVIDER PROBE NEXT.**
 
+## Post-review default-model update — 2026-08-24
+
+User-directed Tier-1 source
+`750d5529620bc11b4fc3f8d5eac5bb1fe91c2b0c` makes
+`gpt-realtime-2.1-mini` the Native Adapter default and retains
+`LIVE_VOICE_SPEECH_REALTIME_MODEL` as an explicit compatible-family override.
+It changes no Provider protocol, authority, identity, lifecycle or settlement
+semantics reviewed below. The Provider file passes `160/160`; the production
+Web-factory focus, Ruff, format, isolated mypy, compile and diff checks pass.
+[D-096](../decisions/DECISIONS.md) owns this later choice. The independent
+`C0/I0/M0` settlement result remains bound to its exact historical sources; the
+next real Provider probe now targets `gpt-realtime-2.1-mini` and still grants no
+physical or quality credit before it runs.
+
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
 demonstrated replayed audio release, illegal transcript/audio order acceptance,
@@ -530,10 +544,13 @@ LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED=true
 LIVE_VOICE_SPEECH_PROVIDER=openai-realtime
 LIVE_VOICE_SPEECH_API_BASE=https://api.openai.com/v1
 LIVE_VOICE_SPEECH_API_KEY=<gateway-private-key>
-LIVE_VOICE_SPEECH_REALTIME_MODEL=gpt-realtime-1.5
+LIVE_VOICE_SPEECH_REALTIME_MODEL=gpt-realtime-2.1-mini
 LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
+
+The model line pins the exact probe target; it may be omitted to exercise the
+same `gpt-realtime-2.1-mini` default on source `750d5529` or later.
 
 The source/automation/independent-review Gate is closed. The next acceptance
 trigger is a separately scoped shortest real server-to-server probe on the
