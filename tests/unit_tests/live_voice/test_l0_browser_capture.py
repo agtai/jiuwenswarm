@@ -6,11 +6,16 @@ from pathlib import Path
 
 import pytest
 import scripts.live_voice.l0_browser_capture as l0_browser_capture
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from scripts.live_voice.l0_browser_capture import (
     ACCEPTANCE_VERSION,
     SESSION_VERSION,
+    _NoRedirectWebSocketConnect,
     _aggregate_cold_evidence,
+    _assert_browser_socket_owner,
     _browser_round_complete,
     _configured_run_labels,
     _correlated_success_counts,
@@ -228,10 +233,18 @@ def test_cdp_discovery_rejects_redirected_or_remote_websocket(
             return self.response
 
     opener = _Opener()
+    opener_handlers: list[object] = []
+
+    def build_opener(*handlers: object) -> _Opener:
+        opener_handlers[:] = handlers
+        return opener
+
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:65530")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:65530")
     monkeypatch.setattr(
         l0_browser_capture.urllib.request,
         "build_opener",
-        lambda *_args: opener,
+        build_opener,
     )
     opener.response = _Response(
         final_url="http://evil.example/json",
@@ -247,6 +260,13 @@ def test_cdp_discovery_rejects_redirected_or_remote_websocket(
             page_origin="http://localhost:5173",
             launch_nonce="2" * 32,
         )
+    proxy_handlers = [
+        handler
+        for handler in opener_handlers
+        if isinstance(handler, l0_browser_capture.urllib.request.ProxyHandler)
+    ]
+    assert len(proxy_handlers) == 1
+    assert proxy_handlers[0].proxies == {}
 
     opener.response = _Response(
         final_url="http://127.0.0.1:9223/json",
@@ -262,7 +282,6 @@ def test_cdp_discovery_rejects_redirected_or_remote_websocket(
             page_origin="http://localhost:5173",
             launch_nonce="2" * 32,
         )
-
     opener.response = _Response(
         final_url="http://127.0.0.1:9223/json",
         page_url=(
@@ -303,6 +322,28 @@ def test_cdp_discovery_rejects_redirected_or_remote_websocket(
             page_origin="http://localhost:5173",
             launch_nonce="2" * 32,
         )
+
+
+def test_cdp_websocket_disables_proxy_and_rejects_handshake_redirect() -> None:
+    connector = _NoRedirectWebSocketConnect(
+        "ws://127.0.0.1:9223/devtools/page/exact",
+        proxy=None,
+    )
+    assert connector.proxy is None
+    redirect = InvalidStatus(
+        Response(
+            302,
+            "Found",
+            Headers(
+                {
+                    "Location": "ws://127.0.0.1:9224/devtools/page/foreign"
+                }
+            ),
+        )
+    )
+    result = connector.process_redirect(redirect)
+    assert isinstance(result, RuntimeError)
+    assert str(result) == "Chrome debugger WebSocket must not redirect"
 
 
 def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
@@ -350,6 +391,42 @@ def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
     monkeypatch.setattr(l0_browser_capture.psutil, "Process", _Process)
     _assert_browser_endpoint_owner(session)
 
+    _Connection.pid = None
+    with pytest.raises(RuntimeError, match="listener owner"):
+        _assert_browser_endpoint_owner(session)
+    _Connection.pid = 4102
+
+    for unexpected_address in ("::1", "0.0.0.0", "::"):
+        _Address.ip = unexpected_address
+        with pytest.raises(RuntimeError, match="listener owner"):
+            _assert_browser_endpoint_owner(session)
+    _Address.ip = "127.0.0.1"
+
+    class _UnknownIpv4Connection:
+        status = l0_browser_capture.psutil.CONN_LISTEN
+        pid = None
+
+        class _Ipv4Address:
+            ip = "127.0.0.1"
+            port = 9223
+
+        laddr = _Ipv4Address()
+
+    _Address.ip = "::1"
+    monkeypatch.setattr(
+        l0_browser_capture.psutil,
+        "net_connections",
+        lambda **_kwargs: [_Connection(), _UnknownIpv4Connection()],
+    )
+    with pytest.raises(RuntimeError, match="listener owner"):
+        _assert_browser_endpoint_owner(session)
+    _Address.ip = "127.0.0.1"
+    monkeypatch.setattr(
+        l0_browser_capture.psutil,
+        "net_connections",
+        lambda **_kwargs: [_Connection()],
+    )
+
     _Connection.pid = 9999
     with pytest.raises(RuntimeError, match="listener owner"):
         _assert_browser_endpoint_owner(session)
@@ -359,6 +436,19 @@ def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
         _Process,
         "cmdline",
         lambda _self: ["chrome.exe", "--remote-debugging-port=9223"],
+    )
+    with pytest.raises(RuntimeError, match="exact isolated profile"):
+        _assert_browser_endpoint_owner(session)
+
+    monkeypatch.setattr(
+        _Process,
+        "cmdline",
+        lambda _self: [
+            "chrome.exe",
+            f"--user-data-dir={tmp_path.resolve()}-attacker",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=9223",
+        ],
     )
     with pytest.raises(RuntimeError, match="exact isolated profile"):
         _assert_browser_endpoint_owner(session)
@@ -389,6 +479,55 @@ def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
     monkeypatch.setattr(_Process, "parents", lambda _self: [])
     with pytest.raises(RuntimeError, match="not descended"):
         _assert_browser_endpoint_owner(session)
+
+
+def test_browser_socket_owner_requires_exact_peer_and_server_four_tuple(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _load_session(_session(tmp_path))
+
+    class _Transport:
+        peer = ("127.0.0.1", 9223)
+        local = ("127.0.0.1", 50123)
+
+        def get_extra_info(self, name: str) -> object:
+            return self.peer if name == "peername" else self.local
+
+    class _Socket:
+        transport = _Transport()
+
+    class _Address:
+        def __init__(self, ip: str, port: int) -> None:
+            self.ip = ip
+            self.port = port
+
+    class _Connection:
+        status = l0_browser_capture.psutil.CONN_ESTABLISHED
+        pid = 4102
+        laddr = _Address("127.0.0.1", 9223)
+        raddr = _Address("127.0.0.1", 50123)
+
+    monkeypatch.setattr(
+        l0_browser_capture.psutil,
+        "net_connections",
+        lambda **_kwargs: [_Connection()],
+    )
+    _assert_browser_socket_owner(session, _Socket())
+
+    _Socket.transport.peer = ("127.0.0.1", 9224)
+    with pytest.raises(RuntimeError, match="escaped"):
+        _assert_browser_socket_owner(session, _Socket())
+    _Socket.transport.peer = ("127.0.0.1", 9223)
+
+    _Connection.pid = None
+    with pytest.raises(RuntimeError, match="not owned"):
+        _assert_browser_socket_owner(session, _Socket())
+    _Connection.pid = 4102
+
+    _Connection.raddr = _Address("127.0.0.1", 50124)
+    with pytest.raises(RuntimeError, match="not owned"):
+        _assert_browser_socket_owner(session, _Socket())
 
 
 @pytest.mark.asyncio
@@ -428,8 +567,8 @@ async def test_owned_browser_socket_revalidates_after_discovery_and_connection(
         lambda *_args, **_kwargs: "ws://127.0.0.1:9223/devtools/page/exact",
     )
     monkeypatch.setattr(
-        l0_browser_capture.websockets,
-        "connect",
+        l0_browser_capture,
+        "_NoRedirectWebSocketConnect",
         lambda *_args, **_kwargs: _Connection(),
     )
 
@@ -438,6 +577,60 @@ async def test_owned_browser_socket_revalidates_after_discovery_and_connection(
             pass
     assert owner_calls == owner_failure_call
     assert connection_enters == (1 if owner_failure_call == 3 else 0)
+
+
+@pytest.mark.asyncio
+async def test_owned_browser_socket_binds_the_established_direct_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _load_session(_session(tmp_path))
+    socket = object()
+    owner_calls = 0
+    socket_owner_calls: list[object] = []
+    connector_kwargs: dict[str, object] = {}
+
+    def assert_owner(_session: dict[str, object]) -> None:
+        nonlocal owner_calls
+        owner_calls += 1
+
+    class _Connection:
+        async def __aenter__(self) -> object:
+            return socket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def connect(*_args: object, **kwargs: object) -> _Connection:
+        connector_kwargs.update(kwargs)
+        return _Connection()
+
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_assert_browser_endpoint_owner",
+        assert_owner,
+    )
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_assert_browser_socket_owner",
+        lambda _session, value: socket_owner_calls.append(value),
+    )
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_discover_page",
+        lambda *_args, **_kwargs: "ws://127.0.0.1:9223/devtools/page/exact",
+    )
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_NoRedirectWebSocketConnect",
+        connect,
+    )
+
+    async with _owned_browser_socket(session) as connected:
+        assert connected is socket
+    assert owner_calls == 3
+    assert socket_owner_calls == [socket]
+    assert connector_kwargs["proxy"] is None
 
 
 def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revision() -> None:
@@ -451,6 +644,14 @@ def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revisio
     assert "仓库内的 L0 证据目录必须位于已忽略的 logs 目录" in source
     assert "browser_page_origin = \"http://localhost:$FrontendPort\"" in source
     assert "Get-ListeningOwners -Ports @($RemoteDebuggingPort)" in source
+    assert "CommandLineToArgvW" in source
+    assert "LocalAddress   = [string]$listener.LocalAddress" in source
+    assert "$debuggerOwner.LocalAddress -cne '127.0.0.1'" in source
+    assert "Test-ExactCommandLineOption" in source
+    assert "$matches.Count -eq 1" in source
+    assert "$matches[0].Substring($prefix.Length) -ieq $ExpectedValue" in source
+    assert "Sort-Object ProcessId, Port, LocalAddress -Unique" in source
+    assert '$debuggerOwner.CommandLine -notlike "*$profilePath*"' not in source
     assert "$debuggerOwner.ExecutablePath -ine $ChromeExecutable" in source
     assert "browser_debugger_process_id = [int]$isolatedChrome.DebuggerProcessId" in source
     assert "browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId" in source

@@ -70,6 +70,69 @@ function Fail([string]$Text) {
     throw $Text
 }
 
+function ConvertFrom-WindowsCommandLine([string]$CommandLine) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return @()
+    }
+    if (-not ('LiveVoiceWindowsCommandLine' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class LiveVoiceWindowsCommandLine {
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(
+        [MarshalAs(UnmanagedType.LPWStr)] string commandLine,
+        out int argumentCount
+    );
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    public static string[] Split(string commandLine) {
+        int argumentCount;
+        IntPtr argumentVector = CommandLineToArgvW(commandLine, out argumentCount);
+        if (argumentVector == IntPtr.Zero) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            string[] arguments = new string[argumentCount];
+            for (int index = 0; index < argumentCount; index++) {
+                IntPtr argument = Marshal.ReadIntPtr(
+                    argumentVector,
+                    index * IntPtr.Size
+                );
+                arguments[index] = Marshal.PtrToStringUni(argument);
+            }
+            return arguments;
+        } finally {
+            LocalFree(argumentVector);
+        }
+    }
+}
+'@
+    }
+    return @([LiveVoiceWindowsCommandLine]::Split($CommandLine))
+}
+
+function Test-ExactCommandLineOption(
+    [string[]]$Arguments,
+    [string]$Name,
+    [string]$ExpectedValue
+) {
+    $prefix = "$Name="
+    $matches = @(
+        $Arguments | Where-Object {
+            $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    return (
+        $matches.Count -eq 1 -and
+        $matches[0].Substring($prefix.Length) -ieq $ExpectedValue
+    )
+}
+
 function Get-ChromeExecutable {
     $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     $candidateRoots = @(
@@ -146,12 +209,14 @@ function Start-IsolatedChrome(
             Fail "隔离 Chrome 未唯一取得 L0 调试端口 $RemoteDebuggingPort。"
         }
         $debuggerOwner = $debuggerOwners[0]
+        $debuggerArguments = @($debuggerOwner.CommandLineArguments)
         if (
+            $debuggerOwner.LocalAddress -cne '127.0.0.1' -or
             $debuggerOwner.Name -notmatch '^chrome\.exe$' -or
             $debuggerOwner.ExecutablePath -ine $ChromeExecutable -or
-            $debuggerOwner.CommandLine -notlike "*$profilePath*" -or
-            $debuggerOwner.CommandLine -notlike '*--remote-debugging-address=127.0.0.1*' -or
-            $debuggerOwner.CommandLine -notlike "*--remote-debugging-port=$RemoteDebuggingPort*"
+            -not (Test-ExactCommandLineOption -Arguments $debuggerArguments -Name '--user-data-dir' -ExpectedValue $profilePath) -or
+            -not (Test-ExactCommandLineOption -Arguments $debuggerArguments -Name '--remote-debugging-address' -ExpectedValue '127.0.0.1') -or
+            -not (Test-ExactCommandLineOption -Arguments $debuggerArguments -Name '--remote-debugging-port' -ExpectedValue ([string]$RemoteDebuggingPort))
         ) {
             Fail 'L0 调试端口不属于本次启动的精确隔离 Chrome profile。'
         }
@@ -260,14 +325,20 @@ function Get-ListeningOwners([int[]]$Ports) {
             $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
             $rows += [pscustomobject]@{
                 Port           = $port
+                LocalAddress   = [string]$listener.LocalAddress
                 ProcessId      = [int]$listener.OwningProcess
                 Name           = if ($null -ne $process) { [string]$process.Name } else { '' }
                 ExecutablePath = if ($null -ne $process) { [string]$process.ExecutablePath } else { '' }
                 CommandLine    = if ($null -ne $process) { [string]$process.CommandLine } else { '' }
+                CommandLineArguments = if ($null -ne $process) {
+                    @(ConvertFrom-WindowsCommandLine -CommandLine ([string]$process.CommandLine))
+                } else {
+                    @()
+                }
             }
         }
     }
-    return @($rows | Sort-Object ProcessId, Port -Unique)
+    return @($rows | Sort-Object ProcessId, Port, LocalAddress -Unique)
 }
 
 function Stop-ExistingDemoServices {
