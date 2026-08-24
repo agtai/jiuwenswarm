@@ -691,6 +691,7 @@ class _RecognitionCommitOwner(StrEnum):
 
 class _RecognitionFinalizationCause(StrEnum):
     CANCEL = "cancel"
+    NORMAL_FINAL = "normal_final"
     PROVIDER_FAILURE = "provider_failure"
     ROLLBACK = "rollback"
     SERVICE_CLOSE = "service_close"
@@ -700,6 +701,49 @@ class _RecognitionFinalizationCause(StrEnum):
 class _RecognitionFinalizationOutcome:
     cause: _RecognitionFinalizationCause
     failure: BaseException | None = field(default=None, repr=False)
+
+
+class _SynthesisFinalizationCause(StrEnum):
+    CANCEL = "cancel"
+    NORMAL_COMPLETE = "normal_complete"
+    PROVIDER_FAILURE = "provider_failure"
+    ROLLBACK = "rollback"
+    SERVICE_CLOSE = "service_close"
+
+
+@dataclass(frozen=True, slots=True)
+class _SynthesisFinalizationOutcome:
+    cause: _SynthesisFinalizationCause
+    failure: BaseException | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True)
+class _FinalizationFailures:
+    process_control: BaseException | None = field(default=None, repr=False)
+    cancellation: BaseException | None = field(default=None, repr=False)
+    cleanup: BaseException | None = field(default=None, repr=False)
+
+    @property
+    def failure(self) -> BaseException | None:
+        return self.process_control or self.cancellation or self.cleanup
+
+    def record(self, exc: BaseException) -> None:
+        failure = _safe_boundary_exception(exc)
+        if _is_process_control(failure):
+            self.process_control = self.process_control or failure
+        elif isinstance(failure, asyncio.CancelledError):
+            self.cancellation = self.cancellation or failure
+        else:
+            self.cleanup = self.cleanup or failure
+
+    async def settle(self, action: Awaitable[object]) -> None:
+        try:
+            result = await _settle_close_action(action)
+        except BaseException as exc:
+            self.record(exc)
+        else:
+            if isinstance(result, BaseException):
+                self.record(result)
 
 
 class _NativeSynthesisPhase(StrEnum):
@@ -755,6 +799,9 @@ class _SynthesisSession:
     events: asyncio.Queue[StreamingSynthesisEvent] = field(repr=False)
     resampler: _StreamingLinearResampler
     task: asyncio.Task[None] | None = field(default=None, repr=False)
+    finalization_task: asyncio.Task[_SynthesisFinalizationOutcome] | None = field(
+        default=None, repr=False
+    )
     stream: SpeechSseStream | None = field(default=None, repr=False)
     socket: RealtimeSocket | None = field(default=None, repr=False)
     provider_response_id: str | None = None
@@ -1318,39 +1365,12 @@ class OpenAIStreamingSpeechProvider:
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
         session = self._require_synthesis(ref)
-        self._conformance.request_synthesis_cancel(ref, reason=reason)
-        session.closing = True
-        session.pending_native_audio.clear()
-        if session.stream is not None:
-            await self._close_stream(session.stream)
-        if session.socket is not None:
-            if session.provider_response_id is not None:
-                with suppress(Exception):
-                    async with asyncio.timeout(
-                        TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
-                    ):
-                        await session.socket.send(
-                            _wire_json(
-                                {
-                                    "type": "response.cancel",
-                                    "response_id": session.provider_response_id,
-                                }
-                            )
-                        )
-            await self._close_socket(session.socket)
-        if session.task is not None:
-            await self._transport_cleanup_tasks.cancel_task(
-                session.task, kind="synthesis-worker"
-            )
-        self._conformance.provider_closed_synthesis(ref)
-        session.terminal = True
-        await self._retire_synthesis(session)
-        await self._emit_failure(
-            operation="synthesis.cancel",
-            reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
-            started_at=None,
-            identity=f"{ref.stream_id}:{ref.stream_generation}",
+        outcome = await self._finalize_synthesis_session(
+            session,
+            cause=_SynthesisFinalizationCause.CANCEL,
+            reason=reason,
         )
+        _raise_synthesis_finalization(outcome)
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -1390,8 +1410,6 @@ class OpenAIStreamingSpeechProvider:
             for synthesis_session in self._synthesis.values()
             if not synthesis_session.terminal
         )
-        for synthesis_session in synthesis:
-            synthesis_session.closing = True
         results = await asyncio.gather(
             *(
                 self._finalize_recognition_session(
@@ -1401,14 +1419,11 @@ class OpenAIStreamingSpeechProvider:
                 for recognition_session in recognition
             ),
             *(
-                _settle_close_action(self._close_stream(synthesis_session.stream))
+                self._finalize_synthesis_session(
+                    synthesis_session,
+                    cause=_SynthesisFinalizationCause.SERVICE_CLOSE,
+                )
                 for synthesis_session in synthesis
-                if synthesis_session.stream is not None
-            ),
-            *(
-                _settle_close_action(self._close_socket(synthesis_session.socket))
-                for synthesis_session in synthesis
-                if synthesis_session.socket is not None
             ),
             return_exceptions=True,
         )
@@ -1416,7 +1431,13 @@ class OpenAIStreamingSpeechProvider:
         for result in results:
             failure = (
                 result.failure
-                if isinstance(result, _RecognitionFinalizationOutcome)
+                if isinstance(
+                    result,
+                    (
+                        _RecognitionFinalizationOutcome,
+                        _SynthesisFinalizationOutcome,
+                    ),
+                )
                 else None
             )
             if failure is None:
@@ -1427,31 +1448,6 @@ class OpenAIStreamingSpeechProvider:
                 raise failure from None
             else:
                 cleanup_failure = cleanup_failure or failure
-        tasks = tuple(
-            task
-            for task in (synthesis_session.task for synthesis_session in synthesis)
-            if task is not None
-        )
-        if tasks:
-            results = await asyncio.gather(
-                *(
-                    _settle_close_action(
-                        self._transport_cleanup_tasks.cancel_task(
-                            task, kind="stream-worker"
-                        )
-                    )
-                    for task in tasks
-                ),
-                return_exceptions=True,
-            )
-            process_control = _first_process_control(process_control, results)
-        for synthesis_session in synthesis:
-            synthesis_session.pending_native_audio.clear()
-            with suppress(StreamingSpeechViolation):
-                self._conformance.provider_closed_synthesis(
-                    synthesis_session.request.ref
-                )
-            synthesis_session.terminal = True
         self._conformance.reap_terminal()
         self._recognition.clear()
         self._synthesis.clear()
@@ -1468,7 +1464,6 @@ class OpenAIStreamingSpeechProvider:
         opening_tasks = ()
         recognition = ()
         synthesis = ()
-        tasks = ()
         if process_control is not None:
             raise process_control from None
         if cleanup_failure is not None:
@@ -1481,6 +1476,7 @@ class OpenAIStreamingSpeechProvider:
         cause: _RecognitionFinalizationCause,
         trigger_failure: BaseException | None = None,
         reason: str = "",
+        final_text: str = "",
     ) -> _RecognitionFinalizationOutcome:
         task = session.finalization_task
         if task is None:
@@ -1488,7 +1484,8 @@ class OpenAIStreamingSpeechProvider:
                 return _RecognitionFinalizationOutcome(cause)
             # Assignment is synchronous: every later contender observes and
             # awaits this exact Task instead of starting another terminal path.
-            session.closing = True
+            if cause is not _RecognitionFinalizationCause.NORMAL_FINAL:
+                session.closing = True
             origin_task = asyncio.current_task()
             task = asyncio.create_task(
                 self._run_recognition_finalization(
@@ -1496,6 +1493,7 @@ class OpenAIStreamingSpeechProvider:
                     cause=cause,
                     trigger_failure=trigger_failure,
                     reason=reason,
+                    final_text=final_text,
                     origin_task=origin_task,
                 ),
                 name=(
@@ -1513,37 +1511,17 @@ class OpenAIStreamingSpeechProvider:
         cause: _RecognitionFinalizationCause,
         trigger_failure: BaseException | None,
         reason: str,
+        final_text: str,
         origin_task: asyncio.Task[Any] | None,
     ) -> _RecognitionFinalizationOutcome:
         ready_was_done = session.ready.done()
-        process_control: BaseException | None = None
-        cancellation: BaseException | None = None
-        cleanup_failure: BaseException | None = None
-
-        def record_failure(exc: BaseException) -> None:
-            nonlocal process_control, cancellation, cleanup_failure
-            failure = _safe_boundary_exception(exc)
-            if _is_process_control(failure):
-                process_control = process_control or failure
-            elif isinstance(failure, asyncio.CancelledError):
-                cancellation = cancellation or failure
-            else:
-                cleanup_failure = cleanup_failure or failure
-
-        async def settle(action: Awaitable[object]) -> None:
-            try:
-                result = await _settle_close_action(action)
-            except BaseException as exc:
-                record_failure(exc)
-            else:
-                if isinstance(result, BaseException):
-                    record_failure(result)
+        failures = _FinalizationFailures()
 
         if trigger_failure is not None and (
             _is_process_control(trigger_failure)
             or isinstance(trigger_failure, asyncio.CancelledError)
         ):
-            record_failure(trigger_failure)
+            failures.record(trigger_failure)
 
         try:
             if cause is _RecognitionFinalizationCause.CANCEL:
@@ -1553,14 +1531,34 @@ class OpenAIStreamingSpeechProvider:
             ):
                 self._conformance.expire()
         except BaseException as exc:
-            record_failure(exc)
+            failures.record(exc)
+
+        transport_closed = False
+        if cause is _RecognitionFinalizationCause.NORMAL_FINAL:
+            await failures.settle(self._close_socket(session.socket))
+            transport_closed = True
+            if failures.failure is None:
+                try:
+                    await self._publish_recognition(
+                        session, RecognitionEventKind.FINAL, final_text
+                    )
+                except BaseException as exc:
+                    trigger_failure = _safe_boundary_exception(exc)
+                    if _is_process_control(trigger_failure) or isinstance(
+                        trigger_failure, asyncio.CancelledError
+                    ):
+                        failures.record(trigger_failure)
+                else:
+                    session.terminal = True
+                    return _RecognitionFinalizationOutcome(cause)
+            session.closing = True
 
         receive_owns_provider_failure = (
             cause is _RecognitionFinalizationCause.PROVIDER_FAILURE
             and origin_task is session.receive_task
         )
-        if not receive_owns_provider_failure:
-            await settle(self._close_socket(session.socket))
+        if not receive_owns_provider_failure and not transport_closed:
+            await failures.settle(self._close_socket(session.socket))
 
         receive_task = session.receive_task
         if (
@@ -1568,7 +1566,7 @@ class OpenAIStreamingSpeechProvider:
             and receive_task is not origin_task
             and receive_task is not asyncio.current_task()
         ):
-            await settle(
+            await failures.settle(
                 self._transport_cleanup_tasks.cancel_task(
                     receive_task, kind="recognition-worker"
                 )
@@ -1578,20 +1576,21 @@ class OpenAIStreamingSpeechProvider:
             self._conformance.provider_closed_recognition(session.ref)
         except StreamingSpeechViolation as exc:
             if cause not in {
+                _RecognitionFinalizationCause.NORMAL_FINAL,
                 _RecognitionFinalizationCause.ROLLBACK,
                 _RecognitionFinalizationCause.SERVICE_CLOSE,
             }:
-                record_failure(exc)
+                failures.record(exc)
         except BaseException as exc:
-            record_failure(exc)
+            failures.record(exc)
 
         session.terminal = True
         try:
             await self._retire_recognition(session)
         except BaseException as exc:
-            record_failure(exc)
+            failures.record(exc)
 
-        if process_control is None and cancellation is None and cleanup_failure is None:
+        if failures.failure is None:
             try:
                 if cause is _RecognitionFinalizationCause.CANCEL:
                     await self._emit_failure(
@@ -1603,7 +1602,11 @@ class OpenAIStreamingSpeechProvider:
                         ),
                     )
                 elif (
-                    cause is _RecognitionFinalizationCause.PROVIDER_FAILURE
+                    cause
+                    in {
+                        _RecognitionFinalizationCause.NORMAL_FINAL,
+                        _RecognitionFinalizationCause.PROVIDER_FAILURE,
+                    }
                     and ready_was_done
                     and trigger_failure is not None
                 ):
@@ -1616,19 +1619,22 @@ class OpenAIStreamingSpeechProvider:
                         ),
                     )
             except BaseException as exc:
-                record_failure(exc)
+                failures.record(exc)
 
         if receive_owns_provider_failure:
             # Existing observers use transport close as the visible completion
             # barrier for a receive-owned failure.  Keep that truth while all
             # other causes close first to wake the receive worker.
-            await settle(self._close_socket(session.socket))
+            await failures.settle(self._close_socket(session.socket))
 
         # Opening waits are released only after transport, worker, conformance,
         # registry and observability settlement.  No receive-side wakeup can
         # publish a competing outcome before this point.
         if not session.ready.done():
-            if cause is _RecognitionFinalizationCause.PROVIDER_FAILURE:
+            if cause in {
+                _RecognitionFinalizationCause.NORMAL_FINAL,
+                _RecognitionFinalizationCause.PROVIDER_FAILURE,
+            }:
                 if isinstance(trigger_failure, asyncio.CancelledError):
                     session.ready.cancel()
                 elif trigger_failure is not None:
@@ -1645,7 +1651,7 @@ class OpenAIStreamingSpeechProvider:
 
         return _RecognitionFinalizationOutcome(
             cause,
-            process_control or cancellation or cleanup_failure,
+            failures.failure,
         )
 
     async def _receive_recognition(self, session: _RecognitionSession) -> None:
@@ -1662,6 +1668,9 @@ class OpenAIStreamingSpeechProvider:
                 # failure unobserved and outside the cleanup owner.
                 async with asyncio.timeout(remaining):
                     raw = await session.socket.recv()
+                if session.closing:
+                    raw = None
+                    return
                 terminal = await self._consume_recognition_message(session, raw)
                 raw = None
                 if terminal:
@@ -1675,11 +1684,14 @@ class OpenAIStreamingSpeechProvider:
                 raise failure from None
             return
         if failure is not None:
+            opening_failure = not session.ready.done()
             outcome = await self._finalize_recognition_session(
                 session,
                 cause=_RecognitionFinalizationCause.PROVIDER_FAILURE,
                 trigger_failure=failure,
             )
+            if opening_failure:
+                return
             _raise_recognition_finalization(outcome)
 
     async def _consume_recognition_message(
@@ -1830,11 +1842,12 @@ class OpenAIStreamingSpeechProvider:
             self._require_committed(session)
             self._bind_item(session, event.get("item_id"))
             transcript = _provider_text(event.get("transcript"), "transcript")
-            await self._close_socket(session.socket)
-            await self._publish_recognition(
-                session, RecognitionEventKind.FINAL, transcript
+            outcome = await self._finalize_recognition_session(
+                session,
+                cause=_RecognitionFinalizationCause.NORMAL_FINAL,
+                final_text=transcript,
             )
-            session.terminal = True
+            _raise_recognition_finalization(outcome)
             return True
         if kind in {
             "conversation.item.input_audio_transcription.failed",
@@ -1921,6 +1934,200 @@ class OpenAIStreamingSpeechProvider:
         session.event_seq += 1
         await self._put_bounded(session.events, accepted)
 
+    async def _finalize_synthesis_session(
+        self,
+        session: _SynthesisSession,
+        *,
+        cause: _SynthesisFinalizationCause,
+        trigger_failure: BaseException | None = None,
+        reason: str = "",
+        started_at: float | None = None,
+        tail: bytes = b"",
+    ) -> _SynthesisFinalizationOutcome:
+        task = session.finalization_task
+        if task is None:
+            if session.terminal:
+                return _SynthesisFinalizationOutcome(cause)
+            if cause is not _SynthesisFinalizationCause.NORMAL_COMPLETE:
+                session.closing = True
+            origin_task = asyncio.current_task()
+            task = asyncio.create_task(
+                self._run_synthesis_finalization(
+                    session,
+                    cause=cause,
+                    trigger_failure=trigger_failure,
+                    reason=reason,
+                    started_at=started_at,
+                    tail=tail,
+                    origin_task=origin_task,
+                ),
+                name=(
+                    "openai-tts-finalize-"
+                    f"{session.request.ref.stream_id}-"
+                    f"{session.request.ref.stream_generation}"
+                ),
+            )
+            session.finalization_task = task
+        return await asyncio.shield(task)
+
+    async def _run_synthesis_finalization(
+        self,
+        session: _SynthesisSession,
+        *,
+        cause: _SynthesisFinalizationCause,
+        trigger_failure: BaseException | None,
+        reason: str,
+        started_at: float | None,
+        tail: bytes,
+        origin_task: asyncio.Task[Any] | None,
+    ) -> _SynthesisFinalizationOutcome:
+        failures = _FinalizationFailures()
+        if trigger_failure is not None and (
+            _is_process_control(trigger_failure)
+            or isinstance(trigger_failure, asyncio.CancelledError)
+        ):
+            failures.record(trigger_failure)
+
+        try:
+            if cause is _SynthesisFinalizationCause.CANCEL:
+                self._conformance.request_synthesis_cancel(
+                    session.request.ref, reason=reason
+                )
+            elif cause is _SynthesisFinalizationCause.PROVIDER_FAILURE and isinstance(
+                trigger_failure, (TimeoutError, asyncio.TimeoutError)
+            ):
+                self._conformance.expire()
+        except BaseException as exc:
+            failures.record(exc)
+
+        if (
+            cause is _SynthesisFinalizationCause.CANCEL
+            and session.socket is not None
+            and session.provider_response_id is not None
+        ):
+            try:
+                async with asyncio.timeout(TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS):
+                    await session.socket.send(
+                        _wire_json(
+                            {
+                                "type": "response.cancel",
+                                "response_id": session.provider_response_id,
+                            }
+                        )
+                    )
+            except BaseException as exc:
+                failure = _safe_boundary_exception(exc)
+                if _is_process_control(failure) or isinstance(
+                    failure, asyncio.CancelledError
+                ):
+                    failures.record(failure)
+
+        transport_closed = False
+        if cause is _SynthesisFinalizationCause.NORMAL_COMPLETE:
+            if session.stream is not None:
+                await failures.settle(self._close_stream(session.stream))
+            if session.socket is not None:
+                await failures.settle(self._close_socket(session.socket))
+            transport_closed = True
+            if failures.failure is None:
+                try:
+                    if tail:
+                        await self._publish_synthesis(
+                            session, SynthesisEventKind.CHUNK, pcm=tail
+                        )
+                    await self._publish_synthesis(session, SynthesisEventKind.COMPLETED)
+                except BaseException as exc:
+                    trigger_failure = _safe_boundary_exception(exc)
+                    if _is_process_control(trigger_failure) or isinstance(
+                        trigger_failure, asyncio.CancelledError
+                    ):
+                        failures.record(trigger_failure)
+                else:
+                    session.terminal = True
+                    return _SynthesisFinalizationOutcome(cause)
+            session.closing = True
+
+        session.pending_native_audio.clear()
+        worker_owns_provider_failure = (
+            cause is _SynthesisFinalizationCause.PROVIDER_FAILURE
+            and origin_task is session.task
+        )
+        if not worker_owns_provider_failure and not transport_closed:
+            if session.stream is not None:
+                await failures.settle(self._close_stream(session.stream))
+            if session.socket is not None:
+                await failures.settle(self._close_socket(session.socket))
+
+        worker = session.task
+        if (
+            worker is not None
+            and worker is not origin_task
+            and worker is not asyncio.current_task()
+        ):
+            await failures.settle(
+                self._transport_cleanup_tasks.cancel_task(
+                    worker, kind="synthesis-worker"
+                )
+            )
+
+        try:
+            self._conformance.provider_closed_synthesis(session.request.ref)
+        except StreamingSpeechViolation as exc:
+            if cause not in {
+                _SynthesisFinalizationCause.NORMAL_COMPLETE,
+                _SynthesisFinalizationCause.ROLLBACK,
+                _SynthesisFinalizationCause.SERVICE_CLOSE,
+            }:
+                failures.record(exc)
+        except BaseException as exc:
+            failures.record(exc)
+
+        session.terminal = True
+        try:
+            await self._retire_synthesis(session)
+        except BaseException as exc:
+            failures.record(exc)
+
+        if failures.failure is None:
+            try:
+                if cause is _SynthesisFinalizationCause.CANCEL:
+                    await self._emit_failure(
+                        operation="synthesis.cancel",
+                        reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
+                        started_at=None,
+                        identity=(
+                            f"{session.request.ref.stream_id}:"
+                            f"{session.request.ref.stream_generation}"
+                        ),
+                    )
+                elif (
+                    cause
+                    in {
+                        _SynthesisFinalizationCause.NORMAL_COMPLETE,
+                        _SynthesisFinalizationCause.PROVIDER_FAILURE,
+                    }
+                    and trigger_failure is not None
+                ):
+                    await self._emit_failure(
+                        operation="synthesis.stream",
+                        reason=_reason_for_exception(trigger_failure),
+                        started_at=started_at,
+                        identity=(
+                            f"{session.request.ref.stream_id}:"
+                            f"{session.request.ref.stream_generation}"
+                        ),
+                    )
+            except BaseException as exc:
+                failures.record(exc)
+
+        if worker_owns_provider_failure:
+            if session.stream is not None:
+                await failures.settle(self._close_stream(session.stream))
+            if session.socket is not None:
+                await failures.settle(self._close_socket(session.socket))
+
+        return _SynthesisFinalizationOutcome(cause, failures.failure)
+
     async def _run_synthesis(self, session: _SynthesisSession) -> None:
         started_at = self._monotonic()
         failure: BaseException | None = None
@@ -1938,59 +2145,37 @@ class OpenAIStreamingSpeechProvider:
                     "SPEECH_PROVIDER_TTS_INCOMPLETE",
                     "speech Provider closed without a done event",
                 )
-            tail = _encode_s16le(session.resampler.finish())
-            if tail:
-                await self._publish_synthesis(
-                    session, SynthesisEventKind.CHUNK, pcm=tail
-                )
-            if session.stream is not None:
-                await self._close_stream(session.stream)
-            if session.socket is not None:
-                await self._close_socket(session.socket)
-            await self._publish_synthesis(session, SynthesisEventKind.COMPLETED)
-            session.terminal = True
         except BaseException as exc:
             failure = _safe_boundary_exception(exc)
+        if failure is None:
+            try:
+                tail = _encode_s16le(session.resampler.finish())
+            except BaseException as exc:
+                failure = _safe_boundary_exception(exc)
+            else:
+                outcome = await self._finalize_synthesis_session(
+                    session,
+                    cause=_SynthesisFinalizationCause.NORMAL_COMPLETE,
+                    started_at=started_at,
+                    tail=tail,
+                )
+                tail = None
+                _raise_synthesis_finalization(outcome)
+                return
         tail = None
-        if isinstance(failure, asyncio.CancelledError):
-            if session.stream is not None:
-                await self._close_stream(session.stream)
-            if session.socket is not None:
-                await self._close_socket(session.socket)
-            session.pending_native_audio.clear()
-            raise failure
-        if failure is not None and _is_process_control(failure):
-            if session.stream is not None:
-                await self._close_stream(session.stream)
-            if session.socket is not None:
-                await self._close_socket(session.socket)
-            session.pending_native_audio.clear()
-            if not session.terminal:
-                with suppress(StreamingSpeechViolation):
-                    self._conformance.provider_closed_synthesis(session.request.ref)
-                session.terminal = True
-            await self._retire_synthesis(session)
-            raise failure
-        if failure is not None and not session.closing:
-            if isinstance(failure, (TimeoutError, asyncio.TimeoutError)):
-                self._conformance.expire()
-            self._conformance.provider_closed_synthesis(session.request.ref)
-            session.terminal = True
-            await self._retire_synthesis(session)
-            await self._emit_failure(
-                operation="synthesis.stream",
-                reason=_reason_for_exception(failure),
-                started_at=started_at,
-                identity=(
-                    f"{session.request.ref.stream_id}:"
-                    f"{session.request.ref.stream_generation}"
-                ),
-            )
-            if session.stream is not None:
-                await self._close_stream(session.stream)
-            if session.socket is not None:
-                await self._close_socket(session.socket)
-            session.pending_native_audio.clear()
+        if failure is None:
+            return
+        if session.closing:
+            if _is_process_control(failure):
+                raise failure from None
+            return
+        outcome = await self._finalize_synthesis_session(
+            session,
+            cause=_SynthesisFinalizationCause.PROVIDER_FAILURE,
+            trigger_failure=failure,
+            started_at=started_at,
+        )
+        _raise_synthesis_finalization(outcome)
 
     async def _run_native_realtime_synthesis(self, session: _SynthesisSession) -> bool:
         model = self._config.realtime_model
@@ -2867,18 +3052,12 @@ class OpenAIStreamingSpeechProvider:
         conformance_started: bool,
     ) -> None:
         if session is not None:
-            session.closing = True
-            if session.stream is not None:
-                await self._close_stream(session.stream)
-            if session.task is not None:
-                await self._transport_cleanup_tasks.cancel_task(
-                    session.task, kind="synthesis-worker"
-                )
-            session.terminal = True
-            key = _synthesis_key(ref)
-            async with self._lock:
-                if self._synthesis.get(key) is session:
-                    del self._synthesis[key]
+            outcome = await self._finalize_synthesis_session(
+                session,
+                cause=_SynthesisFinalizationCause.ROLLBACK,
+            )
+            _raise_synthesis_finalization(outcome)
+            return
         if conformance_started:
             with suppress(StreamingSpeechViolation):
                 self._conformance.provider_closed_synthesis(ref)
@@ -3334,6 +3513,13 @@ def _first_process_control(
 
 def _raise_recognition_finalization(
     outcome: _RecognitionFinalizationOutcome,
+) -> None:
+    if outcome.failure is not None:
+        raise outcome.failure from None
+
+
+def _raise_synthesis_finalization(
+    outcome: _SynthesisFinalizationOutcome,
 ) -> None:
     if outcome.failure is not None:
         raise outcome.failure from None

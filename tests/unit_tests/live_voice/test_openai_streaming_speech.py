@@ -29,6 +29,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     DEFAULT_STT_MODEL,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_VOICE,
+    MAX_EVENT_QUEUE,
     MAX_DEGRADATION_SINK_TASKS_PER_OWNER,
     MAX_INCOMPLETE_TRANSPORT_CLEANUPS,
     MAX_PROVIDER_AUDIO_DELTA_BYTES,
@@ -210,9 +211,9 @@ class CoordinatedCloseSocket(FakeSocket):
 
 
 class OrderedOpeningCloseSocket(FakeSocket):
-    def __init__(self, wake_failure: BaseException) -> None:
+    def __init__(self, wake_value: str | bytes | BaseException) -> None:
         super().__init__()
-        self._wake_failure = wake_failure
+        self._wake_value = wake_value
         self.close_started = asyncio.Event()
         self.receive_woken = asyncio.Event()
         self.release_close = asyncio.Event()
@@ -228,7 +229,7 @@ class OrderedOpeningCloseSocket(FakeSocket):
         if self.closed:
             return
         self.close_started.set()
-        self.incoming.put_nowait(self._wake_failure)
+        self.incoming.put_nowait(self._wake_value)
         await self.release_close.wait()
         self.closed = True
         self.closed_event.set()
@@ -2072,6 +2073,95 @@ async def test_final_and_explicit_close_share_cleanup_before_successor_listening
 
 
 @pytest.mark.asyncio
+async def test_native_realtime_queue_full_final_keeps_normal_terminal_owner() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = FakeSocket((native_session_updated_event(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+        event_queue_wait_seconds=5.0,
+    )
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    socket.push(
+        {
+            "type": "input_audio_buffer.committed",
+            "event_id": "event-queue-full-committed",
+            "item_id": "item-queue-full-final",
+        }
+    )
+    session = provider._require_recognition(ref)
+
+    for index in range(MAX_EVENT_QUEUE):
+        socket.push(
+            {
+                "type": "conversation.item.input_audio_transcription.delta",
+                "event_id": f"event-queue-full-delta-{index}",
+                "content_index": 0,
+                "item_id": "item-queue-full-final",
+                "delta": str(index % 10),
+            }
+        )
+    for _ in range(10_000):
+        if session.events.qsize() == MAX_EVENT_QUEUE:
+            break
+        await asyncio.sleep(0)
+    assert session.events.qsize() == MAX_EVENT_QUEUE
+
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "event_id": "event-queue-full-completed",
+            "content_index": 0,
+            "item_id": "item-queue-full-final",
+            "transcript": "normal final survives cancel",
+        }
+    )
+    for _ in range(10_000):
+        if session.finalization_task is not None:
+            break
+        await asyncio.sleep(0)
+    finalizer = session.finalization_task
+    assert finalizer is not None
+    assert finalizer.done() is False
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert socket.closed is True
+
+    cancel_task = asyncio.create_task(provider.cancel_recognition(ref))
+    await asyncio.sleep(0)
+    assert session.finalization_task is finalizer
+    assert cancel_task.done() is False
+    first_partial = await provider.next_recognition_event(ref, timeout_seconds=1)
+    assert first_partial.kind is RecognitionEventKind.PARTIAL
+    await cancel_task
+    assert (await finalizer).failure is None
+
+    remaining = []
+    while True:
+        event = await provider.next_recognition_event(ref, timeout_seconds=1)
+        remaining.append(event)
+        if event.kind is RecognitionEventKind.FINAL:
+            break
+    assert len(remaining) == MAX_EVENT_QUEUE
+    assert all(event.kind is RecognitionEventKind.PARTIAL for event in remaining[:-1])
+    final = remaining[-1]
+    assert final.hypothesis is not None
+    assert final.hypothesis.selected.display_text == "normal final survives cancel"
+    assert facts == []
+    assert provider._recognition == {}
+    assert provider.conformance.snapshot().pending_provider_controls == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_recognition_process_control_cleans_up_and_rethrows() -> None:
     facts: list[SpeechDegradationFact] = []
     socket = FakeSocket((session_updated_event(),))
@@ -3323,6 +3413,54 @@ async def test_native_realtime_opening_cancel_owns_close_wakeup_and_duplicate(
 
 
 @pytest.mark.asyncio
+async def test_native_realtime_opening_cancel_fences_queued_negotiation() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = OrderedOpeningCloseSocket(
+        json.dumps(native_session_updated_event(server_vad_wire()))
+    )
+
+    async def socket_factory(*_args) -> OrderedOpeningCloseSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    open_task = asyncio.create_task(
+        provider.open_recognition(request, timeout_seconds=0.4)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if socket.sent:
+            break
+    session = provider._require_recognition(request.ref)
+
+    cancel_task = asyncio.create_task(provider.cancel_recognition(request.ref))
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    await asyncio.wait_for(socket.receive_woken.wait(), timeout=1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert session.ready.done() is False
+    assert session.negotiated is False
+
+    socket.release_close.set()
+    await cancel_task
+    with pytest.raises(asyncio.CancelledError):
+        await open_task
+    assert session.negotiated is False
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert provider._recognition == {}
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_native_realtime_cancel_caller_cannot_cancel_shared_finalizer() -> None:
     facts: list[SpeechDegradationFact] = []
     socket = OrderedOpeningCloseSocket(_RealtimeSocketTerminalEof())
@@ -3365,6 +3503,45 @@ async def test_native_realtime_cancel_caller_cannot_cancel_shared_finalizer() ->
     assert len(facts) == 1
     assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
     assert provider.conformance.snapshot().active_recognition == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_opening_process_control_has_one_public_owner() -> None:
+    socket = FakeSocket((GeneratorExit(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    open_task = asyncio.create_task(
+        provider.open_recognition(request, timeout_seconds=0.4)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        session = provider._recognition.get(
+            (request.ref.session_id, request.ref.session_generation)
+        )
+        if session is not None and session.receive_task is not None:
+            break
+    assert session is not None
+    receive_task = session.receive_task
+    assert receive_task is not None
+
+    with pytest.raises(GeneratorExit):
+        await open_task
+    assert await receive_task is None
+    assert socket.closed is True
+    assert provider._recognition == {}
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.active_recognition == snapshot.retained_recognition == 0
+    assert provider.degradation_facts == ()
     assert_zero_business_effects(provider)
     await provider.close()
 
@@ -3633,6 +3810,117 @@ async def test_native_realtime_generic_alias_accepts_compatible_voice_model() ->
     await provider.open_recognition(ref, timeout_seconds=1)
     await provider.cancel_recognition(ref, reason="test-complete")
     assert socket.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_cancel_waiter_cannot_cancel_finalizer() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    socket = CoordinatedCloseSocket(
+        (
+            native_session_created_event(),
+            native_synthesis_session_updated_event(),
+        )
+    )
+    provider, _, request = await open_native_synthesis_for_test(
+        facts=facts, socket=socket
+    )
+    response_id = "provider-response-cancel-owner"
+    native_response_prelude(socket, request, response_id)
+    encoded = base64.b64encode(struct.pack("<hhhh", 1, -1, 2, -2)).decode("ascii")
+    socket.push(
+        native_audio_event("response.output_audio.delta", response_id, delta=encoded)
+    )
+    await wait_for_native_buffer_size(provider, request, 8)
+    session = provider._require_synthesis(request.ref)
+
+    cancelled_waiter = asyncio.create_task(provider.cancel_synthesis(request.ref))
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    finalizer = session.finalization_task
+    assert finalizer is not None
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    assert finalizer.done() is False
+
+    surviving_waiter = asyncio.create_task(provider.cancel_synthesis(request.ref))
+    assert session.finalization_task is finalizer
+    socket.release_close.set()
+    await surviving_waiter
+    assert (await finalizer).failure is None
+    assert session.terminal is True
+    assert session.pending_native_audio == b""
+    assert socket.closed is True
+    assert socket.close_calls == 1
+    assert provider._synthesis == {}
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_synthesis_sink_process_control_cannot_skip_cleanup() -> (
+    None
+):
+    sink_calls: list[SpeechDegradationFact] = []
+    socket = FakeSocket(
+        (
+            native_session_created_event(),
+            native_synthesis_session_updated_event(),
+        )
+    )
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    def process_control_sink(fact: SpeechDegradationFact) -> None:
+        sink_calls.append(fact)
+        raise GeneratorExit()
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=process_control_sink,
+    )
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    session = provider._require_synthesis(request.ref)
+    assert session.task is not None
+    synthesis_task = session.task
+
+    response_id = "provider-response-process-control-sink"
+    native_response_prelude(socket, request, response_id)
+    delta = native_audio_event(
+        "response.output_audio.delta",
+        response_id,
+        event_id="event-process-control-buffered-audio",
+        delta=base64.b64encode(struct.pack("<hhhh", 1, -1, 2, -2)).decode("ascii"),
+    )
+    socket.push(delta)
+    await wait_for_native_buffer_size(provider, request, 8)
+    socket.push(delta)
+
+    with pytest.raises(GeneratorExit):
+        await synthesis_task
+    assert session.terminal is True
+    assert session.pending_native_audio == b""
+    assert socket.closed is True
+    assert provider._synthesis == {}
+    assert len(provider.degradation_facts) == 1
+    assert (
+        provider.degradation_facts[0].reason
+        is SpeechDegradationReason.PROVIDER_PROTOCOL
+    )
+    assert sink_calls == [provider.degradation_facts[0]]
+    assert provider.conformance.snapshot().active_synthesis == 0
     assert_zero_business_effects(provider)
     await provider.close()
 
