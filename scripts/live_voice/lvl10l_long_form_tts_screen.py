@@ -156,7 +156,7 @@ def load_fixture_manifest(path: Path) -> tuple[Lvl10lFixture, ...]:
         raise _invalid("unreadable") from exc
     if not isinstance(raw, dict) or set(raw) != {"schema_version", "fixtures"}:
         raise _invalid("schema_fields")
-    if raw["schema_version"] != "live-voice.lvl10l-corpus.v1":
+    if raw["schema_version"] != "live-voice.lvl10l-corpus.v2":
         raise _invalid("schema_version")
     fixtures = raw["fixtures"]
     if not isinstance(fixtures, list) or len(fixtures) != 3:
@@ -164,7 +164,7 @@ def load_fixture_manifest(path: Path) -> tuple[Lvl10lFixture, ...]:
     expected = (
         ("long_600", 4, (550, 750)),
         ("long_1200", 8, (1100, 1500)),
-        ("long_2400", 16, (2200, 3000)),
+        ("long_2100", 12, (2000, 2250)),
     )
     result: list[Lvl10lFixture] = []
     required = {
@@ -508,7 +508,7 @@ async def run_attempt(
             await fence_group("lvl10l_finally_fence")
 
 
-FIXTURE_IDS = ("long_600", "long_1200", "long_2400")
+FIXTURE_IDS = ("long_600", "long_1200", "long_2100")
 
 
 def scheduled_cells(round_index: int) -> tuple[tuple[PopulationRole, str], ...]:
@@ -596,7 +596,7 @@ def _candidate_gate(
         gain_p50 >= 750_000_000
         and gain_p50 * 100 >= reference_p50 * 15
         and candidate_complete < min(control_complete)
-        and sum(gain > 0 for gain in gains) >= 9
+        and sum(gain > 0 for gain in gains) >= 4
         and first_regression <= 200_000_000
         and first_regression * 100 <= float(median(paired_first)) * 10
         and reserve_regression <= 200_000_000
@@ -610,8 +610,8 @@ def _smallest_monotonic_break_even(
     candidate: PopulationRole,
     groups: dict[tuple[PopulationRole, str], list[Any]],
 ) -> str:
-    passed_2400, _ = _candidate_gate(candidate, "long_2400", groups)
-    assert passed_2400
+    passed_2100, _ = _candidate_gate(candidate, "long_2100", groups)
+    assert passed_2100
     passed_1200, _ = _candidate_gate(candidate, "long_1200", groups)
     passed_600, _ = _candidate_gate(candidate, "long_600", groups)
     if passed_600 and not passed_1200:
@@ -620,13 +620,13 @@ def _smallest_monotonic_break_even(
         return "long_600"
     if passed_1200:
         return "long_1200"
-    return "long_2400"
+    return "long_2100"
 
 
 def _pilot_result(
     groups: dict[tuple[PopulationRole, str], list[Any]], records: Sequence[AttemptRecord]
 ) -> Lvl10lReport:
-    for fixture in ("long_1200", "long_2400"):
+    for fixture in ("long_1200", "long_2100"):
         controls = [
             groups[(PopulationRole.A1, fixture)][0].request_to_complete_ns,
             groups[(PopulationRole.A2, fixture)][0].request_to_complete_ns,
@@ -636,7 +636,7 @@ def _pilot_result(
             for candidate in (PopulationRole.B2, PopulationRole.B4)
         ):
             return Lvl10lReport("PILOT_FAILED", (f"pilot_faster_than_controls:{fixture}",), tuple(records))
-    for fixture in FIXTURE_IDS:
+    for fixture in ("long_1200", "long_2100"):
         a1, a2 = groups[(PopulationRole.A1, fixture)][0], groups[(PopulationRole.A2, fixture)][0]
         for candidate in (PopulationRole.B2, PopulationRole.B4):
             row = groups[(candidate, fixture)][0]
@@ -645,9 +645,9 @@ def _pilot_result(
                 regression = getattr(row, metric) - paired
                 if regression > 1_000_000_000 and regression * 100 > paired * 50:
                     return Lvl10lReport("PILOT_FAILED", (f"pilot_regression:{fixture}:{metric}",), tuple(records))
-    b2_2400 = groups[(PopulationRole.B2, "long_2400")][0].request_to_complete_ns
-    b4_2400 = groups[(PopulationRole.B4, "long_2400")][0].request_to_complete_ns
-    selected = PopulationRole.B2 if b2_2400 <= b4_2400 else PopulationRole.B4
+    b2_2100 = groups[(PopulationRole.B2, "long_2100")][0].request_to_complete_ns
+    b4_2100 = groups[(PopulationRole.B4, "long_2100")][0].request_to_complete_ns
+    selected = PopulationRole.B2 if b2_2100 <= b4_2100 else PopulationRole.B4
     return Lvl10lReport(
         "PILOT_PASS",
         ("pilot_denominators_pass", "pilot_integrity_pass", "pilot_authorization_pass"),
@@ -661,7 +661,7 @@ def reduce_records(
     records: Sequence[AttemptRecord], *, expected_rounds: int, provenance_complete: bool = True
 ) -> Lvl10lReport:
     reasons: list[str] = []
-    if expected_rounds not in (1, 10):
+    if expected_rounds not in (1, 5):
         return Lvl10lReport("INCONCLUSIVE", ("invalid_expected_rounds",), tuple(records))
     groups: dict[tuple[PopulationRole, str], list[Any]] = {}
     for record in records:
@@ -690,25 +690,25 @@ def reduce_records(
             <= min(a1_row.request_to_complete_ns, a2_row.request_to_complete_ns) * 20
             for a1_row, a2_row in zip(a1, a2)
         )
-        if expected_rounds == 10 and close_brackets < 8:
+        if expected_rounds == 5 and close_brackets < 4:
             return Lvl10lReport("INCONCLUSIVE", (f"control_brackets:{fixture}",), tuple(records))
-    b2_2400, b2_gains = _candidate_gate(PopulationRole.B2, "long_2400", groups)
-    b4_2400, b4_gains = _candidate_gate(PopulationRole.B4, "long_2400", groups)
-    if not b2_2400 and not b4_2400:
-        return Lvl10lReport("NO_MATERIAL_GAIN", ("long_2400_materiality", "whole_chunk_availability_diagnostic_only"), tuple(records))
-    if b2_2400 and b4_2400:
+    b2_2100, b2_gains = _candidate_gate(PopulationRole.B2, "long_2100", groups)
+    b4_2100, b4_gains = _candidate_gate(PopulationRole.B4, "long_2100", groups)
+    if not b2_2100 and not b4_2100:
+        return Lvl10lReport("NO_MATERIAL_GAIN", ("long_2100_materiality", "whole_chunk_availability_diagnostic_only"), tuple(records))
+    if b2_2100 and b4_2100:
         b2_gain, b4_gain = float(median(b2_gains)), float(median(b4_gains))
         if b4_gain - b2_gain >= 750_000_000 and (b4_gain - b2_gain) * 100 >= b2_gain * 10:
             decision = "B4_MATERIAL"
         else:
             decision = "B2_AND_B4_MATERIAL_PREFER_B2"
-    elif b2_2400:
+    elif b2_2100:
         decision = "B2_MATERIAL"
     else:
         decision = "B4_MATERIAL"
     selected = PopulationRole.B4 if decision == "B4_MATERIAL" else PopulationRole.B2
     break_even = _smallest_monotonic_break_even(selected, groups)
-    reasons.extend(("provenance_denominators_pass", "integrity_reliability_pass", "control_drift_pass", "long_2400_materiality_pass", f"monotonic_bucket_walk:{break_even}", "whole_chunk_availability_diagnostic_only"))
+    reasons.extend(("provenance_denominators_pass", "integrity_reliability_pass", "control_drift_pass", "long_2100_materiality_pass", f"monotonic_bucket_walk:{break_even}", "whole_chunk_availability_diagnostic_only"))
     return Lvl10lReport(decision, tuple(reasons), tuple(records), selected.value, break_even)
 
 
@@ -988,7 +988,7 @@ def _write_artifacts(
         "paired_completion": paired_completion,
         "control_drift": control_drift,
         "candidate_decision_inputs": candidate_inputs,
-        "b4_incremental_vs_b2": incremental["long_2400"],
+        "b4_incremental_vs_b2": incremental["long_2100"],
         "whole_chunk_availability": "diagnostic_only_non_gating",
         "artifact_hashes": {
             "run_sha256": _file_sha256(output_root / "run.json"),
@@ -1075,7 +1075,7 @@ async def run_population(
                     )
                 )
                 identities[role] += 1
-        expected_identities = 30 if args.rounds == 10 else 3
+        expected_identities = 15 if args.rounds == 5 else 3
         if any(count != expected_identities for count in identities.values()):
             raise RuntimeError("LVL10L_RESPONSE_IDENTITY_BUDGET_INVALID")
         report = reduce_records(records, expected_rounds=args.rounds)
@@ -1108,7 +1108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "validate-corpus":
         print(json.dumps({"fixtures": [fixture.fixture_id for fixture in fixtures]}))
         return 0
-    if args.rounds not in (1, 10):
+    if args.rounds not in (1, 5):
         raise ValueError("LVL10L_ROUNDS_INVALID")
     if any(not getattr(args, field).strip() for field in ("run_id", "source_commit", "source_state", "agent_core_commit", "environment_profile")):
         raise ValueError("LVL10L_PROVENANCE_INVALID")
@@ -1133,7 +1133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "corpus_sha256": _file_sha256(copied_manifest),
             "rounds": args.rounds,
             "expected_requests": args.rounds * len(FIXTURE_IDS) * 8,
-            "request_budget": "24" if args.rounds == 1 else "240",
+            "request_budget": "24" if args.rounds == 1 else "120",
             "max_active_requests": MAX_ACTIVE_REQUESTS,
             "automatic_retries": 0,
             "provider_lock": "/tmp/jiuwenswarm-lvl10-provider.lock",

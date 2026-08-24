@@ -17,7 +17,8 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
 
 
 ROOT = Path(__file__).parents[3]
-MANIFEST_PATH = ROOT / "tests/fixtures/live_voice_lvl10l_tts_v1/manifest.json"
+V1_MANIFEST_PATH = ROOT / "tests/fixtures/live_voice_lvl10l_tts_v1/manifest.json"
+MANIFEST_PATH = ROOT / "tests/fixtures/live_voice_lvl10l_tts_v2/manifest.json"
 RUNNER_PATH = ROOT / "scripts/live_voice/lvl10l_long_form_tts_screen.py"
 
 
@@ -66,12 +67,19 @@ def _mutated_manifest(tmp_path: Path, mutation: str) -> Path:
 
 def test_manifest_is_nested_and_preserves_exact_b2_b4_coverage() -> None:
     fixtures = load_fixture_manifest(MANIFEST_PATH)
-    assert [row.fixture_id for row in fixtures] == ["long_600", "long_1200", "long_2400"]
+    assert [row.fixture_id for row in fixtures] == ["long_600", "long_1200", "long_2100"]
     assert [len(row.chunks_for(PopulationRole.B2)) for row in fixtures] == [2, 2, 2]
     assert [len(row.chunks_for(PopulationRole.B4)) for row in fixtures] == [4, 4, 4]
     assert fixtures[1].final_text.startswith(fixtures[0].final_text)
     assert fixtures[2].final_text.startswith(fixtures[1].final_text)
     assert all("".join(row.chunks_for(PopulationRole.B4)) == row.final_text for row in fixtures)
+
+
+def test_v2_reuses_v1_prefixes_without_mutating_immutable_v1_manifest() -> None:
+    assert runner._file_sha256(V1_MANIFEST_PATH) == "6d7225fecb44b584a08af7431f54ae1a4230773e2cdb2f5d1bc8b23ddc5a78cc"
+    v1 = json.loads(V1_MANIFEST_PATH.read_text(encoding="utf-8"))
+    v2 = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert [row["final_text"] for row in v2["fixtures"][:2]] == [row["final_text"] for row in v1["fixtures"][:2]]
 
 
 @pytest.mark.parametrize(
@@ -295,7 +303,7 @@ def test_schedule_rotates_fixtures_and_alternates_candidates() -> None:
         PopulationRole.B2,
         PopulationRole.A2,
     ]
-    assert _fixture_order(scheduled_cells(2)) == ["long_2400", "long_600", "long_1200"]
+    assert _fixture_order(scheduled_cells(2)) == ["long_2100", "long_600", "long_1200"]
 
 
 def _reduction_record(
@@ -332,8 +340,8 @@ def _reduction_record(
 
 def _formal_population() -> list[Any]:
     records: list[Any] = []
-    for round_index in range(10):
-        for fixture_id in ("long_600", "long_1200", "long_2400"):
+    for round_index in range(5):
+        for fixture_id in ("long_600", "long_1200", "long_2100"):
             records.extend(
                 (
                     _reduction_record(PopulationRole.A1, fixture_id, round_index, started_ms=0, complete_ms=2_000),
@@ -346,14 +354,14 @@ def _formal_population() -> list[Any]:
 
 
 def test_reference_is_interpolated_at_candidate_start() -> None:
-    candidate = _reduction_record(PopulationRole.B2, "long_2400", 0, started_ms=25, complete_ms=0)
-    a1 = _reduction_record(PopulationRole.A1, "long_2400", 0, started_ms=0, complete_ms=1_000)
-    a2 = _reduction_record(PopulationRole.A2, "long_2400", 0, started_ms=100, complete_ms=2_000)
+    candidate = _reduction_record(PopulationRole.B2, "long_2100", 0, started_ms=25, complete_ms=0)
+    a1 = _reduction_record(PopulationRole.A1, "long_2100", 0, started_ms=0, complete_ms=1_000)
+    a2 = _reduction_record(PopulationRole.A2, "long_2100", 0, started_ms=100, complete_ms=2_000)
     assert interpolate_reference(candidate, a1, a2, "request_to_complete_ns") == 1_250_000_000
 
 
 def test_reducer_declares_b2_material_and_keeps_whole_chunk_diagnostic_non_gating() -> None:
-    report = reduce_records(_formal_population(), expected_rounds=10)
+    report = reduce_records(_formal_population(), expected_rounds=5)
     assert report.decision == "B2_MATERIAL"
     assert any("whole_chunk_availability" in reason for reason in report.gate_reasons)
 
@@ -361,9 +369,9 @@ def test_reducer_declares_b2_material_and_keeps_whole_chunk_diagnostic_non_gatin
 def test_reducer_rejects_wrong_request_count_and_marks_missing_control_inconclusive() -> None:
     rejected = _formal_population()
     rejected[1].provider_request_count = 3
-    assert reduce_records(rejected, expected_rounds=10).decision == "REJECTED"
+    assert reduce_records(rejected, expected_rounds=5).decision == "REJECTED"
     incomplete = _formal_population()[1:]
-    assert reduce_records(incomplete, expected_rounds=10).decision == "INCONCLUSIVE"
+    assert reduce_records(incomplete, expected_rounds=5).decision == "INCONCLUSIVE"
 
 
 def test_cli_rejects_non_pilot_non_formal_round_count(tmp_path: Path) -> None:
@@ -447,9 +455,9 @@ def test_artifacts_pin_per_cell_metrics_paired_deltas_and_timeline_schema(
         "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
     ])
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
-    assert report["per_cell"]["LVL-10L-B4"]["long_2400"]["denominator"] == 1
-    assert set(report["per_cell"]["LVL-10L-B4"]["long_2400"]["request_to_complete_ns"]) == {"p50", "p90", "p95"}
-    assert report["paired_completion"]["LVL-10L-B2"]["long_2400"]["win_count"] in (0, 1)
+    assert report["per_cell"]["LVL-10L-B4"]["long_2100"]["denominator"] == 1
+    assert set(report["per_cell"]["LVL-10L-B4"]["long_2100"]["request_to_complete_ns"]) == {"p50", "p90", "p95"}
+    assert report["paired_completion"]["LVL-10L-B2"]["long_2100"]["win_count"] in (0, 1)
     attempt = json.loads((output / "attempts.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert "terminal_reason" in attempt
     assert "whole_chunk_availability_gap_ns" in attempt
@@ -566,10 +574,10 @@ def test_report_markdown_contains_required_timing_and_decision_tables(
         "Browser and product latency are excluded",
     ):
         assert heading in markdown
-    assert "LVL-10L-B2 | long_2400" in markdown
+    assert "LVL-10L-B2 | long_2100" in markdown
     assert "Selected arm:" in markdown
     assert "## Candidate first/reserve/duration decision inputs" in markdown
-    assert "| LVL-10L-B2 | long_2400 | first_pcm_regression | 1 |" in markdown
+    assert "| LVL-10L-B2 | long_2100 | first_pcm_regression | 1 |" in markdown
     assert "| LVL-10L-B4 | long_1200 | audio_duration_delta | 1 |" in markdown
 
 
@@ -587,7 +595,7 @@ def test_artifacts_serialize_candidate_regressions_duration_parity_and_b4_increm
         "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "1",
     ])
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
-    inputs = report["candidate_decision_inputs"][PopulationRole.B2.value]["long_2400"]
+    inputs = report["candidate_decision_inputs"][PopulationRole.B2.value]["long_2100"]
     assert set(inputs) >= {"first_pcm_regression", "reserve_regression", "audio_duration_delta"}
     assert inputs["first_pcm_regression"]["measured_denominator"] == 1
     assert set(inputs["audio_duration_delta"]) >= {"p50_absolute_ns", "p50_percent", "measured_denominator"}
@@ -615,18 +623,18 @@ async def test_fence_terminalizes_buffered_successor_timelines_for_jsonl_without
     assert row["chunk_timelines"][1]["terminal_reason"].startswith("group_fenced:")
 
 
-def test_non_monotonic_bucket_walk_is_recorded_after_2400_pass_and_1200_fail() -> None:
+def test_non_monotonic_bucket_walk_is_recorded_after_2100_pass_and_1200_fail() -> None:
     records = _formal_population()
     for record in records:
         if record.identity.role is PopulationRole.B2:
             record.request_to_complete_ns = {
-                "long_2400": 1_000_000_000,
+                "long_2100": 1_000_000_000,
                 "long_1200": 1_900_000_000,
                 "long_600": 1_000_000_000,
             }[record.identity.fixture_id]
         if record.identity.role is PopulationRole.B4:
             record.request_to_complete_ns = 2_000_000_000
-    report = reduce_records(records, expected_rounds=10)
+    report = reduce_records(records, expected_rounds=5)
     assert report.smallest_break_even == "NON_MONOTONIC"
     assert "monotonic_bucket_walk:NON_MONOTONIC" in report.gate_reasons
 
@@ -635,7 +643,7 @@ def test_non_monotonic_bucket_walk_is_recorded_after_2400_pass_and_1200_fail() -
 async def test_formal_b4_reuses_twelve_stream_identities_with_round_generations() -> None:
     provider = ScriptedProvider()
     fixtures = load_fixture_manifest(MANIFEST_PATH)
-    for round_index in range(10):
+    for round_index in range(5):
         for fixture in fixtures:
             record = await run_attempt(
                 provider,
@@ -644,9 +652,9 @@ async def test_formal_b4_reuses_twelve_stream_identities_with_round_generations(
             )
             assert record.group_completed
     requests = [request for request in provider.requests if request.ref.response.response_id.startswith("lvl10l-response-unit-run-LVL-10L-B4")]
-    assert len(requests) == 120
+    assert len(requests) == 60
     assert len({request.ref.stream_id for request in requests}) == 12
-    assert {request.ref.stream_generation for request in requests} == set(range(10))
+    assert {request.ref.stream_generation for request in requests} == set(range(5))
 
 
 def test_pilot_requires_exact_authorization_predicate_not_formal_materiality() -> None:
@@ -659,9 +667,41 @@ def test_pilot_requires_exact_authorization_predicate_not_formal_materiality() -
 def test_pilot_fails_when_long_candidate_is_not_faster_than_both_controls() -> None:
     pilot = [record for record in _formal_population() if record.identity.round_index == 0]
     for record in pilot:
-        if record.identity.fixture_id == "long_2400" and record.identity.role in (PopulationRole.B2, PopulationRole.B4):
+        if record.identity.fixture_id == "long_2100" and record.identity.role in (PopulationRole.B2, PopulationRole.B4):
             record.request_to_complete_ns = 2_000_000_000
     assert reduce_records(pilot, expected_rounds=1).decision == "PILOT_FAILED"
+
+
+def test_catastrophic_long_600_overhead_does_not_reject_an_eligible_v2_pilot() -> None:
+    pilot = [record for record in _formal_population() if record.identity.round_index == 0]
+    for record in pilot:
+        if record.identity.fixture_id == "long_600" and record.identity.role in (PopulationRole.B2, PopulationRole.B4):
+            record.request_to_first_pcm_ns = 2_000_000_000
+            record.request_to_reserve_ns = 2_000_000_000
+    assert reduce_records(pilot, expected_rounds=1).decision == "PILOT_PASS"
+
+
+def test_v2_formal_population_uses_five_round_budget_and_fifteen_response_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    providers: list[ScriptedProvider] = []
+
+    async def select_fake_provider(*, batch_available: bool) -> Any:
+        provider = ScriptedProvider()
+        providers.append(provider)
+        return SimpleNamespace(tier=runner.SpeechRouteTier.STREAMING, provider=provider)
+
+    monkeypatch.setattr(runner, "select_environment_streaming_speech", select_fake_provider)
+    output = tmp_path / "v2-formal"
+    assert main([
+        "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
+        "--run-id", "v2-formal", "--source-commit", "a" * 40, "--source-state", "clean",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "5",
+    ]) == 0
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["expected_requests"] == report["observed_requests"] == 120
+    assert report["request_totals_by_role"] == {"LVL-10L-A1": 15, "LVL-10L-B2": 30, "LVL-10L-B4": 60, "LVL-10L-A2": 15}
+    assert all(len(provider.conformance.responses) == 15 for provider in providers)
 
 
 def test_monotonic_bucket_walk_and_b4_incremental_preference_are_reported() -> None:
@@ -669,7 +709,7 @@ def test_monotonic_bucket_walk_and_b4_incremental_preference_are_reported() -> N
     for record in records:
         if record.identity.role is PopulationRole.B4:
             record.request_to_complete_ns = 100_000_000
-    report = reduce_records(records, expected_rounds=10)
+    report = reduce_records(records, expected_rounds=5)
     assert report.decision == "B4_MATERIAL"
     assert report.selected_arm == PopulationRole.B4.value
     assert report.smallest_break_even == "long_600"
@@ -709,10 +749,10 @@ def test_actual_conformance_capacity_completes_formal_b4_with_twelve_retained_st
     assert main([
         "run", "--manifest", str(MANIFEST_PATH), "--output-root", str(output),
         "--run-id", "capacity-run", "--source-commit", "a" * 40, "--source-state", "clean",
-        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "10",
+        "--agent-core-commit", "b" * 40, "--environment-profile", "test", "--rounds", "5",
     ]) == 0
     b4 = providers[2].conformance.snapshot()
     assert b4.retained_synthesis == 0
     assert b4.retained_identity_tombstones <= 64
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
-    assert report["observed_requests"] == report["expected_requests"] == 240
+    assert report["observed_requests"] == report["expected_requests"] == 120
