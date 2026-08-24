@@ -55,6 +55,14 @@ Browser or the composed checkpoint and receives no product-behaviour credit.
 Its durable-artifact binding was recorded at
 `85fbcc516571350fc50974ef35bfb2f40e1c48c8`.
 
+LVL-10L is bound to integration branch `latency/hx-optimizations`. Its initial
+real pilots used source `76f4413de`; the clean v2 pilot and stopped formal used
+`bcbf6a423`, with installed Agent-Core `94e10cb6102c36fe78a64547957c0def97299273`.
+Historical LVL-10 worker branches `latency/lvl10-provider-screen` and
+`latency/lvl10-validation` remained predecessor history. LVL-10L changed only
+validation runner, fixtures, tests and documentation; product source remained
+on the one-request full-final route.
+
 Status terms used here:
 
 - **Accepted — causal component scope:** the named owner and boundary passed
@@ -64,6 +72,8 @@ Status terms used here:
   product change was not retained.
 - **Screened out / materiality `STOP`:** the measurement path was valid, but
   the observed headroom did not justify constructing the product candidate.
+- **Directional `STOP`:** a bounded pilot repeated material headroom, but the
+  formal population was not completed and no product candidate is authorized.
 - **Planned/conditional:** no product credit exists; implementation proceeds
   only after the stated measurement gate.
 - **Estimated:** planning headroom inferred from current code facts or
@@ -112,6 +122,7 @@ compatible feature-off/on p50/p95 population.
 | Fixed VAD reduction from 1200 to 900/800 ms | **REJECTED** | P1 input; `streaming_speech.py`, `openai_streaming_speech.py` | Successful turns exposed **285–412 ms** of potential endpointing headroom | Both candidates preserved only 15/20 turns; every 1000 ms natural-pause case failed 0/5 | The headroom is real, but a global fixed threshold cannot safely recover it. Keep 1200 ms. |
 | Application-level TTS HTTPX client reuse | **REJECTED AND REVERTED** | P1 TTS Provider; `openai_streaming_speech.py` | No gain; warm first-PCM regressed **57.8 ms / 7.0%** | B produced **0/3 warm TCP/TLS reuse**; 832.0→889.9 ms warm p50 | Do not reintroduce this implementation unchanged. |
 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP` FOR TESTED WORKLOADS** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Candidate→final/projected-gain p50 **177.2 ms**, p95 **425.3 ms**; relative p50 **7.43%** | 3/3 real pilot attempts completed, exact prefix 3/3, mismatch 0, zero forbidden effects; credited v2 artifacts survive in the durable latency-runs archive with matching hashes | Failed the predeclared 500 ms headroom, 400 ms gain and 10% relative gates. Reopen only with a reviewed new long-form workload/materiality hypothesis; do not generalize this STOP to every possible response length. |
+| LVL-10L completion-primary long-form chunked TTS | **DIRECTIONAL `STOP` — FORMAL ABORTED, NO PRODUCT CREDIT** | Validation-only post-final TTS runner; product source unchanged | Clean v2 pilot `long_2100`: B2 saved **6.93 s / 36.85%**, B4 saved **7.75 s / 41.27%** | 12/12 attempts, 24/24 requests, zero errors at `bcbf6a423`; prior v1 pilots isolated quota exhaustion and the one-request 8 MiB boundary | Repeats LVL-10's long direction but is one round. Hongxing requested stopping long-duration tests; no B2/B4 selection or Browser/product wiring. |
 | Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves controlled owner-path gain only. It does not exercise the raw P2 response observer that caused the deployed TTS authorization failure, nor real Provider/network/Chrome/WebAudio/Agent/model timing. |
 | EOT/STT early result waiter | **REJECTED — NO MATERIAL SERIAL GAP** | P1/P2 Speech settlement; real `ProductP1VoiceRouteOwner` and registry result seam under deterministic dependencies | Largest removable-gap p50 **0.885 ms**; largest fraction p50 **0.015** | Complete A1 at `8e5dab8b8`: 20/20 exact, cleanup-complete attempts; ten marks/eight segments; zero forbidden effects | The 450.782 ms provider-slow diagnostic is legitimate remaining Provider wait. The credited final raw `/tmp` report no longer exists; reviewed sanitized tables remain authoritative, while an earlier diagnostic 20/20 raw report survives. Future credited runs must use the durable latency-runs root. |
 
@@ -424,6 +435,35 @@ requires terminal/profile/round-aware advancement and complete process-tree
 cleanup. See the
 [sanitized pilot evidence](../evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md).
 
+### 5.10 LVL-10L completion-primary long-form follow-up
+
+LVL-10L separated completion from LVL-10's first-playable-reserve primary
+metric and compared A1/B2/B4/A2 after one immutable authoritative final.
+
+The first v1 pilot retained 12 attempts but opened only 18/24 requests because
+OpenAI returned `429 credit_balance_exhausted`; it has zero timing credit. The
+second v1 pilot opened 24/24 and completed 11/12, but its 2,938-character A2
+control reached the 8 MiB wire-audio boundary. That corpus was retired without
+raising the safety cap or crediting the candidate advantage.
+
+The v2 corpus retained the same first 4/8/12 units (734/1,422/2,150 chars).
+Its clean pilot completed 12/12, opened 24/24 requests and recorded zero errors:
+
+| Workload completion | A1 | B2 | B4 | A2 |
+|---|---:|---:|---:|---:|
+| 600 | 8,516 ms | 4,498 ms | 5,715 ms | 6,759 ms |
+| 1200 | 12,522 ms | 8,221 ms | 15,581 ms | 22,652 ms |
+| 2100 | 18,852 ms | 11,878 ms | 11,029 ms | 18,755 ms |
+
+At 2100 chars, time-interpolated paired completion gains were B2 **6,930 ms /
+36.85%** and B4 **7,751 ms / 41.27%**. These are `DERIVED` from measured
+component boundaries and one attempt per cell. They are not formal p50/p95.
+
+The approved five-round/120-request formal was stopped on Hongxing's direction
+before `attempts.jsonl` or a report was written; only run/manifest survive and
+receive zero timing credit. See the
+[LVL-10L result](../evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md).
+
 ## 6. Recommended next optimization candidates
 
 The reference numbers below are stable inventory labels, not execution
@@ -443,7 +483,8 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but separate A1/A2 drift violations invalidated both causal decisions. No Browser Lane C or universal chunked route is authorized. A completion-primary long-form follow-up requires a separate prospective LVL-10L spec. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
+| 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but separate A1/A2 drift violations invalidated both causal decisions. No Browser Lane C or universal chunked route is authorized. Its separate completion-primary LVL-10L follow-up is also stopped. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
+| 13 | LVL-10L completion-primary long-form chunked TTS | **DIRECTIONAL `STOP`; FORMAL NOT COMPLETED** | v2 pilot B2 **6.93 s / 36.85%**, B4 **7.75 s / 41.27%** saved at 2100 chars | validation runner/corpora only; product route unchanged | Clean 12/12 pilot repeats the long signal. Formal stopped before attempt artifacts. No further long-duration tests, arm selection or product wiring. |
 
 ## 7. Residual P2 candidates
 
@@ -493,17 +534,16 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    (ref #4), but the surviving manifest/report cannot bind a compatible A/B
    result. Keep the production default at 1000 ms and run clean
    same-source/same-workload A1=1000/B=250/A2=1000 before any default decision.
-5. Keep stable-sentence stopped for the tested workloads. Reopen only after
-   Hongxing reviews a new long-form workload/materiality solution. Keep LVL-10
-   independent because it accepts `chat.final` before segmentation.
+5. Keep stable-sentence, LVL-10 and LVL-10L stopped for their declared
+   workloads. LVL-10L repeated directional long-form gain, but Hongxing ended
+   long-duration testing before its formal population. Do not select an arm.
 6. Consider authoritative P3 acknowledgements and fixed non-private phrase
    caching only when perceived Task latency is a product priority; neither
    shortens Task completion, and both retain Task/Presentation authority risk.
 7. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
    demonstrates real P2 backlog.
-8. Preserve the completed LVL-10 screen as `INCONCLUSIVE`; no Browser or product
-   wiring follows. A conditional long-form completion hypothesis must use a new
-   prospective LVL-10L contract rather than changing the observed experiment.
+8. Preserve LVL-10 as `INCONCLUSIVE` and LVL-10L as directional/formally
+   incomplete; no Browser or product wiring follows either screen.
 9. Treat native speech-to-speech as a strategic architecture study requiring a
    separate Registry/Tool/Task/presentation-authority decision.
 
@@ -578,8 +618,10 @@ Stable-sentence measured only 177.2 ms p50 projected gain for the tested
 workloads and stopped before product wiring. The distinct LVL-10 post-final TTS
 screen then completed two 45/45 real-Provider populations with zero errors but
 remained `INCONCLUSIVE` because each violated A1/A2 drift. Long completion
-improved 20–24% while medium completion regressed, supporting only a future
-conditional long-form hypothesis. Provider-native Semantic VAD is again the
+improved 20–24% while medium completion regressed. LVL-10L then passed a clean
+12/12, 24-request v2 pilot with 6.93–7.75 seconds of derived 2100-character
+completion gain, but its formal stopped before attempt artifacts on Hongxing's
+direction. This is directional, not formal/product credit. Provider-native Semantic VAD is again the
 next existing no-Browser screen. Adaptive WebAudio at 250 ms has a
 promising 532.295 ms one-round segment signal, but production remains at 1000 ms
 until a clean compatible A1/B/A2 and truthful underrun/rebuffer evidence pass.
@@ -587,7 +629,9 @@ The 2026-08-24 SOTA review introduced LVL-10 as a separate materiality question
 from LVL-07. The completed screen grants no product credit: the current
 full-final SSE route remains unchanged, Browser Lane C is closed, and the
 [sanitized result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md)
-owns the long-form secondary signal and its limits.
+owns the original long-form secondary signal and its limits; the
+[LVL-10L result](../evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md)
+owns the stopped completion-primary follow-up.
 The current-source muted pilot adds partial localization at approximately
 587.6 ms EOT/STT, 1,518.3 ms TTS-to-downlink and 728.0 ms schedule-to-start
 diagnostic medians, but only two dialogue rounds completed. Four Task batches
