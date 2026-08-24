@@ -48,6 +48,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     _RealtimeSocketTerminalEof,
     _StreamingLinearResampler,
     _TransportCleanupOwner,
+    _NATIVE_RESPONSE_REQUIRED_FIELDS,
     _default_socket_factory,
     _degradation_fact,
     _native_response_metadata,
@@ -3322,6 +3323,53 @@ async def test_native_realtime_opening_cancel_owns_close_wakeup_and_duplicate(
 
 
 @pytest.mark.asyncio
+async def test_native_realtime_cancel_caller_cannot_cancel_shared_finalizer() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = OrderedOpeningCloseSocket(_RealtimeSocketTerminalEof())
+
+    async def socket_factory(*_args) -> OrderedOpeningCloseSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    open_task = asyncio.create_task(
+        provider.open_recognition(request, timeout_seconds=0.4)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if socket.sent:
+            break
+    session = provider._require_recognition(request.ref)
+
+    cancelled_waiter = asyncio.create_task(provider.cancel_recognition(request.ref))
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    finalizer = session.finalization_task
+    assert finalizer is not None
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    assert finalizer.done() is False
+
+    surviving_waiter = asyncio.create_task(provider.cancel_recognition(request.ref))
+    assert session.finalization_task is finalizer
+    socket.release_close.set()
+    await surviving_waiter
+    assert await finalizer is not None
+    with pytest.raises(asyncio.CancelledError):
+        await open_task
+    assert socket.closed is True
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_native_realtime_opening_cancel_finalizes_before_process_control() -> (
     None
 ):
@@ -3862,9 +3910,7 @@ async def test_native_realtime_synthesis_close_drain_allows_rate_limits() -> Non
         "status",
         "output",
         "audio_format",
-        "missing_conversation",
-        "missing_status_details",
-        "missing_usage",
+        *(f"missing:{field}" for field in sorted(_NATIVE_RESPONSE_REQUIRED_FIELDS)),
     ),
 )
 @pytest.mark.asyncio
@@ -3897,12 +3943,9 @@ async def test_native_realtime_synthesis_rejects_changed_initial_response(
         output = audio["output"]
         assert isinstance(output, dict)
         output["format"] = {"type": "audio/pcmu"}
-    elif mutation == "missing_conversation":
-        del response["conversation_id"]
-    elif mutation == "missing_status_details":
-        del response["status_details"]
     else:
-        del response["usage"]
+        _, missing_field = mutation.split(":", maxsplit=1)
+        del response[missing_field]
 
     native_response_prelude(
         socket,
@@ -3942,7 +3985,7 @@ async def test_native_realtime_synthesis_rejects_changed_initial_response(
         "status_details",
         "usage_type",
         "usage_total",
-        "missing_usage",
+        *(f"missing:{field}" for field in sorted(_NATIVE_RESPONSE_REQUIRED_FIELDS)),
     ),
 )
 @pytest.mark.asyncio
@@ -3982,7 +4025,8 @@ async def test_native_realtime_synthesis_rejects_contradictory_terminal_response
         assert isinstance(usage, dict)
         usage["total_tokens"] = 4
     else:
-        del terminal["usage"]
+        _, missing_field = mutation.split(":", maxsplit=1)
+        del terminal[missing_field]
     for event in completion:
         socket.push(event)
 
