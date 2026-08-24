@@ -87,6 +87,7 @@ import {
   BrowserAudioDeviceSelectionOwner,
   type BrowserAudioDeviceSelectionSnapshot,
 } from '../../features/live-voice/formal/browserAudioDeviceSelection';
+import type { BrowserAudioCaptureStreamFactory } from '../../features/live-voice/formal/adapters/browserAudioIOAdapter';
 import {
   ProductUnifiedCommittedInputOwner,
   type UnifiedAuthoritativeFinal,
@@ -188,6 +189,7 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
 export interface ProductLiveVoiceSurfaceControl {
   start(): Promise<void>;
   stop(): Promise<void>;
+  setL0CaptureStreamFactory(factory: BrowserAudioCaptureStreamFactory | null): void;
   closeSession(sessionId: string): Promise<void>;
   updateInput(value: string): void;
   submit(): void;
@@ -1443,6 +1445,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const retiredPresentationAckOwnerRequestRef = useRef(new Map<ProductWebP2ActivationOwner, string>());
   const retiredPresentationAckDrainIdentityRef = useRef(0);
   const p1VoiceOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
+  const l0CaptureStreamFactoryRef = useRef<BrowserAudioCaptureStreamFactory | null>(null);
   const p1VoiceOwnerSessionRef = useRef<string | null>(null);
   const unifiedInputOwnerRef = useRef<ProductUnifiedCommittedInputOwner | null>(null);
   const deviceSelectionOwnerRef = useRef<BrowserAudioDeviceSelectionOwner | null>(null);
@@ -4496,6 +4499,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         enabled: true,
         expected_origin: window.location.origin,
         request: productRequest,
+        ...(l0CaptureStreamFactoryRef.current === null
+          ? {}
+          : { capture_stream_factory: l0CaptureStreamFactoryRef.current }),
         on_status: (status, reason) => {
           if (callbackOwner !== null && p1VoiceOwnerRef.current === callbackOwner) {
             if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
@@ -6153,6 +6159,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const control = Object.freeze<ProductLiveVoiceSurfaceControl>({
       start: startProductVoiceLoop,
       stop: () => (p1VoiceOwnerRef.current?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture()),
+      setL0CaptureStreamFactory: factory => {
+        l0CaptureStreamFactoryRef.current = factory;
+      },
       closeSession: closeProductVoiceSession,
       updateInput: handleProductCommandInput,
       submit: handleProductSubmit,

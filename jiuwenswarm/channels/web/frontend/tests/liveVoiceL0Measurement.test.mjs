@@ -36,6 +36,7 @@ test('flag off exposes no control and records no observation', async () => {
   const measurement = await import(`${moduleUrl}?off`);
   assert.equal(measurement.browserL0Available(), false);
   assert.equal(measurement.browserL0Enabled(), false);
+  assert.equal(measurement.browserL0Control(), null);
   assert.equal(globalThis.__JIUWENSWARM_LIVE_VOICE_L0__, undefined);
   assert.equal(
     measurement.recordBrowserL0Milestone({
@@ -52,6 +53,7 @@ test('opt-in control retains only closed content-free production observations', 
   const measurement = await import(`${moduleUrl}?enabled`);
   const control = globalThis.__JIUWENSWARM_LIVE_VOICE_L0__;
   assert.ok(control);
+  assert.equal(measurement.browserL0Control(), control);
   assert.equal(measurement.browserL0Available(), true);
   assert.equal(measurement.browserL0Enabled(), false);
   assert.equal(

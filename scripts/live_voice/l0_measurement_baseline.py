@@ -45,6 +45,7 @@ PROVIDER_ENVIRONMENT_REF = "environment-provider-machine-current"
 _LOCAL_NONSOURCE_PREFIXES = (".codex_tmp/",)
 _RUN_SOURCE_METADATA_NAME = "browser-session.json"
 _BROWSER_SESSION_VERSION = "live-voice.l0-browser-session.v6"
+_ORDINARY_BROWSER_SESSION_VERSION = "live-voice.l0-ordinary-browser-session.v1"
 _BASE_TIME = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
 _COMPLETED = frozenset(
     {
@@ -562,12 +563,15 @@ async def build_provider_component_baseline(
     return report, complete
 
 
-def _provenance_from_input_metadata(inputs: Sequence[Path]) -> tuple[str, str, str]:
+def _provenance_from_input_metadata(
+    inputs: Sequence[Path],
+) -> tuple[str, str, str, str | None]:
     if not inputs:
         raise RuntimeError("aggregation requires at least one input")
     source_heads: set[str] = set()
     environment_refs: set[str] = set()
     configuration_sha256s: set[str] = set()
+    corpus_sha256s: set[str] = set()
     for directory in {path.resolve().parent for path in inputs}:
         metadata_path = directory / _RUN_SOURCE_METADATA_NAME
         try:
@@ -582,8 +586,49 @@ def _provenance_from_input_metadata(inputs: Sequence[Path]) -> tuple[str, str, s
         evidence_directory = metadata.get("evidence_directory")
         environment_ref = metadata.get("environment_ref")
         configuration_sha256 = metadata.get("configuration_sha256")
+        schema_version = metadata.get("schema_version")
+        ordinary_session = schema_version == _ORDINARY_BROWSER_SESSION_VERSION
+        if ordinary_session:
+            if set(metadata) != {
+                "schema_version",
+                "source_head",
+                "runtime_profile",
+                "evidence_directory",
+                "run_labels_file",
+                "browser_page_origin",
+                "browser_mode",
+                "environment_ref",
+                "configuration_sha256",
+                "corpus_sha256",
+                "physical_evidence",
+                "raw_audio_retained",
+                "transcript_retained",
+            }:
+                raise RuntimeError(
+                    "ordinary-browser source metadata has an invalid closed shape"
+                )
+            if (
+                metadata.get("runtime_profile") != "formal-web-validation"
+                or metadata.get("browser_page_origin") != "http://localhost:5173"
+                or metadata.get("browser_mode") != "ordinary-installed-chrome"
+                or type(metadata.get("run_labels_file")) is not str
+                or Path(str(metadata.get("run_labels_file"))).resolve()
+                != directory / "run-labels.json"
+                or type(metadata.get("corpus_sha256")) is not str
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(metadata.get("corpus_sha256"))
+                )
+                or metadata.get("physical_evidence") != "not-claimed"
+                or metadata.get("raw_audio_retained") is not False
+                or metadata.get("transcript_retained") is not False
+            ):
+                raise RuntimeError("ordinary-browser source metadata is invalid")
+            corpus_sha256s.add(str(metadata["corpus_sha256"]))
         if (
-            metadata.get("schema_version") != _BROWSER_SESSION_VERSION
+            schema_version not in {
+                _BROWSER_SESSION_VERSION,
+                _ORDINARY_BROWSER_SESSION_VERSION,
+            }
             or type(source_head) is not str
             or not re.fullmatch(r"[0-9a-f]{40}", source_head)
             or type(evidence_directory) is not str
@@ -592,7 +637,10 @@ def _provenance_from_input_metadata(inputs: Sequence[Path]) -> tuple[str, str, s
             or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", environment_ref)
             or type(configuration_sha256) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", configuration_sha256)
-            or metadata.get("physical_evidence") != "pending-user-run"
+            or (
+                not ordinary_session
+                and metadata.get("physical_evidence") != "pending-user-run"
+            )
         ):
             raise RuntimeError("input source metadata is invalid")
         source_heads.add(source_head)
@@ -604,10 +652,13 @@ def _provenance_from_input_metadata(inputs: Sequence[Path]) -> tuple[str, str, s
         raise RuntimeError(
             "input runs do not share one exact environment and configuration"
         )
+    if len(corpus_sha256s) > 1:
+        raise RuntimeError("input runs do not share one exact corpus")
     return (
         next(iter(source_heads)),
         next(iter(environment_refs)),
         next(iter(configuration_sha256s)),
+        next(iter(corpus_sha256s)) if corpus_sha256s else None,
     )
 
 
@@ -623,6 +674,7 @@ def aggregate_jsonl(
         input_source_head,
         input_environment_ref,
         input_configuration_sha256,
+        input_corpus_sha256,
     ) = _provenance_from_input_metadata(inputs)
     if input_source_head != source_head:
         raise RuntimeError("input run source HEAD differs from the requested source")
@@ -631,6 +683,8 @@ def aggregate_jsonl(
             "input run environment differs from the requested environment"
         )
     manifest, digest = load_l0_corpus_manifest(corpus_path)
+    if input_corpus_sha256 is not None and input_corpus_sha256 != digest:
+        raise RuntimeError("input run corpus differs from the requested corpus")
     profiles = {
         str(profile["profile_id"]): profile for profile in manifest["profiles"]
     }

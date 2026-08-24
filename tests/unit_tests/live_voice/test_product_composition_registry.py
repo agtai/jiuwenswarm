@@ -60,6 +60,10 @@ from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
 )
+from jiuwenswarm.server.live_voice.conversation_runtime import (
+    CancelState,
+    ResponseState,
+)
 from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
@@ -12627,6 +12631,107 @@ async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
     assert not {"response.cancel", "round.cancel", "task.cancel"} & set(effect_types)
 
     blocking.release.set()
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_product_p2_terminal_barge_after_text_ack_is_playback_only(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-terminal-barge",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-terminal-barge",
+            turn_id="turn-terminal-barge",
+            response_id="response-terminal-barge",
+            committed_at=NOW,
+            text="finish generation before downstream playout stops",
+            dispatch_target="agent",
+        ),
+        request_id="request-submit-terminal-barge",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    response = cast(dict, cast(dict, submitted.payload["result"])["response"])
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime._cr
+    for _ in range(100):
+        snapshot = runtime.snapshot()
+        matching = [
+            record
+            for record in snapshot.conversation.responses
+            if record.ref.response_id == response["response_id"]
+        ]
+        units = [
+            record.unit
+            for record in snapshot.presentation.records
+            if record.unit.ref.response_id == response["response_id"]
+        ]
+        if matching and matching[0].state is ResponseState.TERMINAL and units:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("Agent response did not reach terminal presentation")
+
+    unit = units[0]
+    acknowledged = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id=response["response_id"],
+            response_generation=response["response_generation"],
+            surface=unit.surface.value,
+            unit_id=unit.unit_id,
+            contiguous_cursor=unit.seq,
+            presented_at=ACK_NOW,
+        ),
+        request_id="request-ack-terminal-barge",
+        session_id="session-product",
+    )
+    assert acknowledged.ok is True
+
+    interrupted = await registry.handle_p2_barge_in(
+        params=_p2_params(
+            action_id="terminal-barge-action",
+            response_id=response["response_id"],
+            response_generation=response["response_generation"],
+            cancel_response=True,
+        ),
+        request_id="request-terminal-barge",
+        session_id="session-product",
+    )
+
+    assert interrupted.ok is True
+    result = cast(dict, interrupted.payload["result"])
+    assert result["status"] == "barge_in_applied"
+    assert result["applied"] is True
+    assert result["replayed"] is False
+    assert result["cancel_response"] is True
+    effects = runtime.snapshot().effects
+    assert [
+        record.effect.effect_type
+        for record in effects
+        if record.effect.effect_id in result["effect_ids"]
+    ] == ["playback.stop"]
+    assert all(
+        record.effect.effect_type
+        not in {"response.cancel", "round.cancel", "task.cancel"}
+        for record in effects
+    )
+    terminal = next(
+        record
+        for record in runtime.snapshot().conversation.responses
+        if record.ref.response_id == response["response_id"]
+    )
+    assert terminal.state is ResponseState.TERMINAL
+    assert terminal.cancel_state is CancelState.NONE
+
     await registry.close_active_routes()
 
 

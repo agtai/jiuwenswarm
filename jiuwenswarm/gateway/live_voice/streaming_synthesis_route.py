@@ -1062,17 +1062,20 @@ class StreamingSynthesisRouteOwner:
                 handle, reason, allow_batch=False, cancel_provider=True
             )
         except asyncio.CancelledError as caller_cancel:
-            try:
-                await self._terminate(
+            cleanup_task = asyncio.create_task(
+                self._terminate(
                     handle, reason, allow_batch=False, cancel_provider=True
-                )
-            except (
-                asyncio.CancelledError,
-                KeyboardInterrupt,
-                SystemExit,
-                GeneratorExit,
-            ):
-                pass
+                ),
+                name="live-voice-streaming-tts-cancel-cleanup",
+            )
+            while True:
+                try:
+                    await asyncio.shield(cleanup_task)
+                    break
+                except asyncio.CancelledError:
+                    continue
+                except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                    break
             raise caller_cancel
 
     async def wait_for_retained_cleanup(

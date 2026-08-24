@@ -1023,7 +1023,10 @@ async def test_product_business_methods_dispatch_only_exact_rpc_context(
     if includes_channel:
         expected["channel_id"] = "web"
     assert registry.calls == [(label, expected)]
-    assert json.loads(ws.sent[0])["status"] == "succeeded"
+    wire = json.loads(ws.sent[0])
+    assert wire["status"] == "succeeded"
+    if method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN:
+        assert wire["response_kind"] == "e2a.complete"
 
 
 def _intent_observation_route_result(

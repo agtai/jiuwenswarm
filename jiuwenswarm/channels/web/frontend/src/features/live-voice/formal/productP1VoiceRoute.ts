@@ -1,6 +1,7 @@
 import { LIVE_VOICE_AUDIO_FRAME_DURATION_MS, createAudioRenderPlan, type AudioResponseRef, type CapturedAudioFrame } from './audioPort.js';
 import {
   BrowserAudioIOAdapter,
+  type BrowserAudioCaptureStreamFactory,
   type BrowserAudioEnvironment,
   type BrowserAudioPcmChunk,
   type BrowserAudioPlayoutEvent,
@@ -426,6 +427,7 @@ export class ProductP1VoiceRouteOwner {
       expected_origin: string;
       socket_factory?: DedicatedMediaSocketFactory;
       audio_environment?: BrowserAudioEnvironment;
+      capture_stream_factory?: BrowserAudioCaptureStreamFactory;
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
       on_concurrent_capture_started?: () => void;
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
@@ -445,6 +447,7 @@ export class ProductP1VoiceRouteOwner {
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
       ...(input.audio_environment === undefined ? {} : { environment: input.audio_environment }),
+      ...(input.capture_stream_factory === undefined ? {} : { captureStreamFactory: input.capture_stream_factory }),
       observer: {
         onCaptureFrame: frame => this.#acceptCaptureFrame(frame),
         onCaptureState: event => {

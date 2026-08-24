@@ -486,7 +486,7 @@ class _TransportCleanupOwner:
             remaining = max(0.0, deadline - asyncio.get_running_loop().time())
             done, _ = await asyncio.wait({result}, timeout=remaining)
         except asyncio.CancelledError:
-            _log_transport_cleanup(
+            _log_transport_cleanup_deferred(
                 kind=kind, reason="caller-cancelled", retained_count=len(self._tasks)
             )
             raise
@@ -503,7 +503,7 @@ class _TransportCleanupOwner:
             # per stream until capacity is exhausted.  Retaining the task keeps
             # the caller hard-bounded while the owner still finishes and
             # releases the slot.
-            _log_transport_cleanup(
+            _log_transport_cleanup_deferred(
                 kind=kind, reason="timeout", retained_count=len(self._tasks)
             )
         self._prune()
@@ -539,13 +539,13 @@ class _TransportCleanupOwner:
             )
         except asyncio.CancelledError:
             task.cancel()
-            _log_transport_cleanup(
+            _log_transport_cleanup_deferred(
                 kind=kind, reason="caller-cancelled", retained_count=len(self._tasks)
             )
             raise
         if tracked not in done:
             task.cancel()
-            _log_transport_cleanup(
+            _log_transport_cleanup_deferred(
                 kind=kind, reason="timeout", retained_count=len(self._tasks)
             )
             return False
@@ -1173,12 +1173,6 @@ class OpenAIStreamingSpeechProvider:
         self._conformance.provider_closed_recognition(ref)
         session.terminal = True
         await self._retire_recognition(session)
-        await self._emit_failure(
-            operation="recognition.cancel",
-            reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
-            started_at=None,
-            identity=f"{ref.session_id}:{ref.session_generation}",
-        )
 
     async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
         session: _SynthesisSession | None = None
@@ -1248,12 +1242,6 @@ class OpenAIStreamingSpeechProvider:
         self._conformance.provider_closed_synthesis(ref)
         session.terminal = True
         await self._retire_synthesis(session)
-        await self._emit_failure(
-            operation="synthesis.cancel",
-            reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
-            started_at=None,
-            identity=f"{ref.stream_id}:{ref.stream_generation}",
-        )
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -2335,6 +2323,18 @@ def _log_sink_unavailable(fact: SpeechDegradationFact, *, reason: str) -> None:
 def _log_transport_cleanup(*, kind: str, reason: str, retained_count: int) -> None:
     _LOGGER.error(
         "live_voice_speech_transport_cleanup_incomplete "
+        "kind=%s reason=%s retained_count=%d",
+        kind,
+        reason,
+        retained_count,
+    )
+
+
+def _log_transport_cleanup_deferred(
+    *, kind: str, reason: str, retained_count: int
+) -> None:
+    _LOGGER.info(
+        "live_voice_speech_transport_cleanup_deferred "
         "kind=%s reason=%s retained_count=%d",
         kind,
         reason,

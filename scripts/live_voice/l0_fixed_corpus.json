@@ -44,6 +44,22 @@
       "physical_required": false
     },
     {
+      "profile_id": "ordinary-chrome-prerecorded-cold",
+      "evidence_source": "prerecorded",
+      "network_profile_ref": "network-machine-current",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "cold",
+      "physical_required": false
+    },
+    {
+      "profile_id": "ordinary-chrome-prerecorded-warm",
+      "evidence_source": "prerecorded",
+      "network_profile_ref": "network-machine-current",
+      "minimum_successful_rounds": 20,
+      "temperature_policy": "warm",
+      "physical_required": false
+    },
+    {
       "profile_id": "physical-formal-web-cold",
       "evidence_source": "physical",
       "network_profile_ref": "network-room-current",

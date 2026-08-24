@@ -28,6 +28,7 @@ SOURCE_HEAD = "c31e85ade1a69e934d05bfb9c277568a1238663c"
 CORPUS = Path("scripts/live_voice/l0_fixed_corpus.json")
 ENVIRONMENT_REF = "environment-physical-test"
 CONFIGURATION_SHA256 = "b" * 64
+CORPUS_SHA256 = "a51a17289edf1dbcd83da66526d2175e2f84c516240d585e9a78b814551e99d6"
 
 
 def test_direct_cli_imports_the_current_repository_implementation() -> None:
@@ -45,7 +46,7 @@ def test_direct_cli_imports_the_current_repository_implementation() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == (
-        "888fdcba848037c1feba6c8c31a15641d721507b57e0985ba2d14446e7d4b563"
+        "a51a17289edf1dbcd83da66526d2175e2f84c516240d585e9a78b814551e99d6"
     )
 
 
@@ -105,6 +106,64 @@ def _write_source_metadata(
         ),
         encoding="utf-8",
     )
+
+
+def _write_ordinary_source_metadata(
+    tmp_path: Path,
+    *,
+    corpus_sha256: str = CORPUS_SHA256,
+    extra: bool = False,
+) -> None:
+    value = {
+        "schema_version": "live-voice.l0-ordinary-browser-session.v1",
+        "source_head": SOURCE_HEAD,
+        "runtime_profile": "formal-web-validation",
+        "evidence_directory": str(tmp_path.resolve()),
+        "run_labels_file": str((tmp_path / "run-labels.json").resolve()),
+        "browser_page_origin": "http://localhost:5173",
+        "browser_mode": "ordinary-installed-chrome",
+        "environment_ref": ENVIRONMENT_REF,
+        "configuration_sha256": CONFIGURATION_SHA256,
+        "corpus_sha256": corpus_sha256,
+        "physical_evidence": "not-claimed",
+        "raw_audio_retained": False,
+        "transcript_retained": False,
+    }
+    if extra:
+        value["unexpected"] = True
+    (tmp_path / "browser-session.json").write_text(
+        json.dumps(value), encoding="utf-8"
+    )
+
+
+def test_ordinary_browser_provenance_is_closed_and_corpus_bound(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    record.update(
+        profile_id="ordinary-chrome-prerecorded-warm",
+        evidence_source="prerecorded",
+    )
+    path = tmp_path / "records.jsonl"
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    _write_ordinary_source_metadata(tmp_path, corpus_sha256="0" * 64)
+    with pytest.raises(RuntimeError, match="corpus differs"):
+        aggregate_jsonl(
+            inputs=(path,),
+            corpus_path=CORPUS,
+            source_head=SOURCE_HEAD,
+            environment_ref=ENVIRONMENT_REF,
+        )
+
+    _write_ordinary_source_metadata(tmp_path, extra=True)
+    with pytest.raises(RuntimeError, match="invalid closed shape"):
+        aggregate_jsonl(
+            inputs=(path,),
+            corpus_path=CORPUS,
+            source_head=SOURCE_HEAD,
+            environment_ref=ENVIRONMENT_REF,
+        )
 
 
 def test_aggregate_accepts_only_profile_scenario_and_source_from_fixed_corpus(

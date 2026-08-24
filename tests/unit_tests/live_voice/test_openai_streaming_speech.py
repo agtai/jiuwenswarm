@@ -1659,7 +1659,7 @@ async def test_recognition_cancel_is_local_fence_not_provider_ack() -> None:
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.cancel_recognition(ref)
     assert socket.closed is True
-    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert facts == []
     snapshot = provider.conformance.snapshot()
     assert snapshot.active_recognition == 0
     assert snapshot.retained_recognition == 0
@@ -2058,7 +2058,7 @@ async def test_synthesis_cancel_closes_transport_without_cancelled_event() -> No
     assert started.kind is SynthesisEventKind.STARTED
     await provider.cancel_synthesis(request.ref)
     assert stream.closed is True
-    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert facts == []
     with pytest.raises(OpenAIStreamingSpeechError) as retired:
         await provider.next_synthesis_event(request.ref, timeout_seconds=0.01)
     assert retired.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
@@ -2498,7 +2498,9 @@ async def test_ga_transcription_item_lifecycle_events_do_not_fail_the_stream() -
 
 
 @pytest.mark.asyncio
-async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot() -> None:
+async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A close slower than the attempt budget must still complete.
 
     A real WebSocket close handshake needs a network round trip and can never
@@ -2508,6 +2510,8 @@ async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot() -> 
     close the route.  The caller must stay bounded while the owner finishes.
     """
 
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    _LOGGER.addHandler(caplog.handler)
     owner = _TransportCleanupOwner()
     release = asyncio.Event()
     completed = 0
@@ -2526,6 +2530,11 @@ async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot() -> 
     pending = owner.snapshot()
     assert pending.retained_task_count == len(resources)
     assert pending.failed_resource_count == 0
+    assert caplog.text.count("live_voice_speech_transport_cleanup_deferred") == len(
+        resources
+    )
+    assert "live_voice_speech_transport_cleanup_incomplete" not in caplog.text
+    _LOGGER.removeHandler(caplog.handler)
 
     release.set()
     for _ in range(100):

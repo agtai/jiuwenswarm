@@ -11,10 +11,22 @@ param(
     [switch]$AllowDirtyProject,
     [switch]$NoBrowser,
     [switch]$L0Measurement,
+    [switch]$L0OrdinaryChromeBatch,
+    [switch]$L0ResumeBatch,
+    [switch]$L0ReuseValidatedBuild,
     [ValidateRange(9222, 9322)]
     [int]$L0MeasurementPort = 9223,
+    [ValidateRange(9222, 9322)]
+    [int]$L0BatchPort = 9233,
     [string]$L0MeasurementDirectory,
     [string]$L0EnvironmentRef,
+    [ValidateSet('cold', 'warm')]
+    [string]$L0Temperature = 'warm',
+    [ValidateSet(20)]
+    [int]$L0SuccessfulRounds = 20,
+    [string]$L0BatchNonce,
+    [string]$L0EpochId,
+    [string]$L0BrowserPath = '/',
     [ValidateRange(30, 300)]
     [int]$ReadyTimeoutSeconds = 120
 )
@@ -30,7 +42,9 @@ $FrontendRoot = Join-Path $RepoRoot 'jiuwenswarm\channels\web\frontend'
 $ProductionFrontendEnv = Join-Path $FrontendRoot '.env.production'
 $LiveVoiceFrontendEnv = Join-Path $FrontendRoot '.env.live-voice'
 $FormalWebRuntimeProbe = Join-Path $PSScriptRoot 'formal_web_runtime_probe.py'
+$L0OrdinaryChromeCoordinator = Join-Path $PSScriptRoot 'l0_ordinary_chrome_batch.py'
 $ExpectedBranch = 'hx/0812_live_voice_w3'
+$L0Enabled = $L0Measurement -or $L0OrdinaryChromeBatch
 $FrontendPort = if ($RuntimeProfile -eq 'formal-web-validation') { 5173 } else { 6173 }
 $RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {
     'Formal Web validation'
@@ -443,6 +457,31 @@ function Wait-HttpResponse([string]$Uri, [DateTime]$Deadline) {
     return $null
 }
 
+function Wait-LiveVoiceDeploymentLog([string]$Path, [DateTime]$Deadline) {
+    do {
+        $logText = ''
+        try {
+            $logText = Get-Content -Raw -LiteralPath $Path -Encoding UTF8
+        } catch {
+            # The service state can point at the new log before the writer has
+            # created or released it. Keep the launch wait bounded by the same
+            # deployment deadline used for the listening/HTTP probes.
+        }
+        if ($logText -match 'LiveVoice(P3|Product).*failed closed') {
+            Fail '启动日志包含 Live Voice fail-closed 错误。'
+        }
+        if (
+            $logText -match '\[LiveVoiceP3\] authenticated formal route ready' -and
+            $logText -match '\[LiveVoiceProduct\] central composition registered; p2=True p3_text=True'
+        ) {
+            return $logText
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    return $null
+}
+
+$l0BatchProcess = $null
 try {
     Write-Step '检查源码与依赖'
     Set-Location -LiteralPath $RepoRoot
@@ -462,7 +501,11 @@ try {
     $ChromeExecutable = $null
     if (-not $NoBrowser) {
         $ChromeExecutable = Get-ChromeExecutable
-        Write-Pass "隔离浏览器将使用 Google Chrome：$ChromeExecutable"
+        if ($L0OrdinaryChromeBatch) {
+            Write-Pass "普通浏览器将使用已安装 Google Chrome：$ChromeExecutable"
+        } else {
+            Write-Pass "隔离浏览器将使用 Google Chrome：$ChromeExecutable"
+        }
     }
     & $Python -c "import openjiuwen.symphony, yaml; print('runtime-imports-ok')" | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -483,13 +526,33 @@ try {
     }
     $l0RunLabelsPath = $null
     $l0ConfigurationSha256 = $null
-    if ($L0Measurement) {
+    if ($L0Measurement -and $L0OrdinaryChromeBatch) {
+        Fail 'L0 隔离采集与普通 Chrome 自动批次不能同时启用。'
+    }
+    if (($L0ResumeBatch -or $L0ReuseValidatedBuild) -and -not $L0OrdinaryChromeBatch) {
+        Fail 'L0ResumeBatch/L0ReuseValidatedBuild 只适用于普通 Chrome 自动批次。'
+    }
+    if ($L0Enabled) {
         $l0LogsRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'logs'))
         if ($RuntimeProfile -ne 'formal-web-validation') {
             Fail 'L0 物理采集只允许 formal-web-validation profile。'
         }
-        if ($NoBrowser) {
+        if ($L0Measurement -and $NoBrowser) {
             Fail 'L0 物理采集需要隔离 Chrome，不能同时使用 -NoBrowser。'
+        }
+        if ($L0OrdinaryChromeBatch) {
+            if ($L0BatchNonce -notmatch '^[0-9a-f]{32}$') {
+                Fail '普通 Chrome 自动批次需要 32 位小写十六进制 L0BatchNonce。'
+            }
+            if ($L0EpochId -notmatch '^[0-9a-f]{32}$') {
+                Fail '普通 Chrome 自动批次需要 32 位小写十六进制 L0EpochId。'
+            }
+            if ($L0BrowserPath -notmatch '^/(?:chat/[A-Za-z0-9_-]+)?$') {
+                Fail 'L0BrowserPath 只允许 / 或一个安全的 /chat/<session> 路径。'
+            }
+            if (-not (Test-Path -LiteralPath $L0OrdinaryChromeCoordinator -PathType Leaf)) {
+                Fail "缺少普通 Chrome 批次协调器：$L0OrdinaryChromeCoordinator"
+            }
         }
         if (
             [string]::IsNullOrWhiteSpace($L0EnvironmentRef) -or
@@ -532,13 +595,23 @@ try {
         }
         if (Test-Path -LiteralPath $L0MeasurementDirectory) {
             $existingEvidence = @(Get-ChildItem -LiteralPath $L0MeasurementDirectory -Force)
-            if ($existingEvidence.Count -gt 0) {
+            if ($existingEvidence.Count -gt 0 -and -not ($L0OrdinaryChromeBatch -and $L0ResumeBatch)) {
                 Fail "L0 采集目录必须为空或不存在：$L0MeasurementDirectory"
             }
+            if ($existingEvidence.Count -eq 0 -and $L0ResumeBatch) {
+                Fail 'L0ResumeBatch 要求已有的非空受控证据目录。'
+            }
         } else {
+            if ($L0ResumeBatch) {
+                Fail 'L0ResumeBatch 指向的受控证据目录不存在。'
+            }
             New-Item -ItemType Directory -Path $L0MeasurementDirectory | Out-Null
         }
         $l0RunLabelsPath = Join-Path $L0MeasurementDirectory 'run-labels.json'
+        [ordered]@{
+            schema_version = 'live-voice.l0-run-labels.v1'
+            measurement = 'disabled'
+        } | ConvertTo-Json -Compress | Set-Content -LiteralPath $l0RunLabelsPath -Encoding UTF8
         Write-Pass "L0 内容无关证据目录已隔离：$L0MeasurementDirectory"
     }
 
@@ -632,7 +705,7 @@ try {
     } else {
         Write-Pass "$RuntimeProfileLabel Git 项目干净且无 remote"
     }
-    if ($L0Measurement -and $projectStatus.Count -gt 0) {
+    if ($L0Enabled -and $projectStatus.Count -gt 0) {
         Fail 'L0 物理采集要求项目精确绑定到干净 revision；-AllowDirtyProject 不能放宽该证据边界。'
     }
     $projectRevision = (@(
@@ -679,7 +752,7 @@ try {
     if ($speechBase.TrimEnd('/') -ne 'https://api.openai.com/v1') { Fail 'Demo 要求 LIVE_VOICE_SPEECH_API_BASE=https://api.openai.com/v1。' }
     if ($sttModel -ne 'gpt-4o-mini-transcribe-2025-12-15') { Fail 'STT 模型不是已验证的 Demo 模型。' }
     if ($ttsModel -ne 'gpt-4o-mini-tts-2025-12-15') { Fail 'TTS 模型不是已验证的 Demo 模型。' }
-    if ($L0Measurement) {
+    if ($L0Enabled) {
         $agentConfigurationSha256 = (
             Get-FileHash -LiteralPath $ConfigYamlPath -Algorithm SHA256
         ).Hash.ToLowerInvariant()
@@ -767,7 +840,7 @@ try {
     foreach ($entry in $featureEnvironment.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
     }
-    if ($L0Measurement) {
+    if ($L0Enabled) {
         [Environment]::SetEnvironmentVariable(
             'JIUWENSWARM_LIVE_VOICE_L0_MEASUREMENT_DIR',
             $L0MeasurementDirectory,
@@ -865,7 +938,7 @@ try {
     }
 
     Write-Step '处理旧服务并从最新源码构建'
-    if (-not $NoBrowser) {
+    if (-not $NoBrowser -and -not $L0OrdinaryChromeBatch) {
         Stop-ExistingIsolatedChrome -ChromeExecutable $ChromeExecutable
     }
     $owners = @(Get-ListeningOwners -Ports @($ExpectedPorts.Values))
@@ -875,18 +948,68 @@ try {
         }
         Stop-ExistingDemoServices
     }
-    Push-Location -LiteralPath $FrontendRoot
-    try {
-        & $NpmCommand install
-        if ($LASTEXITCODE -ne 0) {
-            Fail "前端依赖安装失败（exit=$LASTEXITCODE）。"
+    $l0BuildContractPath = Join-Path $RepoRoot 'logs\live_voice_l0_build_contract.json'
+    $frontendTree = (& git rev-parse 'HEAD:jiuwenswarm/channels/web/frontend').Trim()
+    $packageLockPath = Join-Path $FrontendRoot 'package-lock.json'
+    $packageLockSha256 = (Get-FileHash -LiteralPath $packageLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($L0ReuseValidatedBuild) {
+        if (-not (Test-Path -LiteralPath $l0BuildContractPath -PathType Leaf)) {
+            Fail '找不到 L0 已验证前端构建合同；必须先完成一次不带 L0ReuseValidatedBuild 的启动。'
         }
-        & $NpmCommand run build:live-voice
-        if ($LASTEXITCODE -ne 0) {
-            Fail "Live Voice 前端构建失败（exit=$LASTEXITCODE）。"
+        $buildContract = Get-Content -Raw -LiteralPath $l0BuildContractPath -Encoding UTF8 | ConvertFrom-Json
+        $bundleRelativePath = [string]$buildContract.bundle_relative_path
+        if ($bundleRelativePath -notmatch '^dist\\assets\\index-[A-Za-z0-9_-]+\.js$') {
+            Fail 'L0 已验证前端构建合同包含无效 bundle 路径。'
         }
-    } finally {
-        Pop-Location
+        $builtAsset = [System.IO.Path]::GetFullPath((Join-Path $FrontendRoot $bundleRelativePath))
+        $frontendPrefix = $FrontendRoot.TrimEnd('\') + '\'
+        if (-not $builtAsset.StartsWith($frontendPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Fail 'L0 已验证前端构建合同的 bundle 路径越界。'
+        }
+        if (
+            $buildContract.schema_version -ne 1 -or
+            $buildContract.source_head -ne (& git rev-parse HEAD).Trim() -or
+            $buildContract.frontend_tree -ne $frontendTree -or
+            $buildContract.package_lock_sha256 -ne $packageLockSha256 -or
+            -not (Test-Path -LiteralPath $builtAsset -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $builtAsset -Algorithm SHA256).Hash.ToLowerInvariant() -ne $buildContract.bundle_sha256
+        ) {
+            Fail 'L0 已验证前端构建合同与当前源码/依赖/产物不一致；拒绝复用。'
+        }
+        Write-Pass '已复用与当前 HEAD、前端 tree、lockfile 和 bundle 摘要精确绑定的构建'
+    } else {
+        Push-Location -LiteralPath $FrontendRoot
+        try {
+            & $NpmCommand install
+            if ($LASTEXITCODE -ne 0) {
+                Fail "前端依赖安装失败（exit=$LASTEXITCODE）。"
+            }
+            & $NpmCommand run build:live-voice
+            if ($LASTEXITCODE -ne 0) {
+                Fail "Live Voice 前端构建失败（exit=$LASTEXITCODE）。"
+            }
+        } finally {
+            Pop-Location
+        }
+        if ($L0OrdinaryChromeBatch) {
+            $distIndexPath = Join-Path $FrontendRoot 'dist\index.html'
+            $distIndex = Get-Content -Raw -LiteralPath $distIndexPath -Encoding UTF8
+            $distAssetMatch = [regex]::Match($distIndex, 'src="([^"?]*index-[^"?]+\.js)"')
+            if (-not $distAssetMatch.Success) {
+                Fail '无法为 L0 构建合同定位唯一的前端 bundle。'
+            }
+            $bundleRelativePath = ('dist/' + $distAssetMatch.Groups[1].Value.TrimStart('/')).Replace('/', '\')
+            $bundleFile = Join-Path $FrontendRoot $bundleRelativePath
+            [ordered]@{
+                schema_version = 1
+                source_head = (& git rev-parse HEAD).Trim()
+                frontend_tree = $frontendTree
+                package_lock_sha256 = $packageLockSha256
+                bundle_relative_path = $bundleRelativePath
+                bundle_sha256 = (Get-FileHash -LiteralPath $bundleFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            } | ConvertTo-Json | Set-Content -LiteralPath $l0BuildContractPath -Encoding UTF8
+            Write-Pass '已写入 L0 精确源码/依赖/bundle 构建合同'
+        }
     }
     & $Python -m jiuwenswarm.start_services debug --skip-build
     if ($LASTEXITCODE -ne 0) {
@@ -918,10 +1041,13 @@ try {
     $state = Get-Content -Raw -LiteralPath $statePath -Encoding UTF8 | ConvertFrom-Json
     $logPath = [string]$state.log_file
     if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { Fail '找不到服务启动日志。' }
-    $logText = Get-Content -Raw -LiteralPath $logPath -Encoding UTF8
-    if ($logText -notmatch '\[LiveVoiceP3\] authenticated formal route ready') { Fail 'P3 authenticated formal route 未就绪。' }
-    if ($logText -notmatch '\[LiveVoiceProduct\] central composition registered; p2=True p3_text=True') { Fail 'Live Voice 产品组合未完整注册。' }
-    if ($logText -match 'LiveVoice(P3|Product).*failed closed') { Fail '启动日志包含 Live Voice fail-closed 错误。' }
+    $logText = Wait-LiveVoiceDeploymentLog -Path $logPath -Deadline $deadline
+    if ($null -eq $logText) {
+        $logText = Get-Content -Raw -LiteralPath $logPath -Encoding UTF8
+        if ($logText -notmatch '\[LiveVoiceP3\] authenticated formal route ready') { Fail 'P3 authenticated formal route 未在启动时限内就绪。' }
+        if ($logText -notmatch '\[LiveVoiceProduct\] central composition registered; p2=True p3_text=True') { Fail 'Live Voice 产品组合未在启动时限内完整注册。' }
+        Fail 'Live Voice 部署日志探针未在启动时限内收敛。'
+    }
     Write-Pass "最新 Live Voice profile bundle 已加载（$assetPath）"
     Write-Pass 'P3 authenticated route 与 P2/P3 product composition 已就绪'
     Write-Pass '四个固定端口均已就绪；未发生静默端口漂移'
@@ -983,10 +1109,61 @@ try {
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $runtimeContractPath -Encoding UTF8
     Write-Pass "已写入不含密钥的运行合同：$runtimeContractPath"
 
+    if ($L0OrdinaryChromeBatch) {
+        $batchPortOwners = @(Get-ListeningOwners -Ports @($L0BatchPort))
+        if ($batchPortOwners.Count -gt 0) {
+            Fail "L0 普通 Chrome 协调端口 $L0BatchPort 已被占用；拒绝连接或停止未知进程。"
+        }
+        $batchStdout = Join-Path $L0MeasurementDirectory "coordinator-$L0EpochId.stdout.log"
+        $batchStderr = Join-Path $L0MeasurementDirectory "coordinator-$L0EpochId.stderr.log"
+        $coordinatorArguments = @(
+            ('"{0}"' -f $L0OrdinaryChromeCoordinator),
+            '--evidence-directory', ('"{0}"' -f $L0MeasurementDirectory),
+            '--run-labels-file', ('"{0}"' -f $l0RunLabelsPath),
+            '--source-head', (& git rev-parse HEAD).Trim(),
+            '--environment-ref', $L0EnvironmentRef,
+            '--configuration-sha256', $l0ConfigurationSha256,
+            '--browser-origin', "http://localhost:$FrontendPort",
+            '--nonce', $L0BatchNonce,
+            '--temperature', $L0Temperature,
+            '--epoch-id', $L0EpochId,
+            '--target', [string]$L0SuccessfulRounds,
+            '--port', [string]$L0BatchPort
+        )
+        $l0BatchProcess = Start-Process `
+            -FilePath $Python `
+            -ArgumentList $coordinatorArguments `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $batchStdout `
+            -RedirectStandardError $batchStderr `
+            -PassThru
+        $batchDeadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSeconds)
+        if (-not (Wait-TcpPort -Port $L0BatchPort -Deadline $batchDeadline)) {
+            if (-not $l0BatchProcess.HasExited) {
+                Stop-Process -Id $l0BatchProcess.Id -Force -ErrorAction SilentlyContinue
+            }
+            Fail 'L0 普通 Chrome 协调器未在时限内就绪。'
+        }
+        if ($l0BatchProcess.HasExited) {
+            Fail "L0 普通 Chrome 协调器启动后退出（exit=$($l0BatchProcess.ExitCode)）。"
+        }
+        Write-Pass "L0 普通 Chrome 协调器已就绪：127.0.0.1:$L0BatchPort；temperature=$L0Temperature"
+    }
+
     $isolatedChrome = $null
     $isolatedChromeProfile = $null
     $browserLaunchNonce = $null
-    if (-not $NoBrowser) {
+    if (-not $NoBrowser -and $L0OrdinaryChromeBatch) {
+        Write-Step '在普通已安装 Chrome 中打开 L0 批次页'
+        $browserUrl = "http://localhost:$FrontendPort$L0BrowserPath"
+        $browserUrl += "?live_voice_l0_measurement=1&live_voice_l0_batch=1"
+        $browserUrl += "&live_voice_l0_coordinator_port=$L0BatchPort&live_voice_l0_nonce=$L0BatchNonce"
+        Start-Process `
+            -FilePath $ChromeExecutable `
+            -ArgumentList @('--new-tab', ('"{0}"' -f $browserUrl)) `
+            -WindowStyle Normal | Out-Null
+        Write-Pass '已在普通 Chrome profile 打开批次页；未创建、连接或清理隔离 profile'
+    } elseif (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
         $browserUrl = "http://localhost:$FrontendPort"
         $remoteDebuggingPort = 0
@@ -1043,10 +1220,20 @@ try {
         Write-Host "  Cold shard: add --profile physical-formal-web-cold --temperature cold --successful-rounds 1 --scenario <case-id> --sample-index-start <unique-index>" -ForegroundColor Yellow
         Write-Host "  Cold aggregate: use --aggregate-cold, repeat --evidence-directory <cold-epoch-dir>, and set --output <report.json>" -ForegroundColor Yellow
     }
+    if ($L0OrdinaryChromeBatch) {
+        Write-Host "  L0 Evidence: $L0MeasurementDirectory" -ForegroundColor DarkGray
+        Write-Host "  Ordinary Chrome coordinator: 127.0.0.1:$L0BatchPort ($L0Temperature)" -ForegroundColor DarkGray
+        if (-not $NoBrowser) {
+            Write-Host '  在右下角 L0 面板点击一次“开始自动批次”并完成首次麦克风授权。' -ForegroundColor Yellow
+        }
+    }
     Write-Host '  首次进入页面仍需由浏览器授予麦克风权限并选择该项目。' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green
     exit 0
 } catch {
+    if ($null -ne $l0BatchProcess -and -not $l0BatchProcess.HasExited) {
+        Stop-Process -Id $l0BatchProcess.Id -Force -ErrorAction SilentlyContinue
+    }
     $failureLine = $_.InvocationInfo.ScriptLineNumber
     Write-Host "`n[Live Voice Demo 启动失败] $($_.Exception.Message)（脚本行 $failureLine）" -ForegroundColor Red
     Write-Host '没有输出任何密钥。修复上述单一问题后重新运行即可。' -ForegroundColor Yellow

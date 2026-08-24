@@ -66,7 +66,9 @@ import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
+import type { BrowserAudioCaptureStreamFactory } from '../../features/live-voice/formal/adapters/browserAudioIOAdapter';
 import { useProductVoiceBrowserOwnership } from './useProductVoiceBrowserOwnership';
+import { L0OrdinaryChromeBatchPanel } from './L0OrdinaryChromeBatchPanel';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -1306,6 +1308,24 @@ export function ChatPanel({
     controlRef: productVoiceControlRef,
     getActiveSessionId: getActiveProductVoiceSessionId,
   });
+  const l0OrdinaryChromeVoiceControl = useMemo(
+    () => formalProductVoiceEnabled
+      ? Object.freeze({
+          start: startProductVoiceWithBrowserOwnership,
+          stop: stopProductVoiceAndReleaseBrowserOwnership,
+          setL0CaptureStreamFactory: (factory: BrowserAudioCaptureStreamFactory | null) => {
+            const control = productVoiceControlRef.current;
+            if (control === null) throw new Error('formal Live Voice surface is unavailable');
+            control.setL0CaptureStreamFactory(factory);
+          },
+        })
+      : null,
+    [
+      formalProductVoiceEnabled,
+      startProductVoiceWithBrowserOwnership,
+      stopProductVoiceAndReleaseBrowserOwnership,
+    ],
+  );
   useEffect(() => {
     setProductVoiceState(null);
   }, [activeSessionId]);
@@ -1607,6 +1627,14 @@ export function ChatPanel({
                 }
               : undefined
           }
+        />
+      )}
+
+      {formalProductVoiceEnabled && (
+        <L0OrdinaryChromeBatchPanel
+          control={l0OrdinaryChromeVoiceControl}
+          state={productVoiceState}
+          connected={isConnected}
         />
       )}
 

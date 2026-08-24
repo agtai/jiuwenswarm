@@ -401,6 +401,40 @@ test('capture reuses the user-unlocked playout context across bounded turns', as
   assert.equal(sharedContext.state, 'closed');
 });
 
+test('an explicit capture stream factory feeds the ordinary adapter without opening the microphone', async () => {
+  const fake = fakeEnvironment();
+  const injectedStream = new FakeStream(new FakeTrack({
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    deviceId: undefined,
+  }));
+  const factoryConstraints = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    captureStreamFactory: async constraints => {
+      factoryConstraints.push(constraints);
+      return injectedStream;
+    },
+  });
+
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture({ deviceId: 'l0-bound-input' });
+
+  assert.equal(fake.mediaDevices.constraints.length, 0, 'the physical microphone must remain unopened');
+  assert.equal(factoryConstraints.length, 1);
+  assert.equal(factoryConstraints[0].video, false);
+  assert.equal(factoryConstraints[0].audio.deviceId.exact, 'l0-bound-input');
+  assert.equal(metadata.actual_processing.echo_cancellation, false);
+  assert.equal(metadata.actual_processing.noise_suppression, false);
+  assert.equal(metadata.actual_processing.auto_gain_control, false);
+
+  await adapter.stopCapture('l0_sample_complete');
+  assert.equal(injectedStream.track.stopCount, 1);
+  await adapter.close();
+});
+
 test('close fences an active capture on the shared context without restoring stale handlers', async () => {
   const fake = fakeEnvironment();
   const adapter = new BrowserAudioIOAdapter({

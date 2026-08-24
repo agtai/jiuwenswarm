@@ -1079,3 +1079,24 @@
 - 非声明：一次人工验收不能把后续自动样本升级为逐轮物理确认；自动 Browser 数值也不是声压传感器测得的 physical-first-audible 或 physical-silence。没有外部声学 oracle 时，严格物理声学 p95、AEC/double-talk、跨设备/房间泛化和 release 稳定性保持开放。本决定不改变 product-readiness、feature-complete、Production 或 remote-ref 状态。
 - 完成门：上述人工记录、两个温度的两类最小样本序列、sanitized 聚合、runner 适用自动化和风险相称 review 必须绑定同一个接受 source 后，L0 才可按本决定记工程测量闭环。当前 runner 若仍要求受控端点或逐轮 operator verdict，先在独立实施包中收敛该差异；不得通过自动输入 `pass`、普通 Chrome 冒充受控 provenance 或更名指标绕过门槛。
 - 重新评估条件：需要严格物理声学 p95；引入参考麦克风、可信硬件/OS loopback 或原始音频保留；改变 corpus、里程碑端点、样本最低数、成功资格或 cold epoch 定义；或把该 L0 工程测量闭环升级为产品/发布 Gate。
+
+## D-096 D-095 自动序列使用普通 Chrome 单次解锁与本地协调器
+
+- 日期：2026-08-24。
+- 状态：Accepted scoped D-095 runner re-evaluation（用户要求减少人工介入并开始实施；本决定只收敛 D-095 自动序列，不把尚未完成的真实序列或聚合记为 PASS）。
+- 普通 Chrome：runner 只在已安装的普通 Google Chrome profile 中打开一个带随机 nonce 的 localhost 页面，不创建、连接、停止或清理隔离 profile，也不启用 CDP/remote-debugging。用户只需首次点击一次以满足浏览器 user-activation；后续 warm/cold 样本、专用语音打断、失败重试、服务重启和聚合由本地控制器执行。固定预录语料同时送到扬声器和仅由该 nonce 页面安装的 WebAudio capture stream；后者进入不变的正式 Media/Realtime STT/Agent/TTS 链路，避免把耳机回放、默认麦克风和 AEC 的偶然声学耦合误当自动输入。
+- 固定输入与端点：13 个 case、`speech_end_to_webaudio_started_ms`/`stop_to_silence_ms` 端点、每温度每指标 20 个 eligible 目标、warm 一次非计数预热和 cold 每个 launcher epoch 最多一个 attempt 均不变。闭集 corpus 仅新增 `ordinary-chrome-prerecorded-cold|warm` 两个非物理 profile，因此摘要变为 `a51a17289edf1dbcd83da66526d2175e2f84c516240d585e9a78b814551e99d6`；旧摘要的历史证据保持原样，不能混入新序列。
+- 身份、安全与恢复：loopback 协调器只绑定 `127.0.0.1`、精确 `http://localhost:5173` Origin、随机 32-hex nonce、clean source、environment/configuration/corpus 和 fresh epoch。动态标签在每轮前原子启用、结算后关闭；错标签、跨 corpus、丢弃和不完整均 fail closed。单轮失败自动单独记账并继续；完成响应丢失保持 unknown，通过同一 active job 或后续 exact session 恢复，不伪造失败或成功。服务重启可复用的前端 bundle 必须同时匹配 source HEAD、前端 tree、lockfile 和 bundle SHA-256。
+- 数据与非声明：固定语料的 Provider 合成音频只驻留协调器和浏览器内存，报告和仓库不保留音频、识别文本、prompt、凭据、设备 identity 或逐轮 correlation。结果只给 Browser 数字链路信用；预录 WebAudio 输入不等于逐轮 operator confirmation，WebAudio started/fence completion 不等于 physical-first-audible/physical-silence，也不关闭真实麦克风、AEC/double-talk、设备/房间泛化或 release 稳定性。
+- 重新评估条件：需要后台绕过浏览器 user-activation/权限；普通 Chrome 无法在服务重启间保留控制页；需要保留原始音频/文本；改变 D-095 case、端点、资格、样本数或 cold epoch 定义；引入非 loopback 服务、CDP/隔离 profile、外部 telemetry 或发布 Gate。
+
+## D-097 D-095 以普通 Chrome warm 稳态基线闭环，cold 转为后续性能工作
+
+- 日期：2026-08-25。
+- 状态：Accepted L0 warm steady-state closure（用户明确确认 cold 不属于本次 L0 收尾要求，并要求以 warm 稳态基线关闭 D-095）。本决定覆盖 D-095/D-096 中把 cold/warm 两温度作为本次 L0 合取完成门的部分；不改写它们在接受时的事实，也不把未运行的 cold 样本记为通过。
+- 完成边界：一次普通安装 Chrome 的 8/8 基础人工旅程、修复后按钮/语音/Stop+Exit 的权威 P2 打断结算，以及同一接受行为源上的普通 Chrome warm 自动序列共同构成本次 L0 闭环。Warm 自动序列必须保留一次不计数预热、至少 `20` 个 eligible first-audio 样本和 `20` 个 eligible dedicated barge-in 样本、独立失败/丢弃分类、sanitized p50/p95 和 exact source/environment/configuration/corpus 绑定。
+- 接受结果：行为源 `ba06d9825c92602066756118dd5cac9572c22827` 在普通安装 Chrome 上完成 warm first-audio `20/20`、barge-in `20/20`，失败和丢弃均为 `0`。`speech_end_to_webaudio_started_ms` 为 p50 `4834.362 ms`、p95 `5603.215 ms`；Browser fence `stop_to_silence_ms` 的报告值为 p50/p95 `0.0/0.0 ms`，原始同源单调时钟为 p50 约 `0.1 ms`、p95 约 `0.3 ms`。这些值建立 warm Browser 数字链路基线，不是预先设定 SLO 的性能 PASS。
+- cold 处置：cold fresh-launcher、cold-minus-warm 和冷启动稳定性不再阻塞本次 L0；它们转入后续性能/泛化工作，只有在未来明确需要冷启动 SLO、部署启动基线或 cold/warm 比较时重新激活。实际 warm→cold 尝试暴露了前端把当前温度 `batch_complete` 当成全序列完成、随后不再领取 cold job 的编排缺陷；该缺陷记录但不在本次收尾中修复。
+- 相邻问题：一次未绑定到 eligible 样本的 Realtime STT `STREAMING_SPEECH_PROVIDER_UNAVAILABLE` 在新连接建立后恢复，不推翻 40 个 exact 样本，也不允许声称整段运行零异常。正式 Task/自然状态查询/恢复问题继续由独立已知问题记录拥有；它们不再作为本次 L0 warm 稳态测量门。
+- 非声明：预录 WebAudio 输入不是逐轮人工或物理声学确认；WebAudio started/fence completion 不是 physical-first-audible/physical-silence；没有 cold 数据、cold-minus-warm、AEC/double-talk、跨设备/房间、release 稳定性或 feature-complete/product-readiness/Production 信用。原 D-095 schema 报告仍会因 cold 缺失显示 `complete=false`，不得修改原始运行产物；当前闭环由本决定和新的 sanitized warm 证据解释。
+- 重新评估条件：cold 启动进入 L0、产品或发布 SLO；需要严格物理声学 p95；改变 warm corpus、端点、样本最低数或成功资格；或把本次 bounded L0 信用升级为 feature-complete、product-readiness 或 Production Gate。

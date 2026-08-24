@@ -750,6 +750,64 @@ async def test_barge_in_stops_only_audio_then_optional_cancel_fences_text(
     ]
 
 
+@pytest.mark.parametrize("outcome", tuple(TerminalOutcome))
+async def test_terminal_barge_in_stops_playback_without_reopening_response_cancel(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+    outcome: TerminalOutcome,
+) -> None:
+    runtime, ref = await prepared(loop_factory, policy=HistorySurfacePolicy.AUDIO)
+    audio = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "terminal-audio",
+        0,
+        0,
+        6,
+        "sha256:a",
+    )
+    assert await runtime.produce_unit(audio) is True
+    assert (await runtime.enqueue_unit(ref, audio.surface, audio.unit_id))[0] is True
+    await runtime.transition_response(ref, ResponseState.TERMINAL, outcome=outcome)
+
+    interrupted = await runtime.barge_in(
+        "terminal-barge",
+        ref,
+        cancel_response=True,
+    )
+    replayed = await runtime.barge_in(
+        "terminal-barge",
+        ref,
+        cancel_response=True,
+    )
+    already_stopped = await runtime.barge_in(
+        "terminal-barge-after-stop",
+        ref,
+        cancel_response=True,
+    )
+
+    assert interrupted.applied is True
+    assert interrupted.replayed is False
+    assert replayed.replayed is True
+    assert replayed.effect_ids == interrupted.effect_ids
+    assert already_stopped.applied is False
+    assert already_stopped.effect_ids == ()
+    effects = runtime.snapshot().effects
+    assert [
+        item.effect.effect_type
+        for item in effects
+        if item.effect.effect_id in interrupted.effect_ids
+    ] == ["playback.stop"]
+    assert all(
+        item.effect.effect_type
+        not in {"response.cancel", "round.cancel", "task.cancel"}
+        for item in effects
+    )
+    response = runtime.snapshot().conversation.responses[0]
+    assert response.state is ResponseState.TERMINAL
+    assert response.outcome is outcome
+    assert response.cancel_state is CancelState.NONE
+
+
 async def test_accepted_presentation_ack_linearizes_before_later_barge_in(
     loop_factory: Callable[..., ConversationRuntimeLoop],
 ) -> None:

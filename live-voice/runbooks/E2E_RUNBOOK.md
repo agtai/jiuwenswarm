@@ -399,6 +399,37 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 `JIUWENSWARM_LIVE_VOICE_P3_ENABLED` 与其余必需项全部记录为 `true` 后，才能
 请求真实设备人工验收。
 
+### 7.6 D-095 普通 Chrome 自动 cold/warm 序列（D-096）
+
+只有在 7.5 的 `formal-web-validation` 项目选择已经保存、当前源码和该项目均
+干净时运行。该入口打开已安装的普通 Chrome profile；它不会创建隔离 profile，
+不会使用 CDP，也不会停止或清理用户 Chrome。`EnvironmentRef` 只写一个可公开的
+稳定机器/网络标签，不要写用户名、设备 ID 或位置详情：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\live_voice\run_l0_ordinary_chrome_series.ps1 `
+  -EnvironmentRef 'ordinary-chrome-machine-current' `
+  -BrowserPath '/chat/web_1a034feac64_9781824cb619'
+```
+
+脚本首次启动 warm epoch 后，在普通 Chrome 右下角只点击一次“开始自动批次”。
+该手势解锁 WebAudio；固定语料会同时输出到扬声器并注入该 nonce 页面专用的
+capture stream，后者继续走正式 Media/Realtime STT/Agent/TTS 路径，不依赖耳机
+回放被默认麦克风重新收音。之后不要逐轮判定或点击：warm 的一次非计数预热、
+两类各 20 个 eligible 样本、fresh cold launcher epochs、失败重试和报告生成均由
+脚本继续。浏览器页必须保持打开，普通 Chrome 可以继续使用原 profile；脚本会
+重启 JiuwenSwarm 服务，但不会重启 Chrome。最终唯一结果是该次受控证据目录中的
+`d095-report.json`；只有 `complete: true`、两温度两指标均达到 20、cold epoch
+唯一且 aggregate count 一致才算自动序列完成。
+
+报告是 Browser 数字链路测量，不是逐轮物理可听/静音确认。协调器和浏览器只在
+内存中持有固定语料的合成音频；受控 capture stream 不证明真实麦克风、AEC 或
+物理声学链路。不得把 stdout/stderr、原始音频、识别文本、nonce、
+凭据或机器私有路径复制进提交证据。失败时保留受控目录用于诊断，不要手工修改
+attempt、epoch、run-label 或报告文件，也不要用 `-L0ResumeBatch` 跨 source、配置、
+环境或 corpus 继续。
+
 普通四场景人工检查能验证用户可见状态、真实麦克风/扬声器、重复副作用与
 Session 隔离，但不能制造可靠的 presentation-ACK 网络延迟。延迟 ACK 必须先由
 确定性 mounted oracle 证明：旧 ACK promise 未释放时，generation 2 已经激活、

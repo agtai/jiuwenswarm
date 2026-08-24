@@ -182,9 +182,9 @@ def test_fixed_corpus_is_closed_complete_and_digest_stable() -> None:
     path = Path("scripts/live_voice/l0_fixed_corpus.json")
     manifest, digest = load_l0_corpus_manifest(path)
 
-    assert len(manifest["profiles"]) == 7
+    assert len(manifest["profiles"]) == 9
     assert len(manifest["cases"]) == 13
-    assert digest == "888fdcba848037c1feba6c8c31a15641d721507b57e0985ba2d14446e7d4b563"
+    assert digest == "a51a17289edf1dbcd83da66526d2175e2f84c516240d585e9a78b814551e99d6"
     assert {
         case["category"] for case in manifest["cases"]
     } >= {

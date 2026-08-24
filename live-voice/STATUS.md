@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-24. This is the only mutable source for current product
+> Updated: 2026-08-25. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -84,35 +84,28 @@
   not p50/p95 or feature-complete latency proof. On the current integrated tree,
   a deterministic 10/50/100-notification benchmark reduces RPCs per attempt
   from `10/50/100` to `1/4/7` and injected-delay p50 by `89.8%/92.1%/93.0%`.
-- **Current L0 measurement result:** **CORRELATED IMPLEMENTATION, AUTOMATED AND
-  PROVIDER-COMPONENT BASELINES COMPLETE; SOURCE/AUTOMATED GATE PASS `C0/I0/M0`
-  / PHYSICAL BASELINE OPEN.** The opt-in
-  production Browser → Gateway → Runtime → Agent timeline, closed fixed corpus,
-  exact response/run isolation, automatic Chrome capture and sanitized
-  aggregation are implemented. Injected cold/warm/degraded profiles each retain
-  20 success-eligible samples plus distinct failure/fallback/cancel samples; the
-  configured real Provider digital-loopback component also completed 20/20 with
-  its lifecycle truthfully marked unknown/uncontrolled. Physical Formal Web
-  cold/warm runs remain NOT RUN, so these
-  results grant no physical-first-audible, audibility, AEC, stop-to-silence or
-  feature-complete p50/p95 credit. Three independent review rounds found three,
-  then two, then two bounded measurement defects. Sample-label snapshotting,
-  feature-off Browser allocation, full tombstone-capacity ownership, exact
-  executable/profile/listener proof, CDP discovery/connect race closure and
-  direct proxy/redirect/four-tuple binding are repaired. A complete owner audit
-  then consolidated HTTP discovery and WebSocket CDP onto verified
-  preconnected sockets; both baselines were regenerated on exact source
-  `7f2b0b7ab`. The resulting broad review disclosed six remaining actionable
-  findings in one batch, and `3421f9191` repairs all six; its bounded closure
-  review passes `C0/I0/M0`. A separate sample-readiness convergence review then
-  found and closed one failure-marker precedence gap and one Browser feature-off
-  hot-path perturbation. Current source `e2c4e64f` excludes frame-loss/false-EOT/
-  missed-EOT from success percentiles and performs no measurement-only per-frame
-  or per-chunk work on ordinary pages. Its deterministic injected baseline was
-  regenerated with unchanged expected results; final browser and independent
-  reviews pass with no open P0-P2. The prior Provider result remains source-bound
-  to `7f2b0b7ab` and was not rerun. See the
-  [L0 evidence](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
+- **Current L0 measurement result:** **PASS — BOUNDED WARM STEADY-STATE L0
+  CLOSURE UNDER D-097; BROADER LATENCY/GENERALIZATION REMAINS PARTIAL.** The
+  correlated Browser → Gateway → Runtime → Agent implementation, closed fixed
+  corpus, injected/Provider-component baselines and source/automated Gate remain
+  complete. The ordinary installed-Chrome basic journey is 8/8 operator-PASS,
+  the repaired terminal button/voice/Stop+Exit P2 boundary has authoritative
+  settlement credit, and behaviour source `ba06d9825c` completed one
+  non-counted warm-up plus first-audio `20/20` and dedicated barge-in `20/20`
+  with zero failed or dropped attempts. Warm
+  `speech_end_to_webaudio_started_ms` is p50 `4834.362 ms`, p95 `5603.215 ms`;
+  Browser fence `stop_to_silence_ms` reports p50/p95 `0.0/0.0 ms`, with exact
+  Browser monotonic p50 about `0.1 ms` and p95 about `0.3 ms`. The run accepted
+  860 correlated records across 40 exact rounds. It contained zero
+  `STREAMING_SPEECH_CANCEL_UNACKNOWLEDGED`, zero cleanup-incomplete and 13
+  owned cleanup-deferred INFO observations. One uncorrelated Realtime STT
+  Provider-unavailable event recovered through a new media connection and
+  remains a disclosed reliability anomaly. [D-097](decisions/DECISIONS.md)
+  supersedes the former cold/warm conjunctive L0 gate: cold, cold-minus-warm,
+  formal background-Task/recovery repair and strict physical-acoustic evidence
+  are later work, not hidden PASS claims. See the
+  [warm closure evidence](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md)
+  and the earlier [L0 baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
 - **P3-G0 status:** **PASS — AUTHORITATIVE P3 FOUNDATION; CONTROLLED
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
@@ -124,10 +117,21 @@
   bounded P2 notification pull and legacy single-pull compatibility. Remaining
   product work is the still-open physical fixed-corpus/generalization evidence,
   generation-time interruption and P3-9 cumulative product acceptance. The L0
-  measurement source/automated Gate is closed; proceed through the D-095
-  one-session manual acceptance, scripted cold/warm first-audio and dedicated
-  barge-in series, then sanitized p50/p95 result. Do not treat Browser digital
-  percentiles as strict physical-acoustic or product latency acceptance. A newly
+  packet is now closed under D-097's bounded warm steady-state scope: the 8/8
+  ordinary-Chrome journey, authoritative terminal-response barge rerun and
+  first-audio/barge warm `20/20 + 20/20` aggregate are recorded. Do not treat
+  Browser digital percentiles as strict physical-acoustic or product latency
+  acceptance. Cold/cold-minus-warm, positive formal background-Task behaviour,
+  natural status/recovery, the one recovered STT Provider anomaly and broader
+  device/network evidence remain separate future work; none blocks or receives
+  credit from the L0 closeout. Normal cancel no longer emits false
+  cancel-unacknowledged or cleanup-incomplete diagnostics; owned delayed cleanup
+  remains INFO. See the
+  [warm closure evidence](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md),
+  [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md),
+  [post-repair interruption evidence](evidence/L0_TERMINAL_BARGE_IN_REPAIR_EVIDENCE_20260824.md)
+  and separately deferred
+  [known issues](reviews/L0_ORDINARY_CHROME_KNOWN_ISSUES_20260824.md). A newly
   reproduced defect may reopen only its owning boundary.
 - **Integration:** integration with a `develop` ref is deferred until the
   feature-complete boundary below passes. At that future boundary, re-read the
@@ -208,8 +212,8 @@ risks, dependencies, acceptance and integration order.
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | P3-9 cumulative acceptance; any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review and exact Wave-2/Wave-3 Direct/Store/Core evidence; no generic Executor or host-crash claim |
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is evaluated only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` remain stable unsupported or terminal conflict with zero protected effect | Broader language/policy generalization and P3-9 cumulative acceptance; positive provide-input/pause/resume remain outside the current Direct profile unless a later real primitive is accepted | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus and D-093 zero-effect decision |
 | Integrated Web product experience | **PARTIAL overall; the four P1/P2 lifecycle repair module Gates and the bounded decoupling review PASS `C0/I0/M0`.** Same-tab recovery, exact Speech timeout/signal forwarding, browser-global capture ownership, retained predecessor ACK settlement and playout/capture decoupling are closed at their scoped source/automation boundaries. The exact consolidated product/test tree passed same-tab A -> B -> A, Exit/immediate re-enable, ordinary forward/reverse two-tab takeover and the cumulative microphone/Agent/playout journey. Production P2 notification pulls now use batch size `16`, with the validation-branch feature-on prompts audibly accepted | Real Provider degradation/fallback longer than 15 seconds remains a physical non-claim; continue generation-time interruption, fixed-corpus latency/generalization, P3-9 and complete product acceptance | [lifecycle closure](#p1p2-lifecycle-repair-closure), [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), scoped decoupling review and remaining P1/P2/P3-9 completion; no controlled-candidate credit |
-| Observability, benchmark and latency | **PARTIAL overall; L0 source/automated Gate PASS `C0/I0/M0`, physical baseline open.** A local opt-in wrapper over validated observability follows exact Session/activation/response/turn/round and optional Task/Attempt identity across Browser, Gateway, Runtime and Agent. Full-budget response conflicts become permanently unresolvable rather than contaminating an old sample. Physical aggregation requires exact source/environment/configuration plus explicit acceptance and cannot be promoted by the generic CLI. All failure markers outrank success. Ordinary feature-off Browser routes install no measurement-only media callbacks and perform no per-frame/per-chunk measurement work. The Chrome collector binds HTTP/WebSocket CDP to verified preconnected sockets owned by the exact launched executable/profile/PID and stale cleanup requires one exact managed profile argument. The deterministic injected 20-sample profiles are current on `e2c4e64f`; the real Provider 20/20 unknown-lifecycle component result remains historical source-bound evidence on `7f2b0b7ab`. The earlier bounded P2 pull remains production default | Run at least 20 correlated physical Formal Web successes for each cold/warm profile; retain separate operator confirmation and no audibility/AEC/stop-silence claim before that. Only measured physical evidence may select later [latency-plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) work. External/persistent telemetry requires separate scope | [L0 evidence](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md), D-093 observability, [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) and D-094 |
-| Automated verification and product acceptance | **PARTIAL overall; existing lifecycle/decoupling/P2 review Gates and the L0 source/automated Gate PASS.** On repaired source `3421f9191`, the broad affected Python/portable-launcher run reports `442 passed / 6` inherited P3 fixture/projection failures. On current source `e2c4e64f`, focused L0 Python is `65/65`, Formal Web is `479/479`, Browser Audio is `104/104`, Browser L0 is `5/5`, build profiles are `2/2`, and strict TypeScript, production build, Ruff, compileall and diff checks pass. Dedicated Media `27/27`, Gateway Media `38/38`, the six-item bounded closure, browser convergence review and final independent review remain accepted | Physical cold/warm fixed-corpus runs, P3-9 cumulative verification and controlled product-candidate journey remain open; Provider component/digital-loopback data has no physical credit | [L0 evidence](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md) and [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md); scoped evidence grants no P3-9 or product-readiness credit |
+| Observability, benchmark and latency | **PARTIAL overall; bounded D-095 warm steady-state L0 PASS under D-097.** The exact production timeline, closed corpus, failure precedence, response/run isolation and feature-off zero-hot-path boundary retain source/automated `C0/I0/M0` credit. Ordinary installed Chrome adds one accepted warm run: 20/20 first-audio, 20/20 dedicated barge-in, zero failure/drop and a sanitized 40-round/860-record aggregate. D-096's cold runner remains source-tested but its real warm→cold lifecycle is neither fixed nor accepted; D-097 removes it from this L0 gate. The existing physical collector and ordinary Browser metrics keep separate provenance | Optional later work includes cold/cold-minus-warm, physical-acoustic first-audible/silence, AEC/double-talk, Provider/network and device/room generalization, and any latency SLO. External/persistent telemetry requires separate scope | [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md), [L0 baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md), [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md), D-097 and D-094 |
+| Automated verification and product acceptance | **PARTIAL overall; L0 source/automated Gate, ordinary-Chrome basic 8/8, authoritative terminal barge and warm real-path closure PASS.** The D-096 source boundary retains exact query/provenance/failure/recovery/cold-epoch tests. Affected Formal Web `479/479`, Browser L0 `5/5`, ordinary batch `5/5`, build profiles `2/2`, Python/portable launchers `76/76`, production build, Ruff, compileall, PowerShell AST and diff checks pass. Behaviour source `ba06d9825c` additionally passes the real warm 20+20 sequence and cancel-log review | P3-9 cumulative verification and controlled product-candidate acceptance remain open. Cold automation, formal background-Task/recovery and strict physical-acoustic evidence are separately deferred rather than L0 failures | [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md), [D-096 review](reviews/L0_ORDINARY_CHROME_BATCH_AUTOMATION_REVIEW_20260824.md), [cancel review](reviews/L0_SPEECH_CANCEL_OBSERVABILITY_REPAIR_REVIEW_20260825.md) and [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md); no P3-9 or product-readiness credit |
 | Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off and the controlled launcher owns the complete non-secret contract. D-092 keeps its three-item P3 retirement boundary. D-094 separately retires only the two validation-only P2 notification switches: production Web is fixed at `16`, A/B injects `1` or `16`, and omitted server input remains legacy single-pull compatibility. The Exit packet retains only exact fences/barriers/timers/cleanup | Each retained manifest row still requires its own Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-092/D-093 evidence, [D-094](decisions/DECISIONS.md) and the [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -258,37 +262,78 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-### L0 correlated measurement baseline — source/automated Gate PASS; D-095 closure execution open
+### L0 correlated measurement baseline — CLOSED under D-097 warm steady-state scope
 
 - **Capability/risk/dependencies:** Observability, benchmark and latency; Tier 3
   because content-free hooks cross Browser, Gateway, Runtime and Agent owners.
   It depends on the accepted formal media/Agent path and D-094 bounded P2 pull;
   it changes neither authority nor the shared schema.
 - **Owned behaviour:** exact production milestones, one-time partial-to-exact
-  response pinning, closed 7-profile/13-case corpus, p50/p95 with missing as
+  response pinning, closed 9-profile/13-case corpus, p50/p95 with missing as
   unknown, separate failure/fallback/cancel, automatic Chrome timing, local
   JSONL and clean-source injected/Provider-component runners.
 - **Exclusions:** no ordinary-production enablement, Provider/model/billing,
   VAD/playout/pipeline tuning, persistent telemetry, raw audio/transcript,
   physical audibility inference, generation-time interruption or P3 policy.
-- **Current result:** implementation, the earlier seven bounded repairs, owner
-  consolidation and all six findings from the one-batch broad review are repaired
-  and bounded-review closed. The later sample-readiness convergence fixes are
-  committed at `e2c4e64f1e5b5ccd6a970b8fa2cc239203968fd4`; the final browser and
-  independent reviews pass with no open P0-P2 (`C0/I0/M0`). The automated
-  injected baseline is regenerated there with the same expected result; the
-  configured-machine Provider component result remains bound to
-  `7f2b0b7ab9b9dc363cec21f83ac6e04ad53d221c`. [D-095](decisions/DECISIONS.md)
-  now freezes the remaining closure as three conjunctive deliverables: one
-  complete exact-source manual microphone/speaker/interaction acceptance
-  session; scripted warm/cold measurement with at least 20 valid first-audio
-  and 20 valid dedicated barge-in samples per temperature; and a sanitized
-  result containing counts plus p50/p95 `speech_end_to_webaudio_started_ms` and
-  `stop_to_silence_ms`, cold/warm differences and anomaly classifications. All
-  three remain NOT RUN. The automatic values are Browser digital-path metrics;
-  without an external acoustic oracle they grant no strict physical-first-
-  audible, physical-silence, AEC/double-talk or release-stability credit.
-- **Evidence:** [L0 correlated measurement and baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
+- **Current result:** the implementation, injected/Provider-component
+  baselines, bounded repairs and source/automated reviews remain closed with no
+  open P0-P2. The 2026-08-24 ordinary-Chrome session records 8/8 operator-PASS;
+  the later repair source records three authoritative button/voice/Stop+Exit
+  P2 completions. Behaviour source `ba06d9825c` then ran the repaired ordinary
+  installed-Chrome warm path: one non-counted warm-up, first-audio `20/20`,
+  dedicated barge-in `20/20`, zero failure/drop, 40 exact rounds and 860
+  accepted correlated observations. The primary warm values are p50/p95
+  `4834.362/5603.215 ms` for speech-end→WebAudio-started and report p50/p95
+  `0.0/0.0 ms` for barge→Browser-fence-terminal; exact Browser monotonic values
+  are about `0.1/0.3 ms`. Normal cancel produced zero cancel-unacknowledged and
+  zero cleanup-incomplete; 13 retained cleanups were correctly INFO deferred.
+  One uncorrelated STT Provider-unavailable event recovered and remains a
+  non-blocking reliability anomaly. The attempted cold transition obtained no
+  job because the Browser controller had exited after warm completion. D-097
+  accepts the warm steady-state boundary and defers cold orchestration,
+  cold-minus-warm, formal background-Task/recovery and physical-acoustic scope.
+  The old raw two-temperature report remains truthfully incomplete and is not
+  rewritten.
+- **Evidence:** [warm steady-state closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md),
+  [L0 correlated measurement and baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md),
+  [ordinary-Chrome manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md),
+  [post-repair terminal barge-in evidence](evidence/L0_TERMINAL_BARGE_IN_REPAIR_EVIDENCE_20260824.md),
+  [Speech cancel review](reviews/L0_SPEECH_CANCEL_OBSERVABILITY_REPAIR_REVIEW_20260825.md),
+  [D-096 runner review](reviews/L0_ORDINARY_CHROME_BATCH_AUTOMATION_REVIEW_20260824.md)
+  and separately deferred
+  [known issues](reviews/L0_ORDINARY_CHROME_KNOWN_ISSUES_20260824.md).
+- **Reopened reproduced-defect packet (2026-08-24; repair acceptance
+  complete):** the nine ordinary-Chrome `barge_in` errors
+  reopened only the
+  Conversation Runtime playback-stop boundary, its Product P2/Web consumer and
+  the content-free E2A error diagnostic. This is Tier 3 because it changes the
+  shared response/presentation/cancel-state contract. Intended behaviour is an
+  exact, replayable `playback.stop` for a retained response whose Agent
+  generation is already terminal while downstream playout can remain active;
+  terminal generation suppresses `response.cancel` and must never produce
+  `round.cancel` or `task.cancel`. Owned source/tests are the Conversation
+  Runtime loop, Product P2 registry/adapter path, Integrated Web convergence,
+  E2A unary logging and their focused Python/Web tests. Acceptance requires the
+  applicable root `TESTING.md` matrix, zero forbidden effects, sanitized
+  code/reason logging and an ordinary-Chrome button/voice/Stop+Exit rerun. The
+  Runtime, actual Product P2 registry, AgentServer/E2A wire and Integrated Web
+  boundaries now pass the scoped automated matrix; see the
+  [repair review](reviews/L0_TERMINAL_BARGE_IN_REPAIR_REVIEW_20260824.md).
+  The operator then repeated button interruption, voice interruption and Stop
+  followed by Exit in the same ordinary Chrome Session on repair behaviour
+  source `39932971f8`; all three new P2 barge requests returned
+  `e2a.complete`, with zero barge `e2a.error`, and final close completed. This
+  closes only the reopened terminal-response barge boundary and does not
+  retroactively alter the earlier session facts. D-097 later changes the L0
+  completion scope and uses the separate warm aggregate plus cancel-log review;
+  it does not turn the earlier Task, silence, cold or cleanup observations into
+  historical PASS.
+  Excluded are generation-time interruption, Provider/VAD/TTS tuning, Task
+  policy, the separately recorded Task/recovery defects, cold/warm measurement
+  execution and any remote update.
+- **Packet disposition:** **CLOSED.** This documentation closeout activates no
+  new implementation packet. Deferred issues reopen only under a newer scoped
+  decision or a reproduced defect in their owning product boundary.
 
 ### Closed OJ-G1-A execution ownership and scope upstream-readiness investigation
 
@@ -630,11 +675,13 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 - **Current latency priority:** the dominant P2 one-notification-per-RPC tail is
   repaired and default-on after D-094. The correlated L0 oracle and fixed corpus
   now exist, and injected plus real-Provider component baselines are complete.
-  The focused independent repair review is closed. Next run the cold/warm
-  physical Formal Web profiles; only their result may
-  decide whether VAD finalization, startup buffering or later pipeline work is
-  activated. Do not infer physical p50/p95 from the manual, injected or digital-
-  loopback samples. See the [2026-08-20 physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md),
+  The focused independent repair review is closed, and D-097 accepts the warm
+  ordinary-Chrome digital baseline for L0. Its first-audio p50/p95 may inform a
+  separately activated VAD/startup/overlap optimization packet, but no threshold
+  was frozen and cold or strict physical-acoustic measurement is not required
+  by this closeout. Do not infer physical p50/p95 from the manual, injected or
+  digital-loopback samples. See the [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md),
+  [2026-08-20 physical record](evidence/P1_T2_HANDS_FREE_PHYSICAL_VALIDATION_AND_LATENCY_FINDING_2026-08-20.md),
   [default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md)
   and [L0 evidence](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
 
@@ -803,8 +850,12 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
    work is generation-time interruption and physical fixed-corpus/generalization
    evidence under the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
    The L0 correlated implementation, injected baseline, Provider-component
-   baseline and source review are complete; the three-part D-095 manual,
-   scripted cold/warm and sanitized-result closure remains open.
+   baseline and source review are complete. D-097 additionally closes the
+   bounded L0 warm steady-state boundary using the 8/8 ordinary-Chrome basic
+   journey, authoritative terminal barge rerun and warm first-audio/barge
+   `20/20 + 20/20` sanitized aggregate. Explicit physical silence, formal
+   background-Task/recovery and cold/cold-minus-warm remain separate future
+   scope rather than current L0 blockers.
    The remaining P3 route is ~~P3-7 formal carrier~~ **DONE — SCOPED GATE
    PASS** → ~~P3-8B bounded composition/three-item retirement~~ **DONE —
    SCOPED GATE PASS** → ~~pre-P3-9 capability closure~~ **DONE on D-093 —
@@ -881,9 +932,11 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
   The first physical diagnosis found the dominant P2 one-notification-per-RPC
   tail; the bounded pull is now repaired, physically accepted in a small sample
-  and default-on under D-094. Next evaluate VAD finalization, first-audio startup
-  and formal sentence-level Agent→TTS overlap against a frozen corpus with
-  p50/p95. This remains queued P1/P2 quality work, not completion credit.
+  and default-on under D-094. The accepted warm L0 baseline now decomposes STT,
+  Agent, TTS, WebAudio first-start and full-round p50/p95. VAD finalization,
+  first-audio startup and formal sentence-level Agent→TTS overlap may be
+  evaluated under a separately activated quality packet; they are not needed to
+  reopen the completed bounded L0 scope.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.
@@ -899,6 +952,28 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   runtime databases/audio remain ignored and excluded from final integration.
 
 ## Verification and runtime truth
+
+- On 2026-08-25, behaviour source `ba06d9825c` passed the formal launcher
+  probes and ordinary installed-Chrome warm sequence: one non-counted warm-up,
+  first-audio `20/20`, dedicated barge-in `20/20`, zero failure/drop, 40 exact
+  rounds and 860 accepted correlated records. Warm first-audio is p50
+  `4834.362 ms`, p95 `5603.215 ms`; Browser fence stop is report p50/p95
+  `0.0/0.0 ms` and exact monotonic p50/p95 about `0.1/0.3 ms`. Cancel-log review
+  found zero cancel-unacknowledged and zero cleanup-incomplete. One recovered,
+  uncorrelated STT Provider-unavailable event remains disclosed. D-097 accepts
+  this as bounded warm L0 closure and defers cold; see the
+  [warm evidence](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md).
+
+- On 2026-08-24, an ordinary installed Chrome window exercised Session
+  `web_1a034feac64_9781824cb619` against clean tested source `362403cd6c` under
+  `formal-web-validation`. The operator accepted all eight bounded basic
+  scenarios, confirmed audible real-microphone interaction and a real terminal
+  Tool, and observed effective button/voice interruption plus playback Stop and
+  Exit. Unified Store rows are complete for response generations `0..7`.
+  Separate Store/log review withholds formal Task and authoritative server-side
+  barge-in credit and records the later Task/recovery anomalies without fixing
+  them. See the [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md)
+  and [known issues](reviews/L0_ORDINARY_CHROME_KNOWN_ISSUES_20260824.md).
 
 - The four consolidated P1/P2 lifecycle modules pass their independent Tier-3
   Gates at `C0/I0/M0`. The rewritten consolidated product/test tree passes Formal

@@ -229,6 +229,7 @@ function responseKey(binding: Readonly<BrowserL0Binding>): string | null {
 }
 
 const state: BrowserL0State | null = queryEnabled() ? createBrowserL0State() : null;
+let exposedControl: BrowserL0Control | null = null;
 
 if (state !== null) {
   const active = state;
@@ -261,6 +262,7 @@ if (state !== null) {
       });
     },
   });
+  exposedControl = control;
   Object.defineProperty(globalThis as BrowserGlobal, '__JIUWENSWARM_LIVE_VOICE_L0__', {
     configurable: false,
     enumerable: false,
@@ -275,6 +277,10 @@ export function browserL0Enabled(): boolean {
 
 export function browserL0Available(): boolean {
   return state !== null;
+}
+
+export function browserL0Control(): BrowserL0Control | null {
+  return exposedControl;
 }
 
 export function registerBrowserL0Response(

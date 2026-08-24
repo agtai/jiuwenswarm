@@ -58,6 +58,10 @@ export interface BrowserMediaDevicesLike {
   removeEventListener(type: 'devicechange', listener: BrowserEventListener): void;
 }
 
+export type BrowserAudioCaptureStreamFactory = (
+  constraints: MediaStreamConstraints,
+) => Promise<BrowserMediaStreamLike>;
+
 export interface BrowserPermissionStatusLike {
   readonly state: string;
   addEventListener(type: 'change', listener: BrowserEventListener): void;
@@ -576,6 +580,7 @@ export interface BrowserAudioIOAdapterOptions {
   readonly enabled: boolean;
   readonly environment?: BrowserAudioEnvironment;
   readonly observer?: BrowserAudioObserver;
+  readonly captureStreamFactory?: BrowserAudioCaptureStreamFactory;
   readonly captureWorkletModuleUrl?: string;
   readonly monotonicNowMs?: () => number;
 }
@@ -584,6 +589,7 @@ export class BrowserAudioIOAdapter {
   readonly #enabled: boolean;
   readonly #environment: BrowserAudioEnvironment;
   readonly #observer: BrowserAudioObserver;
+  readonly #captureStreamFactory: BrowserAudioCaptureStreamFactory | null;
   readonly #captureWorkletModuleUrl: string;
   readonly #monotonicNowMs: () => number;
   readonly #audioPort = new AudioPort();
@@ -617,6 +623,7 @@ export class BrowserAudioIOAdapter {
     this.#enabled = options.enabled;
     this.#environment = this.#enabled ? (options.environment ?? defaultBrowserAudioEnvironment()) : DISABLED_BROWSER_AUDIO_ENVIRONMENT;
     this.#observer = options.observer ?? {};
+    this.#captureStreamFactory = this.#enabled ? (options.captureStreamFactory ?? null) : null;
     this.#captureWorkletModuleUrl = options.captureWorkletModuleUrl ?? new URL('./liveVoiceCaptureProcessor.js', import.meta.url).href;
     this.#monotonicNowMs = options.monotonicNowMs ?? defaultMonotonicNowMs;
     this.#onVisibilityChange = () => {
@@ -753,7 +760,10 @@ export class BrowserAudioIOAdapter {
         channelCount: { ideal: 1 },
         ...(deviceId === null ? {} : { deviceId: { exact: deviceId } }),
       };
-      mediaAcquisition = mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+      const mediaConstraints = { audio: audioConstraints, video: false } as const;
+      mediaAcquisition = this.#captureStreamFactory === null
+        ? mediaDevices.getUserMedia(mediaConstraints)
+        : this.#captureStreamFactory(mediaConstraints);
       stream = await Promise.race([mediaAcquisition, permissionObservation.revocation]);
       if (this.#ownsCapturePermissionObservation(permissionObservation)) {
         permissionObservation.mediaAccessGranted = true;

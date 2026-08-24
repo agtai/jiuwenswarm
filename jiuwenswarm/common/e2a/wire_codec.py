@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict
 from datetime import date, datetime
 from enum import Enum
@@ -33,6 +34,30 @@ from jiuwenswarm.common.e2a.models import (
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
+
+_ERROR_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_.-]{0,127}")
+_ERROR_REASON_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+
+
+def _safe_error_diagnostic(e2a: E2AResponse) -> tuple[str, str]:
+    """Return content-free stable error tokens without logging error payloads."""
+
+    details = e2a.body.get("details")
+    nested = details.get("error") if isinstance(details, dict) else None
+    code = nested.get("code") if isinstance(nested, dict) else e2a.body.get("code")
+    reason = nested.get("reason") if isinstance(nested, dict) else None
+    safe_code = (
+        code
+        if isinstance(code, str) and _ERROR_CODE_PATTERN.fullmatch(code) is not None
+        else "-"
+    )
+    safe_reason = (
+        reason
+        if isinstance(reason, str)
+        and _ERROR_REASON_PATTERN.fullmatch(reason) is not None
+        else "-"
+    )
+    return safe_code, safe_reason
 
 
 def _json_safe(value: Any) -> Any:
@@ -256,12 +281,23 @@ def encode_agent_response_for_wire(
                 sequence=sequence,
                 exc=te,
             )
-        logger.info(
-            "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s legacy_stashed=false",
-            rid,
-            response_id,
-            e2a.response_kind,
-        )
+        if e2a.response_kind == E2A_RESPONSE_KIND_E2A_ERROR:
+            error_code, error_reason = _safe_error_diagnostic(e2a)
+            logger.info(
+                "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s error_code=%s error_reason=%s legacy_stashed=false",
+                rid,
+                response_id,
+                e2a.response_kind,
+                error_code,
+                error_reason,
+            )
+        else:
+            logger.info(
+                "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s legacy_stashed=false",
+                rid,
+                response_id,
+                e2a.response_kind,
+            )
         return _json_safe(wire)
     except Exception as e:
         logger.exception(

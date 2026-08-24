@@ -842,14 +842,9 @@ class ConversationRuntimeLoop:
         self, action_id: str, ref: ResponseRef, cancel_response: bool
     ) -> BargeInResult:
         record = self._response_record(ref)
-        if record.state is ResponseState.TERMINAL:
-            raise ConversationRuntimeLoopViolation(
-                "RESPONSE_ALREADY_TERMINAL",
-                "a terminal response has no live playback to interrupt",
-                ErrorCode.CONFLICT,
-            )
         if (
-            cancel_response
+            record.state is not ResponseState.TERMINAL
+            and cancel_response
             and record.cancel_state is CancelState.NONE
             and record.fenced
         ):
@@ -870,7 +865,14 @@ class ConversationRuntimeLoop:
         if stop is not None:
             effects.append(stop)
 
-        if cancel_response and record.cancel_state is CancelState.NONE:
+        # Agent generation and downstream playout have independent lifecycles.
+        # A completed response may still be audible, so terminal state suppresses
+        # only response cancellation; it never suppresses the exact playback stop.
+        if (
+            cancel_response
+            and record.state is not ResponseState.TERMINAL
+            and record.cancel_state is CancelState.NONE
+        ):
             self._runtime.request_response_cancel(ref)
             self._fence_presentation(ref, reason="barge_in_response_cancel")
             effects.append(

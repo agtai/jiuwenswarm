@@ -700,7 +700,7 @@ def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revisio
     assert "Get-FileHash -LiteralPath $ConfigYamlPath -Algorithm SHA256" in source
     assert "agent_configuration_sha256 = $agentConfigurationSha256" in source
     assert "revision = $projectRevision" in source
-    assert "$L0Measurement -and $projectStatus.Count -gt 0" in source
+    assert "$L0Enabled -and $projectStatus.Count -gt 0" in source
     assert "Join-Path $l0LogsRoot $L0MeasurementDirectory" in source
     assert "仓库内的 L0 证据目录必须位于已忽略的 logs 目录" in source
     assert "browser_page_origin = \"http://localhost:$FrontendPort\"" in source
