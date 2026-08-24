@@ -866,17 +866,17 @@ export class ProductP1VoiceRouteOwner {
         this.#captureStopExpected = false;
       }
       this.#requireCurrent(operationGeneration);
-      if (this.#captureProviderSpeechStartObserved) {
-        // The user started speaking before this window finished closing. The
-        // capture owns a real utterance, so it is not released: the status
-        // stays `capturing`, and the route, frames and media receipt are all
-        // retained, so the caller treats this exactly like a capture that was
-        // already speaking when the answer arrived.
-        return false;
-      }
-      // Only now is the release irreversible, so retire the callbacks of the
+      // The user may have started speaking while the capture was stopping.
+      // `stopCapture` has already ended the microphone track by then, so the
+      // window cannot simply be left open: keeping the status at `capturing`
+      // without a live track would be a lie, and the rest of the utterance
+      // would never be captured. The uplink below is finished either way, and
+      // a speaker gets a real successor capture instead of a release.
+      const speakerStarted = this.#captureProviderSpeechStartObserved;
+      // The release is irreversible from here, so retire the callbacks of the
       // capture being torn down.
       const releaseGeneration = ++this.#operationGeneration;
+      const priorAuthority = this.#mediaCloseBinding;
       // Finish the uplink the same way recognition does. The acknowledged
       // frame count is the media receipt authority the answer about to be
       // spoken depends on, so a released listening window must settle it
@@ -904,6 +904,22 @@ export class ProductP1VoiceRouteOwner {
       this.#captureLocalActivityRecencyFrames = 0;
       this.#captureUtteranceStartFrameIndex = null;
       this.#mediaSentFrames = 0;
+      if (speakerStarted) {
+        // A real utterance is in progress. Rotate onto a successor capture the
+        // same way a bounded silent boundary does: the frames already uplinked
+        // are settled above, a fresh lease keeps recording what the user is
+        // still saying, and end-of-turn and recognition proceed normally. The
+        // caller sees `capturing` because the capture really is live.
+        this.#captureFramesAcked = 0;
+        this.#speech = null;
+        await this.#startConcurrentCapture(releaseGeneration);
+        this.#requireCurrent(releaseGeneration);
+        await this.#revokeMediaAuthority(priorAuthority);
+        this.#requireCurrent(releaseGeneration);
+        this.#setStatus('capturing', this.#streamingFallbackReason);
+        this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+        return false;
+      }
       // `#captureFramesAcked` is the retained proof that this lease really
       // captured and delivered audio; Agent playout requires it. Releasing a
       // silent listening window must not erase the authority the answer about

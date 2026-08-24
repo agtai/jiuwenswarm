@@ -2,7 +2,7 @@
 
 **Branch:** `hx/0823_generation_interruption`
 **Base:** `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789` (`hx/0812_live_voice_w3` at the time of writing)
-**Named-ref caveat:** that ref was amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject) and has since advanced twice more, to `a44843b62` and then `9a3a65fd0`; the last of those touches `productP1VoiceRoute.ts`, which this change also edits, so it was rebased in rather than left aside. It moved again while this record was being committed (`88163b843`, docs-only), and it will keep moving: the stable fact is the **merge-base**, not the ref and not a left/right count. Resolve the base with `git merge-base hx/0812_live_voice_w3 <this HEAD>` at review time; every number below was measured on `9a3a65fd0`. Integration needs its own re-freeze against whatever the ref points at then. It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
+**Named-ref caveat:** that ref was amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject) and has since advanced twice more, to `a44843b62` and then `9a3a65fd0`; the last of those touches `productP1VoiceRoute.ts`, which this change also edits, so it was rebased in rather than left aside. It moved again while this record was being committed (`88163b843`, docs-only), and it will keep moving: the stable fact is the **merge-base**, not the ref and not a left/right count. Resolve the base with `git merge-base hx/0812_live_voice_w3 <this HEAD>` at review time; every number below was measured on `9a3a65fd0`. Integration needs its own re-freeze against whatever the ref points at then.
 **Scope:** hands-free speech that arrives while an Agent answer is still being
 generated can now stop or replace that exact answer.
 
@@ -148,6 +148,29 @@ Two more defects came out of the fourth review.
   `pauseIdleCaptureForNotification`, which is pre-existing P2-notification code
   outside this change and is **not** repaired here.
 
+Three more came out of the fifth review.
+
+* **The release kept a `capturing` status with no live microphone.** The
+  fourth-round repair returned `false` and left the status alone when a
+  speech-start landed during `stopCapture` — but `stopCapture` has already
+  ended the MediaStream track by then, so the rest of the utterance was never
+  recorded and the status was a lie. A speaker now gets a real successor
+  capture: the uplinked frames are settled, `#startConcurrentCapture` opens a
+  fresh lease exactly as a bounded silent rotation does, the prior media
+  authority is revoked, and `capturing` is physically true.
+* **A fenced response could still present what was already queued.** The CR
+  fence invalidates the effect and stops further output, but a notice already
+  sitting in the delivery queue would still reach a consumer and be rendered or
+  spoken. The Web client refuses it by response identity — that refusal is the
+  client's, not this boundary's. `interrupt_generation` now calls the existing
+  `discard_presentation(ref)` when it fences, so the invariant holds for every
+  authenticated consumer.
+* **A failed answer kept its listening window.** The `failed` branch cleared
+  the foreground fence but not `generationCaptureRef`, so the next answer was
+  refused its own window for the rest of the session — and a capture with no
+  outstanding response kept the notification-poll privilege. The window bound
+  to the exact failed response is now retired with it.
+
 ### 2.6 Feature flag
 
 `VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` is **default-off**. Enabling
@@ -165,13 +188,13 @@ method.
 
 | Suite | Result |
 |---|---|
-| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 18 passed |
+| `tests/unit_tests/live_voice/test_generation_time_interruption.py` (new) | 19 passed |
 | `tests/unit_tests/live_voice/test_agent_conversation_runtime.py` | 73 passed |
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 48 passed |
 | `tests/unit_tests/live_voice/test_product_composition_registry.py` | 176 passed, 6 pre-existing failures |
-| Frontend `npm run test:live-voice-integrated-web` | 495 passed (478 pre-existing + 17 new); `test:live-voice-l0-measurement` 5 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3960 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
+| Frontend `npm run test:live-voice-integrated-web` | 496 passed (478 pre-existing + 18 new); `test:live-voice-l0-measurement` 5 passed |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3961 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
 
 `test_partial_activation_failure_rolls_back_runtime` is load-sensitive and is
 reported rather than hidden. It failed once in a focused run immediately after
@@ -189,7 +212,7 @@ margin, not a regression. A reviewer running under load may hit it.
 
 ### 3.1 Mutation checks
 
-Thirty-seven mutants were run in total: 30 killed, 7 disclosed survivors. The
+Forty-one mutants were run in total: 34 killed, 7 disclosed survivors. The
 survivors are named below; every other listed invariant has at least one case
 that dies when it is broken. Invariants **not** in these tables are not claimed
 to be mutation-checked.
@@ -211,6 +234,7 @@ Backend (`test_generation_time_interruption.py`, baseline green):
 | Registry handler hop broken | KILLED |
 | Handler accepts a client-supplied `cancel_scope` | KILLED |
 | Replacement committed before its predecessor is fenced | KILLED |
+| Fenced response keeps its already-queued presentation | KILLED |
 
 A self-review after the first implementation found the CR-B interruption replay
 ledger unbounded. Unlike barge-in, which a user triggers by control action, an
@@ -249,6 +273,9 @@ Frontend (mounted panel suite, baseline green):
 | Release retires its callbacks before the capture stops | KILLED |
 | Release ignores a speech-start observed while stopping | KILLED |
 | Late outcome admitted without its exact voice-loop generation | **SURVIVED** |
+| Release does not recognise a speaker who started while stopping | KILLED |
+| Release keeps the status but opens no successor capture | KILLED |
+| A failed answer keeps its listening window | KILLED |
 
 The interruption-admission mutant is killed independently through both branch
 outcomes: `mounted in-flight interruption from a retired Session cannot touch its
@@ -259,16 +286,18 @@ successor that is already waiting for its own answer.
 
 Seven survivors, in two groups.
 
-**Group A — the repair is applied but its trigger path is not reachable from a
-mounted case.** Both come from the third-review finding that Exit could
-acknowledge an announcement that stood down unspoken. The repair is in (the
-stand-down is decided before anything settles, and cleanup retires such an
-announcement without an ACK), and a case asserts the outcome, but I could not
-reproduce the reviewer's Exit-time settlement path: in my harness Exit does not
-reach `settleRetainedP2Operations` for that attempt, so removing either half of
-the repair changes nothing observable. **Treat this pair as repaired-but-
-unproven, not as covered.** The reviewer reproduced the original defect
-deterministically, so the trigger exists; my case does not reach it.
+**Group A — two halves of one repair that are redundant against each other.**
+Both come from the third-review finding that Exit could acknowledge an
+announcement that stood down unspoken: the stand-down is decided before
+anything settles, *and* cleanup retires such an announcement without an ACK.
+Each single mutant survives because the other half still prevents the ACK. The
+fifth review settled what this record previously got wrong: it applied the
+**combined** mutant — settle before the stand-down is decided *and* bypass the
+deferred branch in cleanup — and `mounted Exit never acknowledges a Task
+announcement that stood down unspoken` observed the false ACK and failed. The
+trigger path is therefore reachable and covered; the earlier
+"repaired-but-unproven / unreachable" wording was wrong and is withdrawn. What
+is missing is only a case that pins each half on its own.
 
 * Playout settled before the stand-down is decided.
 * Cleanup acknowledges a deferred announcement.
@@ -322,6 +351,14 @@ Stated so they are not mistaken for covered:
 * **The exact voice-loop generation on a late interruption outcome.** See the
   Group B entry above: the isolating state is not reachable behind the owner's
   own pending-request barrier.
+* **Exact correlation matching on a replacement target.** Found by the fifth
+  review, not here: dropping the correlation half of the replacement binding
+  check leaves the suite green, because a replacement whose Session,
+  interaction and activation all match is already admitted by the activation
+  check. Recorded as uncovered.
+* **Each half of the Exit stand-down repair on its own.** The combined mutant
+  is killed (see §3.1), so the behaviour is covered; what has no oracle is
+  either half in isolation.
 
 ## 4. Concurrency coverage
 

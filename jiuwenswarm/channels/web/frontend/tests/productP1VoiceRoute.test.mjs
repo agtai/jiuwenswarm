@@ -6545,18 +6545,38 @@ test('formal P1 never publishes a private transport error message', async () => 
 test('a generation-time release keeps an utterance that starts while the capture is stopping', async () => {
   const binding = serverBinding();
   const socket = new FakeSocket();
-  const environment = audioEnvironment();
+  // A successor capture needs its own identity, exactly as a bounded rotation
+  // does; reusing one is rejected by the audio adapter.
+  const environment = audioEnvironment(
+    (() => {
+      let value = 0;
+      return () => `capture-${++value}`;
+    })(),
+  );
+  const sockets = [];
+  const bindings = [];
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
     audio_environment: environment,
     socket_factory: () => {
-      queueMicrotask(() => socket.open(binding));
-      return socket;
+      const next = new FakeSocket();
+      sockets.push(next);
+      queueMicrotask(() => next.open(bindings[sockets.length - 1] ?? binding));
+      return next;
     },
     request: async (method, params) => {
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
-        return streamingMediaActivation(binding, null, {
+        // Each capture -- the original and the successor a speaking user gets
+        // -- carries its own exact browser capture identity.
+        const bound = {
+          ...binding,
+          lease_id: `media-lease-${bindings.length + 1}`,
+          track_id: params.track_id,
+          generation: { kind: 'capture', id: params.capture_id, value: params.capture_generation },
+        };
+        bindings.push(bound);
+        return streamingMediaActivation(bound, null, {
           status: 'active',
           capability_version: 'media.end_of_turn.v1',
           detector: 'server_vad',
@@ -6584,13 +6604,18 @@ test('a generation-time release keeps an utterance that starts while the capture
   // starts speaking inside the release itself: the provider reports it while
   // the capture is still stopping, which is exactly the window in which a
   // release that retired its callbacks up front would drop the utterance.
+  const trackBeforeRelease = environment.track;
+  // The successor capture this release must produce is only ready once it
+  // delivers a frame, exactly like any other capture.
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960).fill(0.25);
   const releasing = owner.abandonCapture('formal_generation_listening_released');
-  socket.onmessage?.({
+  const firstBinding = bindings[0];
+  sockets[0].onmessage?.({
     data: serializeMediaControl({
       type: 'media.speech_start',
       capability_version: 'media.end_of_turn.v1',
-      lease_id: binding.lease_id,
-      generation: binding.generation.value,
+      lease_id: firstBinding.lease_id,
+      generation: firstBinding.generation.value,
       detector: 'server_vad',
       provider_start_ms: 120,
       timing_basis: 'provider_time',
@@ -6604,6 +6629,11 @@ test('a generation-time release keeps an utterance that starts while the capture
 
   assert.equal(released, false);
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
-  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, true);
+  // `capturing` has to be physically true, not just a retained status: the
+  // release already ended the previous microphone track, so a successor
+  // capture must be live to record the rest of what the user is saying.
+  assert.notEqual(environment.track, trackBeforeRelease);
+  assert.equal(trackBeforeRelease.readyState, 'ended');
+  assert.equal(environment.track.readyState, 'live');
   await owner.close();
 });

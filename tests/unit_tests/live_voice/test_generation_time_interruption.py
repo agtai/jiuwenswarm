@@ -1044,3 +1044,57 @@ async def test_failed_supersede_fence_leaves_no_replacement_turn() -> None:
     assert all(record.turn_id != "turn-2" for record in turns)
     lower.gates[0].set()
     await shutdown(current)
+
+
+@pytest.mark.asyncio
+async def test_fence_drops_a_presentation_already_waiting_in_the_delivery_queue() -> None:
+    """A queued notice is output too: a fenced response must present nothing.
+
+    Invalidating the effect is not enough on its own.  A presentation that was
+    enqueued before the fence is still sitting in the delivery queue, and every
+    authenticated consumer of that queue would render or speak it.  The Web
+    client happens to refuse it by response identity, but that refusal is the
+    client's; this boundary has to hold for any consumer.
+    """
+
+    lower = SequencedFormalAdapter(rounds=1, hold_final=True)
+    history = RecordingHistoryWriter()
+    current, _harness = build_runtime(lower, history)
+    await open_runtime(current)
+
+    handle = await submit_turn(current, index=1)
+    await asyncio.wait_for(lower.entered[0].wait(), timeout=1)
+    await drain_until_generating(current, handle.response_ref)
+
+    # Drain everything produced before the answer, so what queues next is the
+    # presentation itself.
+    while current.snapshot().queued_notifications > 0:
+        await asyncio.wait_for(current.next_notification(), timeout=1)
+
+    # Release the answer but never consume it: it stays queued for delivery.
+    lower.gates[0].set()
+    for _ in range(200):
+        if current.snapshot().queued_notifications > 0:
+            break
+        await asyncio.sleep(0)
+    assert current.snapshot().queued_notifications > 0
+
+    interruption = await current.interrupt_generation(
+        action_id="interrupt-1", ref=handle.response_ref
+    )
+    assert interruption.fence_status is GenerationInterruptionFenceStatus.FENCED
+
+    delivered = []
+    while current.snapshot().queued_notifications > 0:
+        delivered.append(await asyncio.wait_for(current.next_notification(), timeout=1))
+    presented = [
+        notification
+        for notification in delivered
+        if notification.presentation_unit is not None
+        and notification.response_ref == handle.response_ref
+    ]
+    assert presented == []
+    assert history.assistant_intents == []
+
+    lower.tails[0].set()
+    await shutdown(current)

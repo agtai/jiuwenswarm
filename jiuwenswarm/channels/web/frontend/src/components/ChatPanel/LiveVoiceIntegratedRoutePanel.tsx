@@ -2129,6 +2129,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       ) {
         pendingForegroundPresentationRef.current = null;
       }
+      // The generation-time listening window is bound to the exact response
+      // that just failed. There is nothing left to interrupt or replace, so
+      // leaving it behind would refuse the next answer its own window for the
+      // rest of the session and keep a capture that answers to nothing holding
+      // the notification-poll privilege.
+      const listening = generationCaptureRef.current;
+      if (
+        listening !== null &&
+        foregroundPresentationFenceMatchesResponse(
+          listening.fence,
+          presentationBinding,
+          disposition.response ?? null,
+        )
+      ) {
+        generationCaptureRef.current = null;
+        void settleCaptureBeforePlayout().catch(() => undefined);
+      }
       const reason = stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
       setProductTextReason(reason);
       setProductTextStatus('failed');

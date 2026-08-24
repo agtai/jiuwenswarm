@@ -11142,6 +11142,27 @@ function generationInterruptResponder(options) {
       },
     });
   };
+  state.failHeldAnswer = text => {
+    const held = state.heldResponses.get(text);
+    assert.ok(held, `no held answer for ${text}`);
+    state.heldResponses.delete(text);
+    publishNotification({
+      ok: true,
+      result: {
+        status: 'notification',
+        session_id: held.params.session_id,
+        correlation_id: held.params.correlation_id,
+        interaction_id: held.params.interaction_id,
+        activation_id: held.params.activation_id,
+        activation_generation: held.params.activation_generation,
+        kind: 'agent.error',
+        response: held.response,
+        agent_event: { event_type: 'agent.failed', error_reason: 'AGENT_PROVIDER_FAILURE' },
+        presentation_unit: null,
+      },
+    });
+    return held.response;
+  };
   state.releaseHeldAnswer = text => {
     const held = state.heldResponses.get(text);
     assert.ok(held, `no held answer for ${text}`);
@@ -12720,6 +12741,67 @@ test('mounted a stale voice-loop interruption failure cannot fail the next loop'
         .join(' | ')}`,
     );
     assert.equal(states.at(-1)?.text_status, statusBeforeSettlement);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted a failed answer retires its listening window so the next answer gets one', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-failed-answer-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。', '那换个问题吧。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '好的。',
+  });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+
+    // The answer this window was listening against fails outright. There is
+    // nothing left to interrupt or replace, so the window must be retired --
+    // otherwise the next answer silently never gets one.
+    await act(async () => {
+      responder.failHeldAnswer(utterances[0]);
+      await waitForMounted(() => states.at(-1)?.text_status === 'failed', 'the failed answer was not surfaced');
+      await new Promise(resolve => setTimeout(resolve, 60));
+    });
+
+    await act(async () => {
+      if (states.at(-1)?.p1_status !== 'capturing') {
+        void controlRef.current.start();
+        await waitForMounted(
+          () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status ?? ''),
+          'the next turn could not capture after a failed answer',
+        );
+        if (states.at(-1)?.p1_status === 'starting') await browser.emitFirstFrame();
+      }
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the next capture did not listen');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(() => responder.submits.length === 2, 'the next utterance was not auto-submitted');
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'starting' && states.at(-1)?.text_status === 'waiting',
+        `the answer after a failed one opened no generation-time listening; states=${states
+          .slice(-8)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+      );
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'the new listening window did not reach capturing');
+    });
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();

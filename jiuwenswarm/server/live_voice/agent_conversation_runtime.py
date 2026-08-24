@@ -2946,6 +2946,21 @@ class AgentConversationRuntime:
                 round_cancel=None,
                 round_cancel_reason="GENERATION_ALREADY_SETTLED",
             )
+        # A presentation that was already queued for delivery is output of the
+        # response this call just fenced.  The CR fence stops anything further
+        # from being produced, but a notice sitting in the delivery queue would
+        # still reach a consumer and be rendered or spoken -- the Web client
+        # refuses it by response identity, yet that refusal is the client's, not
+        # this boundary's.  Drop it here so "a fenced response presents nothing"
+        # holds for every authenticated consumer.
+        # A presentation that was already queued for delivery is output of the
+        # response this call just fenced.  The CR fence stops anything further
+        # from being produced, but a notice sitting in the delivery queue would
+        # still reach a consumer and be rendered or spoken -- the Web client
+        # refuses it by response identity, yet that refusal is the client's, not
+        # this boundary's.  Drop it here so "a fenced response presents nothing"
+        # holds for every authenticated consumer.
+        self._notifications.discard_presentation(ref)
         round_cancel: RoundCancelResult | None = None
         round_cancel_reason: str | None = None
         if handle is None:
