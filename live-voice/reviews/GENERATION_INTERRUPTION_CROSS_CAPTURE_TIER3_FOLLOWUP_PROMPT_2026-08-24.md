@@ -1,21 +1,22 @@
-# Generation interruption Exit/cancel Tier-3 final follow-up prompt
+# Generation interruption pending-successor Tier-3 final follow-up prompt
 
 Perform one independent, targeted Tier-3 follow-up review of the single
-Exit/cancel finding reported against the first cross-capture repair candidate.
+duplicate predecessor-revocation finding reported against the Exit/cancel
+repair candidate.
 
 ## Immutable target
 
 - Repository branch: `hx/0823_generation_interruption`
-- First repair candidate reviewed: `4c1c7d68814c5a165c01c12d036b0b9adc347b66`
+- Prior repair candidate reviewed: `dab640239b1d3f1b887661ebea10266623b336e4`
 - Repair commit parent (documentation-only handoff):
-  `0573e327ef50f90d7d8a163bed862961dd5a1c04`
-- Current repair candidate: `dab640239b1d3f1b887661ebea10266623b336e4`
+  `88367d81877b79253d4d3cb24d1d81a15a2cb110`
+- Current repair candidate: `6559c38eb61d32cc04e494b79598cfdfd51def53`
 - Primary code/test diff:
-  `git diff 0573e327ef50f90d7d8a163bed862961dd5a1c04..dab640239b1d3f1b887661ebea10266623b336e4`
+  `git diff 88367d81877b79253d4d3cb24d1d81a15a2cb110..6559c38eb61d32cc04e494b79598cfdfd51def53`
 - Finding-to-repair comparison:
-  `git diff 4c1c7d68814c5a165c01c12d036b0b9adc347b66..dab640239b1d3f1b887661ebea10266623b336e4 -- jiuwenswarm/channels/web/frontend`
+  `git diff dab640239b1d3f1b887661ebea10266623b336e4..6559c38eb61d32cc04e494b79598cfdfd51def53 -- jiuwenswarm/channels/web/frontend`
 - Cumulative D-096 diff only when this one seam needs context:
-  `git diff 6375e708aa19ba4b04d66c6b411b47eead5592d1..dab640239b1d3f1b887661ebea10266623b336e4`
+  `git diff 6375e708aa19ba4b04d66c6b411b47eead5592d1..6559c38eb61d32cc04e494b79598cfdfd51def53`
 
 First verify `git status --short --branch`, `git rev-parse HEAD`, all immutable
 objects and the repair candidate's parent. Later documentation commits are not
@@ -31,25 +32,25 @@ Read, in this order:
 3. `live-voice/decisions/DECISIONS.md` D-096.
 4. Only the Tier-3, cancel/fence, negative/zero-side-effect and review sections
    of root `TESTING.md` that apply to this repair.
-5. `live-voice/evidence/GENERATION_TIME_INTERRUPTION_20260823.md` §§9–10.
+5. `live-voice/evidence/GENERATION_TIME_INTERRUPTION_20260823.md` §§10–11.
 
-Do not restart the historical broad reviews, reopen the four `4c1c7d68` repairs
-the preceding follow-up accepted, re-review settled Runtime/UI policy, demand
-physical-device evidence from this source review or introduce a new product
+Do not restart the historical broad reviews, reopen the accepted standalone
+Batch/successor-claim/generation/tombstone/cancel repairs, re-review settled
+Runtime/UI policy, demand physical-device evidence or introduce a new product
 requirement. Physical acceptance is deliberately the next Gate after this
 source follow-up passes.
 
 ## Verdict to close
 
-The follow-up of `4c1c7d68` returned **FAIL — C0 / I1 / M0**:
+The follow-up of `dab64023` returned **FAIL — C0 / I1 / M0**:
 
-- `ProductP1VoiceRouteOwner.close()` awaited browser audio and other cleanup
-  before reaching the exact recognition fence and clearing the two current/
-  predecessor PCM owners. If audio cleanup stalled, no cancel or media revoke
-  was sent.
-- After `fenceRecognition()` sent cancel, a late `REQUEST_ABORTED` from the held
-  Batch request caused `recognizeFinal()` to cancel the same operation again.
-  The diagnostic sequence was `recognize_batch, cancel, cancel`.
+- Exit starts revoking predecessor A while successor activation B is pending.
+  If `close(A)` succeeds first, B's activation continuation re-added A to the
+  retained map; the final cleanup scan then closed A again before closing B.
+  The observed sequence was `activate(B), close(A), close(A), close(B)`.
+- A duplicate close can outlive the server's bounded revoked tombstone and leave
+  cleanup permanently pending. The old pending-activation test checked only
+  `some(...)`; the exact-count oracle did not construct this order.
 
 The prior reviewer confirmed the other red/green evidence and findings. They
 are closed context, not new review scope.
@@ -58,24 +59,18 @@ are closed context, not new review scope.
 
 Review the repair diff and only the cumulative interactions needed to answer:
 
-1. At the synchronous start of Exit, before any fallible browser cleanup can
-   suspend, does the owner claim the exact active recognition fence, release
-   both local frame owners and initiate both exact media revocations?
-2. Does stalled or failed audio cleanup retain truthful `cleanup_pending`
-   status without delaying those remote fences, widening cancellation or
-   applying a late result?
-3. Can exactly one path own cancel for an active recognition token, including
-   explicit fence followed by `REQUEST_ABORTED`, timeout/signal cancellation,
-   replacement and repeated close?
-4. Are concurrent/stale media-revocation callers single-flight and bounded,
-   while pending activation and failed-close retry still revoke every exact
-   owned authority without duplicate or cross-subject effects?
-5. Do the two new oracles genuinely fail against the `4c1c7d68` behaviour,
-   pass on `dab64023`, hold `AudioContext.close()`, reject the pending Batch
-   request after fencing, and assert cancel/revoke/frame/forbidden-effect
-   outcomes rather than only source ordering?
-6. Did this repair introduce any deadlock, unbounded retention, authority
-   escape, cleanup regression or ordinary single-capture compatibility change?
+1. When B settles after Exit has successfully revoked A, does exact object
+   ownership prevent B from resurrecting A while still publishing and revoking
+   B exactly once?
+2. If A revocation is still in flight or failed when B settles, does A remain
+   retained/retryable without duplicate, cross-subject or lost-authority effects?
+3. Does the deterministic oracle genuinely fail on `dab64023`, pass on
+   `6559c38e`, construct `activate(B)` pending -> Exit -> successful `close(A)`
+   -> B settlement, and assert exactly one close for both A and B?
+4. Does the identity comparison remain safe under repeated close, activation
+   failure, concurrent cleanup and ordinary single-capture compatibility?
+5. Did this repair introduce any deadlock, unbounded retention, completed-close
+   tombstone, authority escape, cleanup regression or broader product change?
 
 You may run risk-proportional read-only checks using the interpreter and npm
 rules in handoff §2. Do not edit source in the review task.
@@ -83,7 +78,7 @@ rules in handoff §2. Do not edit source in the review task.
 ## Finding standard and output
 
 Report only actionable defects in this repaired seam or a cumulative regression
-caused by `4c1c7d68..dab64023`. Mark pre-existing, explicitly excluded or new
+caused by `dab64023..6559c38e`. Mark pre-existing, explicitly excluded or new
 scope requests separately; they do not count against this candidate.
 
 Every finding must include severity, exact file/line, a concrete reproducer or

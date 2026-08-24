@@ -610,3 +610,37 @@ Agent/Tool/Task/history authority changed. The unchanged backend evidence from
 independent, one-finding follow-up of `4c1c7d68..dab64023` returns no unresolved
 finding; that review must not reopen the four repairs its predecessor already
 accepted. No remote ref was updated.
+
+## 11. 2026-08-24 pending-successor revocation follow-up repair
+
+The follow-up of `dab64023` accepted the synchronous recognition-cancel and
+frame-release repair, then returned **FAIL — C0 / I1 / M0** on one cumulative
+media-authority race. If successor activation B remained pending, Exit could
+finish `media.close(A)` before B returned. B's continuation then unconditionally
+put A back into the retained-authority map, so the final Exit rescan emitted
+`activate(B), close(A), close(A), close(B)`.
+
+Candidate `6559c38eb61d32cc04e494b79598cfdfd51def53` repairs only that race.
+The B activation continuation transfers predecessor A into retained ownership
+only if the owner still holds the same exact A binding object. A completed Exit
+revoke has already cleared that binding and cannot be resurrected; an in-flight
+or failed revoke still owns A and remains retryable. No completed-revocation
+tombstone, new collection, protocol field or product policy was added.
+
+The deterministic Formal Web oracle holds B activation, starts Exit, observes
+the first A close and local audio release, then lets B settle. Compiled through
+the owning npm script, it failed against the unrepaired source with `2 !== 1`
+for A closes (`17` selected tests: `16` pass, `1` fail) and passes on the repair
+with A and B each revoked exactly once. Current candidate evidence is:
+
+| Check on `6559c38e` | Result |
+|---|---|
+| Formal Integrated Web | `496 passed` |
+| Gateway Batch Speech | `32 passed` |
+| `git diff --check` | PASS (line-ending warnings only) |
+| `npm run build:live-voice` | PASS (existing bundle warnings only) |
+
+The unchanged backend, Browser Audio, Browser Gateway Media and Browser
+Dedicated Media results retain their exact earlier-source credit. Physical
+acceptance remains **BLOCKED** until one independent one-finding follow-up of
+`dab64023..6559c38e` returns no unresolved finding. No remote ref was updated.
