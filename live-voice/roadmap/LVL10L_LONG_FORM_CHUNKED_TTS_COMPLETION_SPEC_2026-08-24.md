@@ -2,7 +2,8 @@
 
 > Date: 2026-08-24
 >
-> Status: **PROSPECTIVE — no Provider result, Browser credit or product wiring**
+> Status: **PROSPECTIVE REVISION 2 — pilot boundary evidence only; no
+> materiality, Browser credit or product wiring**
 >
 > Capability: Observability, benchmark and latency / authoritative-final TTS
 >
@@ -24,6 +25,24 @@ fact.
 The selected implementation, if any, still requires a later design for a
 product-owned long-form eligibility rule and a separate physical Browser Gate.
 This experiment cannot authorize either.
+
+### 1.1 Revision-2 pilot disposition
+
+The original v1 corpus remains immutable. Its `long_2400` fixture actually
+contained 2,938 characters. The first pilot was rejected before PCM because
+the configured OpenAI project returned `429 credit_balance_exhausted`. After
+credit restoration, a second pilot opened all 24 requests and completed 11/12
+attempts. The one-request A2 long arm reached approximately 8 MiB of Provider
+PCM and failed at the existing `MAX_STREAM_AUDIO_BYTES` safety boundary; A1
+had completed only about 80 KiB below that boundary. B2/B4 distribute audio
+across requests, so retaining that fixture would structurally favour them.
+
+Revision 2 therefore changes no Provider cap and grants neither pilot latency
+credit. It freezes a separate v2 corpus whose largest fixture is the first 12
+units / 2,150 characters of the same text, leaving materially more headroom
+below the cap. The user also approved a five-round formal population to bound
+external calls. All gain, drift, authority and reliability thresholds remain
+unchanged except round-count predicates stated below.
 
 ## 2. Intended behaviour and invariant
 
@@ -95,15 +114,15 @@ new runtime policy before a break-even point exists. It is explicitly deferred.
 
 ## 5. Frozen corpus contract
 
-The implementation commits one manifest before the first Provider call. It
-contains exactly 16 natural English sentence units on one coherent explanatory
-topic. The three fixtures are nested prefixes of those units:
+The implementation commits a separate v2 manifest before the next Provider
+call. It contains exactly 12 natural English sentence units on one coherent
+explanatory topic. The three fixtures are nested prefixes of those units:
 
 | Fixture | Units | Accepted UTF-8 character range | Purpose |
 |---|---:|---:|---|
 | `long_600` | 4 | 550–750 | lower boundary near the earlier 661-character signal |
 | `long_1200` | 8 | 1,100–1,500 | long-form materiality |
-| `long_2400` | 16 | 2,200–3,000 | request-overhead amortization |
+| `long_2100` | 12 | 2,000–2,250 | request-overhead amortization with 8 MiB safety margin |
 
 Each fixture freezes:
 
@@ -133,13 +152,14 @@ successor beyond the release frontier. B2 therefore opens both requests; B4
 opens two and replenishes only as the ordered frontier advances.
 
 The pilot has one attempt per role/fixture cell: **12 attempts and 24 Provider
-requests**. The formal population has ten attempts per cell: **120 attempts and
-240 Provider requests**. There are no Provider preflight calls, unrecorded
+requests**. The formal population has five attempts per cell: **60 attempts and
+120 Provider requests**. Formal role totals are A1=15, B2=30, B4=60 and A2=15.
+There are no Provider preflight calls, unrecorded
 warm-ups, retries or replacement calls.
 
 The runner creates four Provider adapters before credited attempts, one for
 each role, keeps all four live during the interleaved population and closes all
-four at the end. Each adapter retains exactly 30 response identities in the
+four at the end. Each adapter retains exactly 15 response identities in the
 formal population, below the Provider conformance ledger's exact 64-identity
 cap. Every identity binds interaction to `run+role+fixture`, response
 generation to the round index, and unique response/stream/unit IDs to the exact
@@ -153,7 +173,7 @@ counted.
 One formal round covers all fixtures and all four roles. For round index `r`:
 
 1. rotate fixture order among
-   `600→1200→2400`, `1200→2400→600`, and `2400→600→1200`;
+   `600→1200→2100`, `1200→2100→600`, and `2100→600→1200`;
 2. for each fixture run A1 first and A2 last;
 3. alternate candidate order: even rounds use `A1→B2→B4→A2`; odd rounds use
    `A1→B4→B2→A2`;
@@ -194,10 +214,10 @@ The one-attempt-per-cell pilot may authorize the formal population only when:
 - all 12 attempts complete, all 24 expected requests are observed and Provider
   errors are zero;
 - every integrity, order, fence and zero-forbidden-effect oracle passes;
-- for both `long_1200` and `long_2400`, at least one candidate completes faster
+- for both `long_1200` and `long_2100`, at least one candidate completes faster
   than both its A1 and A2 control;
-- neither candidate is slower than its paired reference by both 1,000 ms and
-  50% on first PCM or reserve;
+- on `long_1200` and `long_2100`, neither candidate is slower than its paired
+  reference by both 1,000 ms and 50% on first PCM or reserve;
 - configuration, source, corpus and environment provenance are complete.
 
 Pilot timings are diagnostic and never enter the formal denominator.
@@ -206,14 +226,14 @@ Pilot timings are diagnostic and never enter the formal denominator.
 
 The formal result is `INCONCLUSIVE` unless:
 
-- each role/fixture cell retains exactly 10/10 attempts;
-- all 120 attempts complete with zero Provider errors and exact request counts;
+- each role/fixture cell retains exactly 5/5 attempts;
+- all 60 attempts complete with zero Provider errors and exact request counts;
 - source, Agent-Core, model, voice, format, environment and corpus hashes are
   identical across arms;
 - every integrity, order, fence and zero-forbidden-effect oracle passes;
 - for each fixture, A1/A2 completion p50 drift is no more than **10%** and
   **1,500 ms**;
-- for each fixture, at least 8/10 A1/A2 completion brackets differ by no more
+- for each fixture, at least 4/5 A1/A2 completion brackets differ by no more
   than 20%;
 - for each fixture, A1/A2 first-PCM and reserve p50 drift are each at most
   **250 ms** and at most **20%**, so their candidate non-regression gate remains
@@ -233,7 +253,7 @@ A candidate is materially positive for one bucket only when all of these hold:
 - paired completion gain p50 is at least **750 ms** and **15%**;
 - candidate completion p50 is directionally faster than both A1 and A2
   completion p50, so interpolation cannot turn control drift into a false win;
-- at least 9 of 10 paired rounds have positive completion gain;
+- at least 4 of 5 paired rounds have positive completion gain;
 - candidate first-PCM and reserve p50 regressions from the paired reference are
   each at most **200 ms** and at most **10%**;
 - generated audio duration and ordered sample-count p50 stay within **±10%**
@@ -243,9 +263,9 @@ A candidate is materially positive for one bucket only when all of these hold:
 
 ### 11.2 Hierarchical long-form decision
 
-`long_2400` is the sole prospectively declared long-form materiality gate. A
+`long_2100` is the sole prospectively declared long-form materiality gate. A
 candidate that fails it is not material, even if a shorter bucket appears to
-win. After `long_2400` passes, evaluate `long_1200` and then `long_600` using
+win. After `long_2100` passes, evaluate `long_1200` and then `long_600` using
 the same per-bucket gate to identify the smallest demonstrated break-even
 boundary. A shorter isolated win followed by a longer failure is non-monotonic
 and does not establish an eligibility threshold.
@@ -253,7 +273,7 @@ and does not establish an eligibility threshold.
 ### 11.3 B4 request-amplification gate
 
 B2 and B4 are evaluated independently using the per-bucket and hierarchical
-gates. If both pass `long_2400`, prefer B2 unless B4's paired completion p50 on
+gates. If both pass `long_2100`, prefer B2 unless B4's paired completion p50 on
 that bucket is at least **750 ms** and **10%** faster than B2 while satisfying
 the same first-PCM, reserve, audio-duration and integrity gates. Thus two extra
 requests require extra material gain.
@@ -262,16 +282,17 @@ requests require extra material gain.
 
 | Outcome | Meaning |
 |---|---|
-| `B2_MATERIAL` | B2 passes the 2400 gate; B4 does not justify extra request amplification |
-| `B4_MATERIAL` | B4 passes the 2400 gate and the incremental B2 gate |
-| `B2_AND_B4_MATERIAL_PREFER_B2` | both pass 2400, but B4 lacks sufficient incremental value |
+| `B2_MATERIAL` | B2 passes the 2100 gate; B4 does not justify extra request amplification |
+| `B4_MATERIAL` | B4 passes the 2100 gate and the incremental B2 gate |
+| `B2_AND_B4_MATERIAL_PREFER_B2` | both pass 2100, but B4 lacks sufficient incremental value |
 | `NO_MATERIAL_GAIN` | valid population, neither candidate passes completion gates |
 | `REJECTED` | integrity, order, reliability, fence or cost/request contract fails |
 | `INCONCLUSIVE` | run validity or provenance fails |
 
-The report separately records the smallest monotonically demonstrated bucket
-for the selected arm. This is evidence for a later product-policy design, not a
-runtime classifier or activation rule.
+With five rounds, p90/p95 are descriptive only and cannot replace the frozen
+p50/win-count decision. The report separately records the smallest
+monotonically demonstrated bucket for the selected arm. This is evidence for a
+later product-policy design, not a runtime classifier or activation rule.
 
 ## 12. Tier-2 scenario closure
 
