@@ -78,6 +78,9 @@ lv-driver.sh <run-id> --launch     # launch stack + collect + report on q
 lv-driver.sh <run-id>              # attach mode: stack already running
 lv-driver.sh <run-id> --smoke      # non-interactive: start, validate ports,
                                    # graceful shutdown, generate report
+lv-driver.sh <run-id> --launch --lvl09-manifest=/private/arms.json
+                                   # LVL-09 only: strict A1/B/A2 arm source,
+                                   # profile/case/round and build-time lead contract
 ```
 
 Interactive commands: `[Enter]`=next stage · `b`=back one stage ·
