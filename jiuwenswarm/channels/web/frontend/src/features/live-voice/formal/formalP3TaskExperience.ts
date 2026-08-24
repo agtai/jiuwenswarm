@@ -368,7 +368,7 @@ function enrichEvents(record: FormalP3TaskRecord, events: readonly JsonObject[])
   });
 }
 
-function enrichResult(record: FormalP3TaskRecord, value: unknown, requestId: string, terminalEventId: string | null): FormalP3TaskRecord {
+function enrichResult(record: FormalP3TaskRecord, value: unknown, requestId: string, terminalSourceEventId: string | null): FormalP3TaskRecord {
   const result = envelope(value, requestId);
   if (result.task_id !== record.task_id || !['available', 'not_ready', 'unavailable'].includes(String(result.availability))) {
     throw new Error('formal P3 TaskResult binding mismatch');
@@ -396,8 +396,8 @@ function enrichResult(record: FormalP3TaskRecord, value: unknown, requestId: str
   if (
     taskResult.task_id !== record.task_id
     || taskResult.attempt_id !== record.attempt_id
-    || terminalEventId === null
-    || taskResult.source_event_id !== terminalEventId
+    || terminalSourceEventId === null
+    || taskResult.source_event_id !== terminalSourceEventId
   ) throw new Error('formal P3 TaskResult identity mismatch');
   const operations = record.canonical_state === 'terminal'
     && record.outcome === 'completed'
@@ -581,8 +581,10 @@ export class FormalP3TaskExperienceOwner {
       resultId,
     );
     if (generation !== this.#generation) throw new Error('formal P3 Task detail became stale');
-    const terminalEventId = events.length === 0 ? null : text(events[events.length - 1].event_id, 'TaskEvent event_id');
-    const enriched = enrichResult(enrichEvents(selected, events), resultResponse, resultId, terminalEventId);
+    const terminalSourceEventId = events.length === 0 || events[events.length - 1].source_event_id === null
+      ? null
+      : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id');
+    const enriched = enrichResult(enrichEvents(selected, events), resultResponse, resultId, terminalSourceEventId);
     const tasks = listedTasks.map(task => task.task_id === taskId ? enriched : task);
     const command = retainedCommand?.task_id === taskId
       ? Object.freeze({ ...retainedCommand, terminal_outcome: enriched.outcome })
