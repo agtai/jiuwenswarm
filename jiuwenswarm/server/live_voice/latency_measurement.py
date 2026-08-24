@@ -1822,9 +1822,13 @@ def register_runtime_l0_binding(binding: L0RoundBinding) -> bool:
                     prior.labels != labels
                     or not _binding_is_compatible(prior.binding, checked)
                 ):
-                    _RUNTIME_L0_BINDINGS.pop(key, None)
                     if len(_RUNTIME_L0_BLOCKED) < _RUNTIME_L0_BINDING_CAPACITY:
+                        _RUNTIME_L0_BINDINGS.pop(key, None)
                         _RUNTIME_L0_BLOCKED.add(key)
+                    # Once the tombstone budget is exhausted, keep the first
+                    # frozen owner.  Capacity pressure may disable new
+                    # measurement, but it must never reopen this response key
+                    # for a conflicting sample.
                     return False
                 _RUNTIME_L0_BINDINGS[key] = _RuntimeL0Registration(
                     binding=_merge_binding(prior.binding, checked),

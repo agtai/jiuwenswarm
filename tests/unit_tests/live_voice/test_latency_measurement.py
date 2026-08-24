@@ -1158,6 +1158,72 @@ def test_registered_response_freezes_labels_and_conflicting_rebind_fails_closed(
         latency_measurement._RUNTIME_L0_BLOCKED.clear()
 
 
+def test_conflicting_response_cannot_rebind_after_tombstone_capacity_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels_a = (
+        "physical-formal-web-warm",
+        "short-no-tool-zh",
+        100,
+        L0RoundTemperature.WARM,
+        L0EvidenceSource.PHYSICAL,
+    )
+    labels_b = (
+        "physical-formal-web-warm",
+        "long-answer-zh",
+        101,
+        L0RoundTemperature.WARM,
+        L0EvidenceSource.PHYSICAL,
+    )
+    current_labels = [labels_a]
+    emitted = []
+
+    class _Sink:
+        def emit(self, record: object) -> bool:
+            emitted.append(record)
+            return True
+
+    monkeypatch.setattr(
+        latency_measurement,
+        "runtime_l0_run_labels",
+        lambda: current_labels[0],
+    )
+    monkeypatch.setattr(
+        latency_measurement,
+        "process_l0_sink",
+        lambda _component: _Sink(),
+    )
+    latency_measurement._RUNTIME_L0_BINDINGS.clear()
+    latency_measurement._RUNTIME_L0_BLOCKED.clear()
+    binding = _binding(100)
+    try:
+        latency_measurement._RUNTIME_L0_BLOCKED.update(
+            (
+                "filled-correlation",
+                f"filled-interaction-{index}",
+                f"filled-response-{index}",
+                index,
+            )
+            for index in range(latency_measurement._RUNTIME_L0_BINDING_CAPACITY)
+        )
+        assert latency_measurement.register_runtime_l0_binding(binding)
+        current_labels[0] = labels_b
+        assert latency_measurement.register_runtime_l0_binding(binding) is False
+        assert latency_measurement.register_runtime_l0_binding(binding) is False
+        assert latency_measurement.emit_runtime_l0_milestone(
+            component="agent",
+            milestone=L0Milestone.CHAT_FINAL,
+            binding=binding,
+            duration_ms=100.0,
+        )
+        assert len(emitted) == 1
+        assert emitted[0].sample_index == labels_a[2]
+        assert emitted[0].scenario_id == labels_a[1]
+    finally:
+        latency_measurement._RUNTIME_L0_BINDINGS.clear()
+        latency_measurement._RUNTIME_L0_BLOCKED.clear()
+
+
 def test_dynamic_run_labels_file_is_closed_content_free_and_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

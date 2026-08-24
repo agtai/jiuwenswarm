@@ -148,6 +148,7 @@ function Start-IsolatedChrome(
         $debuggerOwner = $debuggerOwners[0]
         if (
             $debuggerOwner.Name -notmatch '^chrome\.exe$' -or
+            $debuggerOwner.ExecutablePath -ine $ChromeExecutable -or
             $debuggerOwner.CommandLine -notlike "*$profilePath*" -or
             $debuggerOwner.CommandLine -notlike '*--remote-debugging-address=127.0.0.1*' -or
             $debuggerOwner.CommandLine -notlike "*--remote-debugging-port=$RemoteDebuggingPort*"
@@ -258,10 +259,11 @@ function Get-ListeningOwners([int[]]$Ports) {
         foreach ($listener in $listeners) {
             $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
             $rows += [pscustomobject]@{
-                Port        = $port
-                ProcessId   = [int]$listener.OwningProcess
-                Name        = if ($null -ne $process) { [string]$process.Name } else { '' }
-                CommandLine = if ($null -ne $process) { [string]$process.CommandLine } else { '' }
+                Port           = $port
+                ProcessId      = [int]$listener.OwningProcess
+                Name           = if ($null -ne $process) { [string]$process.Name } else { '' }
+                ExecutablePath = if ($null -ne $process) { [string]$process.ExecutablePath } else { '' }
+                CommandLine    = if ($null -ne $process) { [string]$process.CommandLine } else { '' }
             }
         }
     }
@@ -896,13 +898,14 @@ try {
         Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
         if ($L0Measurement) {
             [ordered]@{
-                schema_version      = 'live-voice.l0-browser-session.v5'
+                schema_version      = 'live-voice.l0-browser-session.v6'
                 source_head         = (& git rev-parse HEAD).Trim()
                 runtime_profile     = $RuntimeProfile
                 evidence_directory = $L0MeasurementDirectory
                 run_labels_file    = $l0RunLabelsPath
                 browser_endpoint   = "http://127.0.0.1:$L0MeasurementPort"
                 browser_page_origin = "http://localhost:$FrontendPort"
+                browser_executable_path = $ChromeExecutable
                 browser_profile_path = $isolatedChromeProfile
                 browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId
                 browser_debugger_process_id = [int]$isolatedChrome.DebuggerProcessId

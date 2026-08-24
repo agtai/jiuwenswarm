@@ -20,6 +20,7 @@ from scripts.live_voice.l0_browser_capture import (
     _labels,
     _load_session,
     _loopback_websocket,
+    _owned_browser_socket,
     _scenario_matrix_complete,
     _select_cases,
     _validate_temperature_capture_policy,
@@ -40,6 +41,8 @@ CONFIGURATION_SHA256 = "b" * 64
 
 def _session(tmp_path: Path, **updates: object) -> Path:
     path = tmp_path / "browser-session.json"
+    browser_executable = tmp_path / "chrome.exe"
+    browser_executable.touch(exist_ok=True)
     value: dict[str, object] = {
         "schema_version": SESSION_VERSION,
         "source_head": SOURCE_HEAD,
@@ -48,6 +51,7 @@ def _session(tmp_path: Path, **updates: object) -> Path:
         "run_labels_file": str(tmp_path / "run-labels.json"),
         "browser_endpoint": "http://127.0.0.1:9223",
         "browser_page_origin": "http://localhost:5173",
+        "browser_executable_path": str(browser_executable.resolve()),
         "browser_profile_path": str(tmp_path.resolve()),
         "browser_launch_process_id": 4101,
         "browser_debugger_process_id": 4102,
@@ -324,6 +328,9 @@ def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
         def name(self) -> str:
             return "chrome.exe"
 
+        def exe(self) -> str:
+            return str((tmp_path / "chrome.exe").resolve())
+
         def cmdline(self) -> list[str]:
             return [
                 "chrome.exe",
@@ -366,9 +373,72 @@ def test_browser_endpoint_owner_requires_exact_listener_profile_and_flags(
             "--remote-debugging-port=9223",
         ],
     )
+    monkeypatch.setattr(
+        _Process,
+        "exe",
+        lambda _self: str((tmp_path / "different-chrome.exe").resolve()),
+    )
+    with pytest.raises(RuntimeError, match="exact isolated profile"):
+        _assert_browser_endpoint_owner(session)
+
+    monkeypatch.setattr(
+        _Process,
+        "exe",
+        lambda _self: str((tmp_path / "chrome.exe").resolve()),
+    )
     monkeypatch.setattr(_Process, "parents", lambda _self: [])
     with pytest.raises(RuntimeError, match="not descended"):
         _assert_browser_endpoint_owner(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_failure_call", [2, 3])
+async def test_owned_browser_socket_revalidates_after_discovery_and_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_failure_call: int,
+) -> None:
+    session = _load_session(_session(tmp_path))
+    owner_calls = 0
+    connection_enters = 0
+
+    def assert_owner(_session: dict[str, object]) -> None:
+        nonlocal owner_calls
+        owner_calls += 1
+        if owner_calls == owner_failure_call:
+            raise RuntimeError("listener owner changed")
+
+    class _Connection:
+        async def __aenter__(self) -> object:
+            nonlocal connection_enters
+            connection_enters += 1
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_assert_browser_endpoint_owner",
+        assert_owner,
+    )
+    monkeypatch.setattr(
+        l0_browser_capture,
+        "_discover_page",
+        lambda *_args, **_kwargs: "ws://127.0.0.1:9223/devtools/page/exact",
+    )
+    monkeypatch.setattr(
+        l0_browser_capture.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _Connection(),
+    )
+
+    with pytest.raises(RuntimeError, match="listener owner changed"):
+        async with _owned_browser_socket(session):
+            pass
+    assert owner_calls == owner_failure_call
+    assert connection_enters == (1 if owner_failure_call == 3 else 0)
+
 
 def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revision() -> None:
     source = LAUNCHER.read_text(encoding="utf-8-sig")
@@ -381,8 +451,10 @@ def test_launcher_binds_l0_to_exact_environment_agent_config_and_project_revisio
     assert "仓库内的 L0 证据目录必须位于已忽略的 logs 目录" in source
     assert "browser_page_origin = \"http://localhost:$FrontendPort\"" in source
     assert "Get-ListeningOwners -Ports @($RemoteDebuggingPort)" in source
+    assert "$debuggerOwner.ExecutablePath -ine $ChromeExecutable" in source
     assert "browser_debugger_process_id = [int]$isolatedChrome.DebuggerProcessId" in source
     assert "browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId" in source
+    assert "browser_executable_path = $ChromeExecutable" in source
     assert "browser_profile_path = $isolatedChromeProfile" in source
     assert "live_voice_l0_launch_nonce=$browserLaunchNonce" in source
     assert "--remote-debugging-address=127.0.0.1" in source

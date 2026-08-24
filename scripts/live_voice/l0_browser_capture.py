@@ -47,7 +47,7 @@ except ModuleNotFoundError as error:
     from l0_measurement_baseline import aggregate_jsonl, clean_source_head
 
 
-SESSION_VERSION: Final = "live-voice.l0-browser-session.v5"
+SESSION_VERSION: Final = "live-voice.l0-browser-session.v6"
 ACCEPTANCE_VERSION: Final = "live-voice.l0-physical-acceptance.v1"
 DEFAULT_CORPUS: Final = Path(__file__).with_name("l0_fixed_corpus.json")
 _SESSION_KEYS: Final = frozenset(
@@ -59,6 +59,7 @@ _SESSION_KEYS: Final = frozenset(
         "run_labels_file",
         "browser_endpoint",
         "browser_page_origin",
+        "browser_executable_path",
         "browser_profile_path",
         "browser_launch_process_id",
         "browser_debugger_process_id",
@@ -147,6 +148,12 @@ def _load_session(path: Path) -> dict[str, object]:
     endpoint = session["browser_endpoint"]
     _loopback_endpoint(endpoint)
     _loopback_page_origin(session["browser_page_origin"])
+    executable_value = session["browser_executable_path"]
+    if type(executable_value) is not str or not Path(executable_value).is_absolute():
+        raise ValueError("browser session executable path is invalid")
+    executable_path = Path(executable_value).resolve()
+    if not executable_path.is_file() or executable_path.name.lower() != "chrome.exe":
+        raise ValueError("browser session executable path is unavailable")
     profile_value = session["browser_profile_path"]
     if type(profile_value) is not str or not Path(profile_value).is_absolute():
         raise ValueError("browser session profile path is invalid")
@@ -296,6 +303,7 @@ def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
     _, port = _loopback_endpoint(session["browser_endpoint"])
     expected_pid = int(session["browser_debugger_process_id"])
     launch_pid = int(session["browser_launch_process_id"])
+    expected_executable = Path(str(session["browser_executable_path"])).resolve()
     profile_path = Path(str(session["browser_profile_path"])).resolve()
     try:
         connections = psutil.net_connections(kind="tcp")
@@ -315,9 +323,11 @@ def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
     try:
         process = psutil.Process(expected_pid)
         name = process.name().lower()
+        executable = Path(process.exe()).resolve()
         command_line = process.cmdline()
         launch_process = psutil.Process(launch_pid)
         launch_name = launch_process.name().lower()
+        launch_executable = Path(launch_process.exe()).resolve()
         launch_command_line = launch_process.cmdline()
         debugger_parent_pids = {parent.pid for parent in process.parents()}
     except psutil.Error as error:
@@ -325,6 +335,8 @@ def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
     expected_profile = f"--user-data-dir={profile_path}"
     if (
         name not in {"chrome", "chrome.exe"}
+        or os.path.normcase(str(executable))
+        != os.path.normcase(str(expected_executable))
         or expected_profile not in command_line
         or f"--remote-debugging-port={port}" not in command_line
         or "--remote-debugging-address=127.0.0.1" not in command_line
@@ -332,6 +344,8 @@ def _assert_browser_endpoint_owner(session: dict[str, object]) -> None:
         raise RuntimeError("Chrome debugger process does not own the exact isolated profile")
     if (
         launch_name not in {"chrome", "chrome.exe"}
+        or os.path.normcase(str(launch_executable))
+        != os.path.normcase(str(expected_executable))
         or expected_profile not in launch_command_line
         or (launch_pid != expected_pid and launch_pid not in debugger_parent_pids)
     ):
@@ -369,6 +383,29 @@ def _discover_page(endpoint: str, *, page_origin: str, launch_nonce: str) -> str
         candidates[0]["webSocketDebuggerUrl"],
         expected_port=port,
     )
+
+
+@asynccontextmanager
+async def _owned_browser_socket(
+    session: dict[str, object],
+) -> AsyncIterator[object]:
+    """Connect only while the frozen Chrome still owns the exact endpoint."""
+
+    _assert_browser_endpoint_owner(session)
+    websocket_url = _discover_page(
+        str(session["browser_endpoint"]),
+        page_origin=str(session["browser_page_origin"]),
+        launch_nonce=str(session["browser_launch_nonce"]),
+    )
+    _assert_browser_endpoint_owner(session)
+    async with websockets.connect(
+        websocket_url,
+        max_size=4 * 1024 * 1024,
+    ) as socket:
+        # A later listener replacement cannot take over this established TCP
+        # and WebSocket stream after the post-connect owner check succeeds.
+        _assert_browser_endpoint_owner(session)
+        yield socket
 
 
 class _CdpClient:
@@ -922,16 +959,11 @@ async def _capture(args: argparse.Namespace) -> int:
     )
     browser_jsonl = evidence_directory / "browser.jsonl"
     acceptance_jsonl = evidence_directory / "physical-acceptance.jsonl"
-    websocket_url = _discover_page(
-        str(session["browser_endpoint"]),
-        page_origin=str(session["browser_page_origin"]),
-        launch_nonce=str(session["browser_launch_nonce"]),
-    )
     successful = 0
     attempted = 0
     successful_by_scenario = {str(case["case_id"]): 0 for case in cases}
     accepted_keys: set[tuple[str, str, int]] = set()
-    async with websockets.connect(websocket_url, max_size=4 * 1024 * 1024) as socket:
+    async with _owned_browser_socket(session) as socket:
         cdp = _CdpClient(socket)
         await cdp.command("Runtime.enable")
         available = await cdp.evaluate(
