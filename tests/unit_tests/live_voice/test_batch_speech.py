@@ -375,6 +375,53 @@ def _recognize_request(
     }
 
 
+def _continued_recognize_request(
+    *,
+    request_id: str = "request-r0",
+    operation_id: str = "operation-r0",
+    predecessor_generation: int = 1,
+    current_generation: int = 2,
+) -> dict[str, object]:
+    request = _recognize_request(
+        request_id=request_id,
+        operation_id=operation_id,
+        capture_id="capture-current",
+        generation=current_generation,
+    )
+    request["capture"] = {
+        "capture_id": "capture-current",
+        "capture_generation": current_generation,
+        "track_id": "track-current",
+        "final": True,
+    }
+    request["audio"] = {
+        "format": "wav_pcm16_mono",
+        "sample_rate_hz": 16_000,
+        "channel_count": 1,
+        "data_base64": base64.b64encode(_wav_samples([2000, 3000])).decode(
+            "ascii"
+        ),
+    }
+    request["predecessor"] = {
+        "subject_id": "subject-predecessor",
+        "capture": {
+            "capture_id": "capture-predecessor",
+            "capture_generation": predecessor_generation,
+            "track_id": "track-predecessor",
+            "final": True,
+        },
+        "audio": {
+            "format": "wav_pcm16_mono",
+            "sample_rate_hz": 16_000,
+            "channel_count": 1,
+            "data_base64": base64.b64encode(_wav_samples([-3000, -2000])).decode(
+                "ascii"
+            ),
+        },
+    }
+    return request
+
+
 def _synthesize_request(
     *,
     request_id: str = "request-s0",
@@ -475,36 +522,7 @@ async def test_cross_capture_recognition_authorizes_and_combines_exact_segments(
     provider = SegmentRecordingProvider()
     resolver = ExactAuthorizationResolver()
     service = _service(provider, resolver=resolver)
-    request = _recognize_request(capture_id="capture-current", generation=2)
-    request["capture"] = {
-        "capture_id": "capture-current",
-        "capture_generation": 2,
-        "track_id": "track-current",
-        "final": True,
-    }
-    request["audio"] = {
-        "format": "wav_pcm16_mono",
-        "sample_rate_hz": 16_000,
-        "channel_count": 1,
-        "data_base64": base64.b64encode(_wav_samples([2000, 3000])).decode("ascii"),
-    }
-    request["predecessor"] = {
-        "subject_id": "subject-predecessor",
-        "capture": {
-            "capture_id": "capture-predecessor",
-            "capture_generation": 1,
-            "track_id": "track-predecessor",
-            "final": True,
-        },
-        "audio": {
-            "format": "wav_pcm16_mono",
-            "sample_rate_hz": 16_000,
-            "channel_count": 1,
-            "data_base64": base64.b64encode(_wav_samples([-3000, -2000])).decode(
-                "ascii"
-            ),
-        },
-    }
+    request = _continued_recognize_request()
 
     recognized = await service.recognize(request, CONTEXT)
 
@@ -550,6 +568,56 @@ async def test_cross_capture_null_predecessor_fails_before_authority_or_provider
     assert result["error"]["reason"] == "INVALID_OBJECT"
     assert resolver.calls == []
     assert provider.recognize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_capture_requires_distinct_capture_generations() -> None:
+    provider = ControlledProvider()
+    resolver = ExactAuthorizationResolver()
+    service = _service(provider, resolver=resolver)
+
+    result = await service.recognize(
+        _continued_recognize_request(
+            predecessor_generation=1,
+            current_generation=1,
+        ),
+        CONTEXT,
+    )
+
+    assert result["error"]["reason"] == "CAPTURE_CONTINUATION_IDENTITY_CONFLICT"
+    assert resolver.calls == []
+    assert provider.recognize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_capture_tombstones_survive_configured_minimum_window() -> None:
+    provider = ControlledProvider()
+    service = _service(provider, max_identity_tombstones=1)
+    combined = _continued_recognize_request()
+
+    first = await service.recognize(combined, CONTEXT)
+    predecessor_only = _recognize_request(
+        request_id="request-predecessor-replay",
+        operation_id="operation-predecessor-replay",
+        capture_id="capture-predecessor",
+        generation=1,
+    )
+    predecessor_only["scope"] = dict(SCOPE, subject_id="subject-predecessor")
+    predecessor_only["capture"] = dict(combined["predecessor"]["capture"])
+    predecessor_only["audio"] = dict(combined["predecessor"]["audio"])
+    replay = await service.recognize(
+        predecessor_only,
+        SpeechRpcContext(
+            "subject-predecessor", "session-1", Assurance.AUTHENTICATED
+        ),
+    )
+
+    assert first["ok"] is True
+    assert replay["error"]["reason"] == "STALE_RECOGNITION_SESSION"
+    assert provider.recognize_calls == 1
+    assert service.capability_payload()["capability"]["declared_limits"][
+        "identity_tombstone_window"
+    ] == 2
 
 
 @pytest.mark.asyncio

@@ -240,6 +240,35 @@ test('cross-capture final keeps predecessor provenance and one ordered Batch req
   assert.equal(calls.length, 1);
 });
 
+test('cross-capture final rejects equal predecessor and successor generations locally', async () => {
+  let transportCalls = 0;
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    scope,
+    createId: ids(),
+    transport: {
+      async request() {
+        transportCalls += 1;
+        throw new Error('equal generations must fail before transport');
+      },
+    },
+  });
+
+  await assert.rejects(
+    client.recognizeFinal({
+      frames: [frame(1, 0, 0.5, 'capture-tail', 'track-tail')],
+      predecessor: {
+        subjectId: 'subject-prefix',
+        frames: [frame(1, 0, -0.5, 'capture-prefix', 'track-prefix')],
+      },
+      locale: 'en-US',
+      correlationId: 'correlation-1',
+    }),
+    error => error.reason === 'CAPTURE_CONTINUATION_IDENTITY_CONFLICT',
+  );
+  assert.equal(transportCalls, 0);
+});
+
 test('real backend streaming fallback fixture crosses into the frontend contract', async () => {
   const client = new GatewayBatchSpeechClient({
     enabled: true,

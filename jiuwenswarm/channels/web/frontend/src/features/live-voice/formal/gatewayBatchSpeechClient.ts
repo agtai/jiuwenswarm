@@ -918,6 +918,7 @@ export class GatewayBatchSpeechClient {
         || predecessorCapture === null
         || requiredText(predecessor.subjectId, 'predecessor.subject_id') === this.#scope!.subject_id
         || predecessorCapture.capture_id === captureId
+        || predecessorCapture.capture_generation === captureGeneration
         || predecessorCapture.track_id === capture.track_id
         || predecessorFirst.format.sample_rate_hz !== first.format.sample_rate_hz
         || predecessorWav === null

@@ -2601,6 +2601,13 @@ export class ProductP1VoiceRouteOwner {
 
   async #releaseResources(reason: string, pendingFailureReason: string | null = null): Promise<void> {
     this.#operationGeneration += 1;
+    const recognitionGeneration = this.#route?.binding.generation;
+    const recognitionFence = (
+      this.#speech !== null
+      && recognitionGeneration?.kind === 'capture'
+    )
+      ? this.#speech.fenceRecognition(recognitionGeneration.id)
+      : Promise.resolve();
     this.#captureReadinessPending = false;
     this.#captureReadinessPurpose = null;
     this.#captureStartupAudioReady = false;
@@ -2642,6 +2649,7 @@ export class ProductP1VoiceRouteOwner {
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#playout = null;
+    await recognitionFence;
     try {
       await this.#audio.stopCapture(reason);
     } catch {

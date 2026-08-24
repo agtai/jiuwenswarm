@@ -1515,10 +1515,38 @@ def _continued_binding_with_segments(
     return replace(binding, recognition_segments=segments, content_sha256=digest)
 
 
+def _single_recognition_binding(
+    binding: SpeechAuthorizationBinding,
+    segment: SpeechRecognitionSegmentBinding,
+) -> SpeechAuthorizationBinding:
+    return replace(
+        binding,
+        subject_id=segment.subject_id,
+        scope=replace(binding.scope, subject_id=segment.subject_id),
+        capture_id=segment.capture_id,
+        capture_generation=segment.capture_generation,
+        track_id=segment.track_id,
+        content_sha256=segment.content_sha256,
+        recognition_segments=(),
+    )
+
+
 def test_continued_recognition_requires_exact_ordered_media_authorities() -> None:
     registry, exact, predecessor, current = _continued_recognition_authority()
 
     assert registry.authorize(exact) == exact
+    assert (
+        registry.authorize(
+            _single_recognition_binding(exact, exact.recognition_segments[0])
+        )
+        is None
+    )
+    assert (
+        registry.authorize(
+            _single_recognition_binding(exact, exact.recognition_segments[1])
+        )
+        is None
+    )
     before = (len(registry._records), len(registry._subjects))
 
     reversed_segments = tuple(reversed(exact.recognition_segments))
@@ -1549,6 +1577,82 @@ def test_continued_recognition_requires_exact_ordered_media_authorities() -> Non
     assert (len(registry._records), len(registry._subjects)) == before
     assert predecessor.recognition_content_sha256 is not None
     assert current.recognition_content_sha256 is not None
+
+
+def test_continued_predecessor_can_activate_only_one_successor() -> None:
+    registry, exact, predecessor, current = _continued_recognition_authority()
+    before = (len(registry._records), len(registry._subjects))
+    params = _params(
+        capture_id="capture-second-successor",
+        capture_generation=3,
+        track_id="track-second-successor",
+        recognition_predecessor_subject_id=predecessor.subject_id,
+    )
+
+    with pytest.raises(
+        MediaTransportViolation, match="exact completed predecessor"
+    ):
+        _activate(
+            registry,
+            params=params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+        )
+
+    assert (len(registry._records), len(registry._subjects)) == before
+    assert current.subject_id == exact.subject_id
+
+
+def test_continued_activation_rejects_equal_capture_generation() -> None:
+    registry = _active_registry()
+    predecessor_activation = _activate(
+        registry,
+        params=_params(
+            capture_id="capture-predecessor",
+            capture_generation=1,
+            track_id="track-predecessor",
+        ),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    predecessor = registry.consume_ticket(
+        _media_ticket(predecessor_activation), request_origin=ORIGIN
+    )
+    assert predecessor is not None
+    registry.accept_frame(
+        predecessor,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(-0.25,) * 320),
+    )
+    registry.complete_route(
+        predecessor,
+        SimpleNamespace(
+            activated=True,
+            accepted_frames=1,
+            reason_id=MediaDetachReason.RECOGNITION_CONTINUATION,
+        ),  # type: ignore[arg-type]
+    )
+    successor_params = _params(
+        capture_id="capture-current",
+        capture_generation=1,
+        track_id="track-current",
+        recognition_predecessor_subject_id=predecessor.subject_id,
+    )
+    _trust_product_activation(
+        registry,
+        successor_params,
+        connection_id="connection-1",
+    )
+
+    with pytest.raises(
+        MediaTransportViolation, match="exact completed predecessor"
+    ):
+        registry.activate(
+            params=successor_params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+        )
+
+    assert len(registry._records) == 1
 
 
 def test_continued_recognition_cannot_import_a_cross_session_predecessor() -> None:

@@ -619,6 +619,9 @@ class _MediaAuthority:
         default=None, repr=False
     )
     recognition_continuation_predecessor: bool = False
+    recognition_continuation_successor_subject_id: str | None = field(
+        default=None, repr=False
+    )
     streaming_voice_commit_receipt: str | None = field(default=None, repr=False)
     streaming_started_at: float | None = None
     streaming_observation_emitted: bool = False
@@ -1317,42 +1320,6 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED",
                     "media activation requires the exact accepted product P2 route",
                 )
-            if recognition_predecessor_subject_id is not None:
-                predecessor_id = self._subjects.get(
-                    (session_id, recognition_predecessor_subject_id)
-                )
-                predecessor = self._records.get(predecessor_id or "")
-                if (
-                    predecessor is None
-                    or predecessor.subject_id
-                    != recognition_predecessor_subject_id
-                    or predecessor.binding.direction is not MediaDirection.UPLINK
-                    or predecessor.binding.connection_id != owner_connection_id
-                    or predecessor.expected_origin != request_origin
-                    or predecessor.binding.session_id != session_id
-                    or predecessor.binding.interaction_id != interaction_id
-                    or predecessor.binding.correlation_id != correlation_id
-                    or predecessor.product_activation_id != activation_id
-                    or predecessor.product_activation_generation
-                    != activation_generation
-                    or predecessor.binding.generation.id == capture_id
-                    or predecessor.binding.track_id == track_id
-                    or predecessor.binding.frame_format.sample_rate_hz
-                    != sample_rate_hz
-                    or predecessor.locale != locale
-                    or not predecessor.recognition_continuation_predecessor
-                    or predecessor.recognition_predecessor_subject_id is not None
-                    or not predecessor.ticket_consumed
-                    or not predecessor.route_completed
-                    or predecessor.accepted_frames <= 0
-                    or predecessor.recognition_content_sha256 is None
-                    or now > predecessor.authority_expires_at
-                    or not self._has_retained_product_activation(predecessor, now)
-                ):
-                    raise MediaTransportViolation(
-                        "MEDIA_RECOGNITION_PREDECESSOR_UNTRUSTED",
-                        "continued recognition requires the exact completed predecessor",
-                    )
         ticket = secrets.token_urlsafe(32)
         record_id = f"media-record-{secrets.token_hex(16)}"
         subject_id = f"live-voice-media:{secrets.token_hex(16)}"
@@ -1399,6 +1366,46 @@ class DedicatedMediaProductRegistry:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
+            if recognition_predecessor_subject_id is not None:
+                predecessor_id = self._subjects.get(
+                    (session_id, recognition_predecessor_subject_id)
+                )
+                predecessor = self._records.get(predecessor_id or "")
+                if (
+                    predecessor is None
+                    or predecessor.subject_id
+                    != recognition_predecessor_subject_id
+                    or predecessor.binding.direction is not MediaDirection.UPLINK
+                    or predecessor.binding.connection_id != owner_connection_id
+                    or predecessor.expected_origin != request_origin
+                    or predecessor.binding.session_id != session_id
+                    or predecessor.binding.interaction_id != interaction_id
+                    or predecessor.binding.correlation_id != correlation_id
+                    or predecessor.product_activation_id != activation_id
+                    or predecessor.product_activation_generation
+                    != activation_generation
+                    or predecessor.binding.generation.id == capture_id
+                    or predecessor.binding.generation.value == capture_generation
+                    or predecessor.binding.track_id == track_id
+                    or predecessor.binding.frame_format.sample_rate_hz
+                    != sample_rate_hz
+                    or predecessor.locale != locale
+                    or not predecessor.recognition_continuation_predecessor
+                    or predecessor.recognition_predecessor_subject_id is not None
+                    or predecessor.recognition_continuation_successor_subject_id
+                    is not None
+                    or not predecessor.ticket_consumed
+                    or not predecessor.route_completed
+                    or predecessor.accepted_frames <= 0
+                    or predecessor.recognition_content_sha256 is None
+                    or now > predecessor.authority_expires_at
+                    or not self._has_retained_product_activation(predecessor, now)
+                ):
+                    raise MediaTransportViolation(
+                        "MEDIA_RECOGNITION_PREDECESSOR_UNTRUSTED",
+                        "continued recognition requires the exact completed predecessor",
+                    )
+                predecessor.recognition_continuation_successor_subject_id = subject_id
             # Product P1 opens the replacement uplink after the authoritative
             # response downlink exists and before playout begins. That exact
             # overlap is the only capture profile that receives the wider VAD
@@ -2897,6 +2904,8 @@ class DedicatedMediaProductRegistry:
                         or binding.track_id != segments[-1].track_id
                         or segments[0].subject_id == segments[1].subject_id
                         or segments[0].capture_id == segments[1].capture_id
+                        or segments[0].capture_generation
+                        == segments[1].capture_generation
                         or segments[0].track_id == segments[1].track_id
                         or binding.content_sha256
                         != hashlib.sha256(
@@ -2951,6 +2960,8 @@ class DedicatedMediaProductRegistry:
                         predecessor.issued_at >= current.issued_at
                         or not predecessor.recognition_continuation_predecessor
                         or predecessor.recognition_predecessor_subject_id is not None
+                        or predecessor.recognition_continuation_successor_subject_id
+                        != current.subject_id
                         or current.recognition_predecessor_subject_id
                         != predecessor.subject_id
                         or predecessor.binding.session_id
@@ -2971,6 +2982,11 @@ class DedicatedMediaProductRegistry:
                     ):
                         return None
                     return binding
+                if (
+                    record.recognition_continuation_predecessor
+                    or record.recognition_predecessor_subject_id is not None
+                ):
+                    return None
                 if record.recognition_content_sha256 is None and record.pcm:
                     wav = _wav_bytes(
                         bytes(record.pcm), record.binding.frame_format.sample_rate_hz

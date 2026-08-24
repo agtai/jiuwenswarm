@@ -1211,6 +1211,7 @@ def parse_recognition_batch_request(
         if (
             prior.subject_id == current.subject_id
             or prior.capture_id == current.capture_id
+            or prior.capture_generation == current.capture_generation
             or prior.track_id == current.track_id
         ):
             raise _fail(
@@ -1526,7 +1527,9 @@ class FormalBatchSpeechService:
         )
         self._monotonic = monotonic
         self._max_completed = max(1, max_completed_operations)
-        self._max_identity_tombstones = max(1, max_identity_tombstones)
+        # A continuation reserves predecessor and successor identities as one
+        # replay boundary, so the supported window can never retain fewer than two.
+        self._max_identity_tombstones = max(2, max_identity_tombstones)
         self._trusted_demo_critical_bypass = (
             _enabled(os.getenv(PRODUCT_DEMO_POLICY_BYPASS_ENV))
             if trusted_demo_critical_bypass is None
