@@ -111,6 +111,7 @@ It did not reproduce a compatible feature-off/on p50/p95 population, so the
 | Fixed VAD reduction from 1200 to 900/800 ms | **REJECTED** | P1 input; `streaming_speech.py`, `openai_streaming_speech.py` | Successful turns exposed **285–412 ms** of potential endpointing headroom | Both candidates preserved only 15/20 turns; every 1000 ms natural-pause case failed 0/5 | The headroom is real, but a global fixed threshold cannot safely recover it. Keep 1200 ms. |
 | Application-level TTS HTTPX client reuse | **REJECTED AND REVERTED** | P1 TTS Provider; `openai_streaming_speech.py` | No gain; warm first-PCM regressed **57.8 ms / 7.0%** | B produced **0/3 warm TCP/TLS reuse**; 832.0→889.9 ms warm p50 | Do not reintroduce this implementation unchanged. |
 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP` FOR TESTED WORKLOADS** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Candidate→final/projected-gain p50 **177.2 ms**, p95 **425.3 ms**; relative p50 **7.43%** | 3/3 real pilot attempts completed, exact prefix 3/3, mismatch 0, zero forbidden effects; credited v2 artifacts survive in the durable latency-runs archive with matching hashes | Failed the predeclared 500 ms headroom, 400 ms gain and 10% relative gates. Reopen only with a reviewed new long-form workload/materiality hypothesis; do not generalize this STOP to every possible response length. |
+| LVL-10L authoritative-final long-form chunked TTS | **STOP — DIRECTIONALLY POSITIVE; FORMAL ABORTED; NO PRODUCT CREDIT** | Validation-only post-final TTS runner; product source unchanged | Clean v2 pilot `long_2100`: B2 **6.93 s / 36.85%**, B4 **7.75 s / 41.27%** derived completion gain | 12/12 attempts, 24/24 requests, zero Provider errors at `bcbf6a423`; an earlier 2,938-character pilot exposed the one-request 8 MiB cap boundary; five-round formal stopped before attempt artifacts | Repeats LVL-10's 20–24% long-completion direction but is one pilot round. Hongxing requested stopping long-duration tests. Do not select B2/B4 or wire product/Browser. See the [result](../evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md). |
 | Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves controlled owner-path gain only. It does not exercise the raw P2 response observer that caused the deployed TTS authorization failure, nor real Provider/network/Chrome/WebAudio/Agent/model timing. |
 | EOT/STT early result waiter | **REJECTED — NO MATERIAL SERIAL GAP** | P1/P2 Speech settlement; real `ProductP1VoiceRouteOwner` and registry result seam under deterministic dependencies | Largest removable-gap p50 **0.885 ms**; largest fraction p50 **0.015** | Complete A1 at `8e5dab8b8`: 20/20 exact, cleanup-complete attempts; ten marks/eight segments; zero forbidden effects | The 450.782 ms provider-slow diagnostic is legitimate remaining Provider wait. The credited final raw `/tmp` report no longer exists; reviewed sanitized tables remain authoritative, while an earlier diagnostic 20/20 raw report survives. Future credited runs must use the durable latency-runs root. |
 
@@ -372,7 +373,8 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 9 | Authoritative accepted/queued acknowledgement | **PROPOSED P3 PERCEIVED-LATENCY OPTIMIZATION** | **2–7 s perceived** | Conversation Runtime, Task Core truth, PresentationUnit/TTS | It does not shorten final Task completion. It gives the user a truthful early response such as “accepted” or “queued.” |
 | 10 | Short Task status/cancel PresentationUnits | **PROPOSED P3** | **1–5 s perceived** | `voice_task_bridge.py`, `product_composition_registry.py`, presentation/TTS | It must speak only authoritative Task state and never promote accepted/queued to running/completed. |
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
-| 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but medium A1/A2 drift 426.8 ms invalidated run 1 and long drift 321.7 ms invalidated run 2. No Browser Lane C or general chunked route is authorized. A long-form completion-primary follow-up requires a separate prospective LVL-10L spec. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
+| 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but medium A1/A2 drift 426.8 ms invalidated run 1 and long drift 321.7 ms invalidated run 2. No Browser Lane C or general chunked route is authorized. Its separate completion-primary successor LVL-10L is now also stopped. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
+| 13 | LVL-10L completion-primary long-form chunked TTS | **STOP — DIRECTIONAL GAIN, FORMAL NOT COMPLETED** | validation runner/corpora only; `lvl10l_long_form_tts_screen.py`; product route unchanged | v2 2100-char pilot: B2 saved **6.93 s / 36.85%**, B4 saved **7.75 s / 41.27%** vs interpolated controls | First pilot: quota rejection; second: 11/12 and 8 MiB boundary; v2: 12/12 PASS with zero errors; formal intentionally aborted with only run/manifest retained | Confirms repeatable long-form headroom but cannot choose arm or authorize wiring. No further long-duration runs per Hongxing. See the [LVL-10L result](../evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md). |
 
 ## 7. Residual P2 candidates
 
@@ -411,9 +413,9 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
 1. Preserve the D-094 atomic ordered batch observation and batch-16 default.
    The fixed-corpus product off/on waterfall remains useful evidence, but it is
    no longer a repair prerequisite.
-2. Preserve the no-Browser LVL-10 result as `INCONCLUSIVE`; do not wire it into
-   the product or Browser. Route any completion-primary long-form hypothesis to
-   a new prospective LVL-10L spec rather than changing the completed screen.
+2. Preserve LVL-10 as `INCONCLUSIVE` and LVL-10L as directionally positive but
+   formally uncompleted. Stop long-duration chunking tests; do not select an
+   arm or wire either experiment into product or Browser.
 3. Run the separately specified Provider-native Semantic VAD
    `auto` and `high` causal screens with the 1200 ms fallback. Treat this as
    Tier-3 Provider/commit/fence work, not a low-risk constant change.
@@ -495,7 +497,10 @@ LVL-10 completed two formal real-Provider populations but remains
 `INCONCLUSIVE`: both ran 45/45 without Provider errors, yet each violated its
 A1/A2 drift gate. The current full-final path remains unchanged and no Browser
 Lane C is authorized. Long completion improved 20–24% against both controls in
-both runs while medium completion regressed, preserving only a new conditional
-long-form hypothesis. Provider-native Semantic VAD is again the next existing
-no-Browser screen. Adaptive WebAudio 250 ms has one unmatched diagnostic signal
-and the default stays 1000 ms.
+both runs while medium completion regressed. LVL-10L then passed a clean
+12/12, 24-request v2 pilot and derived 6.93–7.75 seconds of 2100-character
+completion gain, but its five-round formal stopped before attempt artifacts on
+Hongxing's direction. This is repeatable directional headroom, not formal or
+product credit. Provider-native Semantic VAD is the next existing no-Browser
+screen. Adaptive WebAudio 250 ms has one unmatched diagnostic signal and the
+default stays 1000 ms.

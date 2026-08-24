@@ -109,6 +109,7 @@ a frozen-corpus off/on waterfall.
 | `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Next already-specified no-Browser screen after LVL-10 stopped inconclusive; retain 1200 ms fallback |
 | `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser diagnostic; estimated schedule boundary | One unmatched-round schedule→start estimate **578.998→46.703 ms**, delta **-532.295 ms**, `MEASURED` + `DIAGNOSTIC` | Default remains 1000 ms; clean same-source/workload A1/B/A2 required |
 | `LVL-10` | Authoritative-final chunked TTS | Real-Provider no-Browser `A1/B/A2`; two formal 45/45 populations | **INCONCLUSIVE:** medium A1/A2 drift 426.8 ms in run 1; long drift 321.7 ms in run 2. Long completion B repeated **20–24%** improvement, while medium regressed | Stop before Browser/product wiring; a completion-primary long-form follow-up requires a new prospective hypothesis/spec |
+| `LVL-10L` | Completion-primary long-form chunked TTS | Real-Provider no-Browser A1/B2/B4/A2 pilots; formal stopped | **DIRECTIONAL:** clean v2 pilot 12/12, B2/B4 2100-character completion gain **6.93 s / 36.85%** and **7.75 s / 41.27%**; five-round formal has no attempt artifacts | Stop long-duration testing per Hongxing; no arm selection, Browser or product wiring |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -651,12 +652,37 @@ Neither `>600 ms` nor the 400–800 ms idea is a current gate. Two later formal
 real-Provider populations completed 45/45 with zero errors but each failed the
 A1/A2 drift validity gate. LVL-10 is therefore `INCONCLUSIVE` and does not enter
 Browser Lane C or product wiring. Long completion repeatedly improved 20–24%,
-while medium completion regressed; this is only a new conditional long-form
-hypothesis. See the [sanitized result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md)
+while medium completion regressed. That hypothesis was tested separately by
+LVL-10L and is now stopped without product wiring. See the [sanitized result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md)
 and the
 [SOTA latency review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md).
 
-## 15. What has and has not been measured end to end
+## 15. LVL-10L — completion-primary long-form follow-up
+
+LVL-10L was a separate prospective experiment, not a post-hoc change to
+LVL-10. It froze completion as primary, compared one full-final request with
+two and four exact post-final chunks, and kept Browser/product source excluded.
+The work lived on `latency/hx-optimizations`; historical LVL-10 worker branches
+`latency/lvl10-provider-screen` and `latency/lvl10-validation` remained as
+predecessor history rather than new LVL-10L integration owners.
+
+Three pilots and one stopped formal were retained:
+
+1. v1 pilot at `76f4413de`: 12 attempts, 18/24 requests, zero timings; OpenAI
+   returned `429 credit_balance_exhausted` (`FAILED_WORKFLOW`).
+2. v1 pilot after credit restoration: 11/12, 24/24; the 2,938-character A2
+   control reached the 8 MiB wire-audio safety boundary (`DIAGNOSTIC`).
+3. v2 pilot at `bcbf6a423`: 12/12, 24/24, zero errors and `PILOT_PASS`.
+   At 2,150 characters B2/B4 completion gains were derived 6.93 seconds /
+   36.85% and 7.75 seconds / 41.27%.
+4. approved five-round/120-request formal: stopped on Hongxing's direction;
+   only run/manifest exist, so it has zero timing credit (`ABORTED`).
+
+The clean pilot repeats LVL-10's long-form direction, but one round cannot
+select B2/B4 or satisfy a formal population. Product remains one request. See
+the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md).
+
+## 16. What has and has not been measured end to end
 
 | Question | Current answer |
 |---|---|
@@ -667,7 +693,7 @@ and the
 | Do we have accepted real-Provider component timings? | Yes for the VAD rejection, connection-reuse rejection and stable-sentence materiality stop; each excludes Browser/full E2E. |
 | Is approximately 46% a locally verified product gain? | No. It remains `REPORTED_EXTERNAL`. LVL-01D later closed the workflow defect for one accepted human run but did not reproduce the feature-off/on percentage. |
 
-## 16. Artifact retention summary
+## 17. Artifact retention summary
 
 The private archive is
 `/home/renan/openJiuwen-ai/live-voice-latency-runs/`. Its README is the full
@@ -689,15 +715,16 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-08 | No run artifact exists |
 | LVL-09 | Reused manual run directory survives, but its manifest/report cannot bind a compatible A/B population |
 | LVL-10 | Failed 2-second preflight, corrected 9/9 pilot and two 45/45 formal real-Provider populations survive with hashes bound in the [LVL-10 result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md) |
+| LVL-10L | Quota-rejected v1 pilot, cap-boundary v1 pilot and passing v2 pilot survive under `latency-runs/lvl10l`; the stopped v2 formal retains only run/manifest. Hashes are bound in the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md) |
 
-## 17. Current decision route
+## 18. Current decision route
 
 1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
    LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
    remains an evidence gap, not a repair packet.
-2. Preserve LVL-10 as `INCONCLUSIVE`: no Browser/product wiring. A conditional
-   long-form completion screen requires a new prospective LVL-10L packet rather
-   than changing LVL-10's primary metric after the run.
+2. Preserve LVL-10 as `INCONCLUSIVE` and LVL-10L as directionally positive but
+   formally incomplete. Stop additional long-duration chunking tests and keep
+   the one-request product path.
 3. Repair or replace the manual driver before another physical population: a
    beep must identify profile/round/terminal, advancement must reject a
    mismatched or extra batch, and shutdown must retire the complete process
