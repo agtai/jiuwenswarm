@@ -346,8 +346,8 @@ the same clean specification commit:
 
 | Pane | Branch/worktree | Authority and exclusive files |
 |---|---|---|
-| `1:0.0` | `latency/lvl10-provider-screen` / `.claude/worktrees/lvl10-provider-screen` | Writer A: only `scripts/live_voice/lvl10_segmented_tts_screen.py` |
-| `1:1.0` | `latency/lvl10-validation` / `.claude/worktrees/lvl10-validation` | Writer B: only `tests/fixtures/live_voice_lvl10_tts_v1/manifest.json` and `tests/unit_tests/live_voice/test_lvl10_segmented_tts_screen.py` |
+| `1:0.0` | `latency/lvl10-provider-screen` / `/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/lvl10-provider-screen` | Writer A: only `scripts/live_voice/lvl10_segmented_tts_screen.py` |
+| `1:1.0` | `latency/lvl10-validation` / `/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/lvl10-validation` | Writer B: only `tests/fixtures/live_voice_lvl10_tts_v1/manifest.json` and `tests/unit_tests/live_voice/test_lvl10_segmented_tts_screen.py` |
 | `0:0.0` | current reference tree | Read-only reviewer A: Provider/TTS/conformance inspection; return under `/tmp/lvl10-reviews/provider/` |
 | `0:1.0` | current reference tree | Read-only reviewer B: ordering/cancel/oracle inspection; return under `/tmp/lvl10-reviews/oracles/` |
 
