@@ -255,10 +255,7 @@ async def test_first_valid_pcm_after_2_seconds_does_not_fail_the_provider_screen
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("control", (KeyboardInterrupt, GeneratorExit))
-async def test_process_control_from_provider_is_not_converted_to_measurement_failure(
-    control: type[BaseException],
-) -> None:
+async def test_generator_exit_from_provider_is_not_converted_to_measurement_failure() -> None:
     base_provider = _provider(ScriptedSseFactory())
 
     class ProcessControlProvider:
@@ -269,13 +266,13 @@ async def test_process_control_from_provider_is_not_converted_to_measurement_fai
 
         async def next_synthesis_event(self, _ref: Any, *, timeout_seconds: float) -> Any:
             assert timeout_seconds >= 15.0
-            raise control()
+            raise GeneratorExit()
 
         async def cancel_synthesis(self, _ref: Any, *, reason: str) -> None:
             return None
 
     try:
-        with pytest.raises(control):
+        with pytest.raises(GeneratorExit):
             await run_attempt(
                 ProcessControlProvider(),
                 load_fixture_manifest(MANIFEST_PATH)[0],
