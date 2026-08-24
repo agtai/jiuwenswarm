@@ -26,9 +26,12 @@
 > full tombstone-capacity ownership, CDP discovery/connect race and direct
 > proxy/redirect/listener/four-tuple defects; all seven are repaired. A complete
 > owner audit then consolidated HTTP discovery and WebSocket CDP onto verified
-> preconnected sockets, and the baselines were regenerated on `7f2b0b7ab`.
+> preconnected sockets, and both baselines were regenerated on `7f2b0b7ab`.
+> The resulting broad review disclosed six remaining actionable findings in one
+> batch; all six are repaired on `3421f9191`, whose deterministic injected
+> baseline is current. The external Provider result remains bound to `7f2b0b7ab`.
 > Physical Formal Web cold/warm
-> collection and one broad Tier-3 review are still open, so
+> collection and one focused repair-closure review are still open, so
 > §4 and later optimization layers are not activated
 > by these non-physical results. See the
 > [L0 evidence](../evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
@@ -379,7 +382,8 @@ integration, but activates no next packet. The `e1df8b452` physical run supplies
 a scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
 fixed-corpus baseline required by this plan. The STATUS-selected 2026-08-23 L0
 packet now supplies owner-scoped correlated instrumentation, the frozen corpus
-and non-physical baselines and is ready for one broad Tier-3 review. It does not
+and non-physical baselines, plus the complete disclosed repair batch, and is
+ready for one focused Tier-3 closure review. It does not
 activate an optimization batch: review closure and physical cold/warm Formal Web
 collection are the next dependencies. Only physical evidence may select VAD,
 startup-buffer, EOT settlement or sentence-overlap work. Any later assigned

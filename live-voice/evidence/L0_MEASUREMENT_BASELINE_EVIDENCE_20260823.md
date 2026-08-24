@@ -6,8 +6,12 @@
   the [latency optimization plan](../roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
 - Baseline: `c31e85ade1a69e934d05bfb9c277568a1238663c` on
   `hx/0812_live_voice_w3`.
-- Measured product/test/corpus source:
-  `7f2b0b7ab9b9dc363cec21f83ac6e04ad53d221c`.
+- Current repaired product/test/corpus source:
+  `3421f919192e56ebfa9107efffe5a7846326225f`.
+  The deterministic injected baseline was regenerated on that exact source.
+  The last real-Provider component result remains source-bound to
+  `7f2b0b7ab9b9dc363cec21f83ac6e04ad53d221c`; no Provider was called for the
+  review-only repair batch.
   The later evidence-only commit changes documentation, not the measured
   product, test, corpus or runner trees.
 - Risk: Tier 3. The production hooks cross Browser, Gateway, Runtime and Agent
@@ -15,11 +19,13 @@
   lifecycle or mutation authority.
 - Overall disposition: **PARTIAL**. Correlated production instrumentation,
   fixed corpus, injected baseline and real-Provider digital-loopback component
-  baseline are implemented and automated. Three independent review rounds found
-  three, then two, then two bounded issues; all seven are repaired. A subsequent
-  owner consolidation made the actual HTTP and WebSocket connections, rather
-  than adjacent listener probes, the common CDP ownership invariant. Further
-  Tier-3 review and
+  baseline are implemented and automated. Three earlier independent review
+  rounds found three, then two, then two bounded issues; all seven were repaired.
+  A subsequent owner consolidation made the actual HTTP and WebSocket
+  connections, rather than adjacent listener probes, the common CDP ownership
+  invariant. The resulting broad review disclosed all six remaining actionable
+  findings in one batch; commit `3421f9191` repairs them. One focused independent
+  closure review and
   the required physical microphone, speaker and room cold/warm profiles remain
   open, so no module-Gate PASS, current physical p50/p95, audibility, AEC,
   stop-to-silence or feature-complete latency credit is claimed.
@@ -69,7 +75,11 @@ separately as fallback; silence remains failure.
 - `l0_measurement_baseline.py` validates the corpus, runs deterministic injected
   profiles, runs real Provider batch synthesis plus in-memory digital loopback
   recognition, and aggregates sanitized process JSONL only when each input
-  directory's closed metadata binds the same exact source commit.
+  directory's closed metadata binds the same exact source, environment and
+  configuration. Physical aggregation also requires explicit accepted sample
+  keys and remains incomplete until the dedicated Browser runner validates its
+  acceptance log and full scenario target; the generic CLI cannot bypass that
+  Gate.
 - `start_hands_free_demo.ps1 -L0Measurement` is an isolated
   `formal-web-validation` launcher path with a separate Chrome profile/debug
   endpoint and dynamic closed labels. Session v6 rejects a pre-existing debug
@@ -79,7 +89,9 @@ separately as fallback; silence remains failure.
   `/json` request and accepts only status 200; WebSocket proxy selection and
   redirects are structurally unavailable with the supplied socket. Each peer
   and server-side established four-tuple must belong to the debugger PID. The
-  ordinary launcher path is unchanged.
+  ordinary launcher path is unchanged. Stale-Chrome cleanup parses Windows argv
+  and selects only an exact managed `--user-data-dir`; unrelated command-line
+  substrings have zero process-stop authority.
 - `l0_browser_capture.py` takes no manual timestamps. It reads the browser CDP
   timeline automatically and asks the operator only for pass/fail/quit. A sample
   counts only when the operator passes, no browser record was dropped, all
@@ -115,7 +127,9 @@ also remain unknown where no authoritative event was observed.
 
 ## Real Provider digital-loopback component baseline
 
-The configured machine completed 20/20 real Provider rounds without retaining
+This result remains bound to `7f2b0b7ab`; it was not rerun after the six-item
+review repair because doing so would call the external Provider. The configured
+machine completed 20/20 real Provider rounds without retaining
 synthesized audio or recognized text. The Provider wrapper creates a new client
 per request and exposes no authoritative model-residency lifecycle; this run is
 therefore recorded as `unknown`/`uncontrolled`, not cold or warm:
@@ -151,21 +165,27 @@ it identifies the configured field set without retaining values or credentials.
 ## Verification
 
 - L0 collector/corpus/browser-capture plus affected Agent/Gateway/Registry/
-  launcher Python run: `439 passed / 6 failed`. The six failures are the same
+  launcher Python run: `442 passed / 6 failed`. The six failures are the same
   pre-existing P3 fixture/projection set reproduced on baseline `c31e85ade`;
-  the focused L0/launcher run is `59/59` and all new production-hook
+  the focused L0/launcher set is `62/62` and all new production-hook
   tests pass.
-- Formal Integrated Web: `478/478`; Browser Audio I/O: `103/103`;
+- The declared `websockets==12.0` floor imports the capture runner and displays
+  `--help`; current-lock supplied-socket ownership regressions pass. PowerShell
+  argv probes reject decoy, prefixed and duplicate profile options, and the
+  launcher AST has zero errors.
+- On the unchanged earlier source, Formal Integrated Web was `478/478`;
+  Browser Audio I/O was `103/103`;
   Dedicated Media: `27/27`; Gateway Media: `38/38`; Browser L0: `5/5`.
-- Build profiles: `2/2`; TypeScript `--noEmit`, production Live Voice build,
-  changed-Python Ruff/compileall, PowerShell AST and `git diff --check`: PASS.
+- No TypeScript blob changed in this repair batch, so those frontend suites were
+  not rerun. Changed-Python Ruff/compileall, PowerShell AST and
+  `git diff --check`: PASS.
   Existing duplicate locale-key, mixed-import and chunk-size warnings remain
   unchanged.
 - Direct runner smoke: both `l0_browser_capture.py --help` and corpus validation
   succeed when invoked by repository-supported direct script paths.
-- PowerShell AST parsing and the controlled build-profile checks pass. The L0
-  launcher was deliberately not used to start services or a physical browser
-  session in this non-physical packet.
+- PowerShell AST parsing passes. The unchanged controlled build-profile result
+  was not rerun, and the L0 launcher was deliberately not used to start services
+  or a physical browser session in this non-physical packet.
 
 ## Independent Tier-3 review
 
@@ -190,8 +210,8 @@ identity was inferred only from basename and arguments. Commit `4b96f9823`
 keeps the first frozen owner when the tombstone budget is exhausted, records
 and verifies the exact Chrome executable, and revalidates ownership before and
 after page discovery and after WebSocket connection. The capacity, executable
-and both race-window regressions pass, and both baselines above were regenerated
-on that exact source. A further independent Tier-3 review of `4b96f9823`
+and both race-window regressions pass. At that point both baseline artifacts
+were regenerated on that exact source. A further independent Tier-3 review of `4b96f9823`
 returned `FAIL`, with no P0/P1/P3 and two P2 findings. HTTP and WebSocket
 connections could use environment proxies, WebSocket handshake redirects could
 leave the validated port, and the post-connect checks did not bind the actual
@@ -202,8 +222,8 @@ both proxy paths, rejects every handshake redirect, verifies the direct peer and
 Chrome-owned established four-tuple, requires one exact `127.0.0.1` listener,
 and parses Windows command lines before exact single-value option comparison.
 Proxy, redirect, peer/four-tuple, profile-prefix, wildcard, IPv6 and unknown-PID
-regressions pass, and both baselines above were regenerated on that exact
-source. At that point, another independent Tier-3 review remained required; no
+regressions pass. At that point both baseline artifacts were regenerated on
+that exact source. Another independent Tier-3 review remained required; no
 repair round grants a review PASS.
 
 Before requesting that final review, the owner performed one complete CDP
@@ -216,9 +236,26 @@ WebSocket socket bypasses proxy selection and cannot follow a redirect. Python
 also requires exactly one profile, debugger-address and debugger-port option on
 both frozen Chrome processes. Proxy, HTTP status, WebSocket redirect,
 cross-port, unknown-owner, conflicting-option and same-socket regressions pass;
-the browser-capture suite remains 24 cases. The automated and Provider baselines
-above were regenerated on exact source `7f2b0b7ab`. One broad independent
-Tier-3 review of that consolidated source remains required.
+the browser-capture suite remains 24 cases. At that point both baseline
+artifacts were regenerated on exact source `7f2b0b7ab`. One broad independent
+Tier-3 review of that consolidated source followed.
+
+That broad review returned `FAIL` with no P0 and declared
+`ALL_ACTIONABLE_FINDINGS_DISCLOSED: YES`. Its two P1 findings were a generic
+physical aggregation bypass and unknown failure/fallback/cancel markers losing
+to explicit success. Its four P2 findings were a full-tombstone conflict that
+left the old response resolvable, substring-based Chrome cleanup, a
+`websockets` import newer than the declared dependency floor, and a missing
+process-sink `fsync`. Commit `3421f9191` closes the batch without changing the
+shared protocol or product policy: physical inputs require exact session
+provenance plus explicit acceptance and stay incomplete outside the dedicated
+runner; marker facts join the existing classification precedence; a full-budget
+conflict becomes permanently unresolvable in-place; Chrome cleanup requires one
+exact managed profile argument; the public WebSocket API supports the declared
+12.0 floor; and a successful JSONL write is fsynced before close. Attack
+regressions cover each path. One focused independent closure review of
+`cc8d5c50c..3421f9191` remains required; this is not another open-ended finding
+round.
 
 ## Physical acceptance still open
 
@@ -244,8 +281,9 @@ digest, corpus digest and sample identities are checked automatically.
 The injected oracle's largest modeled critical-path segment is Agent request to
 `chat.final` (`1572.0 / 1794.0 ms`), while the real Provider component's batch
 synthesis completion is `1672.0 / 4125.0 ms`. Neither is a physical end-to-end
-bottleneck claim. The next required action is the single broad independent
-Tier-3 review; after it passes, the next packet is the already-defined physical
+bottleneck claim. The next required action is the focused independent closure
+review of the disclosed repair batch; after it passes, the next packet is the
+already-defined physical
 cold/warm fixed-corpus collection, not a production optimization. Only that
 evidence may choose among VAD finalization, browser startup buffering,
 end-of-turn settlement or later sentence-level Agent→TTS overlap.
