@@ -578,6 +578,11 @@ def test_report_artifacts_expose_sanitized_population_contract(
         "source_state": "clean",
         "fixture_sha256": runner._sha256(MANIFEST_PATH),
     }
+    copied_manifest = output / "manifest.json"
+    assert copied_manifest.read_bytes() == MANIFEST_PATH.read_bytes()
+    manifest_sha256 = runner._sha256(copied_manifest)
+    assert json.loads((output / "run.json").read_text(encoding="utf-8"))["fixture_sha256"] == manifest_sha256
+    assert report["artifact_hashes"]["manifest_sha256"] == manifest_sha256
     assert report["artifact_hashes"]["attempts_sha256"]
     assert report["denominators"] == {
         role.value: {fixture: 5 for fixture in ("short", "medium", "long")}
