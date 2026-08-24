@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-23. This is the only mutable source for current product
+> Updated: 2026-08-24. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -45,6 +45,14 @@
   orders Demo, fails before launch on a missing dependency and emits a
   credential-free runtime contract. Ad-hoc split-service commands are diagnostic
   only and grant no acceptance credit.
+  The source-bound P3-9 candidate is now **ACTIVE / PARTIAL** on
+  `e462abdaf59fdc109c564c01e3b4f5f9b1f7c1f3`, descended without merge or
+  rebase from the accepted P3-9 baseline
+  `5415a3d3fb2c3c50b0b59fb5f5ad3a0aec423465`. Its affected Web checks and
+  controlled exact-source runtime pass, but the panel-first and then physical
+  voice journeys, current-HEAD cumulative backend/real-Agent/Tool evidence and
+  final independent Tier-3 review remain open. No P3-9, controlled-candidate or
+  physical PASS is granted yet.
 - **Accepted historical baseline:** `PASS — INTEGRATED WEB ALPHA` remains bound
   only to `d33b520e0d21ae0829d30814d77a01cc18256f09`. Later source and broader
   functionality do not inherit that result.
@@ -88,14 +96,13 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** the consolidated P1/P2 lifecycle repair packet
-  is closed; do not reopen its four frozen production boundaries without a new
-  reproduced defect. The older successor-capture/playout-receipt decoupling
-  seams now also pass bounded independent Tier-3 review. Preserve the integrated
-  bounded P2 notification pull and legacy single-pull compatibility. Remaining
-  product work is generation-time interruption, fixed-corpus/generalization
-  evidence and P3-9 cumulative product acceptance. A newly reproduced defect
-  may reopen only its owning boundary.
+- **Current highest priority:** finish the active P3-9 cumulative one-product
+  acceptance packet below. The consolidated P1/P2 lifecycle packet remains
+  closed; do not reopen its frozen production boundaries without a newly
+  reproduced defect. Preserve the bounded P2 notification pull and legacy
+  single-pull compatibility. Generation-time interruption and fixed-corpus/
+  generalization evidence remain separate follow-up work and are not P3-9
+  blockers or claims.
 - **Integration:** integration with a `develop` ref is deferred until the
   feature-complete boundary below passes. At that future boundary, re-read the
   configured remotes and live ref before any integration; this document assumes
@@ -151,7 +158,7 @@ risks, dependencies, acceptance and integration order.
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is evaluated only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` remain stable unsupported or terminal conflict with zero protected effect | Broader language/policy generalization and P3-9 cumulative acceptance; positive provide-input/pause/resume remain outside the current Direct profile unless a later real primitive is accepted | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus and D-093 zero-effect decision |
 | Integrated Web product experience | **PARTIAL overall; the four P1/P2 lifecycle repair module Gates and the bounded decoupling review PASS `C0/I0/M0`.** Same-tab recovery, exact Speech timeout/signal forwarding, browser-global capture ownership, retained predecessor ACK settlement and playout/capture decoupling are closed at their scoped source/automation boundaries. The exact consolidated product/test tree passed same-tab A -> B -> A, Exit/immediate re-enable, ordinary forward/reverse two-tab takeover and the cumulative microphone/Agent/playout journey. Production P2 notification pulls now use batch size `16`, with the validation-branch feature-on prompts audibly accepted | Real Provider degradation/fallback longer than 15 seconds remains a physical non-claim; continue generation-time interruption, fixed-corpus latency/generalization, P3-9 and complete product acceptance | [lifecycle closure](#p1p2-lifecycle-repair-closure), [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), scoped decoupling review and remaining P1/P2/P3-9 completion; no controlled-candidate credit |
 | Observability, benchmark and latency | **PARTIAL overall; scheduled P3 observability producer boundary closed.** Validated configuration, trusted public correlation, bounded exporter/backend and exact producers remain integrated. The diagnosed one-RPC-per-notification tail is removed from the production Web path; validation-branch manual samples were `10.65s`, `7.05s`, and `2.78s / 3.14s / 3.14s` with audible TTS. These small samples support D-094 but are not frozen-corpus p50/p95 proof | External/persistent telemetry only if separately required; execute the remaining [latency plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with fixed environment/corpus and p50/p95 evidence | D-093 observability evidence, [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) and D-094 |
-| Automated verification and product acceptance | **PARTIAL overall; four lifecycle module Gates, the older playout/capture decoupling seam and the bounded P2 notification integration follow-up PASS independent Tier-3 review.** The current integrated tree passes Formal Web `472/472`, frontend A/B `2/2`, backend batch focus `7/7`, Browser Audio `103/103`, Dedicated Media `47/47`, build profiles `2/2`, typecheck, production build and Ruff. The affected five-file Python cumulative run is truthfully `352 passed / 6` inherited P3 fixture/projection failures | P3-9 cumulative verification and controlled product-candidate journey remain open; real Provider long degradation and fixed-corpus latency retain no physical credit | [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md); scoped evidence grants no P3-9 or product-readiness credit |
+| Automated verification and product acceptance | **PARTIAL overall; P3-9 affected Web source is green but the cumulative Gate is unfinished.** On `e462abda`, Formal Web passes `476/476`, the focused formal Task projection passes `16/16`, TypeScript and the formal production build pass, and the controlled launcher validates the exact bundle/routes and real Speech safety probe. The earlier five-file Python A/B closes its six inherited Registry fixture/current-projection failures (`9 failed, 397 passed, 1 skipped` on the base versus `406 passed, 1 skipped` after the fixture alignment). These results do not replace the remaining current-HEAD backend, real-Agent/Tool, physical or review Gates | Finish the P3-9 cumulative backend/frontend/static matrix, source-bound real Agent/Tool path, panel and physical voice journeys, latest-diff Tier-3 review and final evidence; real Provider long degradation and fixed-corpus latency retain no physical credit | [active P3-9 packet](#p3-9-cumulative-one-product-acceptance); scoped evidence grants no P3-9 or product-readiness credit |
 | Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off and the controlled launcher owns the complete non-secret contract. D-092 keeps its three-item P3 retirement boundary. D-094 separately retires only the two validation-only P2 notification switches: production Web is fixed at `16`, A/B injects `1` or `16`, and omitted server input remains legacy single-pull compatibility. The Exit packet retains only exact fences/barriers/timers/cleanup | Each retained manifest row still requires its own Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-092/D-093 evidence, [D-094](decisions/DECISIONS.md) and the [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -199,6 +206,60 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### P3-9 cumulative one-product acceptance
+
+- **Status/source:** **ACTIVE / PARTIAL** on exact candidate
+  `e462abdaf59fdc109c564c01e3b4f5f9b1f7c1f3`; exact P3-9 baseline
+  `5415a3d3fb2c3c50b0b59fb5f5ad3a0aec423465`. The candidate history is the
+  coherent nine-commit sequence `cd93abff` → `7e70ba45` → `215910d1` →
+  `543350c9` → `007e9e2e` → `c2302222` → `15bef847` → `3fe7fb77` →
+  `e462abda`. It does not merge, rebase or inherit the materially different
+  sibling source line.
+- **Frozen authority:** retain one Task Core/SQLite Store, Product Registry,
+  Event/Result owner, presentation/ACK owner and confirmation owner. The formal
+  journey remains Direct Store-backed D2; no D1, second authority or positive
+  unsupported-operation claim is introduced. Stop, barge-in, response cancel,
+  Exit and Session/tab switching never imply Task cancellation.
+- **Closed source defects:** the six cumulative Python failures were stale
+  Registry fixtures/current projections, not production Python defects. The
+  candidate also preserves dequeued admission truth, fences stale Task audio,
+  recovers its exact presentation owner, closes the frozen release-create
+  phrase, fences foreground presentation, and binds available TaskResult truth
+  to the terminal TaskEvent's `source_event_id` rather than its record
+  `event_id`. The last projection repair has a mutation-sensitive old-comparator
+  RED and repaired `16/16` GREEN result.
+- **Current verification/review credit:** exact candidate Formal Web is
+  `476 passed / 0 failed / 0 skipped`; `npx tsc --noEmit` and
+  `build:live-voice` pass. The controlled `formal-web-validation` launcher
+  records the exact source, Direct D2 profile, four fixed ports, validated
+  bundle/routes, real Speech round trip, identity/claim rejection and zero probe
+  business effects. Independent Tier-3 review is `C0/I0/M0` only through
+  `15bef847`; later production commits `3fe7fb77` and `e462abda` still require
+  final independent review. This paragraph is affected verification credit, not
+  the final cumulative evidence record.
+- **Human resume boundary:** the user elected to run the existing visible formal
+  P3 issuance panel once before repeating the real voice journey, so ASR noise
+  can be separated from Task/Core/Store/Executor/Result/ACK behaviour. The panel
+  path does not replace microphone, ASR, TTS, audibility or targeting evidence.
+  At every resume, re-read actual Git, controlled runtime contract, Store/lease
+  state and the normal Chrome page before acting; process liveness, credentials,
+  browser state and private runtime paths are not restored by Git. Follow the
+  owning [product acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md),
+  [showcase](demo/PRODUCT_READINESS_SHOWCASE.md) and
+  [runbook](runbooks/E2E_RUNBOOK.md), rather than reconstructing the journey
+  from this status summary.
+- **Remaining Gate:** complete the panel journey and the separate user-confirmed
+  voice journey; finish the exact-HEAD P3-9 × D-032 side-effect matrix and full
+  cumulative backend/frontend/static verification; run the source-bound real
+  AgentServer → Registry → SQLite Store/Core → Direct D2 → real Agent/Tool →
+  Result/Event → presentation/ACK → Web path; obtain final independent Tier-3
+  review; then add one sanitized cumulative evidence record and synchronize this
+  STATUS. Any unexplained failure or flake keeps the packet PARTIAL/FAIL.
+- **Strict non-claims:** generation-time interruption, fixed-corpus p50/p95,
+  long Provider degradation, production auth/tenancy/deployment/SLO, D1,
+  host-crash/real-production-failure credit, feature complete and Production
+  ready remain outside P3-9.
 
 ### P1/P2 lifecycle repair closure
 
