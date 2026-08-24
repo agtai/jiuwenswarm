@@ -77,13 +77,14 @@ const PRESENTATION_PROGRESS_KEYS = Object.freeze([
   'result_source_event_id',
   'session_id',
   'source_event',
+  'state',
   'task_id',
   'unit_id',
 ]);
 
 const LEGACY_PROGRESS_KEYS = Object.freeze(
   PRESENTATION_PROGRESS_KEYS.filter(
-    key => !['expected_event_head', 'presentation_class', 'response_ref', 'result_source_event_id', 'unit_id'].includes(key),
+    key => !['expected_event_head', 'presentation_class', 'response_ref', 'result_source_event_id', 'state', 'unit_id'].includes(key),
   ),
 );
 
@@ -246,6 +247,7 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
   const progressPayload = progressEvent?.payload;
   const workRef = objectValue(progressPayload?.work_ref);
   const state = textValue(progressPayload?.state);
+  const presentationState = textValue(raw.state);
   const sourceState = textValue(sourceEvent?.payload.state);
   const sourceOutcome =
     sourceEvent?.payload.outcome === null || sourceEvent?.payload.outcome === undefined
@@ -301,6 +303,7 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     !sourceEvent ||
     !progressEvent ||
     !state ||
+    (consumptionMode === 'presentation' && presentationState !== state) ||
     !sourceState ||
     sourceState !== state ||
     (terminal && (state !== 'terminal' || !terminalOutcomeLegal || progressOutcome !== sourceOutcome)) ||

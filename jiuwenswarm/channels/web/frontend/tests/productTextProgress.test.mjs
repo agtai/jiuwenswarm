@@ -61,6 +61,7 @@ function progressEvent(overrides = {}) {
           ? persistentSourceEventId
           : null
         : overrides.result_source_event_id,
+    state,
     source_event: {
       event_id: sourceId,
       event_type: eventType,
@@ -105,8 +106,19 @@ function legacyProgressEvent(overrides = {}) {
   delete event.unit_id;
   delete event.expected_event_head;
   delete event.result_source_event_id;
+  delete event.state;
   return event;
 }
+
+test('accepts the exact production presentation state binding', () => {
+  const parsed = parseProductTextProgressEvent(progressEvent({ state: 'running' }));
+  assert.notEqual(parsed, null);
+  assert.equal(parsed.state, 'running');
+
+  const mismatched = progressEvent({ state: 'running' });
+  mismatched.state = 'waiting';
+  assert.equal(parseProductTextProgressEvent(mismatched), null);
+});
 
 test('DOM adoption owner ACKs only an exact connected rendered delivery', () => {
   const parsed = parseProductTextProgressEvent(progressEvent());
@@ -152,6 +164,7 @@ test('DOM adoption owner ACKs only an exact connected rendered delivery', () => 
     /DOM presentation binding mismatch/,
   );
   const changedEvidenceRaw = progressEvent();
+  changedEvidenceRaw.state = 'waiting';
   changedEvidenceRaw.source_event.payload.state = 'waiting';
   changedEvidenceRaw.progress_event.payload.state = 'waiting';
   const changedEvidence = parseProductTextProgressEvent(changedEvidenceRaw);
@@ -391,6 +404,9 @@ test('accepts only the exact legal terminal result binding', () => {
     },
     event => {
       event.source_event.payload.state = 'running';
+    },
+    event => {
+      event.state = 'running';
     },
   ]) {
     const event = structuredClone(completed);

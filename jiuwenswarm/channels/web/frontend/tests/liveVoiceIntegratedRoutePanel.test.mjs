@@ -228,6 +228,7 @@ function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, pro
     unit_id: `unit-progress-${event.seq}`,
     expected_event_head: event.seq,
     result_source_event_id: sourceOutcome === 'completed' ? event.source_event_id : null,
+    state: event.state,
     source_event: {
       event_id: event.event_id,
       event_type: event.event_type,
@@ -364,6 +365,7 @@ test('route panel renders only a validated authenticated text progress fact', as
     unit_id: 'unit-product-1',
     expected_event_head: 11,
     result_source_event_id: null,
+    state: 'running',
     source_event: {
       event_id: 'source-product-1',
       event_type: 'task.running',
