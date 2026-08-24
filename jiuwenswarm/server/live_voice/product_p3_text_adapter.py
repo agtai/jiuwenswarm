@@ -40,9 +40,9 @@ from .task_progress_return import (
     ForegroundSupplier,
     GenerationIsCurrent,
     PreparedTaskProgressSource,
+    TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
-    TaskProgressNotificationIntent,
     TaskProgressReturnActivation,
     TaskProgressReturnBridge,
     TaskProgressReturnLease,
@@ -52,7 +52,6 @@ from .task_progress_return import (
     VoiceIntentSink,
 )
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
-
 
 _QUERY_OPERATIONS = frozenset(
     {"task.get", "task.list", "task.status", "task.events", "task.result"}
@@ -513,6 +512,17 @@ class ProductP3QueryOwner(Protocol):
     ) -> ResultEnvelope: ...
 
 
+class AsyncProductP3QueryOwner(Protocol):
+    """Async read-only owner for authority backends that already use asyncio."""
+
+    async def query(
+        self,
+        query: ProductP3AuthorizedQuery,
+        *,
+        now: str | None = None,
+    ) -> ResultEnvelope: ...
+
+
 class ProductP3SubscriptionFactory(Protocol):
     """Allocate an exact live subscription only after trusted authorization."""
 
@@ -549,7 +559,8 @@ class ProductP3TextAdapter:
         *,
         enabled: bool,
         authority: P3AuthorityAdapter,
-        query_owner: ProductP3QueryOwner,
+        query_owner: ProductP3QueryOwner | None = None,
+        async_query_owner: AsyncProductP3QueryOwner | None = None,
         subscription_factory: ProductP3SubscriptionFactory,
         prepared_source_factory: ProductP3PreparedSourceFactory | None = None,
         replay_text_from_prepared_source: bool = False,
@@ -573,8 +584,16 @@ class ProductP3TextAdapter:
             raise ValueError("product P3 text flag must be boolean")
         if not isinstance(authority, P3AuthorityAdapter):
             raise ValueError("product P3 authority adapter is required")
-        if not callable(getattr(query_owner, "query", None)):
+        if (query_owner is None) == (async_query_owner is None):
+            raise ValueError("product P3 requires exactly one query owner mode")
+        if query_owner is not None and not callable(
+            getattr(query_owner, "query", None)
+        ):
             raise ValueError("product P3 query owner is required")
+        if async_query_owner is not None and not callable(
+            getattr(async_query_owner, "query", None)
+        ):
+            raise ValueError("product P3 async query owner is required")
         for name, dependency in (
             ("subscription_factory", subscription_factory),
             ("generation_is_current", generation_is_current),
@@ -598,6 +617,7 @@ class ProductP3TextAdapter:
         self._enabled = enabled
         self._authority = authority
         self._query_owner = query_owner
+        self._async_query_owner = async_query_owner
         self._subscription_factory = subscription_factory
         if prepared_source_factory is not None and not callable(
             prepared_source_factory
@@ -762,15 +782,23 @@ class ProductP3TextAdapter:
             )
             if not isinstance(invocation.envelope, QueryEnvelope):
                 raise TypeError("query policy emitted a command")
-            result = await asyncio.to_thread(
-                self._query_owner.query,
-                ProductP3AuthorizedQuery(
-                    authority=context,
-                    envelope=invocation.envelope,
-                    authorization=invocation.authorization,
-                ),
-                now=now,
+            prepared_query = ProductP3AuthorizedQuery(
+                authority=context,
+                envelope=invocation.envelope,
+                authorization=invocation.authorization,
             )
+            if self._async_query_owner is not None:
+                result = await self._async_query_owner.query(
+                    prepared_query,
+                    now=now,
+                )
+            else:
+                assert self._query_owner is not None
+                result = await asyncio.to_thread(
+                    self._query_owner.query,
+                    prepared_query,
+                    now=now,
+                )
             if not isinstance(result, ResultEnvelope):
                 raise TypeError("query owner returned a non-result")
             result = ResultEnvelope.from_dict(
@@ -1190,6 +1218,7 @@ class ProductP3TextAdapter:
 
 
 __all__ = [
+    "AsyncProductP3QueryOwner",
     "ProductP3AuthorizedQuery",
     "ProductP3CleanupReason",
     "ProductP3CleanupSnapshot",

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from copy import copy
+import threading
 from collections import deque
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
@@ -62,7 +63,6 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressSourceDecision,
     TaskProgressTextEvent,
 )
-
 
 NOW = "2030-01-01T00:00:00Z"
 EXPIRY = "2035-01-01T00:00:00Z"
@@ -127,15 +127,50 @@ class _QueryOwner:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.calls: list[tuple[ProductP3AuthorizedQuery, str | None]] = []
+        self.thread_ids: list[int] = []
 
     def query(self, query: ProductP3AuthorizedQuery, *, now=None) -> ResultEnvelope:
         assert isinstance(query.envelope, QueryEnvelope)
         self.calls.append((query, now))
+        self.thread_ids.append(threading.get_ident())
         if self.fail:
             raise RuntimeError("query backend secret")
         return ResultEnvelope.success(
             owner=query.envelope,
             result={"query_type": query.envelope.query_type},
+            observed_at=now,
+        )
+
+
+class _AsyncQueryOwner:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        gate: asyncio.Event | None = None,
+    ) -> None:
+        self.fail = fail
+        self.gate = gate
+        self.started = asyncio.Event()
+        self.calls: list[tuple[ProductP3AuthorizedQuery, str | None]] = []
+        self.tasks: list[asyncio.Task[object] | None] = []
+
+    async def query(
+        self,
+        query: ProductP3AuthorizedQuery,
+        *,
+        now=None,
+    ) -> ResultEnvelope:
+        self.calls.append((query, now))
+        self.tasks.append(asyncio.current_task())
+        self.started.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.fail:
+            raise RuntimeError("async query backend secret")
+        return ResultEnvelope.success(
+            owner=query.envelope,
+            result={"query_type": query.envelope.query_type, "mode": "async"},
             observed_at=now,
         )
 
@@ -296,14 +331,19 @@ def _adapter(
     authority: P3AuthorityAdapter | None = None,
     enabled: bool = True,
     owner: _QueryOwner | None = None,
+    async_owner: _AsyncQueryOwner | None = None,
     factory: _SubscriptionFactory | None = None,
     current_generation: int = 7,
     generation_is_current=None,
     cleanup_capacity: int = 64,
     text_events: list[TaskProgressTextEvent] | None = None,
     voice_effects: list[object] | None = None,
-) -> tuple[ProductP3TextAdapter, _QueryOwner, _SubscriptionFactory]:
-    query_owner = owner or _QueryOwner()
+) -> tuple[
+    ProductP3TextAdapter,
+    _QueryOwner | _AsyncQueryOwner,
+    _SubscriptionFactory,
+]:
+    query_owner = None if async_owner is not None else (owner or _QueryOwner())
     subscription_factory = factory or _SubscriptionFactory()
     collected_text = text_events if text_events is not None else []
     collected_voice = voice_effects if voice_effects is not None else []
@@ -320,6 +360,7 @@ def _adapter(
             enabled=enabled,
             authority=authority_adapter,
             query_owner=query_owner,
+            async_query_owner=async_owner,
             subscription_factory=subscription_factory,
             generation_is_current=(
                 generation_is_current
@@ -333,7 +374,7 @@ def _adapter(
             cleanup_capacity=cleanup_capacity,
             clock=lambda: NOW,
         ),
-        query_owner,
+        async_owner if async_owner is not None else query_owner,
         subscription_factory,
     )
 
@@ -368,6 +409,7 @@ async def _wait_cleanup_state(cleanup, state: ProductP3CleanupState) -> None:
 async def test_query_resolves_exact_authority_before_read_only_core() -> None:
     resolver = _Resolver([_candidate("task.get", task_id="task-1")])
     adapter, owner, factory = _adapter(resolver)
+    caller_thread = threading.get_ident()
 
     result = await adapter.query(
         ProductP3QueryRequest(_route(), "task.get", "request-1", "task-1")
@@ -379,6 +421,7 @@ async def test_query_resolves_exact_authority_before_read_only_core() -> None:
     assert result.result.result == {"query_type": "task.get"}
     assert len(resolver.calls) == 1
     assert len(owner.calls) == 1
+    assert isinstance(owner, _QueryOwner)
     query, observed_at = owner.calls[0]
     assert query.envelope.scope == SCOPE
     assert query.envelope.correlation_id == "correlation-1"
@@ -387,6 +430,8 @@ async def test_query_resolves_exact_authority_before_read_only_core() -> None:
     assert query.authority.authority.scope == SCOPE
     assert query.authority.resource == _resource("task-1")
     assert observed_at == NOW
+    assert len(owner.thread_ids) == 1
+    assert owner.thread_ids[0] != caller_thread
     assert factory.calls == []
 
 
@@ -420,6 +465,111 @@ async def test_prepared_query_uses_exact_grant_without_second_resolution() -> No
     assert prepared.authority is context
     assert prepared.authorization is grant
     assert factory.calls == []
+
+
+@pytest.mark.asyncio
+async def test_prepared_query_awaits_exact_async_owner_on_caller_task() -> None:
+    resolver = _Resolver([_candidate("task.get", task_id="task-1")])
+    async_owner = _AsyncQueryOwner()
+    adapter, owner, factory = _adapter(resolver, async_owner=async_owner)
+    caller = asyncio.current_task()
+
+    result = await adapter.query(
+        ProductP3QueryRequest(_route(), "task.get", "request-async", "task-1")
+    )
+
+    assert owner is async_owner
+    assert result.reason_id is ProductP3TextReason.QUERY_ACCEPTED
+    assert result.result is not None
+    assert result.result.result == {"query_type": "task.get", "mode": "async"}
+    assert async_owner.tasks == [caller]
+    assert len(async_owner.calls) == 1
+    assert factory.calls == []
+
+
+@pytest.mark.asyncio
+async def test_async_query_failure_is_stable_and_has_no_progress_effect() -> None:
+    resolver = _Resolver([_candidate("task.get", task_id="task-1")])
+    async_owner = _AsyncQueryOwner(fail=True)
+    adapter, _, factory = _adapter(resolver, async_owner=async_owner)
+
+    result = await adapter.query(
+        ProductP3QueryRequest(
+            _route(),
+            "task.get",
+            "request-async-failed",
+            "task-1",
+        )
+    )
+
+    assert result.ok is False
+    assert result.reason_id is ProductP3TextReason.QUERY_FAILED
+    assert result.result is None
+    assert len(async_owner.calls) == 1
+    assert factory.calls == []
+
+
+@pytest.mark.asyncio
+async def test_async_query_caller_cancellation_propagates() -> None:
+    resolver = _Resolver([_candidate("task.get", task_id="task-1")])
+    gate = asyncio.Event()
+    async_owner = _AsyncQueryOwner(gate=gate)
+    adapter, _, factory = _adapter(resolver, async_owner=async_owner)
+    pending = asyncio.create_task(
+        adapter.query(
+            ProductP3QueryRequest(
+                _route(),
+                "task.get",
+                "request-async-cancel",
+                "task-1",
+            )
+        )
+    )
+    await async_owner.started.wait()
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert len(async_owner.calls) == 1
+    assert factory.calls == []
+
+
+def test_query_owner_modes_are_exactly_one() -> None:
+    resolver = _Resolver([_candidate("task.get", task_id="task-1")])
+    authority = _authority_adapter(resolver)
+    subscription = _SubscriptionFactory()
+
+    with pytest.raises(ValueError, match="exactly one query owner"):
+        ProductP3TextAdapter(
+            enabled=True,
+            authority=authority,
+            query_owner=None,
+            async_query_owner=None,
+            subscription_factory=subscription,
+            generation_is_current=lambda _binding: True,
+            arbiter=ProgressNotificationArbiter(),
+            foreground=_foreground,
+            text_sink=lambda _event: None,
+            voice_sink=lambda _event: None,
+        )
+
+    import jiuwenswarm.server.live_voice.product_p3_text_adapter as module
+
+    assert "AsyncProductP3QueryOwner" in module.__all__
+    with pytest.raises(ValueError, match="exactly one query owner"):
+        ProductP3TextAdapter(
+            enabled=True,
+            authority=authority,
+            query_owner=_QueryOwner(),
+            async_query_owner=_AsyncQueryOwner(),
+            subscription_factory=subscription,
+            generation_is_current=lambda _binding: True,
+            arbiter=ProgressNotificationArbiter(),
+            foreground=_foreground,
+            text_sink=lambda _event: None,
+            voice_sink=lambda _event: None,
+        )
 
 
 @pytest.mark.asyncio

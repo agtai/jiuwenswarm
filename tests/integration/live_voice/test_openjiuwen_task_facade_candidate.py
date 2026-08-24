@@ -9,11 +9,16 @@ import importlib.util
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
+from jiuwenswarm.server.live_voice.openjiuwen_product_query_adapter import (
+    OpenJiuwenProductP3QueryOwner,
+)
 from jiuwenswarm.server.live_voice.openjiuwen_task_facade import (
     OpenJiuwenTaskFacade,
     OpenJiuwenTaskFacadeError,
@@ -21,12 +26,29 @@ from jiuwenswarm.server.live_voice.openjiuwen_task_facade import (
 )
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityResourceBinding,
+    AuthorityRouteContext,
+    P3AuthorityAdapter,
+    ProductAuthorityService,
     ResolvedProductAuthority,
+    TrustedAuthorityCandidate,
+    TrustedAuthorityLookup,
+)
+from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
+    ProductP3QueryRequest,
+    ProductP3TextAdapter,
+    ProductP3TextReason,
+)
+from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
+    ForegroundFact,
+    ForegroundSnapshot,
+    ProgressNotificationArbiter,
+    SpeechPolicy,
 )
 
 SCOPE = ScopeRef("principal-1", "project-1", "session-1", Assurance.AUTHENTICATED)
 TASK = "task-1"
 EXPIRY = "2099-01-01T00:00:00Z"
+NOW = "2030-01-01T00:00:00Z"
 
 
 def _require_exact_candidate() -> tuple[Path, str]:
@@ -97,6 +119,49 @@ def _authority(operation: str) -> ResolvedProductAuthority:
             )
         ),
         confirmation=None,
+    )
+
+
+class _Resolver:
+    def __init__(self, candidate: TrustedAuthorityCandidate) -> None:
+        self._candidate = candidate
+        self.calls: list[TrustedAuthorityLookup] = []
+
+    def resolve(
+        self,
+        lookup: TrustedAuthorityLookup,
+    ) -> Sequence[TrustedAuthorityCandidate]:
+        self.calls.append(lookup)
+        return (self._candidate,)
+
+
+def _query_candidate(operation: str) -> TrustedAuthorityCandidate:
+    return TrustedAuthorityCandidate(
+        principal_id=SCOPE.subject_id,
+        session_id=SCOPE.session_id,
+        project_id=SCOPE.project_id,
+        scope=SCOPE,
+        allowed_operations=frozenset({operation}),
+        allowed_capabilities=frozenset({operation}),
+        expires_at=EXPIRY,
+        assurance=Assurance.AUTHENTICATED,
+        source="server.auth.session",
+        correlation_id="candidate-integration",
+        resource=AuthorityResourceBinding(
+            "task",
+            TASK,
+            hashlib.sha256(TASK.encode()).hexdigest(),
+        ),
+    )
+
+
+def _query_route() -> AuthorityRouteContext:
+    return AuthorityRouteContext(
+        session_id=SCOPE.session_id,
+        correlation_id="candidate-integration",
+        claimed_user_id=SCOPE.subject_id,
+        claimed_project_id=SCOPE.project_id,
+        claimed_scope=SCOPE,
     )
 
 
@@ -306,6 +371,89 @@ async def test_exact_candidate_public_handle_sqlite_event_cursor_and_reopen(
     finally:
         second_agent.session_manager.release_session()
         await second_agent.team_backend.db.close()
+        cleanup_shared_resources()
+
+    assert database_path.exists()
+    assert not legacy_store_path.exists()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_exact_candidate_product_async_query_crosses_public_sqlite_path(
+    tmp_path: Path,
+) -> None:
+    candidate, expected = _require_exact_candidate()
+    _require_candidate_import_source(candidate)
+    assert len(expected) == 40
+    database_path = tmp_path / "agentcore-query.sqlite3"
+    legacy_store_path = tmp_path / "legacy-task-store.sqlite3"
+
+    from openjiuwen.agent_teams.spawn.shared_resources import cleanup_shared_resources
+
+    agent = await _build_agent(database_path)
+    try:
+        facade = await _bind_agent(agent)
+        await _seed(agent)
+        resolver = _Resolver(_query_candidate("task.status"))
+        text_effects: list[object] = []
+        voice_effects: list[object] = []
+
+        async def text_sink(event: object) -> None:
+            text_effects.append(event)
+
+        async def voice_sink(event: object) -> None:
+            voice_effects.append(event)
+
+        adapter = ProductP3TextAdapter(
+            enabled=True,
+            authority=P3AuthorityAdapter(
+                ProductAuthorityService(
+                    enabled=True,
+                    resolver=resolver,
+                    clock=lambda: datetime.fromisoformat(
+                        NOW.replace("Z", "+00:00")
+                    ).astimezone(UTC),
+                )
+            ),
+            async_query_owner=OpenJiuwenProductP3QueryOwner(facade),
+            subscription_factory=lambda _grant, _binding: None,
+            generation_is_current=lambda _binding: True,
+            arbiter=ProgressNotificationArbiter(),
+            foreground=lambda: ForegroundSnapshot(
+                interaction=ForegroundFact.SAFE,
+                response=ForegroundFact.SAFE,
+                presentation=ForegroundFact.SAFE,
+                speech_policy=SpeechPolicy.DISPLAY_ONLY,
+            ),
+            text_sink=text_sink,
+            voice_sink=voice_sink,
+            clock=lambda: NOW,
+        )
+
+        result = await adapter.query(
+            ProductP3QueryRequest(
+                _query_route(),
+                "task.status",
+                "candidate-query-request",
+                TASK,
+            )
+        )
+
+        assert result.ok is True
+        assert result.reason_id is ProductP3TextReason.QUERY_ACCEPTED
+        assert result.result is not None
+        assert result.result.result is not None
+        assert result.result.result["projection"] == (
+            "openjiuwen.agentcore.task-query.v1"
+        )
+        assert result.result.result["task"]["task_id"] == TASK
+        assert result.result.result["task"]["status"] == "pending"
+        assert len(resolver.calls) == 1
+        assert text_effects == []
+        assert voice_effects == []
+    finally:
+        agent.session_manager.release_session()
+        await agent.team_backend.db.close()
         cleanup_shared_resources()
 
     assert database_path.exists()

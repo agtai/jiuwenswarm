@@ -84,6 +84,7 @@ _SUPPORTED_OPERATIONS = frozenset(
     {
         "task.get",
         "task.list",
+        "task.status",
         "task.events",
         "task.result",
         "task.unread_events",
@@ -889,6 +890,24 @@ class OpenJiuwenTaskFacade:
         if task_ids != tuple(sorted(task_ids)) or len(set(task_ids)) != len(task_ids):
             raise _error("INVALID_TASK_LIST")
         return projected
+
+    async def status(
+        self,
+        authority: ResolvedProductAuthority,
+        task_id: str,
+    ) -> OpenJiuwenTaskSnapshot | None:
+        """Read the canonical snapshot under exact ``task.status`` authority."""
+
+        task_id = _text(task_id, "task_id")
+        self._require_authority(authority, operation="task.status", task_id=task_id)
+        raw = await self._call(self._handle.get(task_id))
+        if raw is None:
+            return None
+        return _project_snapshot(
+            raw,
+            binding=self._binding,
+            expected_task_id=task_id,
+        )
 
     async def apply_update(
         self,
