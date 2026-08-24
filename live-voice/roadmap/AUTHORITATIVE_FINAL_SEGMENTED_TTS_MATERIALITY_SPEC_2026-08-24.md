@@ -1,4 +1,4 @@
-# LVL-10 authoritative-final segmented-TTS materiality specification
+# LVL-10 authoritative-final chunked-TTS materiality specification
 
 > Date: 2026-08-24
 >
@@ -19,6 +19,50 @@ LVL-10 is not the rejected LVL-07 stable-sentence experiment. LVL-07 attempted
 to find speakable text before the Agent final. LVL-10 receives the complete
 authoritative final first and changes only the Provider request grouping used
 by a benchmark-only runner.
+
+### 1.1 What “chunked TTS” means in LVL-10
+
+The candidate **divides the authoritative final text into multiple text
+chunks and sends one independent streaming TTS Provider request per chunk**.
+It does not merely divide the PCM returned by one request into smaller audio
+frames; the current SSE path already does that.
+
+The before/after distinction is:
+
+```text
+A1/A2 — current full-final TTS
+
+committed chat.final
+        -> one complete spoken_text
+        -> one /audio/speech SSE request
+        -> Provider audio deltas
+        -> one ordered PCM stream
+
+B — chunked TTS candidate
+
+committed chat.final
+        -> exact text chunk 0 + chunk 1 + ... + chunk n
+        -> one /audio/speech SSE request for each text chunk
+        -> per-chunk Provider audio deltas and bounded PCM buffers
+        -> chunk 0 PCM, then chunk 1 PCM, ... released as one logical utterance
+```
+
+Chunk 0 synthesis starts without waiting for later chunks to finish. While
+chunk 0 is being produced or released, the runner may prefetch exactly one
+successor request. PCM from a successor can be buffered early but cannot cross
+the ordered-release boundary. All chunks are derived only after the complete
+`chat.final`; LVL-10 never speaks a provisional Agent prefix.
+
+Terminology in this specification is exact:
+
+- **text chunk:** one immutable slice of the committed `spoken_text` and one
+  Provider TTS request;
+- **Provider audio delta:** an SSE `speech.audio.delta` belonging to exactly
+  one text chunk;
+- **ordered PCM stream:** the concatenated chunk outputs exposed to the
+  downstream consumer in original text order;
+- **segment:** synonym for text chunk only where existing LVL-10 documents use
+  the earlier “segmented TTS” name.
 
 ## 2. Current implementation fact and rationale
 
@@ -69,7 +113,7 @@ segment classifier and lifecycle wiring, is a separate conditional packet.
 | Role | Identifier | Exact route |
 |---|---|---|
 | Reference before | `LVL-10-A1` | One request containing the complete final text; current SSE Provider stream |
-| Candidate | `LVL-10-B` | Same final text divided by manifest offsets into at most four ordered requests |
+| Candidate | `LVL-10-B` | Same final text divided into manifest-bound text chunks; one SSE TTS request per chunk, at most four, released as one ordered PCM stream |
 | Reference after | `LVL-10-A2` | Same route and complete final text as A1 |
 | Optional diagnostic | `LVL-10-R0` | Batch/fallback inspection only; excluded from all causal calculations |
 
@@ -79,10 +123,11 @@ fixture bytes. Secrets never enter result artifacts or Git.
 
 ## 5. Frozen candidate mechanics
 
-### 5.1 Segment source
+### 5.1 Text-chunk source
 
 Phase 1 does not infer sentence boundaries. Each fixture declares an ordered
-list of Unicode code-point offsets. The runner rejects the manifest unless:
+list of Unicode code-point offsets. Every exact slice is one text chunk and one
+Provider request in B. The runner rejects the manifest unless:
 
 - every segment is non-empty and contiguous;
 - offsets start at zero, strictly increase and end at `len(final_text)`;
@@ -95,7 +140,7 @@ fixture contains three segments. The long fixture contains four segments and
 includes an abbreviation plus a decimal so the manifest demonstrates that
 punctuation is preserved rather than classified heuristically.
 
-### 5.2 Request and prefetch bounds
+### 5.2 Chunk request and prefetch bounds
 
 - maximum segments and Provider requests per B attempt: **4**;
 - maximum simultaneous Provider requests: **2**;
