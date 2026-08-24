@@ -1,7 +1,8 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** APPROACH DEFINED — implementation and current-source
-> measurement are not complete. [STATUS](../STATUS.md) remains the only owner
+> **Plan status:** L0 IMPLEMENTATION AND AUTOMATED/PROVIDER-COMPONENT BASELINES
+> COMPLETE; FINAL TIER-3 REVIEW, PHYSICAL BASELINE AND OPTIMIZATION REMAIN OPEN.
+> [STATUS](../STATUS.md) remains the only owner
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
 >
@@ -15,6 +16,15 @@
 > analysis baseline.
 >
 > Date: 2026-08-18
+>
+> **2026-08-23 execution update:** the §3 correlated L0 source/automation layer,
+> closed fixed corpus, injected baseline and real-Provider digital-loopback
+> component baseline are complete. The Provider component lifecycle is recorded
+> as unknown/uncontrolled rather than cold/warm. Physical Formal Web cold/warm
+> collection is still open, and final independent Tier-3 review has not yet
+> produced a PASS, so §4 and later optimization layers are not activated by
+> these non-physical results. See the
+> [L0 evidence](../evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
 
 ## 1. Outcome and judgement
 
@@ -80,8 +90,8 @@ Task observations also carry Task/Attempt identity. Required timestamps are:
 
 - Provider speech-stopped/EOT; browser EOT receipt; capture stopped; last frame
   sent and ACKed; uplink closed; STT final available; unified submit accepted;
-- Agent request start, first delta, first stable speakable sentence and
-  `chat.final`;
+- Agent request start, first delta, authoritative Tool call/successful result,
+  first stable speakable sentence and `chat.final`;
 - TTS request, Provider first audio, downlink ticket, successor capture ready,
   browser first frame, WebAudio first frame scheduled and actually started;
 - playout underrun/rebuffer, sentence gap, barge-in, fence/cancel completion,
@@ -106,6 +116,21 @@ a substitute for audible output.
 This batch is done when the same response can be followed across all owners,
 each missing segment is explicitly `unknown` rather than zero, and a fixed
 current-source baseline can be reproduced without retaining private content.
+
+The 2026-08-23 L0 packet implements this contract as a local opt-in measurement
+envelope over the existing validated observability schema; it does not extend
+the shared product protocol. Browser, Gateway, Runtime and Agent emit exact
+content-free milestones. Early Provider/browser facts can lack response
+identity, but the collector pins the sample to the first exact later response
+and rejects any attempted rebind. The fixed corpus contains seven profiles and
+thirteen required scenario categories, each formal profile requiring at least
+20 successful rounds. Deterministic injected and real-Provider digital-loopback
+component baselines are reproducible on an exact source; JSONL aggregation also
+requires source-bound run metadata. The Provider component lifecycle remains
+unknown/uncontrolled and grants no cold/warm comparison. The physical portion
+of this batch remains incomplete: WebAudio render completion is not physical
+audibility, and cold/warm Formal Web profiles have not yet supplied 20
+correlated operator-confirmed successes each.
 
 ## 4. Remove avoidable waits on the existing authoritative path
 
@@ -326,19 +351,27 @@ from the reference materials:
   `tests/unit_tests/live_voice/test_agent_conversation_runtime.py`, and the
   frontend `productP1VoiceRoute`, `liveVoiceBrowserAudioIOAdapter` and
   `liveVoiceStreamingSpeech` `.test.mjs` files.
+- L0 local envelope, fixed corpus and aggregation:
+  `jiuwenswarm/server/live_voice/latency_measurement.py`,
+  `scripts/live_voice/l0_fixed_corpus.json` and
+  `scripts/live_voice/l0_measurement_baseline.py`;
+- physical Formal Web collection and controlled opt-in launch:
+  `scripts/live_voice/l0_browser_capture.py`,
+  `scripts/live_voice/start_hands_free_demo.ps1` and frontend
+  `formal/l0Measurement.ts`.
 
 ## 10. Status relationship
 
-This plan is queued under the `Observability, benchmark and latency` capability
+This plan remains under the `Observability, benchmark and latency` capability
 and dependency route to feature complete in [STATUS](../STATUS.md). The
 2026-08-21 routing record closes D-089/D-090 Wave 3 and the bounded P1/P2 repair
 integration, but activates no next packet. The `e1df8b452` physical run supplies
 a scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
-fixed-corpus baseline required by this plan. Latency implementation starts only
-when STATUS selects an owner-scoped P1/P2 packet with that diagnosis, a frozen
-corpus, applicable test-oracle migration, risk and acceptance. Its assigned
-batch/push/coalescing implementation must integrate and pass affected evidence
-before P1/P2 closeout validation. Compatible instrumentation may be included
-earlier in another affected packet only when its ownership and acceptance are
-explicit; this preparatory plan never outranks or activates the current STATUS
-route by itself.
+fixed-corpus baseline required by this plan. The STATUS-selected 2026-08-23 L0
+packet now supplies owner-scoped correlated instrumentation, the frozen corpus
+and non-physical baselines and is ready for final Tier-3 review. It does not
+activate an optimization batch: review closure and physical cold/warm Formal Web
+collection are the next dependencies. Only physical evidence may select VAD,
+startup-buffer, EOT settlement or sentence-overlap work. Any later assigned
+batch must integrate and pass its affected evidence before P1/P2 closeout; this
+plan still never outranks or activates a STATUS route by itself.
