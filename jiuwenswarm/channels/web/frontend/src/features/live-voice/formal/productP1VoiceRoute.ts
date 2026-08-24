@@ -1676,7 +1676,12 @@ export class ProductP1VoiceRouteOwner {
         throw routeUnavailable(activation.reason_id);
       }
       const subjectId = requiredText(activation.subject_id, 'subject_id');
-      this.#retainedMediaAuthorities.set(priorAuthority.subject_id, priorAuthority);
+      // Transfer the predecessor only while this owner still holds it. Exit
+      // may have completed its exact revocation while this activation was
+      // pending; re-adding that closed subject would mint a duplicate close.
+      if (this.#mediaCloseBinding === priorAuthority) {
+        this.#retainedMediaAuthorities.set(priorAuthority.subject_id, priorAuthority);
+      }
       this.#mediaCloseBinding = Object.freeze({
         session_id: sessionId,
         subject_id: subjectId,

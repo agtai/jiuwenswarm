@@ -3636,6 +3636,8 @@ async function runConcurrentCaptureJourney(options = {}) {
   let socketFactory = null;
   let request = null;
   let receiptSubjectId = null;
+  const secondActivationHeld = deferred();
+  const releaseHeldSecondActivation = deferred();
   let finalDownlinkAckResolve;
   const finalDownlinkAckObserved = new Promise(resolve => {
     finalDownlinkAckResolve = resolve;
@@ -3938,7 +3940,7 @@ async function runConcurrentCaptureJourney(options = {}) {
           }
           concurrentCloseAudioReleased = environment.contexts.every(context => context.state === 'closed');
         }
-        return {
+        const activation = {
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: `media-subject-${activationCount}`,
@@ -3965,6 +3967,11 @@ async function runConcurrentCaptureJourney(options = {}) {
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
+        if (activationCount === 2 && options.holdSecondActivationForExit === true) {
+          secondActivationHeld.resolve();
+          await releaseHeldSecondActivation.promise;
+        }
+        return activation;
       }
       if (method === 'live_voice.speech.recognize_streaming_result') {
         return streamingRecognitionResult(params, 'duplex streaming text');
@@ -4086,6 +4093,26 @@ async function runConcurrentCaptureJourney(options = {}) {
     text: options.agentText ?? 'duplex Agent response',
   });
   void playing.catch(() => undefined);
+  if (options.holdSecondActivationForExit === true) {
+    await secondActivationHeld.promise;
+    concurrentClosePromise = owner.close();
+    concurrentCloseSnapshot = owner.status();
+    for (let turn = 0; turn < 100 && calls.filter(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'
+    ).length === 0; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    for (let turn = 0; turn < 100 && !environment.contexts.every(context => context.state === 'closed'); turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    concurrentCloseAudioReleased = environment.contexts.every(context => context.state === 'closed');
+    // Settle close(A), including its single-flight finalizer, before B can
+    // publish its activation and attempt to retain A again.
+    for (let turn = 0; turn < 5; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    releaseHeldSecondActivation.resolve();
+  }
   if (options.sendSecondFrame !== false) {
     if (options.deferSuccessorCaptureUntilAfterPlayout === true) {
       await finalDownlinkAckObserved;
@@ -6453,7 +6480,7 @@ test('formal P1 non-advancing concurrent render clock stops playout with the exa
 test('formal P1 concurrent close waits for pending activation and revokes both exact authorities', async () => {
   const journey = await runConcurrentCaptureJourney({
     sendSecondFrame: false,
-    closeSecondCaptureWhilePending: true,
+    holdSecondActivationForExit: true,
   });
   const { owner, calls, statuses, sockets, playError, concurrentCloseSnapshot, concurrentCloseAudioReleased } = journey;
 
@@ -6465,8 +6492,14 @@ test('formal P1 concurrent close waits for pending activation and revokes both e
   assert.equal(playError?.reason, 'FORMAL_P1_CLOSED');
   assert.equal(statuses.includes('failed'), false);
   assert.deepEqual(owner.status(), { status: 'closed', reason: null });
-  assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'));
-  assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1').length,
+    1,
+  );
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2').length,
+    1,
+  );
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
   assert.equal(
     sockets.some(socket => socket.serverBinding?.generation.id === 'capture-2'),
