@@ -2,7 +2,8 @@
 
 ## Disposition
 
-**CONSOLIDATED SOURCE/AUTOMATION PASS — ONE INDEPENDENT MODULE REVIEW REQUIRED.**
+**LIFECYCLE-CONVERGENCE REPAIR SOURCE/AUTOMATION PASS — INDEPENDENT MODULE
+REVIEW REQUIRED.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -55,14 +56,32 @@ recognition terminal ownership distributed across cancel, receive, rollback,
 send failure and Provider close. Consolidated source
 `1d4f067cf697c4773b3ec7f0cfba307a9238594e` replaces those parallel terminal
 paths with one shielded per-session finalization task and replaces duplicated
-initial/terminal response-field sets with one shared contract. The latest
-independent result remains `C0/I2/M0` until one detached reviewer inspects this
-complete consolidated boundary; no current independent PASS or physical credit
-exists.
+initial/terminal response-field sets with one shared contract.
 
-The review covers the change based on
-`2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the containing commit is the
-reviewed delivery source.
+A detached review then inspected exact clean source
+`cdb88eb0ae81a32aadb58c0aaf92e838e21206b1` and returned **`C0/I3/M1`**. It
+confirmed the earlier findings closed, but proved four remaining lifecycle
+interleavings: an already-queued valid negotiation frame could win after cancel
+marked recognition closing; normal recognition final still bypassed the shared
+terminal owner; synthesis cleanup could be interrupted by a cancelled waiter or
+observability process-control; and an opening receive-owned process-control had
+two observable throw surfaces.
+
+Repair source `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861` closes those findings as
+one lifecycle convergence. Recognition normal final and synthesis normal
+completion now install the same kind of shielded first-owner task as cancel,
+Provider failure, rollback and service close. Recognition rechecks closing
+immediately after receive, and an opening receive worker settles mechanically
+without rethrowing the same process-control already surfaced by
+`open_recognition`. Synthesis cleanup owns transport, worker, conformance,
+registry, buffered PCM and degradation settlement before returning any stored
+failure. The latest independent disposition remains **`C0/I3/M1`** until a
+detached reviewer inspects this exact repair source; no independent PASS or
+physical credit exists.
+
+The cumulative review boundary is based on
+`2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the current repair source is exact
+commit `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861`.
 
 ## Intended behaviour and owned surfaces
 
@@ -130,7 +149,7 @@ continuous native duplex.
 | `B` boundary | PCM/rate/model family, provider delta, stream buffer, text, queue and timeout bounds remain explicit. |
 | `S` stale/replay | A bounded server-event-ID ledger plus exact response/item/output/content and existing response/generation/unit identities reject replay, cross-response and stale data. |
 | `T` timeout/retry | An explicit response lifecycle rejects illegal terminal order; valid progress alone renews the bounded progress deadline. Connect/send/receive/cleanup remain bounded. |
-| `C` concurrency/cancel | Exact response cancel is emitted when known; local/transport completion does not forge cancel acknowledgement. |
+| `C` concurrency/cancel | Queued negotiation, queue-full normal final, cancelled terminal waiter, retry and process-control interleavings share one first terminal owner; exact response cancel is emitted when known and local/transport completion does not forge cancel acknowledgement. |
 | `R` restart/reconnect | Each synthesis unit owns a separate bounded socket; no conversational state is silently resumed or inferred. |
 | `I` isolation | Credentials stay Gateway-private; native effective VAD controls must be strict booleans set to false, effective translate/whisper purpose changes fail closed, and the Adapter cannot invoke Agent/Tool/Task/history authority. |
 | `F` forbidden effects | Partial, mismatched, malformed, tool-shaped and failed paths assert zero Agent, Tool, Task and history effects and zero audio release. |
@@ -163,8 +182,8 @@ The repair is deliberately limited to the four reported findings:
    8 MiB aggregate acceptance versus `+2` rejection.
 
 These are implementer-run repair results, not an independent follow-up
-disposition. The fourth independent `C0/I2/M0` result is the latest independent
-judgement until a detached reviewer inspects the fourth repair.
+disposition. At that historical stage the then-latest independent judgement
+remained `C0/I2/M0` pending review of the fourth repair.
 
 ## Second repair response to the second independent findings
 
@@ -279,31 +298,62 @@ module-boundary review. The reviewer must assess the final state machine and
 all first-owner interleavings, not replay the historical review numbering or
 grant/withhold credit based on the number of prior rounds.
 
+## Lifecycle convergence after the consolidated review
+
+The post-consolidation repair addresses the two root causes exposed by the
+`cdb88eb0` review rather than adding four isolated exception branches:
+
+1. **Normal success is a terminal cause.** Recognition `normal_final` owns
+   socket close and bounded FINAL publication inside the installed finalizer.
+   Synthesis `normal_complete` similarly owns transport settlement, tail and
+   COMPLETED publication. A concurrent cancel or service close waits for that
+   first owner and cannot overwrite an accepted terminal result.
+2. **Synthesis has the same non-cancellable terminal ownership as
+   recognition.** Cancel, Provider failure, failed-open rollback and service
+   close synchronously install or reuse one finalization task. All public
+   waiters use `shield`; the owner clears buffered native PCM and settles
+   transport, worker, conformance, registry and degradation truth before it
+   returns process-control or cleanup failure.
+3. **Opening recognition has one outcome surface.** Once closing is visible, a
+   frame returned from `recv` is fenced before parsing or `ready` mutation. A
+   receive-owned failure during opening completes its private worker normally
+   after finalization; `open_recognition` remains the sole public throw surface.
+4. **Exact race oracles replace timing luck.** Coordinated close fakes and a
+   deliberately full 64-event queue reproduce the valid queued negotiation,
+   accepted-FINAL/cancel, cancelled synthesis waiter/retry and protocol-failure
+   plus sink-process-control windows. They assert one terminal owner, retained
+   final or degradation truth, complete cleanup and zero Agent/Tool/Task/history
+   effects.
+
+This remains one bounded lifecycle module repair. It introduces no schema,
+Agent/Tool/Task/history authority, deployment, credential, device or product
+policy change.
+
 ## Verification
 
-Executed in the consolidation worktree on Windows after the lifecycle and
-response-contract refactor:
+Executed on exact source `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861` in the
+dedicated Windows worktree after the lifecycle convergence:
 
 ```text
-uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
-150 passed in 5.12s; openai_streaming_speech.py 2029 statements, 247 missed, 88%
+.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
+155 passed in 5.71s; openai_streaming_speech.py 2098 statements, 273 missed, 87%
 
-uv run pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
-171 passed, 1 deselected in 5.37s
+.venv\Scripts\python.exe -m pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
+171 passed, 1 deselected in 7.96s
 
 C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
-80 passed in 10.21s
+80 passed in 12.81s
 
-uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
+.venv\Scripts\python.exe -m ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
 
-uv run ruff format --check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py
+.venv\Scripts\python.exe -m ruff format --check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py
 3 files already formatted
 
-uv run mypy --follow-imports=skip --ignore-missing-imports jiuwenswarm\server\live_voice\openai_streaming_speech.py
+.venv\Scripts\python.exe -m mypy --follow-imports=skip --ignore-missing-imports jiuwenswarm\server\live_voice\openai_streaming_speech.py
 Success: no issues found in 1 source file
 
-uv run python -m py_compile jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
+.venv\Scripts\python.exe -m py_compile jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
 
 git diff --check
@@ -358,8 +408,8 @@ LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
 The next acceptance trigger is one detached independent Tier-3 review of exact
-consolidated source `1d4f067cf697c4773b3ec7f0cfba307a9238594e` and its
-complete module boundary. Only after that review
+lifecycle-convergence source `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861`
+and its complete module boundary. Only after that review
 passes may a shortest real server-to-server probe be followed by the existing
 microphone/Agent/playout journey. The physical run must record Provider/session
 model truth, final transcript, audible exact Agent text, cancel/degradation
