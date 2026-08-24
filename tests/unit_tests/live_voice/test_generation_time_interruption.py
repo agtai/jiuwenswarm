@@ -896,9 +896,8 @@ async def test_bounded_ledger_skips_a_pending_action_without_exceeding_its_bound
     running = asyncio.get_running_loop()
     ref = ResponseRef("interaction-1", "response-pending", 0)
     pending_future: asyncio.Future[GenerationInterruptionResult] = running.create_future()
-    loop._pending_generation_interrupt["pending-oldest"] = (ref, pending_future)
     loop._retained_generation_interrupts["pending-oldest"] = (
-        _RetainedGenerationInterrupt(ref=ref)
+        _RetainedGenerationInterrupt(ref=ref, future=pending_future)
     )
     for index in range(_MAX_RETAINED_GENERATION_INTERRUPTS + 8):
         action_id = f"settled-{index}"
@@ -927,6 +926,45 @@ async def test_bounded_ledger_skips_a_pending_action_without_exceeding_its_bound
     # The retained order keeps its oldest-first shape around the skipped entry.
     assert next(iter(loop._retained_generation_interrupts)) == "pending-oldest"
     pending_future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_generation_interrupt_identity_capacity_includes_pending_actions() -> None:
+    """Pending and settled actions share one total replay-identity bound."""
+
+    loop = ConversationRuntimeLoop(
+        scope(), control_capacity=_MAX_RETAINED_GENERATION_INTERRUPTS + 1
+    )
+    assert await loop.start() is True
+    await loop.open_interaction("interaction-1")
+    pending = [
+        loop.post_generation_interrupt(
+            f"pending-{index}",
+            ResponseRef("interaction-1", f"pending-response-{index}", index),
+        )
+        for index in range(_MAX_RETAINED_GENERATION_INTERRUPTS)
+    ]
+    try:
+        assert len(loop._retained_generation_interrupts) == (
+            _MAX_RETAINED_GENERATION_INTERRUPTS
+        )
+        for index, future in enumerate(pending):
+            assert (
+                loop._retained_generation_interrupts[f"pending-{index}"].future
+                is future
+            )
+        with pytest.raises(ConversationRuntimeLoopViolation) as full:
+            loop.post_generation_interrupt(
+                "pending-over-capacity",
+                ResponseRef("interaction-1", "pending-response-over-capacity", 0),
+            )
+        assert full.value.reason == "GENERATION_INTERRUPT_LEDGER_FULL"
+        assert len(loop._retained_generation_interrupts) == (
+            _MAX_RETAINED_GENERATION_INTERRUPTS
+        )
+    finally:
+        await asyncio.gather(*pending, return_exceptions=True)
+        await loop.close()
 
 
 @pytest.mark.asyncio

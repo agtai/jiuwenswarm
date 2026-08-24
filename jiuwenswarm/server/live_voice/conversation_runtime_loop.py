@@ -47,9 +47,10 @@ _MAX_RETAINED_GENERATION_INTERRUPTS = 256
 
 @dataclass
 class _RetainedGenerationInterrupt:
-    """One settled interruption action, kept so an exact replay is idempotent."""
+    """One interruption action from admission through retained replay."""
 
     ref: ResponseRef
+    future: asyncio.Future[GenerationInterruptionResult] | None = None
     result: GenerationInterruptionResult | None = None
     error: Exception | None = None
 
@@ -223,14 +224,11 @@ class ConversationRuntimeLoop:
             str, tuple[ResponseRef, asyncio.Future[ResponseCancelResult]]
         ] = {}
         self._playback_stopped: set[ResponseRef] = set()
-        # One entry per action, in insertion order.  This was four parallel
-        # structures until review found the eviction sweep could drop an action
-        # from some of them and not others; a single record makes that class of
-        # defect unrepresentable.
+        # One entry per action, in insertion order, owns the exact target,
+        # pending future and settled result/error.  Admission and replay share
+        # the same bound, so an event-loop scheduling burst cannot grow a
+        # second pending identity table outside the retained ledger.
         self._retained_generation_interrupts: dict[str, _RetainedGenerationInterrupt] = {}
-        self._pending_generation_interrupt: dict[
-            str, tuple[ResponseRef, asyncio.Future[GenerationInterruptionResult]]
-        ] = {}
 
     @property
     def enabled(self) -> bool:
@@ -611,30 +609,31 @@ class ConversationRuntimeLoop:
     ) -> asyncio.Future[GenerationInterruptionResult]:
         action_id = self._require_id(action_id, "action_id")
         running = self._require_admission()
-        pending = self._pending_generation_interrupt.get(action_id)
-        if pending is not None:
-            pending_ref, future = pending
-            if pending_ref != ref:
-                raise ConversationRuntimeLoopViolation(
-                    "GENERATION_INTERRUPT_ACTION_CONFLICT",
-                    "a generation interrupt action identifier cannot change target",
-                    ErrorCode.CONFLICT,
-                )
-            return future
         retained = self._require_same_generation_interrupt_target(action_id, ref)
         if retained is not None:
+            if retained.future is not None:
+                return retained.future
             if retained.error is not None:
                 return self._failed_future(running, retained.error)
             assert retained.result is not None
             return self._resolved_future(
                 running, replace(retained.result, replayed=True)
             )
+        self._evict_retained_generation_interrupts(reserve=1)
+        if len(self._retained_generation_interrupts) >= _MAX_RETAINED_GENERATION_INTERRUPTS:
+            raise ConversationRuntimeLoopViolation(
+                "GENERATION_INTERRUPT_LEDGER_FULL",
+                "bounded generation interruption ledger is full",
+                ErrorCode.UNAVAILABLE,
+            )
+        entry = _RetainedGenerationInterrupt(ref=ref)
         future = self._post(
-            lambda: self._generation_interrupt(action_id, ref), control=True
+            lambda: self._generation_interrupt(action_id, entry), control=True
         )
-        self._pending_generation_interrupt[action_id] = (ref, future)
+        entry.future = future
+        self._retained_generation_interrupts[action_id] = entry
         future.add_done_callback(
-            lambda completed: self._clear_pending_generation_interrupt(
+            lambda completed: self._settle_generation_interrupt(
                 action_id, completed
             )
         )
@@ -914,21 +913,17 @@ class ConversationRuntimeLoop:
         return result
 
     def _generation_interrupt(
-        self, action_id: str, ref: ResponseRef
+        self, action_id: str, entry: _RetainedGenerationInterrupt
     ) -> GenerationInterruptionResult:
         action_id = self._require_id(action_id, "action_id")
-        retained = self._require_same_generation_interrupt_target(action_id, ref)
-        if retained is not None:
-            if retained.error is not None:
-                raise retained.error
-            assert retained.result is not None
-            return replace(retained.result, replayed=True)
-
-        entry = _RetainedGenerationInterrupt(ref=ref)
-        self._retained_generation_interrupts[action_id] = entry
-        self._evict_retained_generation_interrupts()
+        if self._retained_generation_interrupts.get(action_id) is not entry:
+            raise ConversationRuntimeLoopViolation(
+                "GENERATION_INTERRUPT_ACTION_MISSING",
+                "generation interruption lost its admitted ledger identity",
+                ErrorCode.INTERNAL,
+            )
         try:
-            entry.result = self._apply_new_generation_interrupt(action_id, ref)
+            entry.result = self._apply_new_generation_interrupt(action_id, entry.ref)
         except Exception as error:
             entry.error = error
             raise
@@ -948,7 +943,7 @@ class ConversationRuntimeLoop:
             )
         return retained
 
-    def _evict_retained_generation_interrupts(self) -> None:
+    def _evict_retained_generation_interrupts(self, *, reserve: int = 0) -> None:
         """Bound the replay ledger across a long hands-free conversation.
 
         Every turn can carry one interruption, so this ledger grows with the
@@ -959,16 +954,17 @@ class ConversationRuntimeLoop:
         settled entry behind it accumulate past the bound.
         """
 
-        evictable = (
-            len(self._retained_generation_interrupts)
-            - _MAX_RETAINED_GENERATION_INTERRUPTS
+        if reserve < 0 or reserve > _MAX_RETAINED_GENERATION_INTERRUPTS:
+            raise AssertionError("generation interruption reserve is invalid")
+        evictable = len(self._retained_generation_interrupts) - (
+            _MAX_RETAINED_GENERATION_INTERRUPTS - reserve
         )
         if evictable <= 0:
             return
-        for action_id in list(self._retained_generation_interrupts):
+        for action_id, entry in list(self._retained_generation_interrupts.items()):
             if evictable <= 0:
                 break
-            if action_id in self._pending_generation_interrupt:
+            if entry.future is not None and not entry.future.done():
                 continue
             del self._retained_generation_interrupts[action_id]
             evictable -= 1
@@ -1032,12 +1028,32 @@ class ConversationRuntimeLoop:
             effect_ids=tuple(effect.effect_id for effect in effects),
         )
 
-    def _clear_pending_generation_interrupt(
+    def _settle_generation_interrupt(
         self, action_id: str, completed: asyncio.Future[GenerationInterruptionResult]
     ) -> None:
-        pending = self._pending_generation_interrupt.get(action_id)
-        if pending is not None and pending[1] is completed:
-            del self._pending_generation_interrupt[action_id]
+        entry = self._retained_generation_interrupts.get(action_id)
+        if entry is None or entry.future is not completed:
+            return
+        if entry.result is None and entry.error is None:
+            if completed.cancelled():
+                entry.error = ConversationRuntimeLoopViolation(
+                    "GENERATION_INTERRUPT_ACTION_CANCELLED",
+                    "generation interruption was cancelled before settlement",
+                    ErrorCode.CANCELLED,
+                )
+            else:
+                error = completed.exception()
+                if error is None:
+                    entry.result = completed.result()
+                elif isinstance(error, Exception):
+                    entry.error = error
+                else:
+                    entry.error = ConversationRuntimeLoopViolation(
+                        "GENERATION_INTERRUPT_ACTION_FAILED",
+                        "generation interruption failed outside the runtime contract",
+                        ErrorCode.INTERNAL,
+                    )
+        entry.future = None
 
     def _clear_pending_barge(
         self, action_id: str, completed: asyncio.Future[BargeInResult]
