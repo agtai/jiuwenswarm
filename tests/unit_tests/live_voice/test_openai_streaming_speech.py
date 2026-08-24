@@ -208,6 +208,31 @@ class CoordinatedCloseSocket(FakeSocket):
         await super().close()
 
 
+class OrderedOpeningCloseSocket(FakeSocket):
+    def __init__(self, wake_failure: BaseException) -> None:
+        super().__init__()
+        self._wake_failure = wake_failure
+        self.close_started = asyncio.Event()
+        self.receive_woken = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def recv(self) -> str | bytes:
+        try:
+            return await super().recv()
+        finally:
+            if self.close_started.is_set():
+                self.receive_woken.set()
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.close_started.set()
+        self.incoming.put_nowait(self._wake_failure)
+        await self.release_close.wait()
+        self.closed = True
+        self.closed_event.set()
+
+
 class CancellationDefiantCloseStream(BlockingSseStream):
     def __init__(self) -> None:
         super().__init__()
@@ -3220,6 +3245,128 @@ async def test_native_realtime_opening_recognition_cancel_settles_ready_once() -
     await provider.close()
 
 
+@pytest.mark.parametrize(
+    "wake_failure_type", (_RealtimeSocketTerminalEof, ConnectionError)
+)
+@pytest.mark.asyncio
+async def test_native_realtime_opening_cancel_owns_close_wakeup_and_duplicate(
+    wake_failure_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = OrderedOpeningCloseSocket(wake_failure_type())
+
+    async def socket_factory(*_args) -> OrderedOpeningCloseSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    provider_closed_calls: list[RecognitionStreamRef] = []
+    provider_closed = provider.conformance.provider_closed_recognition
+
+    def record_provider_closed(ref: RecognitionStreamRef) -> None:
+        provider_closed_calls.append(ref)
+        provider_closed(ref)
+
+    monkeypatch.setattr(
+        provider.conformance,
+        "provider_closed_recognition",
+        record_provider_closed,
+    )
+    open_task = asyncio.create_task(
+        provider.open_recognition(request, timeout_seconds=0.4)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if socket.sent:
+            break
+    assert socket.sent and socket.sent[0]["type"] == "session.update"
+    session = provider._require_recognition(request.ref)
+
+    first_cancel = asyncio.create_task(provider.cancel_recognition(request.ref))
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    second_cancel = asyncio.create_task(provider.cancel_recognition(request.ref))
+    await asyncio.wait_for(socket.receive_woken.wait(), timeout=1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    ready_was_stolen = session.ready.done()
+    socket.release_close.set()
+
+    cancel_results = await asyncio.gather(
+        first_cancel, second_cancel, return_exceptions=True
+    )
+    try:
+        await asyncio.wait_for(open_task, timeout=0.05)
+    except BaseException as exc:
+        open_failure = exc
+    else:
+        open_failure = None
+
+    assert ready_was_stolen is False
+    assert cancel_results == [None, None]
+    assert isinstance(open_failure, asyncio.CancelledError)
+    assert socket.closed is True
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert provider_closed_calls == [request.ref]
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert provider.conformance.snapshot().retained_recognition == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_opening_cancel_finalizes_before_process_control() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    socket = OrderedOpeningCloseSocket(GeneratorExit())
+
+    async def socket_factory(*_args) -> OrderedOpeningCloseSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+    )
+    request = RecognitionStreamRequest(
+        recognition_ref(), RecognitionTurnDetection.server_vad_default()
+    )
+    open_task = asyncio.create_task(
+        provider.open_recognition(request, timeout_seconds=0.4)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if socket.sent:
+            break
+    assert socket.sent and socket.sent[0]["type"] == "session.update"
+
+    cancel_task = asyncio.create_task(provider.cancel_recognition(request.ref))
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+    await asyncio.wait_for(socket.receive_woken.wait(), timeout=1)
+    socket.release_close.set()
+
+    with pytest.raises(GeneratorExit):
+        await cancel_task
+    # Process control is preserved through both owners, but only after cancel
+    # has settled conformance/registry state and released the opening waiter.
+    with pytest.raises(GeneratorExit):
+        await asyncio.wait_for(open_task, timeout=0.05)
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.active_recognition == snapshot.retained_recognition == 0
+    assert provider._recognition == {}
+    assert facts == []
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
 @pytest.mark.parametrize("violation", ("missing", "replay"))
 @pytest.mark.asyncio
 async def test_native_realtime_recognition_requires_unique_server_event_id(
@@ -3716,6 +3863,8 @@ async def test_native_realtime_synthesis_close_drain_allows_rate_limits() -> Non
         "output",
         "audio_format",
         "missing_conversation",
+        "missing_status_details",
+        "missing_usage",
     ),
 )
 @pytest.mark.asyncio
@@ -3748,8 +3897,12 @@ async def test_native_realtime_synthesis_rejects_changed_initial_response(
         output = audio["output"]
         assert isinstance(output, dict)
         output["format"] = {"type": "audio/pcmu"}
-    else:
+    elif mutation == "missing_conversation":
         del response["conversation_id"]
+    elif mutation == "missing_status_details":
+        del response["status_details"]
+    else:
+        del response["usage"]
 
     native_response_prelude(
         socket,

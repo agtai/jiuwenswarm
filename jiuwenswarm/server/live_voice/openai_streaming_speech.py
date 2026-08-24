@@ -697,6 +697,7 @@ class _RecognitionSession:
     ready: asyncio.Future[None] = field(repr=False)
     deadline: float
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    cancel_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     receive_task: asyncio.Task[None] | None = field(default=None, repr=False)
     partial_text: str = field(default="", repr=False)
     item_id: str | None = None
@@ -1224,30 +1225,96 @@ class OpenAIStreamingSpeechProvider:
         self, ref: RecognitionStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
         session = self._require_recognition(ref)
-        try:
+        async with session.cancel_lock:
+            # A concurrent duplicate can resolve the session before this waiter
+            # enters the lock.  The first owner has already recorded the exact
+            # cancel fact and settled every lifecycle surface.
+            if session.terminal:
+                return
+            process_control: BaseException | None = None
+            cleanup_failure: BaseException | None = None
+            caller_cancelled = False
             self._conformance.request_recognition_cancel(ref, reason=reason)
             session.closing = True
-            await self._close_socket(session.socket)
-            if session.receive_task is not None:
-                await self._transport_cleanup_tasks.cancel_task(
-                    session.receive_task, kind="recognition-worker"
+            try:
+                results: list[object] = []
+                try:
+                    results.append(
+                        await _settle_close_action(self._close_socket(session.socket))
+                    )
+                except asyncio.CancelledError:
+                    caller_cancelled = True
+                if session.receive_task is not None:
+                    try:
+                        results.append(
+                            await _settle_close_action(
+                                self._transport_cleanup_tasks.cancel_task(
+                                    session.receive_task,
+                                    kind="recognition-worker",
+                                )
+                            )
+                        )
+                    except asyncio.CancelledError:
+                        caller_cancelled = True
+                process_control = _first_process_control(None, results)
+                cleanup_failure = next(
+                    (
+                        _safe_boundary_exception(result)
+                        for result in results
+                        if isinstance(result, BaseException)
+                        and not _is_process_control(result)
+                    ),
+                    None,
                 )
-            self._conformance.provider_closed_recognition(ref)
-            session.terminal = True
-            await self._retire_recognition(session)
-            await self._emit_failure(
-                operation="recognition.cancel",
-                reason=SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED,
-                started_at=None,
-                identity=f"{ref.session_id}:{ref.session_generation}",
-            )
-        finally:
-            # ``open_recognition`` shields this Future while the registered
-            # session negotiates.  External cancel owns that opening session,
-            # so it must settle the waiter after cleanup instead of leaving the
-            # open call alive until its original Provider deadline.
-            if not session.ready.done():
-                session.ready.cancel()
+                try:
+                    self._conformance.provider_closed_recognition(ref)
+                except BaseException as exc:
+                    failure = _safe_boundary_exception(exc)
+                    if _is_process_control(failure):
+                        process_control = process_control or failure
+                    else:
+                        cleanup_failure = cleanup_failure or failure
+                session.terminal = True
+                try:
+                    await self._retire_recognition(session)
+                except asyncio.CancelledError:
+                    caller_cancelled = True
+                    await self._retire_recognition(session)
+                if (
+                    process_control is None
+                    and cleanup_failure is None
+                    and not caller_cancelled
+                ):
+                    try:
+                        await self._emit_failure(
+                            operation="recognition.cancel",
+                            reason=(
+                                SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+                            ),
+                            started_at=None,
+                            identity=f"{ref.session_id}:{ref.session_generation}",
+                        )
+                    except BaseException as exc:
+                        failure = _safe_boundary_exception(exc)
+                        if _is_process_control(failure):
+                            process_control = process_control or failure
+                        elif isinstance(failure, asyncio.CancelledError):
+                            caller_cancelled = True
+                        else:
+                            cleanup_failure = cleanup_failure or failure
+            finally:
+                # ``open_recognition`` shields this Future while the registered
+                # session negotiates.  The cancel owner releases it only after
+                # transport, worker, conformance and registry settlement.
+                if not session.ready.done():
+                    session.ready.cancel()
+            results = []
+            if process_control is not None:
+                raise process_control from None
+            if caller_cancelled:
+                raise asyncio.CancelledError() from None
+            if cleanup_failure is not None:
+                raise cleanup_failure from None
 
     async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
         session: _SynthesisSession | None = None
@@ -1479,6 +1546,14 @@ class OpenAIStreamingSpeechProvider:
             failure = _safe_boundary_exception(exc)
         finally:
             raw = None
+        if session.closing:
+            # Cancel/rollback/provider-close sets ``closing`` before waking the
+            # receive owner.  That owner must not settle ``ready`` or mutate
+            # conformance after a close-induced EOF/transport failure; the
+            # lifecycle owner does so exactly once after its cleanup barrier.
+            if failure is not None and _is_process_control(failure):
+                raise failure from None
+            return
         if isinstance(failure, asyncio.CancelledError):
             await self._close_socket(session.socket)
             raise failure
@@ -2676,13 +2751,34 @@ class OpenAIStreamingSpeechProvider:
         socket: RealtimeSocket | None,
         conformance_started: bool,
     ) -> None:
+        process_control: BaseException | None = None
+        cleanup_failure: BaseException | None = None
+        owns_conformance_settlement = conformance_started and (
+            session is None or not session.terminal
+        )
         if session is not None:
             session.closing = True
-            await self._close_socket(session.socket)
+            results: list[object] = [
+                await _settle_close_action(self._close_socket(session.socket))
+            ]
             if session.receive_task is not None:
-                await self._transport_cleanup_tasks.cancel_task(
-                    session.receive_task, kind="recognition-worker"
+                results.append(
+                    await _settle_close_action(
+                        self._transport_cleanup_tasks.cancel_task(
+                            session.receive_task, kind="recognition-worker"
+                        )
+                    )
                 )
+            process_control = _first_process_control(None, results)
+            cleanup_failure = next(
+                (
+                    _safe_boundary_exception(result)
+                    for result in results
+                    if isinstance(result, BaseException)
+                    and not _is_process_control(result)
+                ),
+                None,
+            )
             session.terminal = True
             key = _recognition_key(ref)
             async with self._lock:
@@ -2690,10 +2786,14 @@ class OpenAIStreamingSpeechProvider:
                     del self._recognition[key]
         elif socket is not None:
             await self._close_socket(socket)
-        if conformance_started:
+        if owns_conformance_settlement:
             with suppress(StreamingSpeechViolation):
                 self._conformance.provider_closed_recognition(ref)
             self._conformance.reap_terminal()
+        if process_control is not None:
+            raise process_control from None
+        if cleanup_failure is not None:
+            raise cleanup_failure from None
 
     async def _rollback_failed_synthesis(
         self,
@@ -3370,6 +3470,8 @@ def _native_initial_response_matches(
         "id",
         "object",
         "status",
+        "status_details",
+        "usage",
         "output",
         "conversation_id",
         "output_modalities",

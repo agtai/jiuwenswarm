@@ -2,7 +2,7 @@
 
 ## Disposition
 
-**THIRD REPAIR SOURCE/AUTOMATION PASS — FOURTH INDEPENDENT REVIEW REQUIRED.**
+**FOURTH REPAIR SOURCE/AUTOMATION PASS — FIFTH INDEPENDENT REVIEW REQUIRED.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -22,9 +22,9 @@ accepts contradictory conversation, modality, status, voice and audio-format
 facts that a later terminal event can overwrite. The second repair is limited
 to terminal quarantine/drain, a negotiated recognition data-plane fence and a
 complete initial response validator, with matching concurrency and zero-effect
-oracles. That second repair and its affected automated matrix now pass, but no
-independent reviewer has inspected the repaired source. A third detached review
-is required before any real Provider/device validation. No OpenAI credential,
+oracles. That second repair and its affected automated matrix passed implementer
+checks; at that point a third detached review was required before any real
+Provider/device validation. No OpenAI credential,
 network session, microphone or speaker was used, so all physical claims remain
 open. No prior source/automation statement grants current PASS or independent
 review credit.
@@ -38,10 +38,21 @@ settle `ready` and therefore emits a later false timeout; terminal
 and native recognition accepts missing or replayed server event IDs without a
 bounded ledger. The third repair is limited to those four protocol/lifecycle
 seams and their exact positive, negative, concurrency, boundary and forbidden-
-effect oracles. Its source and affected automated matrix now pass, but no
-detached reviewer has inspected the repair. The latest independent result
-therefore remains `C0/I4/M0`; no current independent PASS or physical credit
-exists.
+effect oracles. Its source and affected automated matrix passed implementer
+checks and then advanced to a fourth detached review.
+
+That fourth review of exact third-repair source
+`e3664e798fe9901c3bbdd69a140f51bca6542e4a` returned `C0/I2/M0`. It closed
+the prior close-handshake, terminal-resource and recognition-event-ID findings,
+but proved that close-induced EOF can still make the recognition worker settle
+an opening session before its cancel owner, producing stale conformance and the
+wrong degradation fact. It also proved the strict local initial-resource
+contract accepts omitted `status_details` and `usage` as if they were explicit
+null. The fourth repair is limited to those two lifecycle/resource-presence
+seams and their exact concurrency, process-control and zero-effect oracles. Its
+source and affected automation now pass, but no detached reviewer has inspected
+the repair. The latest independent result therefore remains `C0/I2/M0`; no
+current independent PASS or physical credit exists.
 
 The review covers the change based on
 `2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the containing commit is the
@@ -146,8 +157,8 @@ The repair is deliberately limited to the four reported findings:
    8 MiB aggregate acceptance versus `+2` rejection.
 
 These are implementer-run repair results, not an independent follow-up
-disposition. The third independent `C0/I4/M0` result is the latest independent
-judgement until a detached reviewer inspects the third repair.
+disposition. The fourth independent `C0/I2/M0` result is the latest independent
+judgement until a detached reviewer inspects the fourth repair.
 
 ## Second repair response to the second independent findings
 
@@ -207,20 +218,43 @@ findings:
 These are implementer-run source/automation results only. They do not change
 the latest independent FAIL or authorize physical/provider acceptance.
 
+## Fourth repair response to the fourth independent findings
+
+The fourth repair is deliberately limited to the two reported Important
+findings:
+
+1. **I1 — opening cancel/EOF ownership:** each recognition session now
+   serializes cancel owners. Once an owner marks the session closing, the
+   receive worker cannot mutate `ready`, conformance or registry state for EOF,
+   transport failure or cancellation. The cancel owner closes transport,
+   settles the worker, closes and reaps conformance, retires the registry entry,
+   emits exactly one unacknowledged-cancel fact and only then releases the
+   opening waiter. Concurrent duplicate cancel is idempotent for the retained
+   session; process-control is preserved only after the same cleanup barrier.
+   Exact EOF and generic-worker-failure orderings prove one conformance close,
+   one cancel fact, prompt opening cancellation and zero business effects.
+2. **I2 — initial nullable-field presence:** the strict local initial
+   `realtime.response` validator now requires both `status_details` and `usage`
+   keys in addition to requiring their values to be null. Omitting either key
+   emits one protocol degradation and releases zero PCM or completion.
+
+These are implementer-run source/automation results only. They do not change
+the latest independent FAIL or authorize physical/provider acceptance.
+
 ## Verification
 
-Executed in the third-repair worktree on Windows after the third independent
+Executed in the fourth-repair worktree on Windows after the fourth independent
 findings:
 
 ```text
 uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
-128 passed in 5.51s; openai_streaming_speech.py 1986 statements, 232 missed, 88%
+133 passed in 4.82s; openai_streaming_speech.py 2041 statements, 257 missed, 87%
 
 uv run pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
-171 passed, 1 deselected in 5.61s
+171 passed, 1 deselected in 4.27s
 
 C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
-80 passed in 10.77s
+80 passed in 7.37s
 
 uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
@@ -282,8 +316,8 @@ LIVE_VOICE_SPEECH_STT_MODEL=gpt-4o-mini-transcribe
 LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
-The next acceptance trigger is a fourth detached independent Tier-3 review of
-the exact third-repair commit and its complete boundary. Only after that review
+The next acceptance trigger is a fifth detached independent Tier-3 review of
+the exact fourth-repair commit and its complete boundary. Only after that review
 passes may a shortest real server-to-server probe be followed by the existing
 microphone/Agent/playout journey. The physical run must record Provider/session
 model truth, final transcript, audible exact Agent text, cancel/degradation
