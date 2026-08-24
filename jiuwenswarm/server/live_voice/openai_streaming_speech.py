@@ -1157,26 +1157,35 @@ class OpenAIStreamingSpeechProvider:
         finally:
             self._opening_recognition_tasks.discard(opening_task)
         if failure is not None:
+            settlement = _FinalizationFailures()
+            if _is_process_control(failure) or isinstance(
+                failure, asyncio.CancelledError
+            ):
+                settlement.record(failure)
             await self._rollback_failed_recognition(
                 ref,
                 session=session,
                 socket=socket,
                 conformance_started=conformance_started,
+                failures=settlement,
             )
             if not _is_process_control(failure) and not isinstance(
                 failure, asyncio.CancelledError
             ):
-                with suppress(Exception, asyncio.CancelledError):
+                try:
                     await self._emit_failure(
                         operation="recognition.open",
                         reason=_reason_for_exception(failure),
                         started_at=started_at,
                         identity=f"{ref.session_id}:{ref.session_generation}",
                     )
+                except BaseException as exc:
+                    settlement.record(exc)
+            final_failure = settlement.failure or failure
             socket = None
             session = None
             opening_task = None
-            raise failure
+            raise final_failure
 
     async def send_recognition_audio(self, frame: RecognitionAudioFrame) -> None:
         session: _RecognitionSession | None = None
@@ -3048,21 +3057,29 @@ class OpenAIStreamingSpeechProvider:
         session: _RecognitionSession | None,
         socket: RealtimeSocket | None,
         conformance_started: bool,
+        failures: _FinalizationFailures,
     ) -> None:
         if session is not None:
             outcome = await self._finalize_recognition_session(
                 session,
                 cause=_RecognitionFinalizationCause.ROLLBACK,
             )
-            _raise_recognition_finalization(outcome)
+            if outcome.failure is not None:
+                failures.record(outcome.failure)
             return
-        owns_conformance_settlement = conformance_started
         if socket is not None:
-            await self._close_socket(socket)
-        if owns_conformance_settlement:
-            with suppress(StreamingSpeechViolation):
+            await self._settle_finalization_socket(failures, socket)
+        if conformance_started:
+            try:
                 self._conformance.provider_closed_recognition(ref)
-            self._conformance.reap_terminal()
+            except StreamingSpeechViolation:
+                pass
+            except BaseException as exc:
+                failures.record(exc)
+            try:
+                self._conformance.reap_terminal()
+            except BaseException as exc:
+                failures.record(exc)
 
     async def _rollback_failed_synthesis(
         self,

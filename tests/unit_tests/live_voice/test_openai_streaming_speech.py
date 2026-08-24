@@ -957,6 +957,97 @@ async def test_cancelled_recognition_registration_rolls_back_exact_session() -> 
 
 
 @pytest.mark.asyncio
+async def test_failed_open_without_session_reports_incomplete_socket_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = CancellationDefiantCloseSocket()
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    def fail_resampler(*_args: object) -> None:
+        raise ConnectionError("resampler construction failed")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_StreamingLinearResampler",
+        fail_resampler,
+    )
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+    try:
+        open_task = asyncio.create_task(
+            provider.open_recognition(recognition_ref(), timeout_seconds=1)
+        )
+        await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+        with pytest.raises(OpenAIStreamingSpeechError) as incomplete:
+            await asyncio.wait_for(open_task, timeout=1)
+        assert incomplete.value.reason == "SPEECH_PROVIDER_CLEANUP_INCOMPLETE"
+        assert socket.closed is False
+        assert provider.cleanup_snapshot.clean is False
+        assert provider.cleanup_snapshot.retained_task_count == 1
+        assert provider._recognition == {}
+        assert provider._opening_recognition_tasks == set()
+        snapshot = provider.conformance.snapshot()
+        assert snapshot.active_recognition == snapshot.retained_recognition == 0
+        assert snapshot.retained_identity_tombstones == 1
+        assert len(facts) == 1
+        assert facts[0].operation == "recognition.open"
+        assert facts[0].reason is SpeechDegradationReason.PROVIDER_UNAVAILABLE
+        assert provider.degradation_facts == tuple(facts)
+        assert_zero_business_effects(provider)
+    finally:
+        socket.release_close.set()
+        await asyncio.wait_for(socket.close_returned.wait(), timeout=1)
+        await provider.close()
+    assert provider.cleanup_snapshot.clean is True
+
+
+@pytest.mark.asyncio
+async def test_failed_open_without_session_retries_close_before_process_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = ProcessControlOnceCloseSocket()
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    def fail_resampler(*_args: object) -> None:
+        raise ConnectionError("resampler construction failed")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "_StreamingLinearResampler",
+        fail_resampler,
+    )
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+
+    with pytest.raises(GeneratorExit):
+        await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+    assert socket.close_attempts == 2
+    assert socket.closed is True
+    assert provider.cleanup_snapshot.clean is True
+    assert provider._recognition == {}
+    assert provider._opening_recognition_tasks == set()
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.active_recognition == snapshot.retained_recognition == 0
+    assert snapshot.retained_identity_tombstones == 1
+    assert len(facts) == 1
+    assert facts[0].operation == "recognition.open"
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_UNAVAILABLE
+    assert provider.degradation_facts == tuple(facts)
+    assert_zero_business_effects(provider)
+
+    await provider.close()
+    assert socket.close_attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_cancelled_synthesis_registration_rolls_back_exact_session() -> None:
     provider = OpenAIStreamingSpeechProvider(config())
     request = synthesis_request()
