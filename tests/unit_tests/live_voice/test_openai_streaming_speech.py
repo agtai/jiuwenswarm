@@ -1976,26 +1976,90 @@ async def test_recognition_cancel_is_local_fence_not_provider_ack() -> None:
 
 @pytest.mark.asyncio
 async def test_noncooperative_socket_close_is_retained_and_reported() -> None:
+    facts: list[SpeechDegradationFact] = []
     socket = CancellationDefiantCloseSocket((session_updated_event(),))
 
     async def socket_factory(*_args) -> FakeSocket:
         return socket
 
-    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
     ref = recognition_ref()
     await provider.open_recognition(ref, timeout_seconds=1)
     try:
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        await asyncio.wait_for(provider.cancel_recognition(ref), timeout=0.5)
+        with pytest.raises(OpenAIStreamingSpeechError) as incomplete_cancel:
+            await asyncio.wait_for(provider.cancel_recognition(ref), timeout=0.5)
+        assert incomplete_cancel.value.reason == "SPEECH_PROVIDER_CLEANUP_INCOMPLETE"
         assert loop.time() - started_at < 0.4
         assert socket.closed is False
         assert provider.cleanup_snapshot.clean is False
         assert provider.cleanup_snapshot.retained_task_count == 1
+        assert len(facts) == 1
+        assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
 
         with pytest.raises(OpenAIStreamingSpeechError) as incomplete:
             await asyncio.wait_for(provider.close(), timeout=0.5)
         assert incomplete.value.reason == "SPEECH_PROVIDER_CLEANUP_INCOMPLETE"
+    finally:
+        socket.release_close.set()
+        await asyncio.wait_for(socket.close_returned.wait(), timeout=1)
+        await provider.close()
+    assert provider.cleanup_snapshot.clean is True
+
+
+@pytest.mark.asyncio
+async def test_native_realtime_final_requires_mechanical_transport_settlement() -> None:
+    facts: list[SpeechDegradationFact] = []
+    socket = CancellationDefiantCloseSocket((native_session_updated_event(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    session = provider._require_recognition(ref)
+    assert session.receive_task is not None
+    receive_task = session.receive_task
+    socket.push(
+        {
+            "type": "input_audio_buffer.committed",
+            "event_id": "event-incomplete-close-committed",
+            "item_id": "item-incomplete-close",
+        }
+    )
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "event_id": "event-incomplete-close-final",
+            "content_index": 0,
+            "item_id": "item-incomplete-close",
+            "transcript": "must not escape before close",
+        }
+    )
+    try:
+        await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+        assert await asyncio.wait_for(receive_task, timeout=0.5) is None
+        assert session.finalization_task is not None
+        outcome = session.finalization_task.result()
+        assert isinstance(outcome.failure, OpenAIStreamingSpeechError)
+        assert outcome.failure.reason == "SPEECH_PROVIDER_CLEANUP_INCOMPLETE"
+        assert session.events.empty()
+        assert socket.closed is False
+        assert provider.cleanup_snapshot.clean is False
+        assert provider.cleanup_snapshot.retained_task_count == 1
+        assert provider._recognition == {}
+        assert provider.conformance.snapshot().active_recognition == 0
+        assert len(facts) == 1
+        assert facts[0].reason is SpeechDegradationReason.PROVIDER_UNAVAILABLE
+        assert_zero_business_effects(provider)
     finally:
         socket.release_close.set()
         await asyncio.wait_for(socket.close_returned.wait(), timeout=1)
@@ -2451,12 +2515,15 @@ async def test_synthesis_cancel_closes_transport_without_cancelled_event() -> No
 
 @pytest.mark.asyncio
 async def test_noncooperative_stream_close_is_retained_and_reported() -> None:
+    facts: list[SpeechDegradationFact] = []
     stream = CancellationDefiantCloseStream()
 
     async def sse_factory(*_args):
         return stream
 
-    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    provider = OpenAIStreamingSpeechProvider(
+        config(), sse_factory=sse_factory, degradation_sink=facts.append
+    )
     request = synthesis_request()
     provider.conformance.activate_response(request.ref.response)
     await provider.open_synthesis(request)
@@ -2464,11 +2531,15 @@ async def test_noncooperative_stream_close_is_retained_and_reported() -> None:
     try:
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        await asyncio.wait_for(provider.cancel_synthesis(request.ref), timeout=0.5)
+        with pytest.raises(OpenAIStreamingSpeechError) as incomplete_cancel:
+            await asyncio.wait_for(provider.cancel_synthesis(request.ref), timeout=0.5)
+        assert incomplete_cancel.value.reason == "SPEECH_PROVIDER_CLEANUP_INCOMPLETE"
         assert loop.time() - started_at < 0.4
         assert stream.closed is False
         assert provider.cleanup_snapshot.clean is False
         assert provider.cleanup_snapshot.retained_task_count == 1
+        assert len(facts) == 1
+        assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
 
         with pytest.raises(OpenAIStreamingSpeechError) as incomplete:
             await asyncio.wait_for(provider.close(), timeout=0.5)
@@ -2672,6 +2743,55 @@ async def test_transport_close_process_control_retries_before_rethrow(
 
     await provider.close()
     assert provider.cleanup_snapshot.clean is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["recognition", "synthesis"])
+async def test_session_cancel_retries_close_before_process_control_and_fact(
+    modality: str,
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    initial = (
+        (native_session_updated_event(),)
+        if modality == "recognition"
+        else (
+            native_session_created_event(),
+            native_synthesis_session_updated_event(),
+        )
+    )
+    socket = ProcessControlOnceCloseSocket(initial)
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        native_config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+    if modality == "recognition":
+        ref = recognition_ref()
+        await provider.open_recognition(ref, timeout_seconds=1)
+        cancel = provider.cancel_recognition(ref)
+    else:
+        request = synthesis_request()
+        provider.conformance.activate_response(request.ref.response)
+        await provider.open_synthesis(request)
+        started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        assert started.kind is SynthesisEventKind.STARTED
+        cancel = provider.cancel_synthesis(request.ref)
+
+    with pytest.raises(GeneratorExit):
+        await cancel
+    assert socket.close_attempts == 2
+    assert socket.closed is True
+    assert provider.cleanup_snapshot.clean is True
+    assert provider._recognition == {}
+    assert provider._synthesis == {}
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.active_recognition == snapshot.active_synthesis == 0
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
+    assert_zero_business_effects(provider)
+    await provider.close()
 
 
 @pytest.mark.asyncio
@@ -3587,7 +3707,8 @@ async def test_native_realtime_opening_cancel_finalizes_before_process_control()
     snapshot = provider.conformance.snapshot()
     assert snapshot.active_recognition == snapshot.retained_recognition == 0
     assert provider._recognition == {}
-    assert facts == []
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_CANCEL_UNACKNOWLEDGED
     assert_zero_business_effects(provider)
     await provider.close()
 
