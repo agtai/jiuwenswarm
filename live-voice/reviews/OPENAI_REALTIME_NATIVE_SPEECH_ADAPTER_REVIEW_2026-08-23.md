@@ -2,8 +2,8 @@
 
 ## Disposition
 
-**LIFECYCLE-CONVERGENCE REPAIR SOURCE/AUTOMATION PASS — INDEPENDENT MODULE
-REVIEW REQUIRED.**
+**PRE-SESSION ROLLBACK REPAIR SOURCE/AUTOMATION PASS — ONE FINAL TARGETED
+CONFIRMATION REQUIRED.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -67,21 +67,28 @@ terminal owner; synthesis cleanup could be interrupted by a cancelled waiter or
 observability process-control; and an opening receive-owned process-control had
 two observable throw surfaces.
 
-Repair source `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861` closes those findings as
-one lifecycle convergence. Recognition normal final and synthesis normal
-completion now install the same kind of shielded first-owner task as cancel,
-Provider failure, rollback and service close. Recognition rechecks closing
-immediately after receive, and an opening receive worker settles mechanically
-without rethrowing the same process-control already surfaced by
-`open_recognition`. Synthesis cleanup owns transport, worker, conformance,
-registry, buffered PCM and degradation settlement before returning any stored
-failure. The latest independent disposition remains **`C0/I3/M1`** until a
-detached reviewer inspects this exact repair source; no independent PASS or
-physical credit exists.
+Repair source `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861` closed those findings as
+one lifecycle convergence. A later complete-module review of exact
+`6224f8e27fa1ba4508f08e4820c4871ba162c8a2` found one shared boolean transport-
+settlement defect, repaired by `6aed58f5bce5fdfed3bc2920937af377ebafddc3`.
+The required targeted review of exact clean docs HEAD
+`e6663dfa8c6e0fcac88b91ee3fcd1be2f6d45aef` then returned **`C0/I1/M0`**. It
+confirmed every session-backed lifecycle path, but found that recognition's
+socket-allocated, pre-session failed-open rollback still called close directly
+once and could skip retry, conformance reaping and degradation truth.
+
+Product/test source `87b57a69cdb0ffd496468092463ebcf926fb6a10`
+connects that last entry to the existing `_FinalizationFailures` and two-attempt
+socket settlement. It settles resource, conformance and the unique open-failure
+fact before applying process-control, cancellation, cleanup and original-
+failure priority. It adds no session or second finalization task. The latest
+independent disposition remains **`C0/I1/M0`** until one detached reviewer
+confirms only this entry and the shared-helper regression; the completed module
+review must not be restarted, and no physical credit exists.
 
 The cumulative review boundary is based on
-`2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the current repair source is exact
-commit `2698bd9b811f3fe6a710cbbb8c132dd4a9ed2861`.
+`2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the current product/test repair
+source is exact commit `87b57a69cdb0ffd496468092463ebcf926fb6a10`.
 
 ## Intended behaviour and owned surfaces
 
@@ -413,9 +420,64 @@ PASS
 The deselected Gateway baseline still fails independently at
 `handle.cleanup_complete is True` with actual `False`; this repair does not
 touch that route. These are implementer-run source/automation results, not an
-independent PASS. Root `TESTING.md` therefore requires one targeted independent
-confirmation of this I1 repair and its materially affected paths, not another
-complete module review.
+independent PASS. The resulting targeted review was performed at exact docs
+HEAD `e6663dfa`; its one omitted pre-session entry and repair are recorded
+below.
+
+## Pre-session failed-open settlement finding and repair
+
+The detached targeted review of exact clean HEAD
+`e6663dfa8c6e0fcac88b91ee3fcd1be2f6d45aef` returned **`C0/I1/M0`**. It
+confirmed that normal final/complete, caller cancel, Provider failure, timeout,
+session-backed rollback and service close all use the shared session
+settlement. Its sole finding was a socket allocated immediately before
+`_StreamingLinearResampler` construction failed: because no session existed,
+`_rollback_failed_recognition()` called `_close_socket()` directly once.
+
+That path could therefore publish the original
+`SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE` while a non-cooperative socket remained
+retained, or expose a first close `GeneratorExit` with one close attempt,
+active/retained conformance identity and no degradation fact. It was one missed
+entry into the already accepted resource helper, not a new protocol or
+lifecycle design finding.
+
+Product/test source `87b57a69cdb0ffd496468092463ebcf926fb6a10` passes one
+`_FinalizationFailures` accumulator from `open_recognition()` into rollback.
+The pre-session branch now uses `_settle_finalization_socket()` for the same
+bounded two attempts, records any conformance settlement failure, always reaps
+terminal identity, settles exactly one ordinary open-failure fact, and only
+then selects process-control, cancellation, cleanup or the original open
+failure. Session-backed rollback records its existing finalizer outcome in the
+same accumulator. No second task, session, retry loop, protocol state or
+business authority was introduced.
+
+Executed on exact product/test source
+`87b57a69cdb0ffd496468092463ebcf926fb6a10`:
+
+```text
+uv run python -m pytest -q -o addopts="" tests/unit_tests/live_voice/test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
+160 passed in 6.30s; openai_streaming_speech.py 2124 statements, 276 missed, 87%
+
+uv run python -m pytest -q --no-cov tests/unit_tests/live_voice/test_streaming_speech.py tests/unit_tests/gateway/test_streaming_speech_route.py tests/unit_tests/gateway/test_streaming_synthesis_route.py tests/unit_tests/gateway/test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
+171 passed, 1 deselected in 10.60s
+
+uv run ruff check jiuwenswarm/server/live_voice/openai_streaming_speech.py tests/unit_tests/live_voice/test_openai_streaming_speech.py
+uv run ruff format --check jiuwenswarm/server/live_voice/openai_streaming_speech.py tests/unit_tests/live_voice/test_openai_streaming_speech.py
+uv run mypy --follow-imports=skip --ignore-missing-imports jiuwenswarm/server/live_voice/openai_streaming_speech.py
+uv run python -m py_compile jiuwenswarm/server/live_voice/openai_streaming_speech.py tests/unit_tests/live_voice/test_openai_streaming_speech.py
+git diff --check
+PASS
+```
+
+The two new event-driven oracles use the existing non-cooperative and one-shot
+process-control socket fakes and replace the resampler constructor only in
+memory after socket allocation. They assert public cleanup truth, two close
+attempts where applicable, zero active/retained identity, one exact
+`recognition.open` fact, clean registry/opening ownership and zero FINAL/PCM/
+Agent/Tool/Task/history effect. No arbitrary sleep is used. The unchanged Web
+factory composition and inherited deselected Gateway assertion were not rerun:
+the repair does not reach either seam, and the targeted reviewer had just
+confirmed the latter fails identically on baseline and candidate.
 
 ## Cold complete-diff review
 
@@ -452,12 +514,14 @@ LIVE_VOICE_SPEECH_TTS_VOICE=marin
 ```
 
 The next acceptance trigger is one detached targeted Tier-3 confirmation of
-transport-settlement source `6aed58f5bce5fdfed3bc2920937af377ebafddc3`.
-It must verify the independent review's sole I1 and the materially affected
-normal-final, cancel/failure, timeout and service-close settlement paths; it
-must not restart the already completed full module review. Only after that
-confirmation passes may a shortest real server-to-server probe be followed by
-the existing microphone/Agent/playout journey. The physical run must record
-Provider/session model truth, final transcript, audible exact Agent text,
-cancel/degradation behaviour and fixed-corpus latency, and must not reuse the
-API key in browser state, logs or evidence.
+exact product/test source `87b57a69cdb0ffd496468092463ebcf926fb6a10`.
+It must reproduce the former pre-session constructor-failure setup and verify
+only incomplete-close truth, one-shot close process-control ordering,
+conformance/registry/fact settlement and the shared helper's already-covered
+session regression. It must not restart protocol, response-resource, event-
+ledger, PCM or complete lifecycle review. Only after that targeted confirmation
+passes may a shortest real server-to-server probe be followed by the existing
+microphone/Agent/playout journey. The physical run must record Provider/session
+model truth, final transcript, audible exact Agent text, cancel/degradation
+behaviour and fixed-corpus latency, and must not reuse the API key in browser
+state, logs or evidence.
