@@ -282,10 +282,11 @@ fresh independent review of the complete eight-file repair diff returns PASS
 
 ## Physical acceptance still open
 
-Both `physical-formal-web-cold` and `physical-formal-web-warm` remain **NOT
-RUN**. Each needs at least 20 correlated successful rounds on one recorded
-environment, with automatic Browser/Gateway/Agent timing and separate operator
-confirmation. Until then, speech-end-to-physical-first-audible,
+At the source-Gate closure recorded above, both `physical-formal-web-cold` and
+`physical-formal-web-warm` remained **NOT RUN**. The then-current route required
+at least 20 correlated successful rounds on one recorded environment, with
+automatic Browser/Gateway/Agent timing and separate operator confirmation.
+Until a later accepted closure route is executed, speech-end-to-physical-first-audible,
 stop-to-physical-silence, AEC/double-talk, subjective quality and stable-design
 30-run release thresholds remain open. No generated value, Provider component
 probe or prior manual sample substitutes for that evidence.
@@ -299,15 +300,45 @@ sample per fresh launcher epoch, followed by `--aggregate-cold` over at least 20
 unique epoch directories. The environment label, clean source, configuration
 digest, corpus digest and sample identities are checked automatically.
 
+## 2026-08-24 accepted closure execution overlay
+
+[D-095](../decisions/DECISIONS.md) supersedes the current execution route above
+without retroactively granting acceptance. The remaining L0 closure is one
+indivisible three-part deliverable:
+
+1. One complete exact-source manual session on ordinary Chrome covers real
+   microphone input, audible short/long output, pause and silence behaviour,
+   continuous turns, Tool/Task paths, playback-time barge-in and actual stop.
+   It records one bounded functional/subjective result, not a percentile.
+2. A script produces independent fixed-corpus warm and cold series. Warm has one
+   unmeasured warm-up; every cold sample has a new controlled local launcher
+   epoch. Per temperature, at least 20 eligible first-audio samples and 20
+   eligible dedicated barge-in samples are required. Automated completeness
+   replaces per-round operator verdict only for this digital measurement tier;
+   invalid, incomplete, failure, fallback, cancel and dropped records retain
+   their declared classifications and exclusions.
+3. One sanitized aggregate reports attempt/eligible/failure/drop counts, p50/p95
+   `speech_end_to_webaudio_started_ms`, p50/p95 `stop_to_silence_ms`, cold/warm
+   differences and anomaly classifications on the accepted source.
+
+These percentiles terminate at WebAudio actually-started and Browser
+fence-cancel completion. They are Browser digital-path metrics, not instrumented
+physical-first-audible or physical-silence. Strict acoustic p95, AEC/double-talk,
+device/room generalization and release stability remain explicit non-claims
+unless a later packet adds an independent physical acoustic oracle. The current
+runner and evidence have not yet executed this overlay, so all three items remain
+open and no existing result is relabelled.
+
 ## Diagnostic judgement and next packet
 
 The injected oracle's largest modeled critical-path segment is Agent request to
 `chat.final` (`1572.0 / 1794.0 ms`), while the real Provider component's batch
 synthesis completion is `1672.0 / 4125.0 ms`. Neither is a physical end-to-end
 bottleneck claim. The focused independent closure review is complete. The next
-packet is the already-defined physical cold/warm fixed-corpus collection, not a
-production optimization. Only that
-evidence may choose among VAD finalization, browser startup buffering,
+packet is the D-095 manual-plus-automated closure execution, including any
+bounded runner change needed to produce its two automatic percentile series; it
+is not a production optimization. Only that evidence may choose among VAD
+finalization, browser startup buffering,
 end-of-turn settlement or later sentence-level Agent→TTS overlap.
 
 ## Sanitization

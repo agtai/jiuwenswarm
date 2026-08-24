@@ -1068,3 +1068,14 @@
 - 回滚：默认切换验收完成后，回滚窗口不再依赖长期部署开关；若当前实现发生已证实回归，使用有边界的代码回退/修复并保留旧客户端单条兼容。该决定不授权 remote ref update。
 - 证据：[P2 default-on evidence](../evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md)。
 - 重新评估条件：显式 `2..16` 无法保持严格绑定/顺序/authoritative barrier；旧客户端缺省单条路径失败；生产 `16` 在真实负载下产生有证据的 backpressure、丢序或错误授权；或固定语料证明另一有界值需要成为新产品默认。重新评估不自动恢复环境开关。
+
+## D-095 L0 以一次完整人工验收和独立自动化延迟序列闭环
+
+- 日期：2026-08-24。
+- 状态：Accepted L0 closure execution and evidence-boundary decision（用户明确要求把下列三项作为不可拆分的剩余闭环内容，使 Main 或后续 Session 都必须完成同一组交付；本决定不把尚未运行的验收或测量记为 PASS）。
+- 一次完整人工验收：在一个记录了 exact clean source、环境和配置的普通 Chrome 会话中完成固定关键旅程，而不是只说一句话。人工必须观察真实麦克风拾音、短/长播报、停顿与空白拒绝、连续回合、Tool/Task 路径、播放中 barge-in 和实际停止，并记录整组通过或失败。该会话只给功能、真实可听性和主观质量的有界信用，不产生 p50/p95。
+- 自动化测量：脚本以固定语料和自动完整性 oracle 分别生成 warm 与 cold 序列，不再把逐轮人工 pass 当作数字链路样本的必要条件。Warm 先做一次不计数预热；cold 的每个样本来自一个新的受控本地 launcher epoch。每个温度至少保留 `20` 个 time-to-first-audio 有效样本和 `20` 个专用 barge-in 有效样本；失败、fallback、cancel、丢弃和不完整样本单独计数，不得进入不适用的成功百分位。
+- 结果合同：sanitized 报告至少给出 profile/temperature、attempt/eligible/failure/drop counts、p50/p95 `speech_end_to_webaudio_started_ms` 和 p50/p95 `stop_to_silence_ms`，并列出 cold/warm 差异及异常分类。前者的自动端点是 WebAudio actually-started，后者的自动端点是 Browser fence-cancel completion；两者必须称为 Browser 数字链路指标。
+- 非声明：一次人工验收不能把后续自动样本升级为逐轮物理确认；自动 Browser 数值也不是声压传感器测得的 physical-first-audible 或 physical-silence。没有外部声学 oracle 时，严格物理声学 p95、AEC/double-talk、跨设备/房间泛化和 release 稳定性保持开放。本决定不改变 product-readiness、feature-complete、Production 或 remote-ref 状态。
+- 完成门：上述人工记录、两个温度的两类最小样本序列、sanitized 聚合、runner 适用自动化和风险相称 review 必须绑定同一个接受 source 后，L0 才可按本决定记工程测量闭环。当前 runner 若仍要求受控端点或逐轮 operator verdict，先在独立实施包中收敛该差异；不得通过自动输入 `pass`、普通 Chrome 冒充受控 provenance 或更名指标绕过门槛。
+- 重新评估条件：需要严格物理声学 p95；引入参考麦克风、可信硬件/OS loopback 或原始音频保留；改变 corpus、里程碑端点、样本最低数、成功资格或 cold epoch 定义；或把该 L0 工程测量闭环升级为产品/发布 Gate。

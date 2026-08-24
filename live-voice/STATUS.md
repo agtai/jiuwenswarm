@@ -124,9 +124,10 @@
   bounded P2 notification pull and legacy single-pull compatibility. Remaining
   product work is the still-open physical fixed-corpus/generalization evidence,
   generation-time interruption and P3-9 cumulative product acceptance. The L0
-  measurement source/automated Gate is closed; proceed to the physical cold/warm
-  fixed-corpus collection. Do not treat the non-physical probes as product
-  latency acceptance. A newly
+  measurement source/automated Gate is closed; proceed through the D-095
+  one-session manual acceptance, scripted cold/warm first-audio and dedicated
+  barge-in series, then sanitized p50/p95 result. Do not treat Browser digital
+  percentiles as strict physical-acoustic or product latency acceptance. A newly
   reproduced defect may reopen only its owning boundary.
 - **Integration:** integration with a `develop` ref is deferred until the
   feature-complete boundary below passes. At that future boundary, re-read the
@@ -257,7 +258,7 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-### L0 correlated measurement baseline — source/automated closure PASS; physical open
+### L0 correlated measurement baseline — source/automated Gate PASS; D-095 closure execution open
 
 - **Capability/risk/dependencies:** Observability, benchmark and latency; Tier 3
   because content-free hooks cross Browser, Gateway, Runtime and Agent owners.
@@ -277,9 +278,16 @@ exact-source Alpha result.
   independent reviews pass with no open P0-P2 (`C0/I0/M0`). The automated
   injected baseline is regenerated there with the same expected result; the
   configured-machine Provider component result remains bound to
-  `7f2b0b7ab9b9dc363cec21f83ac6e04ad53d221c`. Physical `physical-formal-web-cold` and
-  `physical-formal-web-warm` remain NOT RUN; each requires at least 20 exact
-  correlated operator-confirmed successes before physical p50/p95 credit.
+  `7f2b0b7ab9b9dc363cec21f83ac6e04ad53d221c`. [D-095](decisions/DECISIONS.md)
+  now freezes the remaining closure as three conjunctive deliverables: one
+  complete exact-source manual microphone/speaker/interaction acceptance
+  session; scripted warm/cold measurement with at least 20 valid first-audio
+  and 20 valid dedicated barge-in samples per temperature; and a sanitized
+  result containing counts plus p50/p95 `speech_end_to_webaudio_started_ms` and
+  `stop_to_silence_ms`, cold/warm differences and anomaly classifications. All
+  three remain NOT RUN. The automatic values are Browser digital-path metrics;
+  without an external acoustic oracle they grant no strict physical-first-
+  audible, physical-silence, AEC/double-talk or release-stability credit.
 - **Evidence:** [L0 correlated measurement and baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md).
 
 ### Closed OJ-G1-A execution ownership and scope upstream-readiness investigation
@@ -794,9 +802,9 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
    notification pull is integrated as the production default. Remaining P1/P2
    work is generation-time interruption and physical fixed-corpus/generalization
    evidence under the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
-   The L0 correlated implementation, injected baseline and Provider-component
-   baseline are complete; final independent review and cold/warm physical
-   collection remain open.
+   The L0 correlated implementation, injected baseline, Provider-component
+   baseline and source review are complete; the three-part D-095 manual,
+   scripted cold/warm and sanitized-result closure remains open.
    The remaining P3 route is ~~P3-7 formal carrier~~ **DONE — SCOPED GATE
    PASS** → ~~P3-8B bounded composition/three-item retirement~~ **DONE —
    SCOPED GATE PASS** → ~~pre-P3-9 capability closure~~ **DONE on D-093 —
