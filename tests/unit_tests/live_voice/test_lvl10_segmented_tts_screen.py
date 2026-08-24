@@ -59,12 +59,14 @@ class ScriptedSseStream:
         *,
         release: asyncio.Event | None = None,
         before_done: asyncio.Event | None = None,
+        first_event_delay_seconds: float = 0,
         on_terminal: Callable[[], None],
         on_close: Callable[[], None],
     ) -> None:
         self._lines = lines
         self._release = release
         self._before_done = before_done
+        self._first_event_delay_seconds = first_event_delay_seconds
         self._on_terminal = on_terminal
         self._on_close = on_close
         self._terminal = False
@@ -79,6 +81,8 @@ class ScriptedSseStream:
         try:
             if self._release is not None:
                 await self._release.wait()
+            if self._first_event_delay_seconds:
+                await asyncio.sleep(self._first_event_delay_seconds)
             for line in self._lines:
                 if self._before_done is not None and "speech.audio.done" in line:
                     await self._before_done.wait()
@@ -106,6 +110,7 @@ class ScriptedSseFactory:
         fail_input_index: int | None = None,
         block_input_index: int | None = None,
         delay_done_input_index: int | None = None,
+        first_event_delay_seconds: float = 0,
         sample_count: int = 12_000,
     ) -> None:
         self.inputs: list[str] = []
@@ -116,6 +121,7 @@ class ScriptedSseFactory:
         self.fail_input_index = fail_input_index
         self.block_input_index = block_input_index
         self.delay_done_input_index = delay_done_input_index
+        self.first_event_delay_seconds = first_event_delay_seconds
         self.sample_count = sample_count
         self.release = asyncio.Event()
         self.allow_done = asyncio.Event()
@@ -155,6 +161,7 @@ class ScriptedSseFactory:
             lines,
             release=self.release if self.block_input_index == index else None,
             before_done=self.allow_done if self.delay_done_input_index == index else None,
+            first_event_delay_seconds=self.first_event_delay_seconds,
             on_terminal=lambda: self._deactivate_once(index),
             on_close=lambda: self.closed_input_indexes.add(index),
         )
@@ -230,6 +237,53 @@ async def test_a1_sends_one_full_authoritative_final_request() -> None:
         assert record.forbidden_effects == ZERO_FORBIDDEN_EFFECTS
     finally:
         await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_first_valid_pcm_after_2_seconds_does_not_fail_the_provider_screen() -> None:
+    assert runner.EVENT_TIMEOUT_SECONDS == 15.0
+    fixture = load_fixture_manifest(MANIFEST_PATH)[0]
+    provider = _provider(ScriptedSseFactory(first_event_delay_seconds=2.1))
+    try:
+        record = await run_attempt(
+            provider, fixture, PopulationRole.A1, _identity(PopulationRole.A1, "short")
+        )
+        assert record.terminal_outcome == "completed"
+        assert record.request_to_first_pcm_ns is not None
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control", (KeyboardInterrupt, GeneratorExit))
+async def test_process_control_from_provider_is_not_converted_to_measurement_failure(
+    control: type[BaseException],
+) -> None:
+    base_provider = _provider(ScriptedSseFactory())
+
+    class ProcessControlProvider:
+        conformance = base_provider.conformance
+
+        async def open_synthesis(self, _request: Any) -> None:
+            return None
+
+        async def next_synthesis_event(self, _ref: Any, *, timeout_seconds: float) -> Any:
+            assert timeout_seconds >= 15.0
+            raise control()
+
+        async def cancel_synthesis(self, _ref: Any, *, reason: str) -> None:
+            return None
+
+    try:
+        with pytest.raises(control):
+            await run_attempt(
+                ProcessControlProvider(),
+                load_fixture_manifest(MANIFEST_PATH)[0],
+                PopulationRole.A1,
+                _identity(PopulationRole.A1, "short"),
+            )
+    finally:
+        await base_provider.close()
 
 
 @pytest.mark.asyncio
