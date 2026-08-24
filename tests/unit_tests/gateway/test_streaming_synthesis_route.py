@@ -548,7 +548,23 @@ async def test_native_openai_realtime_adapter_reaches_product_downlink() -> None
         {
             "type": "response.created",
             "event_id": "event-response-created",
-            "response": {"id": response_id, "metadata": metadata},
+            "response": {
+                "id": response_id,
+                "object": "realtime.response",
+                "status": "in_progress",
+                "status_details": None,
+                "usage": None,
+                "output": [],
+                "conversation_id": None,
+                "output_modalities": ["audio"],
+                "audio": {
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24_000},
+                        "voice": "marin",
+                    }
+                },
+                "metadata": metadata,
+            },
         }
     )
     socket.push(

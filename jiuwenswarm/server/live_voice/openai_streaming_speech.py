@@ -87,6 +87,7 @@ MAX_SSE_EVENT_BYTES = 1_048_576
 MAX_STREAM_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_PROVIDER_AUDIO_DELTA_BYTES = 96_000
 MAX_NATIVE_SERVER_EVENT_IDS = 4_096
+NATIVE_TERMINAL_QUARANTINE_SECONDS = 0.05
 MAX_EVENT_QUEUE = 64
 # How long a full event queue may hold the Provider reader before the stream is
 # declared exhausted. Every other link in the pipeline already waits under a
@@ -679,6 +680,7 @@ class _RecognitionSession:
     committed_source_cursor: int | None = None
     event_seq: int = 0
     committed: bool = False
+    negotiated: bool = False
     input_fenced: bool = False
     commit_owner: _RecognitionCommitOwner = _RecognitionCommitOwner.NONE
     closing: bool = False
@@ -1066,6 +1068,7 @@ class OpenAIStreamingSpeechProvider:
         try:
             session = self._require_recognition(frame.ref)
             async with session.send_lock:
+                self._require_negotiated_recognition(session)
                 if session.input_fenced:
                     # The route consumes the typed STOPPED boundary on its own
                     # task. A frame already queued in that handoff window must
@@ -1123,6 +1126,7 @@ class OpenAIStreamingSpeechProvider:
         try:
             session = self._require_recognition(ref)
             async with session.send_lock:
+                self._require_negotiated_recognition(session)
                 if session.closing or session.terminal:
                     raise OpenAIStreamingSpeechError(
                         "RECOGNITION_COMMIT_CONFLICT",
@@ -1181,6 +1185,7 @@ class OpenAIStreamingSpeechProvider:
         self, ref: RecognitionStreamRef, *, timeout_seconds: float
     ) -> StreamingRecognitionOutput:
         session = self._require_recognition(ref)
+        self._require_negotiated_recognition(session)
         event = await asyncio.wait_for(session.events.get(), timeout=timeout_seconds)
         if event.kind in {RecognitionEventKind.FINAL, RecognitionEventKind.CANCELLED}:
             await self._retire_recognition(session)
@@ -1487,7 +1492,24 @@ class OpenAIStreamingSpeechProvider:
             )
         event = _json_object(raw)
         kind = event.get("type")
+        if not session.negotiated and kind not in {
+            "session.created",
+            "transcription_session.created",
+            "session.updated",
+            "transcription_session.updated",
+            "rate_limits.updated",
+            "error",
+        }:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_TURN_ORDER",
+                "recognition Provider emitted data before session negotiation",
+            )
         if kind in {"session.updated", "transcription_session.updated"}:
+            if session.negotiated:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TURN_ORDER",
+                    "recognition Provider duplicated session negotiation",
+                )
             _validate_transcription_session(
                 event,
                 expected_model=self._config.stt_model,
@@ -1499,8 +1521,8 @@ class OpenAIStreamingSpeechProvider:
                     else None
                 ),
             )
-            if not session.ready.done():
-                session.ready.set_result(None)
+            session.negotiated = True
+            session.ready.set_result(None)
             return False
         if kind == "input_audio_buffer.speech_started":
             if (
@@ -1862,7 +1884,37 @@ class OpenAIStreamingSpeechProvider:
         while True:
             raw = await self._recv_native_synthesis(session)
             if await self._consume_native_synthesis_message(session, raw):
+                await self._quarantine_native_terminal(session)
+                socket = session.socket
+                if socket is None or not await self._close_socket(socket):
+                    raise OpenAIStreamingSpeechError(
+                        "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+                        "native Realtime synthesis terminal transport did not close",
+                    )
+                session.socket = None
+                await self._publish_native_audio_buffer(session)
                 return True
+
+    async def _quarantine_native_terminal(self, session: _SynthesisSession) -> None:
+        deadline = self._monotonic() + min(
+            NATIVE_TERMINAL_QUARANTINE_SECONDS,
+            session.request.event_timeout_seconds,
+        )
+        while True:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return
+            try:
+                async with asyncio.timeout(remaining):
+                    raw = await self._recv_native_synthesis(session)
+            except (TimeoutError, asyncio.TimeoutError):
+                return
+            event = _json_object(raw)
+            self._accept_native_event_id(session, event)
+            kind = event.get("type")
+            if kind == "rate_limits.updated":
+                continue
+            self._raise_native_phase(session, kind)
 
     async def _recv_native_synthesis(self, session: _SynthesisSession) -> str:
         if session.socket is None:
@@ -1920,9 +1972,13 @@ class OpenAIStreamingSpeechProvider:
                     "native Realtime synthesis omitted its response",
                 )
             response_id = _safe_label(response.get("id"), "response_id")
-            if session.provider_response_id is not None or response.get(
-                "metadata"
-            ) != _native_response_metadata(session.request):
+            if session.provider_response_id is not None or not (
+                _native_initial_response_matches(
+                    response,
+                    expected_metadata=_native_response_metadata(session.request),
+                    expected_voice=self._config.tts_voice,
+                )
+            ):
                 raise OpenAIStreamingSpeechError(
                     "SPEECH_PROVIDER_RESPONSE_MISMATCH",
                     "native Realtime synthesis response lost its exact binding",
@@ -2117,7 +2173,6 @@ class OpenAIStreamingSpeechProvider:
                 )
             session.native_phase = _NativeSynthesisPhase.TERMINAL
             self._note_native_progress(session)
-            await self._publish_native_audio_buffer(session)
             return True
         if kind == "error":
             raise OpenAIStreamingSpeechError(
@@ -2664,6 +2719,14 @@ class OpenAIStreamingSpeechProvider:
             )
         return session
 
+    @staticmethod
+    def _require_negotiated_recognition(session: _RecognitionSession) -> None:
+        if not session.negotiated:
+            raise OpenAIStreamingSpeechError(
+                "RECOGNITION_SESSION_NOT_NEGOTIATED",
+                "recognition session is not negotiated",
+            )
+
     def _require_synthesis(self, ref: SynthesisStreamRef) -> _SynthesisSession:
         session = self._synthesis.get(_synthesis_key(ref))
         if session is None or session.request.ref != ref:
@@ -3149,6 +3212,44 @@ def _native_response_metadata(
         "live_voice_stream_id": request.ref.stream_id,
         "live_voice_stream_generation": str(request.ref.stream_generation),
     }
+
+
+def _native_initial_response_matches(
+    response: Mapping[str, object],
+    *,
+    expected_metadata: Mapping[str, object],
+    expected_voice: str,
+) -> bool:
+    required_fields = {
+        "id",
+        "object",
+        "status",
+        "output",
+        "conversation_id",
+        "output_modalities",
+        "audio",
+        "metadata",
+    }
+    if not required_fields.issubset(response):
+        return False
+    audio = response.get("audio")
+    audio_output = audio.get("output") if type(audio) is dict else None
+    audio_format = audio_output.get("format") if type(audio_output) is dict else None
+    return (
+        response.get("object") == "realtime.response"
+        and response.get("status") == "in_progress"
+        and response.get("status_details") is None
+        and response.get("usage") is None
+        and response.get("output") == []
+        and response.get("conversation_id") is None
+        and response.get("output_modalities") == ["audio"]
+        and response.get("metadata") == expected_metadata
+        and type(audio_output) is dict
+        and type(audio_format) is dict
+        and audio_format.get("type") == "audio/pcm"
+        and audio_format.get("rate") == OPENAI_PCM_RATE_HZ
+        and audio_output.get("voice") == expected_voice
+    )
 
 
 def _native_terminal_output_matches(

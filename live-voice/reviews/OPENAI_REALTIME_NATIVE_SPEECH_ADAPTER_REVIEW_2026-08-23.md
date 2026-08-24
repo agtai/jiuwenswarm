@@ -2,7 +2,7 @@
 
 ## Disposition
 
-**REPAIR SOURCE/AUTOMATION PASS — INDEPENDENT FOLLOW-UP REVIEW REQUIRED.**
+**SECOND REPAIR SOURCE/AUTOMATION PASS — THIRD INDEPENDENT REVIEW REQUIRED.**
 
 The original automated matrix passed, but a later independent review of exact
 source `774f6ae7025990c7418a69e44b9f2cd38347ed4b` returned `C0/I3/M1`. It
@@ -11,11 +11,23 @@ no-progress events renewing the stream indefinitely, permissive native VAD
 authority echoes, and effective translate/whisper model-purpose bypass. It
 also identified missing production-factory and exact audio-boundary regression
 oracles. The earlier same-session `C0/I0/M0` statement is therefore not a valid
-semantic disposition and must not be used for acceptance. The bounded repair
-and its automated matrix now pass, but no independent reviewer has inspected
-the repaired source. A new independent follow-up review is required before any
-real Provider/device validation. No OpenAI credential, network session,
-microphone or speaker was used, so all physical claims remain open.
+semantic disposition and must not be used for acceptance.
+
+A second detached review of exact repair source
+`f83338649415b567964d8e1328fe3dc6a32ac8b5` then returned `C0/I3/M0`. It
+demonstrated that a response-scoped event queued after `response.done` bypasses
+inspection after PCM release; recognition audio, commit and even final output
+can race ahead of strict native session validation; and `response.created`
+accepts contradictory conversation, modality, status, voice and audio-format
+facts that a later terminal event can overwrite. The second repair is limited
+to terminal quarantine/drain, a negotiated recognition data-plane fence and a
+complete initial response validator, with matching concurrency and zero-effect
+oracles. That second repair and its affected automated matrix now pass, but no
+independent reviewer has inspected the repaired source. A third detached review
+is required before any real Provider/device validation. No OpenAI credential,
+network session, microphone or speaker was used, so all physical claims remain
+open. No prior source/automation statement grants current PASS or independent
+review credit.
 
 The review covers the change based on
 `2d06fd37822c6a20ac8185fbe7cd3df7900cf4bc`; the containing commit is the
@@ -120,25 +132,51 @@ The repair is deliberately limited to the four reported findings:
    8 MiB aggregate acceptance versus `+2` rejection.
 
 These are implementer-run repair results, not an independent follow-up
-disposition. The independent `C0/I3/M1` result remains the last independent
-judgement until a detached reviewer inspects the repaired commit.
+disposition. The second independent `C0/I3/M0` result remains the latest
+independent judgement until a detached reviewer inspects the second repair.
+
+## Second repair response to the second independent findings
+
+The second repair is deliberately limited to the three reported Important
+findings:
+
+1. **I1 — terminal quarantine:** `response.done` moves the response to a
+   terminal phase without publishing PCM. A bounded terminal drain accepts
+   unique-ID `rate_limits.updated` control events without progress renewal,
+   rejects any response-scoped late event, and requires successful transport
+   close before releasing the exact buffered audio. The positive oracle proves
+   close-before-first-chunk and exact sample count; the queued late-delta oracle
+   proves zero audio, exactly one protocol degradation and zero business effects.
+2. **I2 — recognition negotiation fence:** the opening session remains in the
+   registry so cancel/close can find it, but audio send, manual commit and output
+   reads fail with `RECOGNITION_SESSION_NOT_NEGOTIATED` until strict effective
+   VAD/session validation succeeds. All eight invalid VAD echoes exercise those
+   three concurrent data-plane calls, and a Provider final emitted before
+   negotiation fails with turn-order protocol truth and zero business effects.
+3. **I3 — complete initial response binding:** `response.created` now requires
+   the initial `realtime.response` to be `in_progress`, have empty output, null
+   conversation, audio-only modality, exact metadata, PCM 24 kHz output and the
+   configured voice before any later lifecycle event is accepted. Contradictory
+   conversation, modality, status, output, voice, format and missing required
+   fields each release zero audio and emit one protocol degradation.
+
+These results are still implementer-run source/automation evidence. They do not
+change the last independent FAIL or authorize physical/provider acceptance.
 
 ## Verification
 
-Executed in the repair worktree on Windows after the independent findings:
+Executed in the second-repair worktree on Windows after the second independent
+findings:
 
 ```text
-uv run pytest -q --no-cov tests\unit_tests\live_voice\test_openai_streaming_speech.py
-107 passed in 10.94s
-
-uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term-missing
-107 passed; openai_streaming_speech.py 1821 statements, 210 missed, 88%
+uv run pytest -q -o addopts="" tests\unit_tests\live_voice\test_openai_streaming_speech.py --cov=jiuwenswarm.server.live_voice.openai_streaming_speech --cov-report=term
+116 passed in 5.46s; openai_streaming_speech.py 1864 statements, 210 missed, 89%
 
 uv run pytest -q --no-cov tests\unit_tests\live_voice\test_streaming_speech.py tests\unit_tests\gateway\test_streaming_speech_route.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\gateway\test_product_streaming_synthesis.py --deselect tests/unit_tests/gateway/test_streaming_synthesis_route.py::test_cancel_api_caller_cancel_retries_cleanup_then_rethrows
-171 passed, 1 deselected in 15.71s
+171 passed, 1 deselected in 5.27s
 
 C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe -m pytest -q -o addopts="" tests\unit_tests\test_app_web_handlers.py
-80 passed in 43.93s
+80 passed in 11.03s
 
 uv run ruff check jiuwenswarm\server\live_voice\openai_streaming_speech.py tests\unit_tests\live_voice\test_openai_streaming_speech.py tests\unit_tests\gateway\test_streaming_synthesis_route.py tests\unit_tests\test_app_web_handlers.py
 PASS
