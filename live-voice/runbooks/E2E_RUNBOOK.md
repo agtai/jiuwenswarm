@@ -499,6 +499,16 @@ Remove-Item Env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED -ErrorAction Silently
 Presentation、ACK、history、cancel 或下一轮 capture。当前源码只有在 warm/cold
 两组真实运行都满足本节条件后才能取得 baseline credit。
 
+开始前先用
+[latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
+选择兼容的 lane/clock/total contract，并为每个新实验复制
+[record template](../evidence/LATENCY_EXPERIMENT_RECORD_TEMPLATE.md)。交互式
+driver 的操作说明只在
+[manual latency-driver runbook](LATENCY_PROBE_MANUAL_DRIVER.md)；它自动化运行机制，
+但不会提升证据等级。外部产品模式与 JiuwenSwarm 边界的比较在
+[2026-08-24 SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md)，
+不能代替本节的实际测量。
+
 #### 7.6.1 固定源码、私有目录和 `run.json`
 
 每个 smoke、warm baseline 和 cold baseline 使用不同的 `run_id`、不同的

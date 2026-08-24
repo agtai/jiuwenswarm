@@ -1,9 +1,11 @@
 # Live Voice latency experiment catalog
 
 > Catalog date: 2026-08-22
+> Last synchronized: 2026-08-24
 >
-> This is the canonical English reading route for the latency experiments run
-> on 2026-08-20 and 2026-08-21. It is a dated evidence catalog, not the mutable
+> This is the canonical English reading route for the latency experiments and
+> follow-up episodes recorded from 2026-08-20 through 2026-08-24. It is a dated
+> evidence catalog, not the mutable
 > product-status authority. [STATUS](../STATUS.md) owns current product
 > judgement; the
 > [optimization inventory](../roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md)
@@ -26,6 +28,7 @@ contract.
 | `ESTIMATED` | Planning projection or counterfactual not directly exercised |
 | `UNKNOWN` | The boundary was not observed and receives no numeric credit |
 | `REPORTED_EXTERNAL` | Reported by Hongxing without a locally bound raw artifact |
+| `DIAGNOSTIC` | A measured or derived observation whose source/workload/manifest or population is incompatible with acceptance credit |
 
 ### 1.2 Total-latency classes
 
@@ -82,16 +85,20 @@ composed tip. `0812_live_voice_w3_renan` now contains that composition via
 merge `4e60ea455` and remains the documentation-hub first parent.
 `latency_checkpoint_accepted_optimizations` now contains it via merge
 `70224f80f` and remains the controlled LVL-05 / Semantic VAD spec first
-parent. This overlay does not change any LVL result, Gate C failure or §15
-decision route.
+parent. The later Hongxing source `c31e85ade` repaired atomic batch observation,
+made batch 16 default-on under D-094 and passed its scoped human validation.
+That follow-up is catalogued as LVL-01D; it closes the LVL-01C functional
+defect for the declared run without retroactively changing LVL-01C or granting
+a frozen-corpus off/on waterfall.
 
 ## 3. Experiment index
 
 | ID | Experiment or episode | Lane and total class | Headline result | Decision / next gate |
 |---|---|---|---|---|
 | `LVL-00` | Windows Chrome/WSL physical diagnostic A–G | Physical Browser; full experience and Browser-clock code E2E | EOT→ACK **9,832–25,234 ms**; capture-ready→ACK **15,352–32,512 ms**, `MEASURED` | Preliminary diagnostic only; incompatible manifest, dirty source and no formal population |
-| `LVL-01` | P2 one-notification-per-RPC → bounded pull 16 | Deterministic Gate A; component total | p50 **864→86 / 4,348→344 / 8,658→615 ms** for 10/50/100 notifications, `MEASURED` | Causal candidate accepted; product acceptance open |
+| `LVL-01` | P2 one-notification-per-RPC → bounded pull 16 | Deterministic Gate A; component total | p50 **864→86 / 4,348→344 / 8,658→615 ms** for 10/50/100 notifications, `MEASURED` | Causal candidate accepted; later scoped product follow-up is LVL-01D |
 | `LVL-01C` | Hongxing deployed P2 validation | Deployed product episode; affected output failed | About **46%** faster response completion, `REPORTED_EXTERNAL`; TTS failed | Failed Gate C; repair atomic Media batch observation and rerun |
+| `LVL-01D` | Atomic Media batch repair and default-on P2 follow-up | Deployed product episode; scoped human functional validation | Short/medium/long samples **10.65 / 7.05 / 2.78–3.14 s**, with audible TTS, `MEASURED` for the declared run | Scoped functional acceptance and D-094 default-on; no frozen-corpus off/on p50/p95 credit |
 | `LVL-02` | Fixed VAD 1200→900/800 ms | Real Provider Gate B screen; component total | Successful cases saved roughly **285–412 ms**, `MEASURED`; candidates completed only 15/20 | Rejected: every 1000 ms natural-pause case split |
 | `LVL-03` | TTS successor-capture ACK decoupling | Deterministic Gate A; first-source component total | First-source p50 saved **5.8 / 255.1 / 756.1 ms** at 0/250/750 ms ACK delay, `MEASURED` | Accepted for causal first-audio scope; settlement and physical output open |
 | `LVL-04` | TTS Provider HTTPX client reuse | Real Provider Gate B; component total | Warm first PCM **832.0→889.9 ms**, a **57.8 ms / 7.0% regression**, `MEASURED` | Rejected and reverted; 0/3 warm connections reused |
@@ -99,6 +106,8 @@ decision route.
 | `LVL-06` | EOT/STT early-result waiter materiality | Deterministic Gate A; component total | Largest removable-gap p50 **0.885 ms**, fraction **0.015**, `MEASURED` + `DERIVED` | Stop: no material serial tail; no candidate B |
 | `LVL-07` | Stable-sentence Agent→TTS overlap | Real Agent + real Provider screen; projected perceived latency | Projected gain p50 **177.2 ms**, p95 **425.3 ms**, `DERIVED`; final-gated baseline `ESTIMATED` | Stop for tested workloads; failed all three latency materiality gates |
 | `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Next causal screen; retain 1200 ms fallback |
+| `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser diagnostic; estimated schedule boundary | One unmatched-round schedule→start estimate **578.998→46.703 ms**, delta **-532.295 ms**, `MEASURED` + `DIAGNOSTIC` | Default remains 1000 ms; clean same-source/workload A1/B/A2 required |
+| `LVL-10` | Authoritative-final segmented TTS | Planned real-Provider materiality screen | Numeric result `UNKNOWN`; current full-final TTS already streams SSE audio deltas | New candidate distinct from LVL-07; prospective spec and screen before product wiring |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -225,7 +234,7 @@ first lacked the prospective batch-size input; the second exposed a
 candidate-neutral runner oracle that still coupled operation count to delivered
 item count.
 
-### 5.3 Deployed validation failure
+### 5.3 LVL-01C initial deployed validation failure
 
 Hongxing later reported approximately 46% faster response completion in a
 deployed run. That number is `REPORTED_EXTERNAL`: exact branch, source, logs and
@@ -233,16 +242,37 @@ raw report have not yet been bound locally.
 
 The workflow nevertheless failed TTS with
 `SPEECH_OPERATION_NOT_AUTHORIZED`; retry did not recover and the page required
-refresh. Current source explains the defect: the Web parser validates the whole
-`notification_batch`, but `DedicatedMediaProductRegistry.observe_agent_response()`
-observes only a top-level single `notification`. It ignores the nested final
-notification that establishes synthesis authorization.
+refresh. The failing source explained the defect: the Web parser validated the
+whole `notification_batch`, but
+`DedicatedMediaProductRegistry.observe_agent_response()` observed only a
+top-level single `notification`. It ignored the nested final notification that
+establishes synthesis authorization.
 
-The P2 change is therefore a causal candidate with failed Gate C, not a
-complete optimization. Repair requires atomic whole-batch validation, zero
-partial authorization for invalid batches, ordered processing of every valid
-item and final-item TTS authorization. Then rerun the same deployed short,
-medium and long workloads with optimization off/on and successful TTS/playout.
+At that point the P2 change remained a causal candidate with failed Gate C,
+not a complete optimization. The required repair was atomic whole-batch
+validation, zero partial authorization for invalid batches, ordered processing
+of every valid item and final-item TTS authorization.
+
+### 5.4 LVL-01D repaired deployed follow-up
+
+Hongxing source `c31e85ade` subsequently implemented the atomic Media batch
+observation, retained ordered final-notification authorization and made batch
+size 16 default-on under D-094. Its scoped human validation completed the
+agreed prompt classes with audible TTS and no recurrence of
+`SPEECH_OPERATION_NOT_AUTHORIZED`:
+
+| Recorded sample class | Product completion time |
+|---|---:|
+| Long | 10.65 s |
+| Medium | 7.05 s |
+| Short repetitions | 2.78 / 3.14 / 3.14 s |
+
+This closes the LVL-01C workflow defect for that declared environment and
+supports the default-on product decision. It does not provide a compatible
+feature-off/on frozen-corpus population, so the externally reported 46% and
+the individual completion samples remain separate evidence classes. Detailed
+source, checks and non-claims are in
+[P2 notification batch default-on evidence](P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md).
 
 ## 6. LVL-02 — fixed-threshold VAD/EOT screen
 
@@ -533,18 +563,66 @@ The specification and plan remain branch-bound at
 `latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`
 and its adjacent implementation plan.
 
-## 13. What has and has not been measured end to end
+## 13. LVL-09 — Adaptive WebAudio startup-lead diagnostic
+
+One later Browser batch reused the LVL-00-style manual run directory after the
+bounded startup-lead hook was introduced. It produced a useful localization
+signal but not a compatible experiment:
+
+| Field | 1000 ms-attributed round | 250 ms-attributed round |
+|---|---:|---:|
+| Workload | `dialogue_with_tool` | `dialogue_no_tool` |
+| Schedule -> estimated start | 578.998 ms ±41 ms | 46.703 ms ±42 ms |
+| Observed segment delta | — | **-532.295 ms / -91.9%** |
+
+The surviving manifest still declares source `497831f58`, dirty product code,
+a 1000 ms lead and no experiment identity. The rounds use different workloads,
+the 250 ms batch was appended after report generation and its underrun/rebuffer
+counters are not bound in a regenerated report. The audible check was clean,
+but this is `MEASURED` + `DIAGNOSTIC`, not a valid A/B result. Production remains at
+1000 ms until same-source/same-workload A1=1000/B=250/A2=1000 passes completion,
+audible-output and underrun/rebuffer gates.
+
+## 14. LVL-10 — authoritative-final segmented-TTS materiality screen
+
+This planned candidate starts only after one complete authoritative
+`chat.final`. It then splits that immutable text into bounded ordered sentence
+or clause segments, synthesizes the first segment immediately and may prefetch
+a bounded number of successors. It must fence unplayed segments on
+replacement, cancellation, barge-in or scope loss.
+
+LVL-10 is not LVL-07 reopened. LVL-07 asked whether a stable sentence became
+available before the final Agent response; LVL-10 accepts the final first and
+changes only how that final is presented to TTS. The authority boundary is
+therefore compatible, but materiality is unproven.
+
+Current source already sends the complete authoritative text to the OpenAI
+speech endpoint with SSE streaming and publishes each `speech.audio.delta` as
+PCM. Splitting may reduce Provider text preprocessing or inter-sentence gaps,
+but may instead add handshakes, requests, rate-limit exposure and prosody
+discontinuity. The proposed 400–800 ms range receives no credit.
+
+The first gate is a no-Browser real-Provider A1/B/A2 screen using the same
+final text, model, voice, format, network policy and warm/cold class. It must
+measure first Provider PCM, first playable reserve, completion, inter-segment
+gap and request count, with exact text/order and zero stale audio,
+unauthorized speech, false ACK or Agent/Tool/Task/history effects under
+cancellation and replacement. Product wiring is excluded until a prospective
+spec declares a materiality threshold and the screen passes it. See the
+[SOTA latency review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md).
+
+## 15. What has and has not been measured end to end
 
 | Question | Current answer |
 |---|---|
 | Do we have real Browser/device capture-ready→ACK timings? | Yes, only the seven `LVL-00` development diagnostics: 15.352–32.512 s. They are not a compatible baseline. |
 | Do we have real Browser-clock EOT→ACK timings? | Yes, only `LVL-00`: 9.832–25.234 s, with semantic/run-integrity limitations. |
-| Do we have a clean physical A/B/A for any optimization? | No. |
+| Do we have a clean physical A/B/A for any optimization? | No. LVL-09 is one unmatched diagnostic comparison only. |
 | Do we have full-round causal composition timings? | Yes, `LVL-05`, but they are controlled 6.985–10.240 s B totals, not physical E2E. |
 | Do we have accepted real-Provider component timings? | Yes for the VAD rejection, connection-reuse rejection and stable-sentence materiality stop; each excludes Browser/full E2E. |
-| Is approximately 46% a locally verified product gain? | No. It is `REPORTED_EXTERNAL`, and that run failed TTS authorization. |
+| Is approximately 46% a locally verified product gain? | No. It remains `REPORTED_EXTERNAL`. LVL-01D later closed the workflow defect for one accepted human run but did not reproduce the feature-off/on percentage. |
 
-## 14. Artifact retention summary
+## 16. Artifact retention summary
 
 The private archive is
 `/home/renan/openJiuwen-ai/live-voice-latency-runs/`. Its README is the full
@@ -555,6 +633,7 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-00 | Diagnostic/failed-workflow directories survive; no compatible A–G raw population |
 | LVL-01 | Credited A1/B/A2 reports survive with freshly verified hashes; earlier A1 reports are diagnostic |
 | LVL-01C | No locally bound raw artifact; external report only |
+| LVL-01D | Sanitized source/check/result evidence is repository-bound; private raw product artifacts are not catalogued here |
 | LVL-02 | Credited Tier-2 pilot/formal reports and corpus survive; earlier attempts are diagnostic/invalid/superseded |
 | LVL-03 | Credited A1/B2/A2 reports survive; earlier B is superseded |
 | LVL-04 | Pilot/A1/A1-v2/B survive; A1-v2/B are credited to the rejection |
@@ -562,22 +641,30 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-06 | Credited final raw report is lost; sanitized final evidence survives; earlier diagnostic raw survives |
 | LVL-07 | Credited v2 artifacts survive with verified bindings; unversioned pilot directories are superseded |
 | LVL-08 | No run artifact exists |
+| LVL-09 | Reused manual run directory survives, but its manifest/report cannot bind a compatible A/B population |
+| LVL-10 | No run artifact exists; review and proposed screen only |
 
-## 15. Current decision route
+## 17. Current decision route
 
-1. Repair P2 Media observation so an entire `notification_batch` is validated
-   atomically and processed in order, including final TTS authorization.
-2. Run deployed Live Voice off/on with the agreed short, medium and long
-   prompts. Require successful response/task outcome and TTS/playout; record a
-   stage and total waterfall.
-3. In parallel, run the already specified Provider-native Semantic VAD causal
+1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
+   LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
+   remains an evidence gap, not a repair packet.
+2. Run the already specified Provider-native Semantic VAD causal
    screen with the 1200 ms fallback and natural-pause integrity gates.
-4. Use the deployed waterfall to choose whether physical first-audible
-   (Adaptive WebAudio startup) or terminal settlement/next-turn readiness owns
-   the next material residual. Do not add their estimates.
-5. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
+3. Run a clean same-source/same-workload LVL-09
+   A1=1000/B=250/A2=1000 Browser screen. Do not change the default from the
+   unmatched diagnostic.
+4. Write the prospective LVL-10 materiality spec, then compare full-final SSE
+   streaming against bounded post-final segmentation with the same real
+   Provider. Do not implement product wiring from the one-round 1561 ms
+   TTS-to-downlink segment.
+5. Treat native speech-to-speech as a strategic architecture study requiring a
+   separate authority decision, not as the next optimization packet.
+6. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
    stable-sentence packet closed unless a new reviewed mechanism or workload
    hypothesis changes the materiality question.
+7. Keep batch-32, server push and coalescing frozen until a deployed waterfall
+   demonstrates material residual P2 backlog.
 
 Every future result uses
 [LATENCY_EXPERIMENT_RECORD_TEMPLATE.md](LATENCY_EXPERIMENT_RECORD_TEMPLATE.md)

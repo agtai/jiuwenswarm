@@ -62,6 +62,21 @@ Read only the record that owns the regression or source boundary being examined.
 - Historical parallel packets: [Alpha parallel plan](roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md), [Wave A+B packet](roadmap/ALPHA_WAVE_AB_EXECUTION_2026-08-07.md), [Wave C packet](roadmap/ALPHA_WAVE_C_EXECUTION_2026-08-07.md), [W2 90% packet](roadmap/DEMO_90_EXECUTION_2026-08-07.md).
 - Removed superseded product/stash material remains in Git history and never overrides current source, STATUS or accepted decisions.
 
+## Latency experiment and comparative-analysis route
+
+Use this route only for latency forensics, experiment design or optimization
+selection. Start with the
+[canonical experiment catalog](evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
+to identify the compatible lane, clock, workload and truth label. Then read the
+[optimization inventory](roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md)
+for current candidate status/headroom and only the exact-source result linked by
+that entry. The
+[2026-08-24 realtime-voice SOTA review](reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md)
+compares public external patterns with current JiuwenSwarm boundaries; it is
+analysis, not benchmark evidence or an architectural decision. Runtime commands
+remain in the applicable latency section of the
+[E2E runbook](runbooks/E2E_RUNBOOK.md).
+
 ## Fresh-clone recovery
 
 Remote names and publication state are repository-local Git facts. Do not

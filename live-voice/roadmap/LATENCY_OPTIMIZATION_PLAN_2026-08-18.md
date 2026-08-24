@@ -48,29 +48,41 @@
 > Full method, result and limitation evidence is recorded in the
 > [P2 bounded-pull causal result](../evidence/P2_NOTIFICATION_BOUNDED_PULL_CAUSAL_RESULT_2026-08-21.md).
 
+> **2026-08-24 route reconciliation:** Hongxing source `c31e85ade` repaired
+> atomic P2 batch observation, passed scoped human validation with audible TTS
+> and owns D-094 batch-16 default-on. LVL-07 then screened out pre-final
+> stable-sentence overlap for its tested workloads. A 250 ms Browser startup
+> lead produced only an unmatched diagnostic signal; the default remains 1000
+> ms. The active latency route is now LVL-08 Provider-native Semantic VAD, a
+> compatible LVL-09 playout-lead A1/B/A2, and prospective LVL-10 segmentation
+> only after authoritative `chat.final`. The
+> [experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md),
+> [optimization inventory](LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md) and
+> [SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md)
+> own the current evidence interpretation. This dated note supersedes older
+> queue language below where they conflict.
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
 responds early without speaking provisional or stale content, while preserving
 the existing response-generation, Task, history and cancel authorities.
 
-Current code has a real streaming media path, but it still serializes several
-waits on the first-audible critical path. Newer source-bound physical evidence
-shows that, in the analyzed turn, the largest measured tail was the P2
-one-notification-per-RPC backlog after model completion. Authoritative TTS also
-starts only after `chat.final`; there is a fixed one-second browser playout
-lead, a 1.2-second server-VAD silence threshold, serial end-of-turn cleanup, and
-a successor-capture readiness wait before the TTS downlink is opened. The plan
-therefore has four layers:
+Current code has a real streaming media path. The measured P2
+one-notification-per-RPC backlog and successor ACK/receipt lifecycle have been
+repaired at their accepted scopes, while LVL-06 found no material local EOT
+settlement tail. Authoritative TTS still starts only after `chat.final`; Browser
+playout retains a 1000 ms default lead, and the 1200 ms server-VAD fallback
+protects natural pauses. The current plan therefore has four layers:
 
-- establish a current-source causal P2 baseline without making an E2E claim;
-- retain clean physical measurement as the product-path oracle;
-- remove avoidable pipeline waits without changing product truth;
-- overlap Agent generation and TTS at authoritative sentence boundaries.
+- retain compatible physical measurement as the product-path oracle;
+- screen semantic endpointing without weakening commit authority;
+- validate a smaller Browser reserve without promoting the unmatched sample;
+- test post-final TTS segmentation without weakening Agent or speech authority.
 
-The first layer is a prerequisite, not observability polish. Without it, a
-smaller queue or VAD value can make the median look faster while increasing
-breath-pause truncation, audio underruns or stale speech.
+Compatible measurement is a prerequisite, not observability polish. Without
+it, a smaller queue or VAD value can make the median look faster while
+increasing breath-pause truncation, audio underruns or stale speech.
 
 ## 2. Formal path under optimization and corrected baseline
 
@@ -87,13 +99,13 @@ Important code facts are:
 |---|---|---|
 | Capture | `formal/audioPort.ts` produces 20 ms PCM frames. `browserAudioIOAdapter.ts` requests AEC/NS/AGC and uses the actual AudioContext sample rate; 48 kHz is not a product invariant. | Frame size is already suitable for streaming; codec replacement is not the first lever. |
 | End of turn | `streaming_speech.py::ServerVadConfig` defaults to `silence_duration_ms=1_200`. [D115](../D115_S6_02_BREATH_PAUSE_VAD_REPAIR_2026-08-13.md) raised it from 500 ms after physical breath-pause failures. | A global return to 500 ms would trade latency for false commits. |
-| Recognition final | `productP1VoiceRoute.ts::#stopAndRecognizeOnce` stops capture, drains and ACKs every frame, closes uplink, then calls `recognizeStreamingFinal`. | Local media settlement and Provider-final retrieval are unnecessarily serial after server VAD has committed the turn. |
+| Recognition final | `productP1VoiceRoute.ts::#stopAndRecognizeOnce` stops capture, drains and ACKs every frame, closes uplink, then calls `recognizeStreamingFinal`. | LVL-06 found at most 0.885 ms p50 removable local settlement tail; the remaining Provider-final wait is legitimate and no overlap change was authorized. |
 | Submit | `components/ChatPanel/index.tsx` enables `handsFree: true`; `components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx` automatically submits the recognized final through the unified owner. The manual surface is hidden diagnostic compatibility. | The supplied analyses' “click Send” delay is stale for the formal product path. |
 | Agent | `agent_conversation_runtime.py::_consume_agent_event` creates the text `PresentationUnit` only for `chat.final`; `chat.delta` is observation only. | The Agent's full 6–8 second historical generation time is silent before TTS starts. |
 | Task commands | `voice_task_bridge.py::resolve_unified` already has a structured Task route and short authoritative speech for supported Task operations. | A new generic “fast Task route” is not the first task; its truth and latency should be measured and repaired where necessary. |
 | TTS start | `productP1VoiceRoute.ts::playAgentText` sends the complete authoritative text. The Gateway pulls the first Provider audio before returning the downlink ticket. | Streaming exists below the full-text gate, so first audio still waits for `chat.final`. |
-| Capture/playback overlap | Before opening a streaming downlink, `playAgentText` awaits `#startConcurrentCapture`, including device capture and media activation/readiness. | Preparing barge-in capture can delay first audible output and needs its own timing seam. |
-| Browser playout | `browserAudioIOAdapter.ts::PLAYOUT_STARTUP_LEAD_SECONDS` is fixed at `1.0`; its test schedules the first two 20 ms sources at 11.00 and 11.02 when current time is 10. | This deliberately adds one second to first audible to mask Provider burst gaps. |
+| Capture/playback overlap | The accepted first-audio path and later retained-receipt lifecycle no longer require successor readiness to own predecessor output. | Preserve the accepted decoupling; future receipt work needs new evidence rather than reopening this seam. |
+| Browser playout | `browserAudioIOAdapter.ts` keeps `PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 1000` and exposes a clamped 160–1000 ms diagnostic hook. | One unmatched 250 ms round is promising but cannot change the default; LVL-09 requires compatible physical A1/B/A2. |
 | Backpressure | the synthesis media queues default to eight frames, or 160 ms at 20 ms/frame. | Raising every queue to 64 frames would add up to 1.28 seconds of stale/cancel backlog and does not by itself solve Provider seed gaps. |
 
 The only repository benchmark close to the whole route is
@@ -319,10 +331,17 @@ measured target, recorded or omitted from history according to one explicit
 policy, and stale/wrong-scope/cancelled operations produce no audio or history
 effects.
 
-### Formal sentence-level Agent-to-TTS overlap
+### Historical pre-final sentence-level Agent-to-TTS overlap — screened out
 
-The largest structural gain comes from releasing a stable first sentence
-before `chat.final`. Raw `chat.delta` punctuation splitting in the browser is
+> **2026-08-24 disposition:** LVL-07 tested this materiality question with a
+> real Agent and real Provider. Its projected gain was 177.2 ms p50 / 425.3 ms
+> p95 and 7.43% relative p50, below all predeclared gates. The proposal below
+> is retained as historical rationale but is not an active implementation
+> packet. Reopening it requires a reviewed new workload or mechanism.
+
+The original hypothesis was that releasing a stable first sentence before
+`chat.final` could provide a large structural gain. Raw `chat.delta`
+punctuation splitting in the browser is
 not safe: a delta can be rewritten, a decimal or code block can contain
 punctuation, and provisional audio cannot be retracted after it is heard.
 
@@ -356,6 +375,23 @@ This batch is accepted only when sentence one can be heard before
 duplicate-final, failure, barge-in, stale/wrong-scope and zero-forbidden-effect
 tests pass on the formal Integrated Web route.
 
+### Authoritative-final segmented TTS — LVL-10 materiality first
+
+The authority-compatible follow-up begins only after complete `chat.final`.
+It derives bounded sentence/clause segments from that immutable text, starts
+the first segment and may prefetch a bounded number of successors while
+preserving exact order and cancellation fences. It does not speak provisional
+Agent deltas and is therefore distinct from the stopped LVL-07 proposal.
+
+Current TTS already sends the complete final text to a Provider SSE stream and
+publishes each `speech.audio.delta` as it arrives. Segmentation receives no
+assumed 400–800 ms gain. Before product code, a no-Browser real-Provider
+A1/B/A2 must compare the existing full-final stream with post-final segments
+under the same text/model/voice/network/warmth, measuring first PCM, first
+playable reserve, completion, inter-segment gaps, requests, order, cancellation
+and zero forbidden effects. The prospective spec must declare its numeric
+materiality and reliability gates before the run.
+
 ## 6. Agent-path work after pipeline evidence
 
 Current dialogue requests allow tools even for simple questions. After the
@@ -373,23 +409,22 @@ project files.
 
 ## 7. Delivery order and acceptance
 
-Work should be packetized in this dependency order:
+Current latency work should be packetized in this dependency order:
 
-1. ~~current-source no-Browser P2 A1 with the deterministic 10/50/100
-   backlog;~~ **DONE — causal component evidence only**
-2. ~~one named bounded P2 transport candidate B, followed by unchanged-source
-   A2 and an A1/B/A2 accept/revise/discard decision;~~ **ACCEPTED — causal
-   component evidence only**
-3. clean physical Browser confirmation of an accepted P2 candidate, without
-   retroactively relabelling the causal run as E2E evidence;
-4. physical fixed-corpus baseline for capture/STT/TTS/playout work, then
-   adaptive browser startup, first-downlink/capture decoupling, EOT overlap and
-   controlled VAD experiments;
-5. authoritative acknowledgement for genuinely long operations;
-6. Conversation Runtime-owned sentence streaming with bounded semantic
-   prefetch;
-7. Agent/model/tool-path changes only where the preceding evidence still shows
-   material delay.
+1. preserve the accepted D-094 P2 default and retained ACK/receipt lifecycle;
+   the missing fixed-corpus off/on population is an evidence gap, not an open
+   repair;
+2. execute LVL-08 Provider-native Semantic VAD with the 1200 ms fallback and
+   natural-pause/false-EOT gates;
+3. execute a clean LVL-09 Browser A1=1000/B=250/A2=1000 using the same source,
+   workload and manifest; keep 1000 ms as default until it passes;
+4. specify and execute the no-Browser real-Provider LVL-10 materiality screen;
+5. consider authoritative acknowledgements for genuinely long Task operations
+   only when perceived latency is the product priority;
+6. change Agent/model/tool paths only where compatible measurements still show
+   material delay;
+7. treat native speech-to-speech as a separate strategic architecture study,
+   not a latency packet under the current Registry/Task authority model.
 
 This is an order of proof, not a request for one large patch. Each packet names
 its P1/P2 owner, D-046 risk tier, flags/configuration, rollback path, positive
@@ -405,8 +440,8 @@ Initial targets are deliberately relative to the fresh baseline:
 - the low-risk pipeline batch reduces speech-end-to-first-audible p50 by at
   least 1.0 second, with no p95 false-EOT, underrun, fallback or cancel
   regression;
-- the sentence-streaming batch reduces p50 speech-end-to-first-audible by at
-  least 40%, with a working target band of 5–7 seconds for ordinary dialogue;
+- LVL-10 receives no threshold from this historical plan; its prospective spec
+  must freeze a material first-PCM or continuity gate before the Provider run;
 - truthful acknowledgement, where applicable, has a working perceived-response
   target of 3–4 seconds;
 - Task create/status/cancel receive a 3–5 second working target only after the
@@ -440,6 +475,12 @@ VAD, and the article title as an SLO. Current code already supplies streaming
 STT/TTS, bounded ordered media and generation fences; they receive no new
 completion credit from appearing in the references.
 
+The [2026-08-24 SOTA review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md)
+adds official-source confidence labels to that comparison. It does not prove
+external providers' internal model topology, turn one diagnostic round into a
+population or authorize native speech-to-speech under JiuwenSwarm's current
+Registry/Tool/Task/presentation authority.
+
 ## 9. Code and test anchors
 
 The implementation packets should begin from these current owners rather than
@@ -472,13 +513,16 @@ from the reference materials:
 
 This plan is queued under the `Observability, benchmark and latency` capability
 and dependency route to feature complete in [STATUS](../STATUS.md). The
-2026-08-23 lifecycle repair packet is closed. The accepted P2 bounded-pull
-candidate is now composed on that source; remaining product work is atomic
-batch observation and deployed Gate C. The `e1df8b452` physical run supplies a
-scoped diagnosis of the P2 one-notification-per-RPC tail; it is not the fresh
-fixed-corpus baseline required by this plan. The
+2026-08-23 lifecycle repair packet is closed. Hongxing source `c31e85ade` owns
+atomic P2 batch observation, D-094 default-on and its scoped human acceptance;
+the initial authorization failure is closed for that declared run, while a
+compatible fixed-corpus off/on population remains unclaimed. The `e1df8b452`
+physical run supplies a scoped diagnosis of the P2 one-notification-per-RPC
+tail; it is not the fresh fixed-corpus baseline required by this plan. The
 [latency experiment catalog](../evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md)
-owns the dated causal/deployed evidence. Compatible instrumentation may be
-included in an affected packet only when its ownership and acceptance are
-explicit; this preparatory plan never outranks or activates the current STATUS
-route by itself.
+owns the dated causal/deployed evidence. LVL-08, compatible LVL-09 and
+prospective LVL-10 are the current latency sequence; none receives product
+credit from this plan. Compatible instrumentation may be included in an
+affected packet only when its ownership and acceptance are explicit; this
+preparatory plan never outranks or activates the current STATUS route by
+itself.
