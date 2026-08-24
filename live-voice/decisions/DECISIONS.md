@@ -1093,3 +1093,14 @@
 - 第一项已由 `30300f32` 修复：同一 `_RetainedGenerationInterrupt` 从准入到结算拥有精确 `ref`、pending future 与 result/error，pending/settled 共用一个 256-entry bound；受影响五文件后端集为 `190/190`，三项账本聚焦回归 `3/3`，Ruff 与 diff check 通过。
 - 第二项不能在原冻结的浏览器局部边界内诚实修复：前驱与后继帧分别绑定不同的 capture、track 与 Media authority，而现有 Speech 准入及 Batch WAV 只接受一个精确 capture。浏览器拼接、重标或重放会伪造 provenance。任何多段连续识别、跨 capture 授权或新的服务器组合权威都属于 Realtime Media/Speech 协议与 authority 扩界，必须先按 Tier 3 重新记录 owner、scope、负向零副作用和 acceptance，再实施。
 - 当前 disposition：生成期插话保持默认关闭且 **BLOCKED**；不得把 §5 真机旅程当作当前下一步或验收 PASS。物理验收只能在跨 capture 完整语句 oracle 与定向复审关闭之后进行。若不接受该扩界，只能改为显式失败并要求用户重说，不能声称无损生成期插话。
+
+## D-096 接受一个前驱段的精确跨 capture Batch 连续识别
+
+- 日期：2026-08-24
+- 状态：用户在获知 Tier-3 扩界及后续任务后明确要求执行；本决定仅激活 `hx/0823_generation_interruption` 上的窄连续识别包，不关闭 D-095 Gate，不授权远端更新。
+- 协议决定：保留 `live_voice.speech.recognize_batch` 与 `live-voice.contract.v2`。普通请求字段和语义不变；仅 release-race 续接请求可额外携带一个 `predecessor`，其中包含前驱 `subject_id`、精确 final capture binding 与该段独立 PCM16 WAV。前驱上行以内容无关的 `MEDIA_RECOGNITION_CONTINUATION` 结算，后继 `media.activate` 再携带该前驱 subject；这两个服务器可核验标记共同关闭跨 RPC 竞态。当前 capture 仍是结果、取消、重放围栏与 voice-commit receipt 的主 identity。服务端分别验证两段后，在内存中按前驱→当前顺序组合成一个 Provider WAV；浏览器不得重标、伪造 capture 或把前驱样本冒充当前样本。
+- Authority 决定：两段必须均已完成上行且仍有有效媒体 authority，并共享同一 Session、correlation、interaction、product activation、browser connection、locale 与 sample rate；subject/capture/generation/track/content digest 分别精确匹配，前驱签发时间必须早于当前，且只允许两个不同 capture。后继必须精确引用已以 continuation reason 结算的前驱；缺少任一标记、重排或链式第三段均 fail closed。准入后两个 capture identity 原子进入同一个 Speech replay/tombstone 边界，不能部分消费。
+- 生命周期与隐私决定：浏览器只在该竞态发生后以 memory-only 方式暂存前驱帧和 close binding，直到 Batch 请求结算；成功、失败、空 final、Exit 与 cleanup 均清除帧并撤销两段 authority。Gateway 继续只保留每段摘要，不新增音频持久化或日志。前驱和带前驱链接的后继均不得签发或读取 Streaming commit receipt；后继 Streaming 只保留 EOT 观测，完整 final 仅走一次组合 Batch。普通单段 Streaming/Batch 不变。
+- 明确排除：不增加第二个打断 authority，不改变 EOT 是唯一提交边界，不触及 Task/Agent/Tool/history、产品开关默认值、普通 rotation、`pauseIdleCaptureForNotification`、Provider 选择、物理或上线结论。
+- Gate：正向必须证明前驱话头与后继尾部只形成一个完整 Provider 输入和一个 final；负向必须覆盖重排、伪造音频、stale/replay、跨 Session/interaction/activation/connection/track，且所有拒绝路径的 Agent/Tool/Task/history 副作用为零。受影响自动化、静态检查、生产构建及一次独立 Tier-3 审核关闭后，才能进入 D-095 §5 真机验收。
+- 实施状态：源候选 `35537a9a` 已实现上述边界；受影响 backend `257/257`、Formal Web `496/496`、Browser Gateway Media `38/38`、Browser Dedicated Media `27/27`、Gateway Batch Speech `30/30`、Ruff、diff check 与 `build:live-voice` 均 PASS。独立 Tier-3 审核和真机验收仍未发生，因此 D-095 Gate 与物理结论保持 BLOCKED。

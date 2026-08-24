@@ -462,3 +462,54 @@ No frontend suite, full backend sweep, mutation run or physical journey was
 rerun for the Runtime-only repair. Historical results above retain only their
 exact-source credit. Physical acceptance is blocked until the cross-capture
 source boundary is accepted, implemented and reviewed.
+
+## 8. 2026-08-24 cross-capture continuation repair candidate
+
+D-096 accepted the narrow Tier-3 boundary and source candidate `35537a9a`
+implements it. This section supersedes only the statement above that the second
+finding is unimplemented; it does not grant independent-review or physical
+acceptance credit.
+
+The browser closes the exact predecessor uplink with the content-free
+`MEDIA_RECOGNITION_CONTINUATION` reason before Streaming settlement, retains
+its frames and media close binding in memory, and activates one real successor
+that names that predecessor subject. Gateway validates that exact link against
+two completed, live media records in the same Session, correlation,
+interaction, product activation, browser connection, locale and sample rate.
+The Batch request carries two separately finalized WAVs; the server validates
+each capture/generation/track/content digest, concatenates PCM only in memory in
+predecessor-then-successor order, and invokes one Batch final. Both capture
+identities enter one atomic replay/tombstone preflight.
+
+The early close marker is also the duplicate-commit fence. A predecessor marked
+for continuation and a successor linked to it can still use Streaming Provider
+events for EOT, but neither may mint or return a Streaming voice-commit receipt.
+The only final receipt for the continued utterance comes from the combined
+Batch result. Missing/reordered markers, stale/reused identity, forged audio or
+track, and cross-Session/interaction/activation/connection candidates fail
+closed before Provider or business effects.
+
+| Check on `35537a9a` | Result |
+|---|---|
+| Affected backend: Batch Speech, Media registration/RPC, product authority, Streaming Speech and Python media transport | `257 passed` |
+| Formal Integrated Web | `496 passed` |
+| Browser Gateway Media | `38 passed` |
+| Browser Dedicated Media | `27 passed` |
+| Gateway Batch Speech/privacy | `30 passed` |
+| Ruff and `git diff --check` | PASS (line-ending warnings only) |
+| `npm run build:live-voice` | PASS |
+
+The positive oracle observes negative predecessor samples followed by positive
+successor samples in one Provider WAV and one complete final. The browser
+journey proves the old track ended, the successor track is live, the successor
+receives provider speech-start and EOT, the Batch payload retains both exact
+captures, no Streaming-result RPC is used, the predecessor is revoked once
+after settlement, and no Agent/Tool/Task method is called. Server negatives
+also prove zero competing Streaming receipt for both segments and reject
+missing close/activation links.
+
+Current disposition remains **BLOCKED for physical acceptance**. The next
+source step is one bounded independent Tier-3 review of `35537a9a` and its
+exact diff; only findings in this changed authority boundary require repair and
+follow-up. If that review closes, run handoff §5 once on a real microphone and
+headphones. Do not restart the five historical broad review rounds.

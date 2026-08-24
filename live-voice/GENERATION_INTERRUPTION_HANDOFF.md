@@ -2,15 +2,15 @@
 
 **Branch:** `hx/0823_generation_interruption`
 **Base (merge-base, not a ref):** `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789`
-**Worktree used so far:** `D:/XGG AI/openjiuwen/jiuwenswarm-gen-interrupt`
+**Current worktree:** `C:/Users/admin/Desktop/live voice hx-generation-interruption`
 
 The original implementation was verified by automation, but a 2026-08-24
 targeted closure review found two Important defects (`C0/I2/M0`). The atomic
-Runtime-ledger defect is repaired on `30300f32`; the browser release race can
-still recognize only the successor capture and lose the start of the user's
-utterance. A truthful repair requires an explicitly re-scoped cross-capture
-Realtime Media/Speech authority boundary. **Nothing has run on a real device,
-and physical acceptance must not begin until that source boundary closes.**
+Runtime-ledger defect is repaired on `30300f32`; the cross-capture release race
+is repaired by source candidate `35537a9a`, which retains an exact predecessor
+plus successor, composes one Batch final and fences both competing Streaming
+commit paths. **Nothing has run on a real device. One bounded independent
+Tier-3 review of `35537a9a` remains before physical acceptance.**
 
 ---
 
@@ -45,7 +45,7 @@ These cost real hours when they were learned. All of them still apply.
 | Trap | What to do |
 |---|---|
 | `pytest -o addopts=''` | **Never.** It clears `--asyncio-mode=auto` and fabricates dozens of failures. Just add `--no-cov`. |
-| Python interpreter | Use `D:/XGG AI/openjiuwen/jiuwenswarm/.venv/Scripts/python.exe`. The conda base is missing `httpx`/`websockets`/`aiohttp`/`loguru` and collection errors look like broken code. |
+| Python interpreter | In the current machine use `C:/Users/admin/Desktop/live voice hx/.venv/Scripts/python.exe`. The conda base is missing `httpx`/`websockets`/`aiohttp`/`loguru` and collection errors look like broken code. |
 | `node --test <file>` directly | **Never for verification.** It runs the previously compiled cache, so a mutant you just introduced is not in the code under test and the check is a false negative. Always go through `npm run test:live-voice-*`. |
 | A new worktree needs `node_modules` | Junction it to the main repo: `New-Item -ItemType Junction -Path <new>/jiuwenswarm/channels/web/frontend/node_modules -Target <main>/jiuwenswarm/channels/web/frontend/node_modules` |
 | Removing such a worktree | `cmd /c rmdir <link>` **first**, then `git worktree remove`. `--force` walks through the junction and empties the main repo's `node_modules` (recovery is `npm ci`). |
@@ -93,6 +93,25 @@ under heavy parallel load the bounded rollback wait expires and the result
 becomes `ROLLBACK_FAILED`. It failed twice this way across the whole effort.
 Re-run it alone before treating it as a finding.
 
+### Current `35537a9a` continuation checks
+
+The table above is the historical broad baseline. The exact new source boundary
+has these fresh results:
+
+| Check | Result |
+|---|---|
+| Batch Speech + Media registration/RPC + product authority + Streaming Speech + Python media transport | `257 passed` |
+| Formal Integrated Web | `496 passed` |
+| Browser Gateway Media / Browser Dedicated Media / Gateway Batch Speech | `38 / 27 / 30 passed` |
+| Ruff / `git diff --check` / `npm run build:live-voice` | PASS |
+
+The review target is the immutable code/test commit `35537a9a`; documentation
+may be a later commit. Do not ask the reviewer to reopen the five historical
+broad rounds. Review only the cross-capture request, media-authority chain,
+receipt fence, replay boundary and cleanup diff introduced by this candidate.
+Use the prepared
+[targeted review prompt](reviews/GENERATION_INTERRUPTION_CROSS_CAPTURE_TIER3_REVIEW_PROMPT_2026-08-24.md).
+
 ## 4. Where the code is
 
 **Backend**
@@ -104,12 +123,15 @@ Re-run it alone before treating it as a finding.
 | `server/live_voice/agent_conversation_runtime.py` | `interrupt_generation` — the fence, the fixed `round.cancel` command, dropping an already-queued presentation, and `submit_committed_turn(..., supersedes=)` which fences **before** committing the replacement |
 | `server/live_voice/product_p2_interaction_adapter.py` | `P2ActivationLease.interrupt_generation` (no scope argument exists) |
 | `server/live_voice/product_composition_registry.py` | `handle_p2_interrupt_generation` — production wiring; rejects a client-supplied `cancel_scope` |
+| `gateway/live_voice/dedicated_media_registration.py` | Verifies the predecessor-close and successor-activation chain, exact per-segment digests and the no-Streaming-receipt fence |
+| `server/live_voice/batch_speech.py` | Parses the optional predecessor, composes PCM in memory in exact order and atomically reserves both capture identities |
 
 **Frontend**
 
 | File | Role |
 |---|---|
 | `features/live-voice/formal/productP1VoiceRoute.ts` | `on_generation_speech_start`, and `abandonCapture(reason)` — releases a silent listening window, but when the provider reports speech during `stopCapture` it opens a **real successor capture** instead |
+| `features/live-voice/formal/gatewayBatchSpeechClient.ts` | Emits two separately finalized WAV segments only for the one accepted predecessor/successor continuation |
 | `components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx` | The window's whole lifecycle. Two names carry the invariants that five review rounds converged on: `ownerHasUnsettledGenerationInterrupt(owner)` — the single question every barrier asks; `retireGenerationListening(matches?)` — the single place every retirement path goes through |
 
 Two invariants are worth stating in words, because both were defects first:
@@ -124,17 +146,15 @@ Two invariants are worth stating in words, because both were defects first:
   window's reason to exist must retire it: Session switch, Exit, capture
   ownership surrender, and the exact response failing.
 
-## 5. Physical acceptance — blocked until source closure
+## 5. Physical acceptance — blocked until one source review closes
 
-Do not run this as acceptance yet. If provider speech-start arrives while
-`abandonCapture` is releasing the old track, the route opens a real successor
-capture but recognizes only frames from that successor. Frames already recorded
-under the predecessor capture are cleared, so scenario 2 can submit only the
-tail of the utterance. The existing test proves old-track/new-track liveness,
-not end-of-turn recognition of the complete sentence.
+Do not run this as acceptance yet. `35537a9a` now has an automated
+full-utterance/EOT oracle: the predecessor prefix and successor tail retain
+separate exact capture authorities, Gateway validates both, and one combined
+Batch final is returned. Physical credit is still blocked until one independent
+Tier-3 review of that exact commit closes with no unresolved finding.
 
-After a separately scoped Media/Speech continuation repair passes targeted
-review, this physical run needs a person with headphones. Headphones remove the
+After that review, this physical run needs a person with headphones. Headphones remove the
 echo/double-talk risk entirely, so what is being judged is timing and accuracy,
 not acoustics.
 
@@ -157,7 +177,7 @@ While these run, the logs to watch are the `action_id` of each interruption, the
 `response_id` it names, and the `round_id` in the cancel command — they have to
 line up with the answer the user actually meant to stop.
 
-**Acceptance is complete only when:** the cross-capture source Gate is closed,
+**Acceptance is complete only when:** the cross-capture source review is closed,
 all three scenarios behave, the affected suites still pass, and the flag can be
 turned back off with no residue.
 
@@ -165,11 +185,10 @@ turned back off with no residue.
 
 * **No physical run of any kind has happened yet.** No latency number is
   claimed, including for the listening window itself.
-* **Late release-race speech can lose its prefix.** The predecessor and
-  successor frames have different exact capture/media authorities; current
-  Batch recognition accepts one capture. Relabeling or concatenating in the
-  browser would falsify provenance, so this is a Tier-3 re-scope rather than a
-  local state fix.
+* **The late release-race source repair is not independently accepted yet.**
+  `35537a9a` implements the D-096 two-authority Batch boundary and its automated
+  oracle, but the required independent review and physical observation remain
+  open.
 * Seven mutants survive, in two groups — two halves of one Exit repair that are
   redundant against each other (the combined mutant *is* killed), and five state
   hygiene guards whose external effect another guard already provides. Evidence
@@ -187,8 +206,9 @@ turned back off with no residue.
 Five broad independent Tier-3 reviews returned `C0/I2/M0`, `C0/I6/M2`,
 `C0/I4/M3`, `C0/I3/M3`, `C0/I3/M3`. A later targeted closure review on
 `b476873b` returned `C0/I2/M0`: its atomic-ledger finding is repaired on
-`30300f32`, while its full-utterance finding remains open pending explicit
-re-scope. Full narrative in
+`30300f32`, while its full-utterance finding is implemented by the explicitly
+re-scoped D-096 candidate `35537a9a` and awaits one bounded independent review.
+Full narrative in
 [evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md), decision record
 in [D-095](decisions/DECISIONS.md).
 
@@ -196,9 +216,9 @@ Of the 25 findings, 9 were real defects in the original implementation, 6 were
 incomplete repairs of earlier findings, and the rest were counts, wording and
 base-SHA drift. The 6 are the reason this took five rounds instead of two: the
 pattern was making the smallest change that turned a case green instead of
-asking whether the invariant held on every path. If you repair something here,
-enumerate the call sites with `grep` before claiming "every one is fixed", and
-distrust any fix that is physically impossible but state-wise plausible.
+asking whether the invariant held on every path. The current candidate therefore
+fences both predecessor and successor Streaming receipts at the server seam,
+instead of relying only on the browser not to request them.
 
 **The base ref moves.** `hx/0812_live_voice_w3` was amended four times and
 advanced three more times during this work. Resolve the base with
