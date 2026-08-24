@@ -1,8 +1,8 @@
 # Agent generation-time interruption — implementation evidence (2026-08-23)
 
 **Branch:** `hx/0823_generation_interruption`
-**Base:** `a44843b628e2f2358906fa5b903190bd6bac50b2` (`hx/0812_live_voice_w3` at the time of writing)
-**Named-ref caveat:** that ref was amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject) and then advanced by a further docs-only commit to `a44843b62`. It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
+**Base:** `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789` (`hx/0812_live_voice_w3` at the time of writing)
+**Named-ref caveat:** that ref was amended **four** times during this work (`5415a3d3f` -> `8de91262a` -> `7c589dcda` -> `24e7e6106`, all carrying the same subject) and has since advanced twice more, to `a44843b62` and then `9a3a65fd0`; the last of those touches `productP1VoiceRoute.ts`, which this change also edits, so it was rebased in rather than left aside. It moves faster than a review cycle. **Always resolve the base with `git merge-base` against this branch at review time; the ref name is not a base identifier.** Integration will need its own re-freeze against whatever the ref points at then.
 **Scope:** hands-free speech that arrives while an Agent answer is still being
 generated can now stop or replace that exact answer.
 
@@ -170,8 +170,8 @@ method.
 | `tests/unit_tests/live_voice/test_conversation_runtime*.py` | 50 passed |
 | `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py` | 48 passed |
 | `tests/unit_tests/live_voice/test_product_composition_registry.py` | 176 passed, 6 pre-existing failures |
-| Frontend `npm run test:live-voice-integrated-web` | 495 passed (478 pre-existing + 17 new); `test:live-voice-l0-measurement` 4 passed |
-| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3958 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
+| Frontend `npm run test:live-voice-integrated-web` | 495 passed (478 pre-existing + 17 new); `test:live-voice-l0-measurement` 5 passed |
+| `tests/unit_tests/{live_voice,gateway,common}` full sweep | 3960 passed, 2 skipped, 11 failed — the identical 11 pre-existing failures (see §6) |
 
 `test_partial_activation_failure_rolls_back_runtime` is load-sensitive and is
 reported rather than hidden. It failed once in a focused run immediately after
@@ -356,7 +356,7 @@ cancel nothing: there is no fenceable live target at all.
 * Echo/double-talk behaviour with an open microphone during generation is
   unevaluated. AEC/NS/AGC remain the open Audio I/O items.
 * The 11 failures in the full backend sweep are pre-existing on the base commit
-  `a44843b62` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
+  `9a3a65fd0` — eight under `live_voice` (`test_p3_wave2_real_evidence_producer`,
   six in `test_product_composition_registry`, `test_task_progress_return`) and
   three under `gateway` (`test_harmonyos_dev`, `test_streaming_synthesis_route`,
   `test_upload_storage`). Each was reproduced by running the same files in a
