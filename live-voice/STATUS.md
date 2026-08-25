@@ -218,8 +218,12 @@ diagnostic only: it reduced one estimated Browser schedule-to-start segment,
 but reused an incompatible dirty-source/1000-ms manifest and was appended after
 the retained report. Production `PLAYOUT_STARTUP_LEAD_DEFAULT_MS` therefore
 remains 1000; a clean same-source/same-workload A1=1000/B=250/A2=1000 is
-required before any default decision. Remaining latency work begins with the
-LVL-08 Provider-native Semantic VAD causal screen and the later compatible
+required before any default decision. The LVL-08 fast-screen implementation is
+now complete on isolated branch `latency/semantic-vad-experiment` at
+`5038c41c4`: typed Provider/Gateway support and separate `auto`/`high` A1/B/A2
+runner blocks pass 333 affected tests and independent Tier-3 review. No real
+Provider run or latency result exists yet. Remaining latency execution begins
+with that staged Provider pilot and the later compatible
 LVL-09 playout screen. Completed LVL-10/LVL-10L receive no product/Browser
 credit; long-duration chunking work is stopped. The local
 [Semantic VAD spec](roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md)
@@ -231,10 +235,16 @@ authority decision, not a current packet.
 The current-source muted manual pilot is diagnostic only: two dialogue rounds
 completed, four Task batches cancelled, and no Task-cancel batch was actually
 collected. Its stable residuals preserve materiality for LVL-08/LVL-09/LVL-10,
-but its beep/snapshot/advance path is not terminal/profile/round-aware and can
-leave child processes alive. Close that harness Gate, then collect a separate
+but that historical run's beep/snapshot/advance path was not terminal/profile/
+round-aware and could leave child processes alive. The setup-only branch
+`latency/adaptive-playout-lead-experiment` at `5b37103a2` and its private
+driver/preparer now close those orchestration and source-binding defects under
+deterministic harness checks; no physical A1/B/A2 has run. Collect a separate
 five-round no-tool and five-round Tool dialogue pilot before treating Browser
-samples as a population. Keep Task create/status/cancel in a distinct P3 lane.
+samples as a population. Keep Task create/status/cancel in a distinct P3 lane;
+its offline opportunity reader is ready on
+`latency/task-ack-latency-experiment` at `e38cb7b38`, but candidate gain remains
+`UNMEASURED` until a valid Task population exists.
 See the [pilot record](evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md)
 and [driver runbook](runbooks/LATENCY_PROBE_MANUAL_DRIVER.md).
 
