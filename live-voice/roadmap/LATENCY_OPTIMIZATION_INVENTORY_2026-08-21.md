@@ -1,7 +1,7 @@
 # Live Voice latency optimization inventory
 
 > Date: 2026-08-21
-> Last synchronized: 2026-08-24
+> Last synchronized: 2026-08-25
 >
 > This is a dated optimization/evidence snapshot, not the authority for current
 > project status or execution priority. `live-voice/STATUS.md` remains the
@@ -363,7 +363,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | Ref | Candidate | Status | Expected headroom | Area / likely code | Current evidence and rationale |
 |---:|---|---|---:|---|---|
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
-| 2 | Provider-native Semantic VAD with 1200 ms fallback | **AUTO INTEGRITY REJECTED; PROTOCOL REPAIRED; HIGH NOT RUN** on `latency/semantic-vad-experiment` at `222582618` | Measured **684–734 ms EOT gain** on no-pause/300 ms only; zero credit for 600/1000 ms | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, Gateway and no-Browser validation runner | Protocol/fault repair passed 189 tests and two Tier-3 `C0/I0/M0` re-reviews. The full real A1/B/A2 pilot completed 12 slots: AUTO passed two cases but produced `EARLY_EOT` at 600/1000 ms. Preserve 1200 ms, reject AUTO and do not run HIGH. See the [retry result](../evidence/LVL08_SEMANTIC_VAD_AUTO_RETRY_RESULT_2026-08-25.md). |
+| 2 | Provider-native Semantic VAD with 1200 ms fallback | **AUTO INTEGRITY REJECTED; PROTOCOL REPAIRED; HIGH NOT RUN** on `latency/semantic-vad-experiment` at `222582618` | Measured **684–734 ms EOT gain** on no-pause/300 ms only; zero credit for 600/1000 ms | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, Gateway and no-Browser validation runner | Protocol/fault repair passed 189 tests and two Tier-3 `C0/I0/M0` re-reviews. The full real A1/B/A2 pilot completed 12 slots: AUTO passed two cases but produced `EARLY_EOT` at 600/1000 ms. Preserve 1200 ms, reject AUTO and do not run HIGH. See the [controlled-audio method below](#lvl-08-controlled-audio-and-no-browser-method) and [retry result](../evidence/LVL08_SEMANTIC_VAD_AUTO_RETRY_RESULT_2026-08-25.md). |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **TARGET MATERIALITY PASS; PHYSICAL ACCEPTANCE INCOMPLETE; DEFAULT REMAINS 1000 MS** on `latency/adaptive-playout-lead-experiment` at `5b37103a2` | Same-workload target headroom **670.117–672.874 ms / 93.26–93.29%**; A1/A2 target drift **2.757 ms / 0.383%** | `browserAudioIOAdapter.ts`; bounded hook plus private source-bound A1/B/A2 driver | A1/B completed at 718.549/48.432 ms; A2 recorded 721.306 ms then cancelled on barge-in before playout completion. Provider/Agent drift consumed the target gain in total first-audio, so no total-gain or default claim follows. See the [pilot result](../evidence/LVL09_ADAPTIVE_PLAYOUT_LEAD_PILOT_RESULT_2026-08-25.md). |
 | 5 | Separate retained receipt settlement from successor readiness | **DONE — SCOPED LIFECYCLE SOURCE/AUTOMATION** | Earlier controlled waits exposed approximately **254/754/1007 ms**; no new physical gain is credited | P2 activation journal, retained presentation ACK and next-turn ownership | Hongxing commit `1fec48027` decouples retained predecessor settlement from the successor generation and passed its scoped review. This is lifecycle closure, not a p50/p95 latency population. |
@@ -375,6 +375,65 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 11 | Structured Task route avoiding unnecessary dialogue | **MEASURE FIRST** | **1–6 s where applicable** | `voice_task_bridge.py`, composition registry | This route partially exists already. Benchmark before expanding it; otherwise the estimate may double-count existing behavior. |
 | 12 | Authoritative-final chunked TTS | **INCONCLUSIVE — STOP BEFORE PRODUCT WIRING** | Primary reserve gain unresolved; long completion repeated **20–24%**, medium regressed **10–24%** | validation runner only; product route unchanged | Two formal real-Provider populations completed 45/45 with zero errors, but medium A1/A2 drift 426.8 ms invalidated run 1 and long drift 321.7 ms invalidated run 2. No Browser Lane C or general chunked route is authorized. Its separate completion-primary successor LVL-10L is now also stopped. See the [result](../evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md). |
 | 13 | LVL-10L completion-primary long-form chunked TTS | **STOP — DIRECTIONAL GAIN, FORMAL NOT COMPLETED** | validation runner/corpora only; `lvl10l_long_form_tts_screen.py`; product route unchanged | v2 2100-char pilot: B2 saved **6.93 s / 36.85%**, B4 saved **7.75 s / 41.27%** vs interpolated controls | First pilot: quota rejection; second: 11/12 and 8 MiB boundary; v2: 12/12 PASS with zero errors; formal intentionally aborted with only run/manifest retained | Confirms repeatable long-form headroom but cannot choose arm or authorize wiring. No further long-duration runs per Hongxing. See the [LVL-10L result](../evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md). |
+
+### LVL-08 controlled-audio and no-Browser method
+
+LVL-08 uses a human recording, not generated speech. The immutable master was
+recorded on an Android phone as 48 kHz stereo AAC-LC M4A with the spoken input
+“In two short sentences, please introduce Paris.” FFmpeg 7.0.2 converted the
+complete decoded recording to 48 kHz mono PCM signed 16-bit little-endian WAV
+and appended exactly 2.000 seconds of digital silence. Conversion applied no
+normalization, denoise, compression, trimming, speed change or other audio
+effect.
+
+The VAD corpus builder selected a verified silent boundary at source frame
+`171360`, approximately 3.570 seconds into the source, before the required
+continuation “please introduce Paris.” It removed the source's existing silent
+boundary and reconstructed four WAVs as:
+
+```text
+unchanged human-voice prefix
+  + exact zero-valued PCM pause
+  + unchanged source suffix including “please introduce Paris”
+  + the retained 2.000-second final silence
+```
+
+| Case | Inserted internal pause | Purpose |
+|---|---:|---|
+| `no-internal-pause` | 0 ms | fastest clean continuation control |
+| `internal-pause-300` | 300 ms / 14,400 samples | short continuation pause |
+| `internal-pause-600` | 600 ms / 28,800 samples | medium continuation-safety boundary |
+| `internal-pause-1000` | 1000 ms / 48,000 samples | long natural-pause safety boundary |
+
+Except for that exact zero-valued interval, the four files reuse identical
+source samples. Their expected normalized transcript is
+`in two short sentences please introduce paris`; `please`, `introduce` and
+`paris` are mandatory post-pause tokens. A Provider stop before the annotated
+last voiced frame, or a Provider-reported end before that boundary, is
+`EARLY_EOT`; failed/unknown/invalid rows receive null latency even if “faster.”
+
+The current private corpus is
+`vad-en-v1.reconciled-20260825-5038c41c4`. Its WAV files are byte-identical to
+the previously credited corpus. Reconciliation created a new immutable corpus
+identity and moved only `final_voiced_frame` by −8 samples in every case
+(approximately 0.17 ms) to match the current RMS detector; no audio was edited.
+The manifest is SHA-bound, each WAV is SHA-bound, and directories/files remain
+private mode 0700/0600.
+
+The no-Browser runner decodes each exact WAV and paces 960-sample frames every
+20 ms using one process-local monotonic clock. It runs one independent
+`A1_1200 → B_AUTO → A2_1200` block: Server-VAD 1200 ms, Semantic-VAD AUTO, then
+the same Server-VAD control. Each arm receives the same WAV bytes, model,
+Provider, frame size and pacing policy. Primary timing is annotated final voiced
+frame → observed `speech_stopped`; EOT → STT final and final voiced frame → STT
+final detect waits shifted downstream. The runner also requires exact
+start/stop/commit/final identity, complete transcript, valid pacing, clean
+cleanup and zero Agent/Tool/Task/P2/TTS/history/Browser effects.
+
+This is a causal real-Provider Gate B, not microphone/Browser product
+acceptance. The human voice is real, but the inserted pauses are perfect
+digital silence: the result is reproducible evidence of continuation safety,
+not proof across breathing, background noise, echo or every speaking style.
 
 ## 7. Residual P2 candidates
 
