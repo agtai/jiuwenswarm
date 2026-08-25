@@ -315,6 +315,12 @@ multiple production owners, so production code stops here until a separate
 minimum AgentCore PR packet re-scopes it. Exact evidence, commands, ownership
 and exclusions are in the [OJ-G1-A packet](reviews/OPENJIUWEN_G1_A_EXECUTION_OWNERSHIP_CONFORMANCE_PACKET_2026-08-23.md).
 
+The accepted [AgentCore reuse and Hermes comparison scope](reviews/OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md)
+limits the current slimming work to direct-reuse, thin-Adapter, AgentCore PR
+candidate and LiveVoice module-disposition preparation. The accompanying
+[symbol migration map](reviews/OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md)
+is a design inventory rather than a migration or product-delivery claim.
+
 EventEnvelope/order/cursor-ACK, D2 receipt/reconcile, real Agent/file-Tool crash
 injection, migration, canary and duplicate deletion remain later packets and
 receive no credit here. Main is the sole shared-semantics, integration,
