@@ -625,36 +625,39 @@ def _validate_report_semantics(report: VadBenchmarkReport) -> None:
         True,
         experiment=report.experiment,
     )
-    expected_attempts = (
-        len(config.configuration_sequence)
-        * 4
-        * config.attempts_per_case
-    )
-    if len(report.attempts) != expected_attempts:
-        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
-    expected_slots = {
+    expected_slots = tuple(
         (configuration_id, threshold, case_id, attempt_index)
         for configuration_id, threshold in config.configuration_sequence
         for case_id in report.case_ids
         for attempt_index in range(1 if report.mode == "pilot" else 5)
-    }
-    actual_slots = {
-        (
-            attempt.configuration_id,
-            attempt.silence_duration_ms,
-            attempt.case_id,
-            attempt.attempt_index,
-        )
+    )
+    actual_slots = tuple(
+        (attempt.configuration_id, attempt.silence_duration_ms, attempt.case_id,
+         attempt.attempt_index)
         for attempt in report.attempts
-    }
-    if (
-        actual_slots != expected_slots
-        or any(
-            attempt.outcome in {VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID}
-            or not attempt.cleanup_complete
-            or not attempt.pacing_valid
-            for attempt in report.attempts
+    )
+    full_population = (
+        len(actual_slots) == len(expected_slots)
+        and set(actual_slots) == set(expected_slots)
+    )
+    early_stop = (
+        bool(report.attempts)
+        and actual_slots == expected_slots[:len(actual_slots)]
+        and report.attempts[-1].outcome in {
+            VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID
+        }
+        and all(
+            attempt.outcome is VadAttemptOutcome.COMPLETED
+            and attempt.cleanup_complete and attempt.pacing_valid
+            for attempt in report.attempts[:-1]
         )
+    )
+    if not full_population and not early_stop:
+        raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
+    if full_population and any(
+        attempt.outcome in {VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID}
+        or not attempt.cleanup_complete or not attempt.pacing_valid
+        for attempt in report.attempts
     ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
     if report.decision != _decision(
@@ -863,9 +866,7 @@ async def run_vad_attempt(
             retained=retained_calls,
         )
         clean = provider.cleanup_snapshot.clean
-        if not clean:
-            reason = VadAttemptReason.CLEANUP_INCOMPLETE
-        elif not pacing_valid:
+        if not pacing_valid:
             reason = VadAttemptReason.PACING_INVALID
         elif early_eot:
             reason = VadAttemptReason.EARLY_EOT
@@ -880,6 +881,8 @@ async def run_vad_attempt(
             RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED if configuration.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD else RecognitionCommitDisposition.SERVER_VAD_OBSERVED,
         }:
             reason = VadAttemptReason.PROVIDER_PROTOCOL
+        elif not clean:
+            reason = VadAttemptReason.CLEANUP_INCOMPLETE
         else:
             assert eot_at is not None and final_at is not None
             return VadAttemptResult.completed(
@@ -906,7 +909,7 @@ async def run_vad_attempt(
                 VadAttemptOutcome.INVALID
                 if reason is VadAttemptReason.PACING_INVALID
                 else VadAttemptOutcome.UNKNOWN
-                if reason is VadAttemptReason.CLEANUP_INCOMPLETE
+                if not clean
                 else VadAttemptOutcome.FAILED
             ),
             speech_started_count=started,
@@ -951,7 +954,7 @@ async def run_vad_attempt(
     if not cleanup:
         return VadAttemptResult.failed(
             configuration_id, silence_duration_ms, case.case_id, attempt_index,
-            VadAttemptReason.CLEANUP_INCOMPLETE,
+            reason,
             outcome=VadAttemptOutcome.UNKNOWN,
             speech_started_count=started, speech_stopped_count=stopped,
             committed_count=committed, final_count=final,
@@ -1042,6 +1045,11 @@ def _semantic_decision(
         else "SEMANTIC_VAD_HIGH_ELIGIBLE"
     )
     if any(
+        attempt.outcome in {VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID}
+        for attempt in attempts
+    ):
+        return "SEMANTIC_VAD_INTEGRITY_REJECTED"
+    if any(
         attempt.reason
         in {
             VadAttemptReason.PROVIDER_PROTOCOL,
@@ -1121,6 +1129,8 @@ def _decision(
         )
         return _semantic_decision(config, attempts, case_ids)
     if config.mode == "pilot":
+        if any(attempt.outcome is not VadAttemptOutcome.COMPLETED for attempt in attempts):
+            return "INCONCLUSIVE"
         return "READY_FOR_SCREENING"
     summaries = {(row.configuration_id, row.case_id): row for row in _safe_summary(attempts)}
     cases = sorted({row.case_id for row in attempts})
@@ -1176,6 +1186,7 @@ async def run_screening(
     stt_model: str = "gpt-4o-mini-transcribe",
 ) -> VadBenchmarkReport:
     attempts = []
+    stopped = False
     for configuration_id, threshold in config.configuration_sequence:
         for case in manifest.cases:
             for attempt_index in range(config.attempts_per_case):
@@ -1191,7 +1202,12 @@ async def run_screening(
                 )
                 attempts.append(result)
                 if result.outcome in {VadAttemptOutcome.UNKNOWN, VadAttemptOutcome.INVALID}:
-                    raise ValueError("VAD_EOT_BENCHMARK_INFRASTRUCTURE_INVALID")
+                    stopped = True
+                    break
+            if stopped:
+                break
+        if stopped:
+            break
     frozen = tuple(attempts)
     settled_manifest = load_vad_corpus_manifest(config.manifest_path)
     if settled_manifest != manifest:

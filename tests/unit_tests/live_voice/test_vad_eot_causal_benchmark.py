@@ -576,7 +576,7 @@ async def test_cancellation_hostile_send_does_not_defeat_deadline(tmp_path: Path
     elapsed = asyncio.get_running_loop().time() - started_at
     assert elapsed < 0.05
     assert result.outcome is runner.VadAttemptOutcome.UNKNOWN
-    assert result.reason is runner.VadAttemptReason.CLEANUP_INCOMPLETE
+    assert result.reason is runner.VadAttemptReason.TIMEOUT
     await asyncio.sleep(0.09)
 
 
@@ -691,12 +691,48 @@ async def test_screening_aborts_after_first_invalid_attempt(tmp_path: Path) -> N
             outcome=runner.VadAttemptOutcome.INVALID,
         )
 
-    with pytest.raises(ValueError, match="INFRASTRUCTURE_INVALID"):
-        await runner.run_screening(
-            config, manifest, provider_factory=lambda _: None,
-            attempt_runner=invalid_attempt,
-        )
+    report = await runner.run_screening(
+        config, manifest, provider_factory=lambda _: None,
+        attempt_runner=invalid_attempt,
+    )
     assert calls == 1
+    assert len(report.attempts) == 1
+    assert report.decision == "INCONCLUSIVE"
+    runner.write_vad_benchmark_report(config.output_path, report)
+    assert config.output_path.stat().st_mode & 0o777 == 0o600
+    serialized = config.output_path.read_text(encoding="utf-8")
+    assert "exception" not in serialized
+    assert '"transcript_complete":false' in serialized
+    assert "api_key" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_semantic_unknown_is_integrity_rejected_before_provider_incompatible(
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(tmp_path), experiment="semantic-auto")
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    calls = 0
+
+    async def unknown_attempt(_config, case, attempt_index, **kwargs):
+        nonlocal calls
+        calls += 1
+        return runner.VadAttemptResult.failed(
+            kwargs["configuration_id"], kwargs["silence_duration_ms"],
+            case.case_id, attempt_index, runner.VadAttemptReason.PROVIDER_PROTOCOL,
+            outcome=runner.VadAttemptOutcome.UNKNOWN,
+            cleanup_complete=False,
+        )
+
+    report = await runner.run_screening(
+        config, manifest, provider_factory=lambda _: None,
+        attempt_runner=unknown_attempt,
+    )
+
+    assert calls == 1
+    assert report.decision == "SEMANTIC_VAD_INTEGRITY_REJECTED"
+    runner.write_vad_benchmark_report(config.output_path, report)
+    assert config.output_path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio
@@ -1273,7 +1309,7 @@ def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) ->
         provider_class="OpenAIStreamingSpeechProvider",
         stt_model="gpt-4o-mini-transcribe",
         attempts=tuple(attempts),
-        decision="READY_FOR_SCREENING",
+        decision="INCONCLUSIVE",
     )
     runner.write_vad_benchmark_report(config.output_path, report)
     loaded = json.loads(config.output_path.read_text())
