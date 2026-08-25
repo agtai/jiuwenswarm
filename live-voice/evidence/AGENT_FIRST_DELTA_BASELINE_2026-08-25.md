@@ -59,7 +59,44 @@ The population also shows a warm-state distinction. Its first short call took
 first-token time are still aggregated inside this measurement and remain the
 next decomposition target.
 
-## 4. Artifact binding
+## 4. Stable segmentation versus authoritative-final chunked TTS
+
+These are complementary experiments at different boundaries and must not be
+reported as the same optimization:
+
+```text
+pre-final stable segmentation
+
+Agent request
+  → chat.delta stream
+  → exact immutable prefix gate
+  → authoritative PresentationUnit
+  → TTS may start
+  → chat.final later confirms the prefix
+
+post-final chunked TTS (LVL-10/LVL-10L)
+
+Agent request
+  → complete chat.final
+  → split already-authoritative final text
+  → bounded sequential/parallel TTS requests
+  → ordered audio/downlink
+```
+
+Stable segmentation targets the wait before `chat.final`; its central risk is
+speaking text that could later be retracted. The current baseline shows almost
+no timing opportunity for short output and material timing windows for medium
+and long output, but it does not yet prove an immutable prefix.
+
+LVL-10/LVL-10L starts only after the complete authoritative `chat.final`. It
+cannot recover the measured 1.68/3.52-second pre-final windows. Its authority
+risk is lower, while its optimization target is TTS generation/completion and
+inter-sentence continuity. The LVL-10L 2100-character pilot directionally saved
+6.93–7.75 seconds of post-final completion, but its formal population was
+stopped and it has no product credit. A future design may compose the two
+techniques only after the exact-prefix gate independently passes.
+
+## 5. Artifact binding
 
 - Content-free population report:
   `/home/renan/openJiuwen-ai/live-voice-latency-runs/agent-first-delta-20260825/population-f71a5d8300f621616030c4dafa608edaec6e46b0.json`
@@ -70,7 +107,7 @@ next decomposition target.
 - The verbose local log is diagnostic-only and may contain runtime metadata;
   it is not a shareable or credited evidence artifact.
 
-## 5. Next gate
+## 6. Next gate
 
 Keep the first-delta instrumentation default-off. Before changing product
 behaviour, run an exact-prefix/stable-segmentation screen on medium and long
