@@ -244,6 +244,8 @@ def test_report_is_private_exclusive_and_mode_600(tmp_path: Path) -> None:
 
     assert report["status"] == "PASS"
     assert report["decision"] == "PILOT_PASS"
+    assert report["excluded_warmup_agent_calls"] == 0
+    assert report["excluded_warmup_tts_calls"] == 0
     assert report["summaries"]["medium"]["arms"]["A1"]["agent_to_candidate_p50_ms"] == pytest.approx(700.0)
     assert report["summaries"]["long"]["arms"]["A2"]["candidate_to_final_p95_nearest_rank_ms"] == pytest.approx(1600.0)
     assert output.stat().st_mode & 0o777 == 0o600

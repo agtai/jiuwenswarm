@@ -531,6 +531,7 @@ def build_report(
     git_commit: str,
     agent_core_commit: str,
     attempts: tuple[Attempt, ...],
+    warmup_completed: bool = False,
 ) -> dict[str, object]:
     count = 1 if mode == "pilot" else 5
     expected_slots = tuple(
@@ -667,6 +668,8 @@ def build_report(
         "summaries": summaries,
         "authorized_agent_calls": sum(attempt.authorized_agent_calls for attempt in attempts),
         "authorized_tts_calls": sum(attempt.authorized_tts_calls for attempt in attempts),
+        "excluded_warmup_agent_calls": 1 if warmup_completed else 0,
+        "excluded_warmup_tts_calls": 1 if warmup_completed else 0,
         "forbidden_effects": dict(ZERO_FORBIDDEN_EFFECTS),
         "browser_exercised": False,
         "product_wiring_exercised": False,
@@ -729,6 +732,15 @@ async def _run(args: argparse.Namespace) -> int:
         )
         if facade is None:
             raise RuntimeError("formal Agent facade is unavailable")
+        warmup = await measure_attempt(
+            facade,
+            WORKLOADS[0],
+            "A1",
+            -1,
+            tts=create_real_tts_client(dict(os.environ)),
+        )
+        if warmup.outcome != "completed":
+            raise RuntimeError("declared Agent/TTS warmup failed")
         attempts = await collect_attempts(
             facade,
             mode=args.command,
@@ -754,6 +766,7 @@ async def _run(args: argparse.Namespace) -> int:
         git_commit=args.git_commit,
         agent_core_commit=args.agent_core_commit,
         attempts=attempts,
+        warmup_completed=True,
     )
     prefix_screen.write_report(output, report)
     return 0 if report["status"] == "PASS" else 2
