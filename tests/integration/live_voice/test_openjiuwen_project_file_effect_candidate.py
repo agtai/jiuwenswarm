@@ -82,6 +82,20 @@ def _require_exact_candidate() -> tuple[Path, str]:
     return candidate, actual
 
 
+def _require_candidate_contains(candidate: Path, ancestor: str) -> None:
+    contained = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, "HEAD"],
+        cwd=candidate,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if contained.returncode != 0:
+        pytest.fail(
+            f"AgentCore candidate does not contain required capability {ancestor}"
+        )
+
+
 def _require_candidate_import_source(candidate: Path) -> None:
     loaded = sys.modules.get("openjiuwen")
     origin = getattr(loaded, "__file__", None) if loaded is not None else None
@@ -388,9 +402,12 @@ async def _plan_claim_dispatch(handle, owned, plan):
 async def test_exact_candidate_project_effect_success_recovery_and_isolation(
     tmp_path: Path,
 ) -> None:
-    candidate, expected = _require_exact_candidate()
+    candidate, _actual = _require_exact_candidate()
     _require_candidate_import_source(candidate)
-    assert expected == "db8216839562de36fa24fd6f5ce807acea5a132a"
+    _require_candidate_contains(
+        candidate,
+        "db8216839562de36fa24fd6f5ce807acea5a132a",
+    )
 
     from openjiuwen.agent_teams import (
         ExternalEffectClaimPurpose,

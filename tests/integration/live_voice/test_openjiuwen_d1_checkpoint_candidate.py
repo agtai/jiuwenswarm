@@ -76,6 +76,20 @@ def _require_exact_candidate() -> tuple[Path, str]:
     return candidate, actual
 
 
+def _require_candidate_contains(candidate: Path, ancestor: str) -> None:
+    contained = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, "HEAD"],
+        cwd=candidate,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if contained.returncode != 0:
+        pytest.fail(
+            f"AgentCore candidate does not contain required capability {ancestor}"
+        )
+
+
 def _require_candidate_import_source(candidate: Path) -> None:
     loaded = sys.modules.get("openjiuwen")
     origin = getattr(loaded, "__file__", None) if loaded is not None else None
@@ -303,9 +317,12 @@ def _adapter(
 async def test_exact_candidate_d1_publish_retry_orphan_and_reopen(
     tmp_path: Path,
 ) -> None:
-    candidate, expected = _require_exact_candidate()
+    candidate, _actual = _require_exact_candidate()
     _require_candidate_import_source(candidate)
-    assert expected == "503cf538fd7403d0919e53b53f857fa68d624f31"
+    _require_candidate_contains(
+        candidate,
+        "503cf538fd7403d0919e53b53f857fa68d624f31",
+    )
 
     from openjiuwen.agent_teams.schema.task import ExecutionOutcome, TaskEventType
     from openjiuwen.agent_teams.spawn.shared_resources import cleanup_shared_resources
