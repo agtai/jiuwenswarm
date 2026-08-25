@@ -1059,6 +1059,36 @@ async def test_product_submit_contains_hook_failures() -> None:
 
 
 @pytest.mark.asyncio
+async def test_product_cancel_before_visible_delta_emits_no_late_delta_mark() -> None:
+    lower = LowerFormalAdapter(release=asyncio.Event())
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    marks: list[str] = []
+    hooks = AgentForegroundStreamProbeHooks(
+        mark_started=lambda: marks.append("started"),
+        mark_first_visible_delta=lambda: marks.append("delta"),
+    )
+
+    handle = await submit(current, selected, latency_probe_hooks=hooks)
+    await asyncio.wait_for(lower.started.wait(), timeout=1)
+    cancelled = await current.close_interaction(
+        cancel_command(handle, selected, command_id="cancel-before-visible-delta")
+    )
+
+    assert cancelled.accepted is True
+    assert (await asyncio.wait_for(handle.completion, timeout=1)).terminal_outcome is (
+        TerminalOutcome.CANCELLED
+    )
+    assert marks == ["started"]
+    assert history.assistant_intents == []
+    assert lower.calls == 1
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_turn() -> (
     None
 ):
