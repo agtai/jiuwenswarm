@@ -649,6 +649,7 @@ class _RecognitionCommitOwner(StrEnum):
     NONE = "none"
     MANUAL = "manual"
     SERVER_VAD = "server_vad"
+    SEMANTIC_VAD = "semantic_vad"
 
 
 @dataclass(slots=True)
@@ -1125,12 +1126,10 @@ class OpenAIStreamingSpeechProvider:
                         "RECOGNITION_COMMIT_CONFLICT",
                         "recognition stream cannot be committed in its current state",
                     )
-                if session.commit_owner is _RecognitionCommitOwner.SERVER_VAD:
-                    return (
-                        RecognitionCommitDisposition.SERVER_VAD_OBSERVED
-                        if session.committed
-                        else RecognitionCommitDisposition.SERVER_VAD_PENDING
-                    )
+                if session.commit_owner in (_RecognitionCommitOwner.SERVER_VAD, _RecognitionCommitOwner.SEMANTIC_VAD):
+                    if session.commit_owner is _RecognitionCommitOwner.SEMANTIC_VAD:
+                        return RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED if session.committed else RecognitionCommitDisposition.SEMANTIC_VAD_PENDING
+                    return RecognitionCommitDisposition.SERVER_VAD_OBSERVED if session.committed else RecognitionCommitDisposition.SERVER_VAD_PENDING
                 if (
                     session.committed
                     or session.commit_owner is not _RecognitionCommitOwner.NONE
@@ -1523,7 +1522,7 @@ class OpenAIStreamingSpeechProvider:
                 session.speech_end_ms = end_ms
                 session.input_fenced = True
                 if session.commit_owner is _RecognitionCommitOwner.NONE:
-                    session.commit_owner = _RecognitionCommitOwner.SERVER_VAD
+                    session.commit_owner = (_RecognitionCommitOwner.SEMANTIC_VAD if session.request.turn_detection.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD else _RecognitionCommitOwner.SERVER_VAD)
             await self._publish_recognition_boundary(
                 session,
                 RecognitionTurnBoundaryKind.SPEECH_STOPPED,
@@ -1533,7 +1532,7 @@ class OpenAIStreamingSpeechProvider:
             return False
         if kind == "input_audio_buffer.committed":
             item_id = _safe_label(event.get("item_id"), "item_id")
-            if session.commit_owner is _RecognitionCommitOwner.SERVER_VAD:
+            if session.commit_owner in (_RecognitionCommitOwner.SERVER_VAD, _RecognitionCommitOwner.SEMANTIC_VAD):
                 if (
                     session.speech_end_ms is None
                     or session.committed
@@ -2763,7 +2762,8 @@ def _turn_detection_value(
         return None
     if detection.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD:
         config = detection.semantic_vad
-        assert config is not None
+        if config is None:
+            raise StreamingSpeechViolation("INVALID_TURN_DETECTION", "semantic VAD wire requires typed config")
         return {"type": "semantic_vad", "eagerness": config.eagerness.value, "create_response": False, "interrupt_response": False}
     config = detection.server_vad
     assert config is not None

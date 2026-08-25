@@ -98,6 +98,8 @@ class RecognitionCommitDisposition(StrEnum):
     CLIENT_COMMIT_SENT = "client_commit_sent"
     SERVER_VAD_PENDING = "server_vad_pending"
     SERVER_VAD_OBSERVED = "server_vad_observed"
+    SEMANTIC_VAD_PENDING = "semantic_vad_pending"
+    SEMANTIC_VAD_OBSERVED = "semantic_vad_observed"
 
 
 @dataclass(frozen=True, slots=True)
