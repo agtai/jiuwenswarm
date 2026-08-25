@@ -550,6 +550,34 @@ async def test_semantic_vad_requires_native_capability_before_provider_allocatio
 
 
 @pytest.mark.asyncio
+async def test_semantic_vad_provider_order_fences_input_and_never_client_commits() -> None:
+    provider = _ServerVadProvider()
+    async def semantic_commit(ref):
+        assert ref == provider.ref
+        provider.commit_count += 1
+        return RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED
+    provider.commit_recognition = semantic_commit
+    owner = StreamingRecognitionRouteOwner(lambda: asyncio.sleep(0, result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)))
+    handle, fallback = await owner.begin(_binding(), turn_detection=RecognitionTurnDetection.semantic_vad_configured(SemanticVadEagerness.HIGH))
+    assert handle is not None and fallback is None
+    owner.offer(handle, _frame(0))
+    await asyncio.sleep(0)
+    await provider.events.put(RecognitionTurnBoundaryEvent(handle.ref, _PROVIDER_REF, 0, RecognitionTurnBoundaryKind.SPEECH_STARTED, "provider-item-1", provider_start_ms=100))
+    await provider.events.put(RecognitionTurnBoundaryEvent(handle.ref, _PROVIDER_REF, 1, RecognitionTurnBoundaryKind.SPEECH_STOPPED, "provider-item-1", provider_end_ms=700))
+    end = await asyncio.wait_for(owner.wait_end_of_turn(handle), timeout=1)
+    assert end.provider_end_ms == 700
+    owner.offer(handle, _frame(1))
+    assert [f.seq for f in provider.frames] == [0]
+    task = asyncio.create_task(owner.finish(handle))
+    await asyncio.sleep(0)
+    await provider.events.put(RecognitionTurnBoundaryEvent(handle.ref, _PROVIDER_REF, 2, RecognitionTurnBoundaryKind.COMMITTED, "provider-item-1"))
+    await provider.events.put(StreamingRecognitionEvent(handle.ref, _PROVIDER_REF, 3, None, RecognitionEventKind.FINAL, RecognitionHypothesis((RecognitionAlternative("semantic final", "semantic final", None),)), timing_basis=RecognitionTimingBasis.PROVIDER_TIME))
+    outcome = await asyncio.wait_for(task, timeout=1)
+    assert outcome.final_text == "semantic final" and provider.commit_count == 1
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit() -> (
     None
 ):

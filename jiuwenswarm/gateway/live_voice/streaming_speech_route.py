@@ -613,6 +613,8 @@ class StreamingRecognitionRouteOwner:
                         RecognitionCommitDisposition.CLIENT_COMMIT_SENT,
                         RecognitionCommitDisposition.SERVER_VAD_PENDING,
                         RecognitionCommitDisposition.SERVER_VAD_OBSERVED,
+                        RecognitionCommitDisposition.SEMANTIC_VAD_PENDING,
+                        RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED,
                     }:
                         raise RuntimeError("recognition commit ownership was untyped")
                     if handle.event_task is None:
