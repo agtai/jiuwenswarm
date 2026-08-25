@@ -11,6 +11,7 @@ from jiuwenswarm.gateway.app_gateway import (
     GatewayServerConfig,
     RouteConfig,
     _inject_live_voice_gateway_voice_claim,
+    _inject_live_voice_interaction_engine,
     _inject_live_voice_web_alpha_credential,
     _normalize_gateway_message,
 )
@@ -206,6 +207,26 @@ def test_live_voice_web_alpha_credential_owner_is_default_off(
 
     assert "auth_token" not in msg.params
     assert msg.params["session_id"] == "session-1"
+
+
+def test_gateway_overwrites_browser_interaction_engine_selection() -> None:
+    msg = Message(
+        id="req-native-selection",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={
+            "session_id": "session-1",
+            "interaction_engine": "browser-forged",
+        },
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
+    )
+
+    _inject_live_voice_interaction_engine(msg, "openai-realtime-native")
+
+    assert msg.params["interaction_engine"] == "openai-realtime-native"
 
 
 @pytest.mark.parametrize(

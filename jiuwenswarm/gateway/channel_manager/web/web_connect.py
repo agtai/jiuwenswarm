@@ -206,6 +206,8 @@ class WebChannel(BaseWsChannel):
         self.live_voice_owned_speech_service: Any = None
         self.live_voice_streaming_speech_owner: Any = None
         self.live_voice_streaming_synthesis_owner: Any = None
+        self.live_voice_interaction_engine: str = "cascade"
+        self.live_voice_native_runtime_client: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -1076,25 +1078,68 @@ class WebChannel(BaseWsChannel):
             # returned to the still-live physical request socket.  Session or
             # routing-key fallbacks are delivery conveniences, never authority.
             media_registry = self.live_voice_media_registry
-            if (
-                media_registry is not None
-                and exact_request_ws is not None
-                and ws_set == {exact_request_ws}
+            private_native_descriptor = (
+                isinstance(res_payload.get("result"), dict)
+                and "_native_gateway" in res_payload["result"]
+            )
+            if private_native_descriptor and (
+                exact_request_ws is None or ws_set != {exact_request_ws}
             ):
+                logger.error(
+                    "Live Voice Native activation response lacked exact socket authority"
+                )
+                return
+            if exact_request_ws is not None and ws_set == {exact_request_ws}:
+                native_client = self.live_voice_native_runtime_client
                 try:
-                    media_registry.observe_agent_response(
-                        res_payload,
-                        routed_session_id=msg.session_id,
-                        user_id=msg.user_id,
-                        connection_id=request_ws_id,
-                        request_method=str(metadata.get("method") or ""),
-                    )
+                    if native_client is not None:
+                        res_payload = native_client.observe_activation_response(
+                            res_payload,
+                            routed_session_id=msg.session_id,
+                            connection_id=request_ws_id,
+                            request_method=str(metadata.get("method") or ""),
+                        )
+                    elif private_native_descriptor:
+                        raise RuntimeError(
+                            "Native activation has no Gateway capability owner"
+                        )
                 except Exception:
-                    # An evidence observer can only narrow Speech authority; it
-                    # must never interrupt delivery of the Agent response.
+                    res_payload = {
+                        "request_id": res_payload.get("request_id", msg.id),
+                        "ok": False,
+                        "result": None,
+                        "error": {
+                            "code": "UNAVAILABLE",
+                            "reason": "NATIVE_GATEWAY_ACTIVATION_INVALID",
+                            "message": "Native activation is unavailable",
+                        },
+                    }
                     logger.exception(
-                        "Live Voice media authority observer failed closed"
+                        "Live Voice Native capability observer failed closed"
                     )
+                frame["payload"] = res_payload
+                if res_payload.get("ok") is False:
+                    frame["ok"] = False
+                    native_error = res_payload.get("error")
+                    if isinstance(native_error, dict):
+                        if isinstance(native_error.get("message"), str):
+                            frame["error"] = native_error["message"]
+                        if isinstance(native_error.get("code"), str):
+                            frame["code"] = native_error["code"]
+                if media_registry is not None and frame["ok"] is True:
+                    try:
+                        media_registry.observe_agent_response(
+                            res_payload,
+                            routed_session_id=msg.session_id,
+                            user_id=msg.user_id,
+                            connection_id=request_ws_id,
+                            request_method=str(metadata.get("method") or ""),
+                        )
+                    except Exception:
+                        # Media evidence can only narrow Speech authority.
+                        logger.exception(
+                            "Live Voice media authority observer failed closed"
+                        )
             await self._broadcast_to(frame, ws_set)
             return
 

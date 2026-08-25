@@ -238,6 +238,11 @@ class ReqMethod(Enum):
     LIVE_VOICE_COMPOSITION_P2_BARGE_IN = (
         "live_voice.composition.p2.barge_in"
     )
+    LIVE_VOICE_INTERNAL_NATIVE_PROPOSE = "live_voice.internal.native.propose"
+    LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK = (
+        "live_voice.internal.native.presentation_ack"
+    )
+    LIVE_VOICE_INTERNAL_NATIVE_CLOSE = "live_voice.internal.native.close"
     LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE = (
         "live_voice.composition.p3.confirmation.issue"
     )

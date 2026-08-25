@@ -160,6 +160,42 @@ class _ProductRegistry:
         self.calls.append(("p2.barge_in", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"applied": True}})
 
+    async def handle_native_propose(self, **kwargs):
+        self.calls.append(("native.propose", kwargs))
+        return P3RouteResult(
+            True,
+            {
+                "request_id": kwargs["request_id"],
+                "ok": True,
+                "result": {"accepted": True},
+                "error": None,
+            },
+        )
+
+    async def handle_native_presentation_ack(self, **kwargs):
+        self.calls.append(("native.presentation_ack", kwargs))
+        return P3RouteResult(
+            True,
+            {
+                "request_id": kwargs["request_id"],
+                "ok": True,
+                "result": {"accepted": True},
+                "error": None,
+            },
+        )
+
+    async def handle_native_close(self, **kwargs):
+        self.calls.append(("native.close", kwargs))
+        return P3RouteResult(
+            True,
+            {
+                "request_id": kwargs["request_id"],
+                "ok": True,
+                "result": {"accepted": True},
+                "error": None,
+            },
+        )
+
     async def handle_p3_confirmation_issue(self, **kwargs):
         self.calls.append(("p3.confirmation.issue", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"issued": True}})
@@ -577,6 +613,114 @@ async def test_top_level_dispatch_reaches_every_product_composition_method(
     )
 
     assert captured == [method]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    [
+        ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+        ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK,
+        ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE,
+    ],
+)
+async def test_top_level_dispatch_reaches_only_internal_native_handler(
+    method: ReqMethod,
+) -> None:
+    server = object.__new__(AgentWebSocketServer)
+    captured: list[ReqMethod | None] = []
+
+    async def no_hook(_request: AgentRequest) -> None:
+        return None
+
+    async def record_native_request(
+        _ws: object,
+        request: AgentRequest,
+        _send_lock: asyncio.Lock,
+    ) -> None:
+        captured.append(request.req_method)
+
+    server._trigger_before_chat_request_hook = no_hook
+    server._handle_live_voice_native_request = record_native_request
+    await server._handle_message(
+        _WebSocket(),
+        json.dumps(
+            {
+                "request_id": f"request-top-level-{method.name.lower()}",
+                "channel_id": "live_voice_native_gateway",
+                "session_id": "session-1",
+                "req_method": method.value,
+                "params": {},
+            }
+        ),
+        asyncio.Lock(),
+    )
+
+    assert captured == [method]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "expected_call"),
+    [
+        (ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE, "native.propose"),
+        (
+            ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK,
+            "native.presentation_ack",
+        ),
+        (ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE, "native.close"),
+    ],
+)
+async def test_native_handler_requires_private_gateway_channel(
+    method: ReqMethod,
+    expected_call: str,
+) -> None:
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    private_ws = _WebSocket()
+    private_request = AgentRequest(
+        request_id="request-native-private",
+        channel_id="live_voice_native_gateway",
+        session_id="session-1",
+        req_method=method,
+        params={"private": True, "mode": "agent"},
+    )
+
+    await server._handle_live_voice_native_request(
+        private_ws, private_request, asyncio.Lock()
+    )
+
+    assert registry.calls == [
+        (
+            expected_call,
+            {
+                "params": {"private": True},
+                "request_id": "request-native-private",
+                "session_id": "session-1",
+            },
+        )
+    ]
+    assert json.loads(private_ws.sent[0])["status"] == "succeeded"
+
+    browser_ws = _WebSocket()
+    browser_request = AgentRequest(
+        request_id="request-native-browser",
+        channel_id="web",
+        session_id="session-1",
+        req_method=method,
+        params={"private": True},
+    )
+    await server._handle_live_voice_native_request(
+        browser_ws, browser_request, asyncio.Lock()
+    )
+
+    assert len(registry.calls) == 1
+    browser_wire = json.loads(browser_ws.sent[0])
+    assert browser_wire["status"] == "failed"
+    assert browser_wire["body"]["details"]["error"]["reason"] == (
+        "NATIVE_INTERNAL_CHANNEL_REQUIRED"
+    )
 
 
 @pytest.mark.asyncio

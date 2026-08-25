@@ -169,6 +169,7 @@ class NativeInteractionRuntimeOwner:
         binding: NativeInteractionBinding,
         *,
         runtime: ConversationRuntimeLoop,
+        owns_runtime: bool = True,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -179,8 +180,11 @@ class NativeInteractionRuntimeOwner:
                 "NATIVE_RUNTIME_SCOPE_MISMATCH",
                 "Runtime scope must match the exact Native activation binding",
             )
+        if type(owns_runtime) is not bool:
+            raise TypeError("owns_runtime must be boolean")
         self._binding = binding
         self._runtime = runtime
+        self._owns_runtime = owns_runtime
         self._lock = asyncio.Lock()
         self._started = False
         self._closed = False
@@ -205,12 +209,34 @@ class NativeInteractionRuntimeOwner:
                 )
             if self._started:
                 return False
-            if not await self._runtime.start():
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_RUNTIME_UNAVAILABLE",
-                    "Conversation Runtime did not accept Native start",
+            if self._owns_runtime:
+                if not await self._runtime.start():
+                    raise NativeInteractionRuntimeError(
+                        "NATIVE_RUNTIME_UNAVAILABLE",
+                        "Conversation Runtime did not accept Native start",
+                    )
+                await self._runtime.open_interaction(self._binding.interaction_id)
+            else:
+                snapshot = self._runtime.snapshot()
+                interaction = next(
+                    (
+                        item
+                        for item in snapshot.conversation.interactions
+                        if item.interaction_id == self._binding.interaction_id
+                    ),
+                    None,
                 )
-            await self._runtime.open_interaction(self._binding.interaction_id)
+                if (
+                    not snapshot.started
+                    or not snapshot.accepting
+                    or snapshot.closed
+                    or interaction is None
+                    or interaction.state is not InteractionState.OPEN
+                ):
+                    raise NativeInteractionRuntimeError(
+                        "NATIVE_RUNTIME_UNAVAILABLE",
+                        "shared Conversation Runtime is not open for the Native binding",
+                    )
             self._started = True
             return True
 
@@ -563,7 +589,8 @@ class NativeInteractionRuntimeOwner:
                     await self._runtime.transition_interaction(
                         self._binding.interaction_id, InteractionState.CLOSED
                     )
-            await self._runtime.close()
+            if self._owns_runtime:
+                await self._runtime.close()
             self._closed = True
 
     def snapshot(self) -> NativeInteractionRuntimeSnapshot:

@@ -75,6 +75,21 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     ValidatedExecutorConfiguration,
     ValidatedLiveVoiceConfiguration,
 )
+from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
+from jiuwenswarm.server.live_voice.native_interaction_carrier import (
+    NativeInteractionProposal,
+)
+from jiuwenswarm.server.live_voice.native_interaction_config import (
+    InteractionEngineKind,
+)
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeInteractionBinding,
+    NativeTurnCommit,
+)
+from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    NativeEngineEvent,
+)
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice.batch_speech import (
@@ -1592,6 +1607,7 @@ def _registry(
     commit_ledger: TurnCommitLedger | None = None,
     critical_input: bool = False,
     unified: bool = False,
+    interaction_engine: InteractionEngineKind = InteractionEngineKind.CASCADE,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -1606,6 +1622,7 @@ def _registry(
             p2_enabled=p2,
             p3_text_enabled=p3,
             critical_input_enabled=critical_input,
+            interaction_engine=interaction_engine,
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
@@ -1672,6 +1689,77 @@ def _p2_params(**changes: object) -> dict[str, object]:
     }
     params.update(changes)
     return params
+
+
+def _native_turn_proposal(
+    binding: NativeInteractionBinding, *, ordinal: int = 1
+) -> NativeInteractionProposal:
+    commit = NativeTurnCommit(
+        contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+        commit_id=f"native-commit-{ordinal}",
+        binding=binding,
+        turn_id=f"native-turn-{ordinal}",
+        provider_session_id="provider-session-native",
+        provider_item_id=f"provider-item-{ordinal}",
+        provider_event_id=f"provider-commit-{ordinal}",
+        causation_id=f"provider-speech-{ordinal}",
+        input_audio_start_ms=(ordinal - 1) * 20,
+        input_audio_end_ms=ordinal * 20,
+        committed_audio_ms=20,
+    )
+    return NativeInteractionProposal.from_engine_event(
+        binding,
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id=f"native-action-{ordinal}",
+                operation="TURN_COMMIT",
+                interaction_id=binding.interaction_id,
+                scope=binding.scope,
+                payload=(("turn_id", commit.turn_id),),
+            ),
+            turn_commit=commit,
+        ),
+    )
+
+
+def _native_propose_params(
+    binding: NativeInteractionBinding,
+    capability: str,
+    proposal: NativeInteractionProposal,
+) -> dict[str, object]:
+    return {
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "binding": binding.to_dict(),
+        "capability": capability,
+        "proposal": proposal.to_dict(),
+    }
+
+
+def _native_speak_proposal(
+    binding: NativeInteractionBinding,
+) -> NativeInteractionProposal:
+    return NativeInteractionProposal.from_engine_event(
+        binding,
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-action-speak-1",
+                operation="SPEAK",
+                interaction_id=binding.interaction_id,
+                scope=binding.scope,
+                payload=(("provider_response_id", "provider-response-1"),),
+            )
+        ),
+    )
+
+
+def _native_close_params(
+    binding: NativeInteractionBinding, capability: str
+) -> dict[str, object]:
+    return {
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "binding": binding.to_dict(),
+        "capability": capability,
+    }
 
 
 def _p2_task_origin_params(*, stem: str, text: str) -> dict[str, object]:
@@ -1993,6 +2081,276 @@ def test_demo_policy_bypass_is_backend_configured_and_default_off(
     assert (
         ProductCompositionSettings.from_environment().demo_policy_bypass_enabled is True
     )
+
+
+@pytest.mark.asyncio
+async def test_cascade_p2_activation_has_no_private_native_descriptor(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-cascade-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert activated.ok is True
+    result = cast(dict[str, object], activated.payload["result"])
+    assert "_native_gateway" not in result
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert route.native_runtime_owner is None
+    assert route.native_capability is None
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_replays_capability_and_admits_exact_turn(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activation = _p2_params(interaction_engine="openai-realtime-native")
+
+    first = await registry.handle_p2_activate(
+        params=activation,
+        request_id="request-native-activate-1",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    replay = await registry.handle_p2_activate(
+        params=activation,
+        request_id="request-native-activate-2",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert first.ok is replay.ok is True
+    first_result = cast(dict[str, object], first.payload["result"])
+    replay_result = cast(dict[str, object], replay.payload["result"])
+    descriptor = cast(dict[str, object], first_result["_native_gateway"])
+    assert replay_result["_native_gateway"] == descriptor
+    capability = cast(str, descriptor["capability"])
+    assert len(capability) == 64
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+
+    admitted = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_turn_proposal(binding),
+        ),
+        request_id="request-native-propose-turn",
+        session_id=SCOPE.session_id,
+    )
+
+    assert admitted.ok is True
+    assert admitted.payload["result"] == {
+        "kind": "turn",
+        "status": "observed",
+        "accepted": True,
+    }
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert route.native_runtime_owner is not None
+    assert route.native_runtime_owner.snapshot().turn_count == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_wrong_capability_has_zero_runtime_and_replay_effect(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert route.native_runtime_owner is not None
+    before = route.native_runtime_owner.snapshot()
+
+    rejected = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            "f" * 64,
+            _native_turn_proposal(binding),
+        ),
+        request_id="request-native-wrong-capability",
+        session_id=SCOPE.session_id,
+    )
+
+    assert rejected.ok is False
+    assert cast(dict, rejected.payload["error"])["reason"] == (
+        "NATIVE_RUNTIME_CAPABILITY_REJECTED"
+    )
+    assert route.native_runtime_owner.snapshot() == before
+    assert registry._native_propose_operations == {}
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_speak_changed_replay_and_close_are_exactly_fenced(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    turn_request = "request-native-turn-once"
+    admitted_turn = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_turn_proposal(binding)
+        ),
+        request_id=turn_request,
+        session_id=SCOPE.session_id,
+    )
+    assert admitted_turn.ok is True
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert route.native_runtime_owner is not None
+
+    changed_replay = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_turn_proposal(binding, ordinal=2)
+        ),
+        request_id=turn_request,
+        session_id=SCOPE.session_id,
+    )
+    assert changed_replay.ok is False
+    assert cast(dict, changed_replay.payload["error"])["reason"] == (
+        "NATIVE_REQUEST_REPLAY_CONFLICT"
+    )
+    assert route.native_runtime_owner.snapshot().turn_count == 1
+
+    response = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id="request-native-speak",
+        session_id=SCOPE.session_id,
+    )
+    assert response.ok is True
+    response_result = cast(dict[str, object], response.payload["result"])
+    assert response_result["kind"] == "response"
+    assert response_result["provider_response_id"] == "provider-response-1"
+    assert cast(dict, response_result["response"])["response_generation"] == 1
+    assert route.native_runtime_owner.snapshot().response_count == 1
+
+    closed = await registry.handle_native_close(
+        params=_native_close_params(binding, capability),
+        request_id="request-native-close",
+        session_id=SCOPE.session_id,
+    )
+    replayed_close = await registry.handle_native_close(
+        params=_native_close_params(binding, capability),
+        request_id="request-native-close",
+        session_id=SCOPE.session_id,
+    )
+    assert closed.ok is replayed_close.ok is True
+    assert closed.payload == replayed_close.payload
+    assert route.native_runtime_owner is None
+    assert route.native_capability is None
+    assert route.native_closed is True
+
+    stale = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_turn_proposal(binding, ordinal=2)
+        ),
+        request_id="request-native-after-close",
+        session_id=SCOPE.session_id,
+    )
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] == (
+        "NATIVE_RUNTIME_CAPABILITY_REJECTED"
+    )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_successor_activation_closes_predecessor_before_replacement(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    first_params = _p2_params(interaction_engine="openai-realtime-native")
+    first = await registry.handle_p2_activate(
+        params=first_params,
+        request_id="request-native-first",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    first_descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], first.payload["result"])["_native_gateway"],
+    )
+    first_binding = NativeInteractionBinding.from_dict(first_descriptor["binding"])
+    first_capability = cast(str, first_descriptor["capability"])
+    predecessor = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert predecessor.native_runtime_owner is not None
+    predecessor_owner = predecessor.native_runtime_owner
+
+    successor_params = _p2_params(
+        interaction_engine="openai-realtime-native",
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    successor = await registry.handle_p2_activate(
+        params=successor_params,
+        request_id="request-native-successor",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert successor.ok is True
+    assert predecessor_owner.snapshot().closed is True
+    current = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    assert current.binding.activation_generation == 2
+    successor_descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], successor.payload["result"])["_native_gateway"],
+    )
+    assert successor_descriptor["capability"] != first_capability
+
+    stale = await registry.handle_native_propose(
+        params=_native_propose_params(
+            first_binding,
+            first_capability,
+            _native_turn_proposal(first_binding),
+        ),
+        request_id="request-native-stale-predecessor",
+        session_id=SCOPE.session_id,
+    )
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] == (
+        "NATIVE_RUNTIME_CAPABILITY_REJECTED"
+    )
+    await registry.stop()
 
 
 @pytest.mark.asyncio

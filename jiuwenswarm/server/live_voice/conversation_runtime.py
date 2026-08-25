@@ -425,7 +425,8 @@ class ConversationRuntime:
                     max(minimum_generation, prior_generation + 1)
                     if self._response_generation_owner is None
                     else self._response_generation_owner(
-                        interaction_id, prior_generation
+                        interaction_id,
+                        max(prior_generation, minimum_generation - 1),
                     )
                 )
             if (

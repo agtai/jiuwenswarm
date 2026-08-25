@@ -10,7 +10,9 @@ from typing import Any
 
 import pytest
 
+from jiuwenswarm.common.schema.message import Message
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+from jiuwenswarm.gateway.routing.keys import RoutingKey
 from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannel,
     WebChannelConfig,
@@ -21,6 +23,7 @@ class _FakeWebSocket:
     def __init__(self) -> None:
         self.sent_frames: list[dict[str, Any]] = []
         self.remote_address = ("127.0.0.1", 12345)
+        self.closed = False
 
     async def send(self, data: str) -> None:
         self.sent_frames.append(json.loads(data))
@@ -132,6 +135,118 @@ async def test_ws_sessions_ignores_empty_string_session_id():
     )
 
     assert id(ws) not in channel._ws_sessions
+
+
+@pytest.mark.asyncio
+async def test_native_activation_capability_is_stripped_before_browser_and_media() -> (
+    None
+):
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = _FakeWebSocket()
+    observed_media: list[dict[str, object]] = []
+
+    class _NativeClient:
+        def observe_activation_response(self, payload, **_kwargs):
+            sanitized = {**payload, "result": dict(payload["result"])}
+            sanitized["result"].pop("_native_gateway")
+            return sanitized
+
+    class _MediaRegistry:
+        def observe_agent_response(self, payload, **_kwargs):
+            observed_media.append(dict(payload))
+
+    channel.live_voice_native_runtime_client = _NativeClient()
+    channel.live_voice_media_registry = _MediaRegistry()
+    await channel.register_ws(
+        ws,
+        RoutingKey(
+            user_id="user-native",
+            channel_id="web",
+            app_id="default",
+            agent_ref=None,
+            session_id="session-native",
+        ),
+    )
+    try:
+        await channel.send(
+            Message(
+                id="request-native-activate",
+                type="res",
+                channel_id="web",
+                session_id="session-native",
+                params={},
+                timestamp=0.0,
+                ok=True,
+                payload={
+                    "request_id": "request-native-activate",
+                    "ok": True,
+                    "result": {
+                        "status": "active",
+                        "_native_gateway": {"capability": "a" * 64},
+                    },
+                    "error": None,
+                },
+                metadata={
+                    "ws_id": getattr(ws, "_jiuwen_ws_id", ""),
+                    "method": "live_voice.composition.p2.activate",
+                },
+            )
+        )
+        for _ in range(20):
+            if ws.sent_frames:
+                break
+            await asyncio.sleep(0.005)
+
+        browser_result = ws.sent_frames[0]["payload"]["result"]
+        assert "_native_gateway" not in browser_result
+        assert "_native_gateway" not in observed_media[0]["result"]
+    finally:
+        await channel.unregister_ws(ws)
+
+
+@pytest.mark.asyncio
+async def test_native_activation_descriptor_never_uses_session_fallback() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = _FakeWebSocket()
+    await channel.register_ws(
+        ws,
+        RoutingKey(
+            user_id="user-native",
+            channel_id="web",
+            app_id="default",
+            agent_ref=None,
+            session_id="session-native",
+        ),
+    )
+    try:
+        await channel.send(
+            Message(
+                id="request-native-fallback",
+                type="res",
+                channel_id="web",
+                session_id="session-native",
+                params={},
+                timestamp=0.0,
+                ok=True,
+                payload={
+                    "request_id": "request-native-fallback",
+                    "ok": True,
+                    "result": {
+                        "status": "active",
+                        "_native_gateway": {"capability": "a" * 64},
+                    },
+                    "error": None,
+                },
+                metadata={
+                    "method": "live_voice.composition.p2.activate",
+                },
+            )
+        )
+        await asyncio.sleep(0.02)
+
+        assert ws.sent_frames == []
+    finally:
+        await channel.unregister_ws(ws)
 
 
 @pytest.mark.asyncio

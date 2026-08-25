@@ -1618,7 +1618,46 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.server.live_voice.observability import (
         LiveVoiceObservabilityCollector,
     )
-    media_registry = DedicatedMediaProductRegistry.from_environment()
+    from jiuwenswarm.server.live_voice.native_interaction_config import (
+        InteractionEngineKind,
+        NativeInteractionConfigurationError,
+        select_interaction_engine_environment,
+    )
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
+        GatewayNativeInteractionRuntimeClient,
+    )
+
+    native_runtime_client = None
+    try:
+        interaction_selection = select_interaction_engine_environment(os.environ)
+        selected_interaction_engine = interaction_selection.kind.value
+    except NativeInteractionConfigurationError as exc:
+        selected_interaction_engine = "unavailable"
+        logger.error(
+            "Live Voice interaction Engine selection unavailable: reason=%s",
+            exc.reason,
+        )
+    if (
+        selected_interaction_engine
+        == InteractionEngineKind.OPENAI_REALTIME_NATIVE.value
+    ):
+        resolved_native_agent_client = (
+            agent_client.get("value")
+            if isinstance(agent_client, dict)
+            else agent_client
+        )
+        try:
+            native_runtime_client = GatewayNativeInteractionRuntimeClient(
+                resolved_native_agent_client
+            )
+        except Exception:
+            selected_interaction_engine = "unavailable"
+            logger.error("Live Voice Native Runtime client is unavailable")
+    channel.live_voice_interaction_engine = selected_interaction_engine
+    channel.live_voice_native_runtime_client = native_runtime_client
+    media_registry = DedicatedMediaProductRegistry.from_environment(
+        native_runtime_client=native_runtime_client
+    )
     speech_service = bind.speech_service
     media_registry_owns_speech_authority = speech_service is None
     if speech_service is None:
@@ -1819,6 +1858,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ws_id = str(getattr(ws, "_jiuwen_ws_id", "") or "").strip()
         if callable(cleanup) and ws_id:
             await cleanup(channel.channel_id, ws_id)
+        native_client = getattr(channel, "live_voice_native_runtime_client", None)
+        forget_connection = getattr(native_client, "forget_connection", None)
+        if callable(forget_connection) and ws_id:
+            forget_connection(ws_id)
 
     register_disconnect = getattr(channel, "on_disconnect", None)
     if callable(register_disconnect):

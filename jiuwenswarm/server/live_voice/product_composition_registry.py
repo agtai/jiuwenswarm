@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -73,7 +74,24 @@ from .formal_task_models import (
     utc_now,
 )
 from .task_store import TaskDurabilityDiagnosticSnapshot
-from .interaction_engine import InteractionEnginePort
+from .interaction_engine import INTERACTION_ACTION_OPERATIONS, InteractionEnginePort
+from .native_interaction_carrier import (
+    NativeCarrierViolation,
+    NativeInteractionProposal,
+)
+from .native_interaction_config import (
+    InteractionEngineKind,
+    select_interaction_engine_environment,
+)
+from .native_interaction_contract import (
+    NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeInteractionBinding,
+    NativePresentationCursor,
+)
+from .native_interaction_runtime import (
+    NativeInteractionRuntimeError,
+    NativeInteractionRuntimeOwner,
+)
 from .latency_measurement import (
     L0Milestone,
     L0RoundBinding,
@@ -306,9 +324,11 @@ class ProductCompositionSettings:
     p3_mutation_enabled: bool = False
     critical_input_enabled: bool = False
     demo_policy_bypass_enabled: bool = False
+    interaction_engine: InteractionEngineKind = InteractionEngineKind.CASCADE
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
+        interaction_engine = select_interaction_engine_environment(os.environ)
         return cls(
             p2_enabled=_is_enabled(os.getenv(PRODUCT_P2_ENABLE_ENV)),
             p3_text_enabled=_is_enabled(os.getenv(PRODUCT_P3_TEXT_ENABLE_ENV)),
@@ -319,6 +339,7 @@ class ProductCompositionSettings:
             demo_policy_bypass_enabled=_is_enabled(
                 os.getenv(PRODUCT_DEMO_POLICY_BYPASS_ENV)
             ),
+            interaction_engine=interaction_engine.kind,
         )
 
 
@@ -431,6 +452,15 @@ class _P2Route:
     observability_adapter: ProductObservabilityAdapter | None = None
     notification_replay_floor: int = 0
     notification_admitted_sequence: int = 0
+    native_runtime_owner: NativeInteractionRuntimeOwner | None = None
+    native_capability: str | None = field(default=None, repr=False)
+    native_closed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeProductOperation:
+    fingerprint_sha256: str
+    result: P3RouteResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -1019,6 +1049,9 @@ class AgentServerProductCompositionRegistry:
             str, _RetainedProductOperation
         ] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
+        self._native_propose_operations: dict[str, _NativeProductOperation] = {}
+        self._native_ack_operations: dict[str, _NativeProductOperation] = {}
+        self._native_close_operations: dict[str, _NativeProductOperation] = {}
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_intent_operations: dict[str, _RetainedProductOperation] = {}
@@ -1066,13 +1099,18 @@ class AgentServerProductCompositionRegistry:
             authority_adapter=P2AuthorityAdapter(disabled_service),
             runtime_factory=self._create_p2_runtime,
             interaction_engine_factory=lambda _context, _binding: InteractionEnginePort(
-                frozenset(
-                    {
-                        "playback.stop",
-                        "response.cancel",
-                        "round.cancel",
-                        "task.cancel",
-                    }
+                (
+                    INTERACTION_ACTION_OPERATIONS
+                    if settings.interaction_engine
+                    is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                    else frozenset(
+                        {
+                            "playback.stop",
+                            "response.cancel",
+                            "round.cancel",
+                            "task.cancel",
+                        }
+                    )
                 )
             ),
         )
@@ -3967,6 +4005,7 @@ class AgentServerProductCompositionRegistry:
                         "activation_generation",
                         "claimed_user_id",
                         "claimed_project_id",
+                        "interaction_engine",
                     }
                 ),
             )
@@ -4001,6 +4040,18 @@ class AgentServerProductCompositionRegistry:
                 correlation_id=correlation_id,
                 params=params,
             )
+            requested_engine = params.get(
+                "interaction_engine", InteractionEngineKind.CASCADE.value
+            )
+            if (
+                type(requested_engine) is not str
+                or requested_engine != self._settings.interaction_engine.value
+            ):
+                raise FormalTaskViolation(
+                    "INTERACTION_ENGINE_SELECTION_REJECTED",
+                    "activation Engine does not match the server-owned selection",
+                    ErrorCode.PERMISSION_DENIED,
+                )
         except FormalTaskViolation as exc:
             return _error_result(
                 request_id,
@@ -4045,28 +4096,53 @@ class AgentServerProductCompositionRegistry:
                         and expected.activation_id == activation_id
                         and expected.activation_generation == generation
                     ):
+                        if (
+                            self._settings.interaction_engine
+                            is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                            and existing.native_closed
+                        ):
+                            if replay_authority.lease is not None:
+                                await replay_authority.lease.close()
+                            return _error_result(
+                                request_id,
+                                reason="NATIVE_RUNTIME_CLOSED",
+                                code=ErrorCode.CONFLICT,
+                                manifest=existing.manifest,
+                            )
                         if replay_authority.lease is not None:
                             await replay_authority.lease.close()
+                        replay_result: dict[str, object] = {
+                            "status": "active",
+                            "replayed": True,
+                            "session_id": routed_session,
+                            "correlation_id": correlation_id,
+                            "interaction_id": interaction_id,
+                            "activation_id": activation_id,
+                            "activation_generation": generation,
+                        }
+                        descriptor = self._native_gateway_descriptor(existing)
+                        if descriptor is not None:
+                            replay_result["_native_gateway"] = descriptor
                         return _success_result(
                             request_id,
-                            {
-                                "status": "active",
-                                "replayed": True,
-                                "session_id": routed_session,
-                                "correlation_id": correlation_id,
-                                "interaction_id": interaction_id,
-                                "activation_id": activation_id,
-                                "activation_generation": generation,
-                            },
+                            replay_result,
                             existing.manifest,
                         )
-                    if replay_authority.lease is not None:
-                        await replay_authority.lease.close()
-                    return _error_result(
-                        request_id,
-                        reason="ACTIVATION_BINDING_CONFLICT",
-                        code=ErrorCode.CONFLICT,
+                    native_successor = (
+                        self._settings.interaction_engine
+                        is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                        and expected.correlation_id == correlation_id
+                        and generation > expected.activation_generation
+                        and activation_id != expected.activation_id
                     )
+                    if not native_successor:
+                        if replay_authority.lease is not None:
+                            await replay_authority.lease.close()
+                        return _error_result(
+                            request_id,
+                            reason="ACTIVATION_BINDING_CONFLICT",
+                            code=ErrorCode.CONFLICT,
+                        )
                 if replay_authority.lease is not None:
                     await replay_authority.lease.close()
                 cleanup_pending = False
@@ -4227,6 +4303,31 @@ class AgentServerProductCompositionRegistry:
                     self._pending_p2_agents.pop(pending_key, None)
                 if result.status is P2ActivationStatus.ACTIVE:
                     assert result.lease is not None
+                    native_owner: NativeInteractionRuntimeOwner | None = None
+                    native_capability: str | None = None
+                    if (
+                        self._settings.interaction_engine
+                        is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                    ):
+                        try:
+                            native_owner = (
+                                await result.lease.activate_native_interaction_runtime()
+                            )
+                        except Exception:
+                            await result.lease.close(
+                                result.lease.binding, timeout_seconds=0.5
+                            )
+                            unpin = getattr(self._agent_manager, "unpin_agent", None)
+                            if callable(unpin):
+                                unpin(agent)
+                            return ProductSegmentActivation(
+                                _unavailable_fact(
+                                    ProductSegment.P2_AGENT_INTERACTION,
+                                    ProductRouteReason.P2_RUNTIME_UNAVAILABLE,
+                                ),
+                                None,
+                            )
+                        native_capability = secrets.token_hex(32)
                     wrapper = _P2RootLease(
                         lease=result.lease,
                         binding=result.lease.binding,
@@ -4235,6 +4336,8 @@ class AgentServerProductCompositionRegistry:
                     )
                     holder["binding"] = result.lease.binding
                     holder["activation_lease"] = result.lease
+                    holder["native_runtime_owner"] = native_owner
+                    holder["native_capability"] = native_capability
                     return ProductSegmentActivation(
                         _formal_fact(ProductSegment.P2_AGENT_INTERACTION),
                         wrapper,
@@ -4310,10 +4413,23 @@ class AgentServerProductCompositionRegistry:
             activation_lease = holder.get("activation_lease")
             observability_context = observability_holder.get("context")
             observability_adapter = observability_holder.get("adapter")
+            native_runtime_owner = holder.get("native_runtime_owner")
+            native_capability = holder.get("native_capability")
             if (
                 not isinstance(binding, P2InteractionBinding)
                 or not isinstance(activation_lease, P2ActivationLease)
                 or activation.lease is None
+                or (
+                    self._settings.interaction_engine
+                    is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                    and (
+                        not isinstance(
+                            native_runtime_owner, NativeInteractionRuntimeOwner
+                        )
+                        or type(native_capability) is not str
+                        or len(native_capability) != 64
+                    )
+                )
                 or (
                     self._observability_exporter is not None
                     and (
@@ -4354,23 +4470,634 @@ class AgentServerProductCompositionRegistry:
                     if isinstance(observability_adapter, ProductObservabilityAdapter)
                     else None
                 ),
+                native_runtime_owner=(
+                    native_runtime_owner
+                    if isinstance(native_runtime_owner, NativeInteractionRuntimeOwner)
+                    else None
+                ),
+                native_capability=(
+                    native_capability if type(native_capability) is str else None
+                ),
             )
             self._p2_routes[key] = retained_route
             self._observe_p2_activation(retained_route)
             self._closed_p2_routes.pop(key, None)
+            activation_result: dict[str, object] = {
+                "status": "active",
+                "replayed": False,
+                "session_id": routed_session,
+                "correlation_id": correlation_id,
+                "interaction_id": binding.interaction_id,
+                "activation_id": binding.activation_id,
+                "activation_generation": binding.activation_generation,
+            }
+            descriptor = self._native_gateway_descriptor(retained_route)
+            if descriptor is not None:
+                activation_result["_native_gateway"] = descriptor
             return _success_result(
                 request_id,
-                {
-                    "status": "active",
-                    "replayed": False,
-                    "session_id": routed_session,
-                    "correlation_id": correlation_id,
-                    "interaction_id": binding.interaction_id,
-                    "activation_id": binding.activation_id,
-                    "activation_generation": binding.activation_generation,
-                },
+                activation_result,
                 activation.manifest,
             )
+
+    @staticmethod
+    def _native_gateway_descriptor(
+        route: _P2Route,
+    ) -> dict[str, object] | None:
+        owner = route.native_runtime_owner
+        capability = route.native_capability
+        if owner is None and capability is None:
+            return None
+        if (
+            not isinstance(owner, NativeInteractionRuntimeOwner)
+            or type(capability) is not str
+            or len(capability) != 64
+        ):
+            raise RuntimeError("Native activation authority is incomplete")
+        binding = NativeInteractionBinding(
+            scope=route.binding.scope,
+            interaction_id=route.binding.interaction_id,
+            activation_id=route.binding.activation_id,
+            activation_generation=route.binding.activation_generation,
+            correlation_id=route.binding.correlation_id,
+        )
+        return {
+            "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+            "binding": binding.to_dict(),
+            "capability": capability,
+        }
+
+    async def handle_native_propose(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Admit one capability-bound Native proposal through the P2 owners."""
+
+        try:
+            _require_exact_params(
+                params,
+                frozenset({"contract_version", "binding", "capability", "proposal"}),
+            )
+            if params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
+                raise FormalTaskViolation(
+                    "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
+                    "Native proposal contract version is unsupported",
+                    ErrorCode.UNSUPPORTED,
+                )
+            routed_session = _required_text(session_id, "routed_session_id")
+            parsed_request_id = _required_text(request_id, "request_id")
+            binding = NativeInteractionBinding.from_dict(params.get("binding"))
+            proposal = NativeInteractionProposal.from_dict(params.get("proposal"))
+            capability = params.get("capability")
+            if (
+                type(capability) is not str
+                or len(capability) != 64
+                or any(character not in "0123456789abcdef" for character in capability)
+            ):
+                raise FormalTaskViolation(
+                    "NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                    "Native Runtime capability is invalid",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if (
+                binding.scope.session_id != routed_session
+                or proposal.binding != binding
+            ):
+                raise FormalTaskViolation(
+                    "NATIVE_RUNTIME_BINDING_MISMATCH",
+                    "Native proposal does not match its routed binding",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            fingerprint = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "method": "live_voice.internal.native.propose",
+                        "session_id": routed_session,
+                        "params": dict(params),
+                    }
+                )
+            ).hexdigest()
+        except (FormalTaskViolation, NativeCarrierViolation) as exc:
+            return _error_result(
+                request_id,
+                reason=exc.reason,
+                code=getattr(exc, "code", ErrorCode.INVALID_ARGUMENT),
+                message=str(exc),
+            )
+        except Exception as exc:
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "NATIVE_PROPOSAL_INVALID"),
+                code=getattr(exc, "code", ErrorCode.INVALID_ARGUMENT),
+                message=str(exc),
+            )
+
+        async with self._lock:
+            if self._stopped:
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
+            route = self._p2_routes.get((routed_session, binding.interaction_id))
+            if (
+                route is None
+                or route.native_runtime_owner is None
+                or route.native_capability is None
+                or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
+                or route.binding.scope != binding.scope
+                or route.binding.correlation_id != binding.correlation_id
+                or route.binding.activation_id != binding.activation_id
+                or route.binding.activation_generation != binding.activation_generation
+                or not hmac.compare_digest(route.native_capability, capability)
+            ):
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                    code=ErrorCode.PERMISSION_DENIED,
+                )
+            prior = self._native_propose_operations.get(parsed_request_id)
+            if prior is not None:
+                if prior.fingerprint_sha256 == fingerprint:
+                    return prior.result
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                    code=ErrorCode.CONFLICT,
+                )
+            try:
+                self._require_product_request_not_evicted(
+                    "native.propose", parsed_request_id
+                )
+            except FormalTaskViolation as exc:
+                return _error_result(
+                    request_id,
+                    reason=exc.reason,
+                    code=exc.code,
+                    message=str(exc),
+                )
+            owner = route.native_runtime_owner
+            assert owner is not None
+            action_intent = None
+            try:
+                if proposal.action is not None:
+                    action_intent = route.activation_lease.propose_action(
+                        route.binding, proposal.action
+                    )
+                if proposal.turn_commit is not None:
+                    if (
+                        proposal.action is None
+                        or proposal.action.operation != "TURN_COMMIT"
+                        or dict(proposal.action.payload).get("turn_id")
+                        != proposal.turn_commit.turn_id
+                        or proposal.delegate is not None
+                        or proposal.provider_done is not None
+                    ):
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_TURN_PROPOSAL_INVALID",
+                            "Native turn proposal is not an exact TURN_COMMIT",
+                        )
+                    accepted = await owner.accept_turn(proposal.turn_commit)
+                    result_payload: dict[str, object] = {
+                        "kind": "turn",
+                        "status": "observed",
+                        "accepted": accepted,
+                    }
+                elif proposal.provider_done is not None:
+                    if proposal.action is not None or proposal.delegate is not None:
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_DONE_PROPOSAL_INVALID",
+                            "Native completion must be a standalone observation",
+                        )
+                    accepted = await owner.accept_provider_done(proposal.provider_done)
+                    result_payload = {
+                        "kind": "done",
+                        "status": "observed",
+                        "accepted": accepted,
+                    }
+                elif proposal.delegate is not None:
+                    raise NativeInteractionRuntimeError(
+                        "NATIVE_DELEGATE_UNAVAILABLE",
+                        "Native delegate admission is not available",
+                    )
+                elif (
+                    proposal.action is not None and proposal.action.operation == "SPEAK"
+                ):
+                    payload = dict(proposal.action.payload)
+                    provider_response_id = _required_text(
+                        payload.get("provider_response_id"),
+                        "provider_response_id",
+                    )
+                    response_id = (
+                        "native-response-"
+                        + hashlib.sha256(
+                            proposal.action.action_id.encode("utf-8")
+                        ).hexdigest()
+                    )
+                    admission = await owner.accept_provider_response(
+                        provider_response_id, response_id
+                    )
+                    result_payload = {
+                        "kind": "response",
+                        "status": "observed",
+                        "accepted": True,
+                        "provider_response_id": provider_response_id,
+                        "response": {
+                            "interaction_id": admission.response.interaction_id,
+                            "response_id": admission.response.response_id,
+                            "response_generation": (
+                                admission.response.response_generation
+                            ),
+                        },
+                    }
+                else:
+                    assert action_intent is not None
+                    result_payload = {
+                        "kind": "action",
+                        "status": "observed",
+                        "accepted": action_intent.accepted,
+                    }
+            except (FormalTaskViolation, NativeInteractionRuntimeError) as exc:
+                return _error_result(
+                    request_id,
+                    reason=exc.reason,
+                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                    message=str(exc),
+                    manifest=route.manifest,
+                )
+            except Exception as exc:
+                return _error_result(
+                    request_id,
+                    reason=getattr(exc, "reason", "NATIVE_RUNTIME_REJECTED"),
+                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                    message=str(exc),
+                    manifest=route.manifest,
+                )
+            result = _success_result(request_id, result_payload, route.manifest)
+            if len(self._native_propose_operations) >= self._PRODUCT_OPERATION_CAPACITY:
+                expired_request_id = next(iter(self._native_propose_operations))
+                self._native_propose_operations.pop(expired_request_id)
+                self._mark_evicted_product_request("native.propose", expired_request_id)
+            self._native_propose_operations[parsed_request_id] = (
+                _NativeProductOperation(fingerprint, result)
+            )
+            return result
+
+    async def handle_native_presentation_ack(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Apply one exact audio ACK or played cursor to the Native owner."""
+
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "contract_version",
+                        "binding",
+                        "capability",
+                        "ack",
+                        "cursor",
+                        "action_id",
+                    }
+                ),
+            )
+            if params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
+                raise FormalTaskViolation(
+                    "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
+                    "Native ACK contract version is unsupported",
+                    ErrorCode.UNSUPPORTED,
+                )
+            routed_session = _required_text(session_id, "routed_session_id")
+            parsed_request_id = _required_text(request_id, "request_id")
+            binding = NativeInteractionBinding.from_dict(params.get("binding"))
+            capability = params.get("capability")
+            raw_ack = params.get("ack")
+            raw_cursor = params.get("cursor")
+            raw_action_id = params.get("action_id")
+            if (
+                type(capability) is not str
+                or len(capability) != 64
+                or any(character not in "0123456789abcdef" for character in capability)
+                or binding.scope.session_id != routed_session
+                or (raw_ack is None) == (raw_cursor is None)
+            ):
+                raise FormalTaskViolation(
+                    "NATIVE_PRESENTATION_ACK_INVALID",
+                    "Native ACK requires one exact capability-bound observation",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            ack: PresentationAck | None = None
+            cursor: NativePresentationCursor | None = None
+            action_id: str | None = None
+            if raw_ack is not None:
+                if raw_action_id is not None:
+                    raise FormalTaskViolation(
+                        "NATIVE_PRESENTATION_ACK_INVALID",
+                        "audio ACK cannot include a played-cursor action",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                if not isinstance(raw_ack, Mapping) or set(raw_ack) != {
+                    "response",
+                    "surface",
+                    "unit_id",
+                    "contiguous_cursor",
+                    "presented_at",
+                }:
+                    raise FormalTaskViolation(
+                        "NATIVE_PRESENTATION_ACK_FIELDS_NOT_CLOSED",
+                        "Native audio ACK fields are not closed",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                response = raw_ack.get("response")
+                if not isinstance(response, Mapping) or set(response) != {
+                    "interaction_id",
+                    "response_id",
+                    "response_generation",
+                }:
+                    raise FormalTaskViolation(
+                        "NATIVE_RESPONSE_REF_FIELDS_NOT_CLOSED",
+                        "Native ACK response fields are not closed",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                generation = response.get("response_generation")
+                cursor_value = raw_ack.get("contiguous_cursor")
+                if (
+                    type(generation) is not int
+                    or not 0 < generation <= MAX_SAFE_INTEGER
+                    or type(cursor_value) is not int
+                    or not 0 <= cursor_value <= MAX_SAFE_INTEGER
+                    or raw_ack.get("surface") != PresentationSurface.AUDIO.value
+                ):
+                    raise FormalTaskViolation(
+                        "NATIVE_PRESENTATION_ACK_INVALID",
+                        "Native ACK cursor and surface are invalid",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                ref = ResponseRef(
+                    _required_text(
+                        response.get("interaction_id"), "response.interaction_id"
+                    ),
+                    _required_text(response.get("response_id"), "response.response_id"),
+                    generation,
+                )
+                ack = PresentationAck(
+                    ref=ref,
+                    surface=PresentationSurface.AUDIO,
+                    unit_id=_required_text(raw_ack.get("unit_id"), "unit_id"),
+                    contiguous_cursor=cursor_value,
+                    presented_at=_required_text(
+                        raw_ack.get("presented_at"), "presented_at"
+                    ),
+                )
+            else:
+                cursor = NativePresentationCursor.from_dict(raw_cursor)
+                action_id = _required_text(raw_action_id, "action_id")
+            target_response = ack.ref if ack is not None else cursor.response
+            assert target_response is not None
+            if target_response.interaction_id != binding.interaction_id:
+                raise FormalTaskViolation(
+                    "NATIVE_RUNTIME_BINDING_MISMATCH",
+                    "Native ACK must target the exact interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            fingerprint = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "method": "live_voice.internal.native.presentation_ack",
+                        "session_id": routed_session,
+                        "params": dict(params),
+                    }
+                )
+            ).hexdigest()
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id,
+                reason=exc.reason,
+                code=exc.code,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "NATIVE_PRESENTATION_ACK_INVALID"),
+                code=getattr(exc, "code", ErrorCode.INVALID_ARGUMENT),
+                message=str(exc),
+            )
+
+        async with self._lock:
+            if self._stopped:
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
+            route = self._p2_routes.get((routed_session, binding.interaction_id))
+            if (
+                route is None
+                or route.native_runtime_owner is None
+                or route.native_capability is None
+                or route.native_closed
+                or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
+                or route.binding.scope != binding.scope
+                or route.binding.correlation_id != binding.correlation_id
+                or route.binding.activation_id != binding.activation_id
+                or route.binding.activation_generation != binding.activation_generation
+                or not hmac.compare_digest(route.native_capability, capability)
+            ):
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                    code=ErrorCode.PERMISSION_DENIED,
+                )
+            prior = self._native_ack_operations.get(parsed_request_id)
+            if prior is not None:
+                if prior.fingerprint_sha256 == fingerprint:
+                    return prior.result
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                    code=ErrorCode.CONFLICT,
+                )
+            try:
+                self._require_product_request_not_evicted(
+                    "native.presentation_ack", parsed_request_id
+                )
+                owner = route.native_runtime_owner
+                assert owner is not None
+                if ack is not None:
+                    history = await owner.acknowledge_audio(ack)
+                    result_payload: dict[str, object] = {
+                        "kind": "presentation_ack",
+                        "status": "observed",
+                        "history_eligible": history is not None,
+                    }
+                    if history is not None:
+                        result_payload["history"] = {
+                            "response": {
+                                "interaction_id": history.response.interaction_id,
+                                "response_id": history.response.response_id,
+                                "response_generation": (
+                                    history.response.response_generation
+                                ),
+                            },
+                            "transcript": history.transcript,
+                            "presented_at": history.presented_at,
+                        }
+                else:
+                    assert cursor is not None and action_id is not None
+                    barge = await owner.barge_in(
+                        action_id=action_id,
+                        response=cursor.response,
+                        cursor=cursor,
+                    )
+                    result_payload = {
+                        "kind": "played_cursor",
+                        "status": "observed",
+                        "applied": barge.applied,
+                        "cancel_command_id": barge.cancel_command_id,
+                    }
+            except Exception as exc:
+                return _error_result(
+                    request_id,
+                    reason=getattr(exc, "reason", "NATIVE_PRESENTATION_ACK_REJECTED"),
+                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                    message=str(exc),
+                    manifest=route.manifest,
+                )
+            result = _success_result(request_id, result_payload, route.manifest)
+            if len(self._native_ack_operations) >= self._PRODUCT_OPERATION_CAPACITY:
+                expired_request_id = next(iter(self._native_ack_operations))
+                self._native_ack_operations.pop(expired_request_id)
+                self._mark_evicted_product_request(
+                    "native.presentation_ack", expired_request_id
+                )
+            self._native_ack_operations[parsed_request_id] = _NativeProductOperation(
+                fingerprint, result
+            )
+            return result
+
+    async def handle_native_close(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Invalidate one exact Native capability without closing the P2 route."""
+
+        try:
+            _require_exact_params(
+                params,
+                frozenset({"contract_version", "binding", "capability"}),
+            )
+            if params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
+                raise FormalTaskViolation(
+                    "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
+                    "Native close contract version is unsupported",
+                    ErrorCode.UNSUPPORTED,
+                )
+            routed_session = _required_text(session_id, "routed_session_id")
+            parsed_request_id = _required_text(request_id, "request_id")
+            binding = NativeInteractionBinding.from_dict(params.get("binding"))
+            capability = params.get("capability")
+            if (
+                type(capability) is not str
+                or len(capability) != 64
+                or any(character not in "0123456789abcdef" for character in capability)
+                or binding.scope.session_id != routed_session
+            ):
+                raise FormalTaskViolation(
+                    "NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                    "Native close capability or binding is invalid",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            fingerprint = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "method": "live_voice.internal.native.close",
+                        "session_id": routed_session,
+                        "params": dict(params),
+                    }
+                )
+            ).hexdigest()
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id,
+                reason=exc.reason,
+                code=exc.code,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "NATIVE_CLOSE_INVALID"),
+                code=getattr(exc, "code", ErrorCode.INVALID_ARGUMENT),
+                message=str(exc),
+            )
+
+        async with self._lock:
+            prior = self._native_close_operations.get(parsed_request_id)
+            if prior is not None:
+                if prior.fingerprint_sha256 == fingerprint:
+                    return prior.result
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                    code=ErrorCode.CONFLICT,
+                )
+            if self._stopped:
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
+            route = self._p2_routes.get((routed_session, binding.interaction_id))
+            if (
+                route is None
+                or route.native_runtime_owner is None
+                or route.native_capability is None
+                or route.native_closed
+                or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
+                or route.binding.scope != binding.scope
+                or route.binding.correlation_id != binding.correlation_id
+                or route.binding.activation_id != binding.activation_id
+                or route.binding.activation_generation != binding.activation_generation
+                or not hmac.compare_digest(route.native_capability, capability)
+            ):
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                    code=ErrorCode.PERMISSION_DENIED,
+                )
+            try:
+                self._require_product_request_not_evicted(
+                    "native.close", parsed_request_id
+                )
+                await route.native_runtime_owner.close()
+            except Exception as exc:
+                return _error_result(
+                    request_id,
+                    reason=getattr(exc, "reason", "NATIVE_RUNTIME_CLOSE_FAILED"),
+                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                    message=str(exc),
+                    manifest=route.manifest,
+                )
+            route.native_runtime_owner = None
+            route.native_capability = None
+            route.native_closed = True
+            result = _success_result(
+                request_id,
+                {
+                    "kind": "close",
+                    "status": "closed",
+                    "accepted": True,
+                },
+                route.manifest,
+            )
+            if len(self._native_close_operations) >= self._PRODUCT_OPERATION_CAPACITY:
+                expired_request_id = next(iter(self._native_close_operations))
+                self._native_close_operations.pop(expired_request_id)
+                self._mark_evicted_product_request("native.close", expired_request_id)
+            self._native_close_operations[parsed_request_id] = _NativeProductOperation(
+                fingerprint, result
+            )
+            return result
 
     @staticmethod
     def _parse_p2_route_binding(

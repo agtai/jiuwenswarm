@@ -28,6 +28,15 @@ from jiuwenswarm.server.live_voice.interaction_engine import (
     InteractionAction,
     InteractionEnginePort,
 )
+from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+    ConversationRuntimeLoop,
+)
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NativeInteractionBinding,
+)
+from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeInteractionRuntimeOwner,
+)
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityRouteContext,
     AuthorityRoutingClaim,
@@ -135,6 +144,16 @@ class FakeRuntime:
         self.closed = False
         self.notification_lease = object()
         self.notifications: list[AgentConversationNotification] = []
+        self.native_bindings: list[NativeInteractionBinding] = []
+        self.native_owner: NativeInteractionRuntimeOwner | None = None
+
+    def create_native_interaction_runtime_owner(
+        self, binding: NativeInteractionBinding
+    ) -> NativeInteractionRuntimeOwner:
+        self.native_bindings.append(binding)
+        if self.native_owner is None:
+            raise RuntimeError("native owner not configured")
+        return self.native_owner
 
     async def accept_task_progress_notification(
         self, intent: TaskProgressNotificationIntent, *, response_ref: ResponseRef
@@ -423,6 +442,50 @@ async def test_authority_succeeds_before_any_factory_or_runtime_effect() -> None
     assert result.evidence.evidence_scope == "package_only"
     assert result.evidence.formal_route_ready is False
     assert result.evidence.real_runtime_path_observed is False
+
+
+@pytest.mark.asyncio
+async def test_activation_lease_derives_and_retains_one_attached_native_owner() -> None:
+    resolver = RecordingResolver((candidate(),))
+    runtime = FakeRuntime()
+    shared_loop = ConversationRuntimeLoop(SCOPE)
+    assert await shared_loop.start() is True
+    await shared_loop.open_interaction("interaction-1")
+    runtime.native_owner = NativeInteractionRuntimeOwner(
+        NativeInteractionBinding(
+            scope=SCOPE,
+            interaction_id="interaction-1",
+            activation_id="activation-1",
+            activation_generation=1,
+            correlation_id="correlation-1",
+        ),
+        runtime=shared_loop,
+        owns_runtime=False,
+    )
+    result = await adapter_for(resolver, lambda _context, _binding: runtime).activate(
+        request()
+    )
+    assert result.lease is not None
+
+    first = await result.lease.activate_native_interaction_runtime()
+    replay = await result.lease.activate_native_interaction_runtime()
+
+    assert first is replay is runtime.native_owner
+    assert runtime.native_bindings == [
+        NativeInteractionBinding(
+            scope=SCOPE,
+            interaction_id="interaction-1",
+            activation_id="activation-1",
+            activation_generation=1,
+            correlation_id="correlation-1",
+        )
+    ]
+    assert first.snapshot().started is True
+    closed = await result.lease.close(result.lease.binding, timeout_seconds=0.2)
+    assert closed.status is P2LeaseCloseStatus.CLOSED
+    assert first.snapshot().closed is True
+    assert shared_loop.snapshot().closed is False
+    await shared_loop.close()
 
 
 @pytest.mark.asyncio

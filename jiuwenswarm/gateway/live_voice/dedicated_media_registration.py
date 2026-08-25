@@ -873,6 +873,7 @@ class DedicatedMediaProductRegistry:
         capacity: int = _MAX_RECORDS,
         end_of_turn_enabled: bool = False,
         streaming_observability: LiveVoiceObservabilityCollector | None = None,
+        native_runtime_client: Any | None = None,
     ) -> None:
         self.enabled = enabled is True
         self._monotonic = monotonic
@@ -880,6 +881,7 @@ class DedicatedMediaProductRegistry:
         self._authority_ttl = authority_ttl_seconds
         self._capacity = max(1, min(capacity, _MAX_RECORDS))
         self.end_of_turn_enabled = end_of_turn_enabled is True
+        self._native_runtime_client = native_runtime_client
         self._records: OrderedDict[str, _MediaAuthority] = OrderedDict()
         # One-use credentials exist only in this pre-authentication index.  All
         # durable authority references use an unrelated internal record id.
@@ -925,7 +927,9 @@ class DedicatedMediaProductRegistry:
         self._streaming_diagnostics_cleanup_complete: bool | None = None
 
     @classmethod
-    def from_environment(cls) -> "DedicatedMediaProductRegistry":
+    def from_environment(
+        cls, *, native_runtime_client: Any | None = None
+    ) -> "DedicatedMediaProductRegistry":
         enabled = _enabled(os.getenv(MEDIA_FEATURE_ENV))
         return cls(
             enabled=enabled,
@@ -935,7 +939,14 @@ class DedicatedMediaProductRegistry:
             streaming_observability=(
                 LiveVoiceObservabilityCollector() if enabled else None
             ),
+            native_runtime_client=native_runtime_client,
         )
+
+    @property
+    def native_runtime_client(self) -> Any | None:
+        """Return the process-private Native carrier owner, if selected."""
+
+        return self._native_runtime_client
 
     @property
     def streaming_observability(self) -> LiveVoiceObservabilityCollector | None:

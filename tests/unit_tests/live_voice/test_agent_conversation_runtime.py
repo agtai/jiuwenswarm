@@ -46,6 +46,9 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessRoundViolation,
     JiuWenSwarmRoundHarness,
 )
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NativeInteractionBinding,
+)
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
     PresentationLedgerViolation,
@@ -294,6 +297,27 @@ def runtime(
         harness=harness,
         bridge=bridge,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_creates_native_owner_only_for_its_existing_cr_binding() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    assert await current.start() is True
+    await current.open_interaction("interaction-native")
+    native_binding = NativeInteractionBinding(
+        scope=scope(),
+        interaction_id="interaction-native",
+        activation_id="activation-native",
+        activation_generation=1,
+        correlation_id="correlation-native",
+    )
+
+    owner = current.create_native_interaction_runtime_owner(native_binding)
+    assert await owner.start() is True
+    await owner.close()
+
+    assert current.snapshot().closed is False
+    await current.close(timeout_seconds=0.2)
 
 
 async def prepare(

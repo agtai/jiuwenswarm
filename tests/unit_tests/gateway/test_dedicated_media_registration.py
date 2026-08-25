@@ -203,6 +203,17 @@ def test_feature_off_and_provider_off_create_no_route() -> None:
     }
 
 
+def test_registry_retains_only_the_injected_native_runtime_client() -> None:
+    native_client = object()
+
+    registry = DedicatedMediaProductRegistry(
+        enabled=False, native_runtime_client=native_client
+    )
+
+    assert registry.native_runtime_client is native_client
+    assert DedicatedMediaProductRegistry(enabled=False).native_runtime_client is None
+
+
 def test_websocket_transport_debug_cannot_persist_binary_media(
     tmp_path: Path,
 ) -> None:

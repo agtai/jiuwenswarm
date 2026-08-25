@@ -546,11 +546,25 @@ git commit -m "feat(live-voice): enforce native Runtime audio fences"
 **Files:**
 
 - Modify: `jiuwenswarm/common/schema/message.py`
+- Create: `jiuwenswarm/server/live_voice/native_interaction_carrier.py`
+- Create: `tests/unit_tests/live_voice/test_native_interaction_carrier.py`
+- Modify: `jiuwenswarm/server/live_voice/native_interaction_runtime.py`
+- Modify: `tests/unit_tests/live_voice/test_native_interaction_runtime.py`
+- Modify: `jiuwenswarm/server/live_voice/agent_conversation_runtime.py`
+- Modify: `tests/unit_tests/live_voice/test_agent_conversation_runtime.py`
+- Modify: `jiuwenswarm/server/live_voice/product_p2_interaction_adapter.py`
+- Modify: `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py`
 - Create: `jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py`
 - Create: `tests/unit_tests/gateway/test_native_interaction_runtime_client.py`
 - Modify: `jiuwenswarm/server/live_voice/product_composition_registry.py`
 - Modify: `tests/unit_tests/live_voice/test_product_composition_registry.py`
+- Modify: `jiuwenswarm/server/agent_ws_server.py`
+- Modify: `tests/unit_tests/agentserver/test_live_voice_p3_route.py`
+- Modify: `jiuwenswarm/gateway/live_voice/dedicated_media_registration.py`
+- Modify: `tests/unit_tests/gateway/test_dedicated_media_registration.py`
 - Modify: `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py`
+- Modify: `jiuwenswarm/gateway/channel_manager/web/web_connect.py`
+- Modify: `tests/unit_tests/channel/test_web_channel_ws_sessions.py`
 - Modify: `jiuwenswarm/gateway/app_gateway.py`
 - Modify: `tests/unit_tests/test_app_web_handlers.py`
 
@@ -559,7 +573,7 @@ git commit -m "feat(live-voice): enforce native Runtime audio fences"
 - Consumes: v1 codecs, `NativeInteractionRuntimeOwner`, existing authenticated P2 activation binding, `AgentServerClient.send_request()`.
 - Produces: exact internal ReqMethods and a server-minted activation capability consumed only by Gateway.
 
-- [ ] **Step 1: Write failing carrier authorization tests**
+- [x] **Step 1: Write failing carrier authorization tests**
 
 ```python
 @pytest.mark.asyncio
@@ -576,7 +590,7 @@ async def test_internal_native_methods_are_absent_from_browser_allowlist() -> No
     assert set(NATIVE_INTERNAL_REQ_METHODS).isdisjoint(WEB_CLIENT_REQ_METHODS)
 ```
 
-- [ ] **Step 2: Add exact internal methods and codec parity tests**
+- [x] **Step 2: Add exact internal methods and codec parity tests**
 
 Add enum members:
 
@@ -588,19 +602,19 @@ live_voice.internal.native.close
 
 They are accepted only on Gateway→AgentServer E2A. Add them to internal server dispatch, never Web registered/forwarded/allowlisted method sets. Each request contains exact v1 payload plus a random 256-bit capability returned only inside the Gateway-observed P2 activation response; Browser response transformation removes the capability before sending the response to JavaScript.
 
-- [ ] **Step 3: Implement AgentServer Native route ownership**
+- [x] **Step 3: Implement AgentServer Native route ownership**
 
 On P2 activation with exact `interaction_engine="openai-realtime-native"`, create one `NativeInteractionRuntimeOwner`, mint one capability, and return a Gateway-only activation descriptor through the existing response observer seam. Cascade activation remains unchanged. Exact replay returns the same descriptor; changed activation generation closes the predecessor before replacement. Native internal handlers validate capability with constant-time comparison, scope/interaction/activation generation, request replay ID/fingerprint, and current route lease before any Runtime call.
 
-- [ ] **Step 4: Implement Gateway client and activation wiring**
+- [x] **Step 4: Implement Gateway client and activation wiring**
 
 `GatewayNativeInteractionRuntimeClient` constructs E2A envelopes with bounded request IDs and calls `AgentServerClient.send_request`; it validates exact result keys and never logs payload/capability. `app_web_handlers.py` selects the Engine once from environment, creates the client only for Native, and injects it into `DedicatedMediaProductRegistry`. Unknown/failed Native selection keeps Native unavailable and never installs Cascade as a fallback for that activation.
 
-- [ ] **Step 5: Test lifecycle, replay, timeout, and cleanup**
+- [x] **Step 5: Test lifecycle, replay, timeout, and cleanup**
 
 Cover activation replay/conflict, wrong capability/scope/session/connection/generation, client timeout, AgentServer unavailable, Runtime failure, close replay, Gateway shutdown, AgentServer route close, and response observer error. Each negative case asserts no Engine socket, Runtime turn/response, Agent/Task call, media ticket, history, or retained registry entry.
 
-- [ ] **Step 6: Run GREEN and commit**
+- [x] **Step 6: Run GREEN and commit**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m pytest -q tests/unit_tests/gateway/test_native_interaction_runtime_client.py tests/unit_tests/live_voice/test_product_composition_registry.py tests/unit_tests/test_app_web_handlers.py

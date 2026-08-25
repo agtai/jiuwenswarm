@@ -123,6 +123,27 @@ async def active_owner() -> tuple[
     return owner, runtime
 
 
+@pytest.mark.asyncio
+async def test_attached_owner_uses_existing_runtime_and_never_closes_shared_loop() -> (
+    None
+):
+    runtime = ConversationRuntimeLoop(_SCOPE)
+    assert await runtime.start() is True
+    await runtime.open_interaction(binding().interaction_id)
+    owner = NativeInteractionRuntimeOwner(
+        binding(), runtime=runtime, owns_runtime=False
+    )
+
+    assert await owner.start() is True
+    assert await owner.accept_turn(turn_commit()) is True
+    await owner.close()
+
+    assert owner.snapshot().closed is True
+    assert runtime.snapshot().closed is False
+    assert runtime.snapshot().accepting is True
+    await runtime.close()
+
+
 def ack_for(
     runtime: ConversationRuntimeLoop,
     response: ResponseRef,

@@ -46,6 +46,8 @@ from .agent_conversation_runtime import (
 )
 from .conversation_runtime_loop import BargeInResult
 from .interaction_engine import InteractionAction, InteractionEnginePort
+from .native_interaction_contract import NativeInteractionBinding
+from .native_interaction_runtime import NativeInteractionRuntimeOwner
 from .presentation_ledger import (
     PresentationAck,
     PresentationSurface,
@@ -556,6 +558,7 @@ class P2ActivationLease:
         self._operation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._close_coordinator: asyncio.Task[P2LeaseCloseResult] | None = None
+        self._native_runtime_owner: NativeInteractionRuntimeOwner | None = None
         attach_consumer = getattr(runtime, "attach_notification_consumer", None)
         self._notification_lease = (
             attach_consumer(
@@ -603,6 +606,48 @@ class P2ActivationLease:
                 accepted=accepted,
                 cancellation_scope=_CANCELLATION_SCOPES.get(retained.operation),
             )
+
+    async def activate_native_interaction_runtime(
+        self,
+    ) -> NativeInteractionRuntimeOwner:
+        """Attach one Native owner to the lease's already-open Runtime."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(self._binding)
+            if self._native_runtime_owner is not None:
+                return self._native_runtime_owner
+            create = getattr(
+                self._runtime, "create_native_interaction_runtime_owner", None
+            )
+            if not callable(create):
+                raise _violation(
+                    "NATIVE_RUNTIME_FACTORY_UNAVAILABLE",
+                    "retained runtime has no Native owner factory",
+                    ErrorCode.UNAVAILABLE,
+                )
+            binding = NativeInteractionBinding(
+                scope=self._binding.scope,
+                interaction_id=self._binding.interaction_id,
+                activation_id=self._binding.activation_id,
+                activation_generation=self._binding.activation_generation,
+                correlation_id=self._binding.correlation_id,
+            )
+            owner = create(binding)
+            if not isinstance(owner, NativeInteractionRuntimeOwner):
+                raise _violation(
+                    "NATIVE_RUNTIME_FACTORY_UNAVAILABLE",
+                    "retained runtime returned no canonical Native owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if await owner.start() is not True:
+                raise _violation(
+                    "NATIVE_RUNTIME_START_FAILED",
+                    "Native owner did not attach to the retained Runtime",
+                    ErrorCode.UNAVAILABLE,
+                )
+            self._native_runtime_owner = owner
+            return owner
 
     async def submit_committed_turn(
         self,
@@ -1140,6 +1185,8 @@ class P2ActivationLease:
     async def _run_close(self) -> P2LeaseCloseResult:
         try:
             async with self._operation_lock:
+                if self._native_runtime_owner is not None:
+                    await self._native_runtime_owner.close()
                 if (
                     self._notification_lease is not None
                     and not self._notification_detached

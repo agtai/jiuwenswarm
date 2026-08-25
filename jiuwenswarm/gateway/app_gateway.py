@@ -240,6 +240,24 @@ async def _inject_live_voice_gateway_voice_claim(
     msg.params = params
 
 
+def _inject_live_voice_interaction_engine(
+    msg: Message, selected_engine: str | None
+) -> None:
+    """Replace any Browser Engine claim with the Gateway-owned selection."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if (
+        msg.channel_id != "web"
+        or method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value
+    ):
+        return
+    params = dict(msg.params or {})
+    params.pop("interaction_engine", None)
+    selected = str(selected_engine or "").strip()
+    params["interaction_engine"] = selected or "unavailable"
+    msg.params = params
+
+
 async def _normalize_and_forward_message(msg, channel_manager) -> bool:
     normalized = _normalize_gateway_message(msg)
     # ACP/直连转发路径(session.create 等)也需注入 work_mode 归一化,
@@ -2006,6 +2024,10 @@ async def _run(
             normalized = _normalize_gateway_message(msg)
             _inject_live_voice_web_alpha_credential(normalized)
             if source_label == "Web":
+                _inject_live_voice_interaction_engine(
+                    normalized,
+                    getattr(web_channel, "live_voice_interaction_engine", None),
+                )
                 await _inject_live_voice_gateway_voice_claim(
                     normalized,
                     getattr(web_channel, "live_voice_speech_service", None),

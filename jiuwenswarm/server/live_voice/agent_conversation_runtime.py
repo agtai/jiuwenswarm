@@ -68,6 +68,12 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     JiuWenSwarmRoundHarness,
     RoundCancelResult,
 )
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NativeInteractionBinding,
+)
+from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeInteractionRuntimeOwner,
+)
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
@@ -688,6 +694,29 @@ class AgentConversationRuntime:
         self._closed = not enabled
         if self._closed:
             self._notifications.close()
+
+    def create_native_interaction_runtime_owner(
+        self, binding: NativeInteractionBinding
+    ) -> NativeInteractionRuntimeOwner:
+        """Create the Native adapter only over this facade's retained CR owner."""
+
+        if not isinstance(binding, NativeInteractionBinding):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_RUNTIME_BINDING_INVALID",
+                "Native Runtime requires a canonical activation binding",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if binding.scope != self._scope:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_RUNTIME_BINDING_MISMATCH",
+                "Native Runtime must match the exact facade scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return NativeInteractionRuntimeOwner(
+            binding,
+            runtime=self._cr,
+            owns_runtime=False,
+        )
 
     async def start(self) -> bool:
         async with self._start_lock:

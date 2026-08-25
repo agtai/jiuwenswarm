@@ -92,11 +92,33 @@ async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
     _register_web_handlers(
         WebHandlersBindParams(channel=channel, message_handler=message_handler)
     )
+    forgotten: list[str] = []
+    channel.live_voice_native_runtime_client = SimpleNamespace(
+        forget_connection=lambda connection_id: forgotten.append(connection_id)
+    )
     ws = SimpleNamespace(_jiuwen_ws_id="web-ws-dead")
 
     await channel.disconnect_handler(ws, {"sess-web"})
 
     assert message_handler.disconnected_websockets == [("web", "web-ws-dead")]
+    assert forgotten == ["web-ws-dead"]
+
+
+def test_web_handlers_select_native_runtime_client_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    channel = FakeWebChannel()
+    agent = FakeAgentClient()
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=agent))
+
+    assert channel.live_voice_interaction_engine == "openai-realtime-native"
+    assert channel.live_voice_native_runtime_client is not None
+    assert (
+        channel.live_voice_media_registry.native_runtime_client
+        is channel.live_voice_native_runtime_client
+    )
 
 
 class FakeChannelManager:
