@@ -272,9 +272,14 @@ exact-source Alpha result.
 
 ### OpenAI Realtime Native Interaction Engine
 
-- **Status/source:** **ACTIVE / NOT IMPLEMENTED** on isolated branch
-  `codex/openai-realtime-native-interaction-engine`, based on clean integration
-  source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`. The old
+- **Status/source:** **ACTIVE / FAILED CANDIDATE UNDER D-100 CORRECTION** on
+  isolated branch `codex/openai-realtime-native-interaction-engine`, based on
+  clean integration source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`.
+  Exact candidate `0a1a5d36e851998e5fe384c48302f7b446f52d12` has substantial local
+  implementation and passing affected automation, but its independent cold
+  review is `C2/I5/M0 — FAIL`; it has no source-pass or acceptance credit. The
+  user accepted D-100 solution A, and correction implementation is now active.
+  The old
   `codex/openai-realtime-native-voice@42f448aff7f8af9b0759c59a841f6a57a5792449`
   remains an untouched Speech Adapter reference and has no Native Engine
   completion authority.
@@ -289,12 +294,18 @@ exact-source Alpha result.
   `LISTEN/SILENCE/TURN_COMMIT/SPEAK/STOP/REVISE/DELEGATE` action set, admits
   direct native audio only through Runtime fences, truncates interrupted
   Provider output at the Audio I/O played cursor and delegates Jiuwen work only
-  through the existing Bridge authorities.
+  through the existing Bridge authorities. Under D-100, one Provider response
+  owns one bounded streaming source/ticket/socket while each 20 ms frame remains
+  individually Runtime-admitted; no-cursor interruption fences locally and
+  discards late output without inventing Provider truncate truth.
 - **Owned product/test surfaces:** new closed
   `live-voice.native-interaction.v1` internal contract, shared Realtime session
   kernel extraction, independent Native Engine and Runtime adapter, thin
   Gateway/Product activation/media composition, D-099's three-method internal
-  authority carrier and single existing-P2 `native.audio` notification variant,
+  authority carrier and single existing-P2 `native.audio` notification variant;
+  D-100 additionally owns its response-scoped async source, closed fence-only
+  ACK and activation-aborted close variants, AgentServer history reconciliation
+  task, method-specific delegate deadline and retained Provider close owner,
   plus focused contract, Provider-fake, Runtime, Bridge and cumulative Cascade
   regression tests.
 - **Exclusions:** no existing TurnCommit or SQLite migration, second
@@ -304,13 +315,19 @@ exact-source Alpha result.
   remains independent after source/automation and cold Tier-3 review pass.
 - **Acceptance and re-scope:** use red-green-refactor with deterministic
   event/barrier/manual-clock races; mutation-capable negative paths assert zero
-  forbidden effects. Freeze one exact candidate, obtain independent Tier-3
-  review plus fix-only follow-up, then decide whether machine-private real
+  forbidden effects. The D-100 packet must prove 3 s/150-frame sustained audio,
+  before-first/between-frame/duplicate speech-start, cursor/no-cursor fencing,
+  both history settlement orders and autonomous writer retry, long delegate,
+  incomplete close ownership, single direct response and transactional
+  activation compensation. Freeze a new exact candidate, obtain independent
+  fix-only Tier-3 review at `C0/I0`, then decide whether machine-private real
   Provider evidence is runnable. Any need to change shared wire/schema,
   authority ownership, Provider function exposure, played-cursor truth or
   fallback policy triggers re-scope before code expansion. See the
   [accepted design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md)
-  and [D-098/D-099](decisions/DECISIONS.md).
+  and [D-098/D-099/D-100](decisions/DECISIONS.md); the executable correction
+  boundary is in the
+  [D-100 plan](../docs/superpowers/plans/2026-08-25-openai-realtime-native-response-stream-correction.md).
 
 ### Separate outstanding P3-9 cumulative one-product acceptance Gate
 

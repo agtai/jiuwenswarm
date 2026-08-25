@@ -139,6 +139,46 @@ Native v1 本身不新增持久化 authority、schema migration 或第二个 rou
 
 该扩张不修改 shared `TurnCommit`、SQLite、P3 command、media v1 或 canonical history schema。任何更多 Browser method/notification kind、持久 capability、第二队列/Runtime owner 或通用 Gateway→AgentServer execution API 都触发第 16 节重新评估。
 
+### 5.5 D-100 response-scoped streaming correction overlay
+
+2026-08-25 对 exact candidate `0a1a5d36e851998e5fe384c48302f7b446f52d12`
+的独立冷复核证明，§5.4 若按“每个 20 ms Runtime unit 都创建一个非流式
+ticket/notification/socket”实现，会把数据面切成控制面事务，无法持续播放；原实现还在
+播放开始时过早清除了 speech-start，并遗漏 history、deadline、close、单响应和激活补偿
+闭环。D-098/D-099 保留为当时的设计历史，本节和 D-100 是后续实现的控制性修正。
+
+一个 Provider response 只创建一个 `native.audio` P2 notification、一个 ticket、一个
+dedicated-media WebSocket 和一个 bounded async source。每个规范化 20 ms frame 仍必须先
+获得独立 Runtime `PresentationUnit`，再按单调 sequence 放入同一 source。首 unit 仅作为
+既有 route anchor；source 持有有界 queue、sequence→unit 映射与增量 digest，不缓存整段
+PCM。既有 descriptor 以 `streaming=true`、`frame_count=null` 表示该 source，媒体 leaf
+沿用现有 async iterable 和逐 frame transport ACK，因此不增加 Browser RPC、notification
+kind、media frame/control 或 subprotocol。
+
+Browser 播放完成后的既有 receipt 携带最终 rendered-through sequence；Gateway 必须把它
+精确映射到最后实际播放的 Runtime unit，并以一个现有 `native.presentation_ack` 完成同一
+response 的连续 presentation prefix。错序、越界、stale generation、映射缺失和 bounded
+queue 饱和均 fail closed。Browser 不逐 frame 拉取 P2，不逐 frame 建 WebSocket，也不能
+以收到或排队的 frame 冒充已播放事实。
+
+speech-start 在首帧前或帧间出现时必须保留到 exact response 建立。若有真实 played cursor，
+顺序固定为 Browser local fence → Runtime generation fence/cancel admission → Provider
+`response.cancel` → exact `conversation.item.truncate`。若没有 cursor，Browser local fence、
+Runtime fence、Gateway source close 和 Engine late-output discard 仍立即发生，但不发送无事实
+依据的 Provider cancel/truncate；`native.presentation_ack` 只在同一 method 中使用 closed
+fence-only variant。zero、last、duplicate 和迟到 cursor 都按 exact binding 幂等处理。
+
+Runtime 的 done/ACK 任一后到者都进入同一 history reconciliation；AgentServer 拥有有界
+writer retry task，Browser 不负责通过重放 ACK 驱动 canonical write。delegate internal carrier
+使用 30 s method-specific deadline。未完成 Provider close 由 bounded retained close owner
+持有 Engine/capacity。一个 turn 只消费一个 direct response；delegate successor 需要 pending
+delegate/result 的显式 binding。activation 任一步失败都以既有 `native.close` 的 closed
+`activation_aborted` disposition 补偿关闭 exact Native/P2/media/Provider resources。
+
+上述修正不新增第四个 internal method、第二 authority、SQLite/TurnCommit/P3/media-v1
+schema、Browser surface 或 silent Cascade fallback。实现与验证任务见
+[D-100 correction plan](../../docs/superpowers/plans/2026-08-25-openai-realtime-native-response-stream-correction.md)。
+
 ## 6. Authority 划分
 
 | Owner | 唯一职责 | 明确禁止 |
