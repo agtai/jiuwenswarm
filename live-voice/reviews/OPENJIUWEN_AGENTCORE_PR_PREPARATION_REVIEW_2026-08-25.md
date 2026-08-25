@@ -192,8 +192,10 @@ The dedicated test-first replay packets are indexed in
 [AgentCore local PR replay packets](agentcore-pr-preparation/README.md). Each
 packet names its exact owned source/tests, intended public contract, dependency
 order, red/green and compatibility commands, quality-fix ownership, proposed
-PR title/body content, risk and exclusions. Their existence closes planning,
-not implementation: every packet remains marked `replay pending`.
+PR title/body content, risk and exclusions. Their existence closed planning,
+not implementation at the time of this review. The live execution state is now
+maintained in the packet index; it supersedes the historical `replay pending`
+labels recorded here.
 
 The refreshed upstream drift is already material: current `origin/develop`
 is `6390bbf2`, and AgentTeams Task storage, session-table DDL,
@@ -224,8 +226,10 @@ Before the AgentCore PR packages can be called ready for submission:
 
 - compare each group with the then-current `develop` and resolve upstream API,
   schema and migration drift;
-- replay the ten local stacked review refs onto the then-current `develop` and
-  redistribute the two cross-group quality-fix commits into their owning PRs;
+- finish real-issue metadata and reviewable three-commit history packaging for
+  the PR 01–03 technical replays already present locally;
+- formally replay PR 04–10 on their accepted dependency tips and redistribute
+  the two cross-group quality-fix commits into their owning PRs;
 - close the formatter/type-policy decisions described above on each branch;
 - rerun the focused and affected suites per PR, not only on the aggregate stack;
 - produce per-PR summary, risk, dependency, exact test evidence and exclusions;

@@ -1,7 +1,12 @@
 # AgentCore local PR replay packets — 2026-08-25
 
-Status: ten implementation plans are prepared; none has been replayed onto a
-fresh current develop branch, pushed or submitted.
+Status: ten implementation plans are prepared. PR 01 has a local three-commit
+technical replay on the refreshed base; PR 02 and PR 03 have isolated local
+technical candidates. PR 03 is Tier-3 technical-ready (`573` affected tests,
+`130` race repeats, independent `Critical 0 / Important 0`) but none of these
+packages is submission-ready: the required real issue reference is still
+missing, local history must be packaged/reworded accordingly, and nothing has
+been pushed or submitted. PR 04 has completed read-only preflight only.
 
 ## Refreshed upstream drift
 
@@ -34,10 +39,10 @@ run its affected evidence and obtain a new Tier-3 review.
 
 | Order | Capability | Dependency | Packet | Current state |
 |---:|---|---|---|---|
-| 1 | Mandatory TeamTask scope | current develop | [PR 01](2026-08-25-pr01-task-scope.md) | plan ready; replay pending |
-| 2 | Monotonic AsyncTool cancellation | current develop | [PR 02](2026-08-25-pr02-async-cancel.md) | plan ready; replay pending |
-| 3 | Durable execution ownership | PR 01, PR 02 | [PR 03](2026-08-25-pr03-execution-owner.md) | plan ready; replay pending |
-| 4 | Command replay and immutable result | PR 01, PR 03 | [PR 04](2026-08-25-pr04-command-result.md) | plan ready; replay pending |
+| 1 | Mandatory TeamTask scope | current develop | [PR 01](2026-08-25-pr01-task-scope.md) | technical replay present; issue metadata/history package pending |
+| 2 | Monotonic AsyncTool cancellation | current develop | [PR 02](2026-08-25-pr02-async-cancel.md) | isolated technical candidate present; issue metadata/package pending |
+| 3 | Durable execution ownership | PR 01, PR 02 | [PR 03](2026-08-25-pr03-execution-owner.md) | technical Ready; issue metadata and three-commit package pending |
+| 4 | Command replay and immutable result | PR 01, PR 03 | [PR 04](2026-08-25-pr04-command-result.md) | preflight blockers recorded; formal replay blocked on packaged PR 03 base |
 | 5 | Canonical Task events and dispatch | PR 03, PR 04 | [PR 05](2026-08-25-pr05-event-dispatch.md) | plan ready; replay pending |
 | 6 | Execution-checkpoint publication | PR 03, PR 05 | [PR 06](2026-08-25-pr06-checkpoint.md) | plan ready; replay pending |
 | 7 | External-effect journal | PR 03, PR 05 | [PR 07](2026-08-25-pr07-effect-journal.md) | plan ready; replay pending |

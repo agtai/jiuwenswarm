@@ -326,6 +326,20 @@ injection, migration, canary and duplicate deletion remain later packets and
 receive no credit here. Main is the sole shared-semantics, integration,
 documentation and Git-history owner; parallel workers are read-only.
 
+The isolated AgentCore replay has now advanced through PR 03 technical closure.
+The durable execution-ownership candidate passes `573` affected tests plus `130`
+key race repetitions, and an independent Tier-3 cold review reports
+`0 Critical / 0 Important`. It is not committed or submission-ready because the
+repository requires a real issue reference on the consecutive source/test/docs
+package. PR 04 command/result preflight is complete, but formal replay is held
+until PR 03 has that reviewable base. The preflight records current-contract
+adaptations for runtime quiescence, review-round CAS, version-0 terminal ABA,
+Team-clean reservation/tombstones, terminal consumers, command ordering and
+SessionFileStore zero-effect behaviour in
+the [PR 04 packet](reviews/agentcore-pr-preparation/2026-08-25-pr04-command-result.md).
+No result changes Live Voice authority, performs composition/migration, or
+grants deletion credit.
+
 ### P1/P2 lifecycle repair closure
 
 All four repair boundaries preserve the product/test tree of pre-consolidation
