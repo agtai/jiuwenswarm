@@ -595,7 +595,7 @@ async def run_vad_attempt(
     attempt_index: int,
     *,
     configuration_id: str,
-    silence_duration_ms: int,
+    silence_duration_ms: int | None,
     provider_factory: ProviderFactory,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -619,6 +619,14 @@ async def run_vad_attempt(
     if configuration.silence_duration_ms != silence_duration_ms:
         raise ValueError("VAD_CONFIGURATION_INVALID")
     turn_detection = turn_detection_for(configuration)
+    result_labels = {
+        "turn_detection_mode": configuration.mode.value,
+        "semantic_eagerness": (
+            configuration.semantic_eagerness.value
+            if configuration.semantic_eagerness is not None
+            else None
+        ),
+    }
     sent_cursor = 0
     item_id: str | None = None
     eot_seen = asyncio.Event()
@@ -778,6 +786,7 @@ async def run_vad_attempt(
                 pacing_p50_ms=p50,
                 pacing_p95_ms=p95,
                 pacing_max_ms=maximum,
+                **result_labels,
             )
         return VadAttemptResult.failed(
             configuration_id,
@@ -800,6 +809,7 @@ async def run_vad_attempt(
             transcript_complete=transcript_complete,
             cleanup_complete=clean,
             pacing_valid=pacing_valid,
+            **result_labels,
         )
     except asyncio.CancelledError:
         raise
@@ -839,6 +849,7 @@ async def run_vad_attempt(
             committed_count=committed, final_count=final,
             exact_identity=exact_identity, transcript_complete=transcript_complete,
             cleanup_complete=False, pacing_valid=pacing_valid,
+            **result_labels,
         )
     if lateness and not pacing_valid:
         return VadAttemptResult.failed(
@@ -849,6 +860,7 @@ async def run_vad_attempt(
             committed_count=committed, final_count=final,
             exact_identity=exact_identity, transcript_complete=transcript_complete,
             cleanup_complete=True, pacing_valid=False,
+            **result_labels,
         )
     if early_eot and cleanup:
         return VadAttemptResult.failed(
@@ -865,6 +877,7 @@ async def run_vad_attempt(
             transcript_complete=transcript_complete,
             cleanup_complete=True,
             pacing_valid=pacing_valid,
+            **result_labels,
         )
     return VadAttemptResult.failed(
         configuration_id,
@@ -881,6 +894,7 @@ async def run_vad_attempt(
         transcript_complete=transcript_complete,
         cleanup_complete=cleanup,
         pacing_valid=pacing_valid,
+        **result_labels,
     )
 
 

@@ -222,6 +222,28 @@ class FakeProvider:
         self.closed = True
 
 
+class SemanticFakeProvider(FakeProvider):
+    def __init__(
+        self,
+        case,
+        *,
+        disposition=RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED,
+    ) -> None:
+        super().__init__(case, 300)
+        self.disposition = disposition
+
+    async def open_recognition(self, request, *, timeout_seconds: float) -> None:
+        assert timeout_seconds > 0
+        assert request.turn_detection.mode is runner.RecognitionTurnDetectionMode.SEMANTIC_VAD
+        assert request.turn_detection.semantic_vad is not None
+        assert request.turn_detection.semantic_vad.eagerness is runner.SemanticVadEagerness.AUTO
+        self.ref = request.ref
+
+    async def commit_recognition(self, ref):
+        assert ref == self.ref
+        return self.disposition
+
+
 class EarlyEotThenProtocolProvider(FakeProvider):
     async def send_recognition_audio(self, frame) -> None:
         self.frames.append(frame)
@@ -757,6 +779,60 @@ def test_semantic_attempt_fields_are_closed_and_failed_timings_are_null() -> Non
     assert completed.semantic_eagerness == "auto"
     failed = runner.VadAttemptResult.failed("B_HIGH", None, "case-a", 0, runner.VadAttemptReason.TIMEOUT, turn_detection_mode="semantic_vad", semantic_eagerness="high")
     assert failed.final_voiced_frame_to_eot_ms is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disposition", "expected_outcome"),
+    (
+        (
+            RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED,
+            runner.VadAttemptOutcome.COMPLETED,
+        ),
+        (
+            RecognitionCommitDisposition.SERVER_VAD_OBSERVED,
+            runner.VadAttemptOutcome.FAILED,
+        ),
+    ),
+)
+async def test_semantic_attempt_uses_native_detection_and_mode_specific_commit_truth(
+    tmp_path: Path,
+    disposition,
+    expected_outcome,
+) -> None:
+    config = _config(tmp_path)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    case = manifest.cases[0]
+    provider = SemanticFakeProvider(case, disposition=disposition)
+    clock = ManualClock()
+
+    async def factory(turn_detection):
+        assert turn_detection.mode is runner.RecognitionTurnDetectionMode.SEMANTIC_VAD
+        return provider
+
+    result = await runner.run_vad_attempt(
+        config,
+        case,
+        0,
+        configuration_id="B_AUTO",
+        silence_duration_ms=None,
+        provider_factory=factory,
+        monotonic=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert result.outcome is expected_outcome
+    assert result.turn_detection_mode == "semantic_vad"
+    assert result.semantic_eagerness == "auto"
+    assert result.silence_duration_ms is None
+    if expected_outcome is runner.VadAttemptOutcome.COMPLETED:
+        assert result.reason is runner.VadAttemptReason.OK
+        assert result.final_voiced_frame_to_eot_ms is not None
+    else:
+        assert result.reason is runner.VadAttemptReason.PROVIDER_PROTOCOL
+        assert result.final_voiced_frame_to_eot_ms is None
+        assert result.eot_to_final_ms is None
+        assert result.final_voiced_frame_to_final_ms is None
 
 
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
