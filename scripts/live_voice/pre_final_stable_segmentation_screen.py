@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.metadata
 import json
 import math
 import os
@@ -231,6 +232,25 @@ def _cancel_command(
     )
 
 
+async def _cancel_and_wait_terminal(handle: object, binding: HarnessRoundBinding) -> str:
+    cancel = getattr(handle, "cancel", None)
+    round_id = getattr(handle, "round_id", None)
+    if not callable(cancel) or not isinstance(round_id, str):
+        raise RuntimeError("round handle cannot be cancelled")
+    result = cancel(_cancel_command(binding=binding, round_id=round_id))
+    if getattr(result, "accepted", False) is not True:
+        raise RuntimeError("round cancellation was not accepted")
+
+    async def wait_terminal() -> object:
+        while getattr(handle, "terminal_event", None) is None:
+            await asyncio.sleep(0)
+        return handle.terminal_event
+
+    terminal = await asyncio.wait_for(wait_terminal(), timeout=10)
+    payload = terminal.payload
+    return str(payload.get("outcome", "unknown"))
+
+
 async def measure_attempt(
     facade: object,
     workload: Workload,
@@ -336,14 +356,33 @@ async def measure_attempt(
                     payload = item.payload
                     if payload.get("state") == "terminal":
                         terminal_outcome = str(payload.get("outcome", "unknown"))
-    except BaseException:
-        failure_reason = failure_reason or "AGENT_STREAM_FAILED_OR_TIMED_OUT"
+    except TimeoutError:
+        failure_reason = failure_reason or "AGENT_STREAM_TIMED_OUT"
         if handle is not None and handle.terminal_event is None:
             try:
-                handle.cancel(
-                    _cancel_command(binding=binding, round_id=handle.round_id)
-                )
-            except BaseException:
+                terminal_outcome = await _cancel_and_wait_terminal(handle, binding)
+            except Exception:
+                failure_reason = "ROUND_CANCEL_FAILED"
+    except asyncio.CancelledError:
+        if handle is not None and handle.terminal_event is None:
+            try:
+                await _cancel_and_wait_terminal(handle, binding)
+            except Exception:
+                pass
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        if handle is not None and handle.terminal_event is None:
+            try:
+                await _cancel_and_wait_terminal(handle, binding)
+            except Exception:
+                pass
+        raise
+    except Exception:
+        failure_reason = failure_reason or "AGENT_STREAM_FAILED"
+        if handle is not None and handle.terminal_event is None:
+            try:
+                terminal_outcome = await _cancel_and_wait_terminal(handle, binding)
+            except Exception:
                 failure_reason = "ROUND_CANCEL_FAILED"
     finally:
         try:
@@ -466,14 +505,26 @@ def build_report(
                 and candidate_p50 >= MATERIALITY_THRESHOLD_MS
             ),
         }
+    expected_slots = tuple(
+        (workload.workload_id, attempt_index)
+        for workload in workloads
+        for attempt_index in range(attempts_per_workload)
+    )
+    actual_slots = tuple(
+        (attempt.workload_id, attempt.attempt_index) for attempt in attempts
+    )
     integrity_pass = (
-        len(attempts) == expected_count
+        actual_slots == expected_slots
+        and len(attempts) == expected_count
         and all(attempt.outcome == "completed" for attempt in attempts)
         and all(
             attempt.reconciliation_disposition
             == FinalReconciliationDisposition.EXACT_PREFIX.value
             for attempt in attempts
         )
+    )
+    materiality_pass = integrity_pass and all(
+        bool(summary["materiality_pass"]) for summary in summaries.values()
     )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -488,6 +539,13 @@ def build_report(
         "p95_method": "nearest_rank_small_population",
         "intended_attempts": expected_count,
         "status": "PASS" if integrity_pass else "FAIL",
+        "decision": (
+            "READY_FOR_TTS_SCREEN"
+            if materiality_pass
+            else "MATERIALITY_STOP"
+            if integrity_pass
+            else "INTEGRITY_FAILED"
+        ),
         "attempts": [attempt.to_dict() for attempt in attempts],
         "summaries": summaries,
         "forbidden_effects": dict(ZERO_FORBIDDEN_EFFECTS),
@@ -508,19 +566,39 @@ def _git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def validate_source(root: Path, git_commit: str, output: Path) -> None:
+def _installed_agent_core_commit() -> str:
+    try:
+        distribution = importlib.metadata.distribution("openjiuwen")
+        direct_url_text = distribution.read_text("direct_url.json")
+        direct_url = json.loads(direct_url_text or "{}")
+        commit_id = direct_url.get("vcs_info", {}).get("commit_id")
+    except (importlib.metadata.PackageNotFoundError, json.JSONDecodeError):
+        commit_id = None
+    if not isinstance(commit_id, str) or not _COMMIT_RE.fullmatch(commit_id):
+        raise ValueError("installed Agent-Core commit provenance is unavailable")
+    return commit_id
+
+
+def validate_source(
+    root: Path,
+    git_commit: str,
+    agent_core_commit: str,
+    output: Path,
+) -> None:
     if output.exists():
         raise FileExistsError("benchmark output already exists")
     if _git(root, "rev-parse", "HEAD") != git_commit:
         raise ValueError("git commit does not match the checked-out source")
     if _git(root, "status", "--porcelain"):
         raise ValueError("benchmark requires a clean source tree")
+    if _installed_agent_core_commit() != agent_core_commit:
+        raise ValueError("Agent-Core commit does not match the installed dependency")
 
 
 async def _run(args: argparse.Namespace) -> int:
     root = Path(__file__).resolve().parents[2]
     output = Path(args.output).resolve()
-    validate_source(root, args.git_commit, output)
+    validate_source(root, args.git_commit, args.agent_core_commit, output)
     project_dir = Path(args.project_dir).resolve()
     if not project_dir.is_dir():
         raise ValueError("project directory does not exist")

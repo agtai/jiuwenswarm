@@ -16,19 +16,31 @@ class _Facade:
         events: tuple[tuple[str, str], ...],
         *,
         block: bool = False,
+        wrong_request: bool = False,
     ) -> None:
         self.events = events
         self.block = block
+        self.wrong_request = wrong_request
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
 
     def supports_formal_live_voice(self) -> bool:
         return True
 
     async def process_formal_live_voice_stream(self, execution):
         if self.block:
-            await asyncio.Event().wait()
-        for event_type, content in self.events:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.closed.set()
+        for index, (event_type, content) in enumerate(self.events):
             yield AgentResponseChunk(
-                request_id=execution.request_id,
+                request_id=(
+                    "foreign-request"
+                    if self.wrong_request and index == 0
+                    else execution.request_id
+                ),
                 channel_id=execution.channel_id,
                 payload={"event_type": event_type, "content": content},
                 is_complete=event_type == "chat.final",
@@ -140,7 +152,46 @@ async def test_timeout_fails_closed_and_cleans_up() -> None:
     )
 
     assert attempt.outcome == "failed"
-    assert attempt.reason == "AGENT_STREAM_FAILED_OR_TIMED_OUT"
+    assert attempt.reason == "AGENT_STREAM_TIMED_OUT"
+    assert attempt.terminal_outcome == "cancelled"
+    assert attempt.agent_to_candidate_ms is None
+    assert attempt.candidate_to_final_ms is None
+    assert attempt.agent_to_final_ms is None
+
+
+@pytest.mark.asyncio
+async def test_external_process_cancellation_is_not_swallowed() -> None:
+    facade = _Facade((), block=True)
+    task = asyncio.create_task(
+        screen.measure_attempt(facade, WORKLOAD, 0, timeout_seconds=10)
+    )
+    await asyncio.wait_for(facade.started.wait(), timeout=1)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(facade.closed.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_foreign_chunk_identity_fails_closed_at_harness_boundary() -> None:
+    attempt = await screen.measure_attempt(
+        _Facade(
+            (
+                ("chat.delta", "Paris is the capital. "),
+                ("chat.delta", "More follows."),
+                ("chat.final", "Paris is the capital. More follows."),
+            ),
+            wrong_request=True,
+        ),
+        WORKLOAD,
+        0,
+        monotonic=_Clock((10.0,)),
+    )
+
+    assert attempt.outcome == "failed"
+    assert attempt.terminal_outcome == "failed"
     assert attempt.agent_to_candidate_ms is None
     assert attempt.candidate_to_final_ms is None
     assert attempt.agent_to_final_ms is None
@@ -159,6 +210,7 @@ def test_report_is_private_exclusive_and_mode_600(tmp_path: Path) -> None:
     screen.write_report(output, report)
     serialized = output.read_text(encoding="utf-8")
     assert report["status"] == "PASS"
+    assert report["decision"] == "READY_FOR_TTS_SCREEN"
     assert report["summaries"]["medium"]["materiality_pass"] is True
     assert output.stat().st_mode & 0o777 == 0o600
     assert "private" not in serialized
@@ -176,13 +228,36 @@ def test_source_validation_rejects_mismatch_dirty_and_existing_output(
     answers = iter(("b" * 40, ""))
     monkeypatch.setattr(screen, "_git", lambda *_args: next(answers))
     with pytest.raises(ValueError, match="does not match"):
-        screen.validate_source(tmp_path, "a" * 40, output)
+        screen.validate_source(tmp_path, "a" * 40, "c" * 40, output)
 
     answers = iter(("a" * 40, "dirty"))
     monkeypatch.setattr(screen, "_git", lambda *_args: next(answers))
     with pytest.raises(ValueError, match="clean source"):
-        screen.validate_source(tmp_path, "a" * 40, output)
+        screen.validate_source(tmp_path, "a" * 40, "c" * 40, output)
+
+    answers = iter(("a" * 40, ""))
+    monkeypatch.setattr(screen, "_git", lambda *_args: next(answers))
+    monkeypatch.setattr(screen, "_installed_agent_core_commit", lambda: "b" * 40)
+    with pytest.raises(ValueError, match="Agent-Core commit"):
+        screen.validate_source(tmp_path, "a" * 40, "c" * 40, output)
 
     output.touch()
     with pytest.raises(FileExistsError):
-        screen.validate_source(tmp_path, "a" * 40, output)
+        screen.validate_source(tmp_path, "a" * 40, "c" * 40, output)
+
+
+def test_run_report_requires_the_exact_medium_long_slot_population() -> None:
+    repeated_medium = tuple(
+        screen.Attempt.completed("medium", index, 400.0, 800.0, 1200.0)
+        for index in range(10)
+    )
+
+    report = screen.build_report(
+        mode="run",
+        git_commit="a" * 40,
+        agent_core_commit="b" * 40,
+        attempts=repeated_medium,
+    )
+
+    assert report["status"] == "FAIL"
+    assert report["decision"] == "INTEGRITY_FAILED"
