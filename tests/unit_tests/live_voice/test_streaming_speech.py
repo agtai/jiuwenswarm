@@ -337,6 +337,69 @@ def test_server_vad_boundaries_require_same_item_and_cursorless_final() -> None:
     assert snapshot.turn_commits == 0
 
 
+def test_semantic_provider_commit_rejects_cursor_bearing_final() -> None:
+    capability = replace(
+        native_capability(),
+        recognition=replace(
+            native_capability().recognition,
+            semantic_vad=CapabilityProvenance.PROVIDER_NATIVE,
+        ),
+    )
+    runtime = StreamingSpeechConformance(capability, enabled=True)
+    ref = recognition_ref()
+    runtime.start_recognition(
+        RecognitionStreamRequest(
+            ref,
+            RecognitionTurnDetection.semantic_vad_configured(
+                SemanticVadEagerness.AUTO
+            ),
+        ),
+        timeout_seconds=5,
+    )
+    runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
+    for boundary in (
+        RecognitionTurnBoundaryEvent(
+            ref,
+            PROVIDER,
+            0,
+            RecognitionTurnBoundaryKind.SPEECH_STARTED,
+            "semantic-item-1",
+            provider_start_ms=100,
+        ),
+        RecognitionTurnBoundaryEvent(
+            ref,
+            PROVIDER,
+            1,
+            RecognitionTurnBoundaryKind.SPEECH_STOPPED,
+            "semantic-item-1",
+            provider_end_ms=700,
+        ),
+        RecognitionTurnBoundaryEvent(
+            ref,
+            PROVIDER,
+            2,
+            RecognitionTurnBoundaryKind.COMMITTED,
+            "semantic-item-1",
+        ),
+    ):
+        runtime.accept_recognition_boundary(boundary)
+
+    with pytest.raises(StreamingSpeechViolation) as rejected:
+        runtime.accept_recognition_event(
+            StreamingRecognitionEvent(
+                ref=ref,
+                provider=PROVIDER,
+                seq=3,
+                audio_cursor=4,
+                kind=RecognitionEventKind.FINAL,
+                hypothesis=hypothesis("semantic final"),
+                timing_basis=RecognitionTimingBasis.EXACT_SOURCE_CURSOR,
+            )
+        )
+    assert rejected.value.reason == "PROVIDER_VAD_CURSOR_FORBIDDEN"
+    assert_zero_authority_effects(runtime)
+
+
 def test_server_vad_request_requires_exact_provider_capability_before_allocation() -> (
     None
 ):

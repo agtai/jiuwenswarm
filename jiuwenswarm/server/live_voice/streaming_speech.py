@@ -735,18 +735,27 @@ class StreamingSpeechConformance:
                         reason,
                         "recognition Provider event sequence must be contiguous",
                     )
-                if event.audio_cursor is None:
-                    provider_vad_supported = (
-                        state.turn_detection.mode
-                        is RecognitionTurnDetectionMode.SERVER_VAD
-                        and self._capability.recognition.server_vad
-                        is CapabilityProvenance.PROVIDER_NATIVE
-                    ) or (
-                        state.turn_detection.mode
-                        is RecognitionTurnDetectionMode.SEMANTIC_VAD
-                        and self._capability.recognition.semantic_vad
-                        is CapabilityProvenance.PROVIDER_NATIVE
+                provider_vad_supported = (
+                    state.turn_detection.mode
+                    is RecognitionTurnDetectionMode.SERVER_VAD
+                    and self._capability.recognition.server_vad
+                    is CapabilityProvenance.PROVIDER_NATIVE
+                ) or (
+                    state.turn_detection.mode
+                    is RecognitionTurnDetectionMode.SEMANTIC_VAD
+                    and self._capability.recognition.semantic_vad
+                    is CapabilityProvenance.PROVIDER_NATIVE
+                )
+                if (
+                    state.provider_committed
+                    and provider_vad_supported
+                    and event.audio_cursor is not None
+                ):
+                    raise StreamingSpeechViolation(
+                        "PROVIDER_VAD_CURSOR_FORBIDDEN",
+                        "Provider-owned VAD output cannot claim an exact source cursor",
                     )
+                if event.audio_cursor is None:
                     if (
                         event.timing_basis is not RecognitionTimingBasis.PROVIDER_TIME
                         or event.timing_provenance

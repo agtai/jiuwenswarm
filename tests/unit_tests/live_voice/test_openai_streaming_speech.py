@@ -668,6 +668,137 @@ async def test_semantic_vad_owns_provider_turn_boundaries_and_final() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events",
+    (
+        (
+            {
+                "type": "input_audio_buffer.speech_stopped",
+                "item_id": "semantic-item-1",
+                "audio_end_ms": 640,
+            },
+        ),
+        (
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "semantic-item-1",
+                "audio_start_ms": 120,
+            },
+            {
+                "type": "input_audio_buffer.speech_stopped",
+                "item_id": "semantic-item-2",
+                "audio_end_ms": 640,
+            },
+        ),
+        (
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "semantic-item-1",
+                "audio_start_ms": 120,
+            },
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "semantic-item-1",
+                "audio_start_ms": 121,
+            },
+        ),
+        (
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "semantic-item-1",
+                "audio_start_ms": 120,
+            },
+            {
+                "type": "input_audio_buffer.speech_stopped",
+                "item_id": "semantic-item-1",
+                "audio_end_ms": 640,
+            },
+            {
+                "type": "input_audio_buffer.speech_stopped",
+                "item_id": "semantic-item-1",
+                "audio_end_ms": 641,
+            },
+        ),
+        (
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "semantic-item-1",
+                "audio_start_ms": 120,
+            },
+            {
+                "type": "input_audio_buffer.speech_stopped",
+                "item_id": "semantic-item-1",
+                "audio_end_ms": 640,
+            },
+            {"type": "input_audio_buffer.committed", "item_id": "semantic-item-1"},
+            {"type": "input_audio_buffer.committed", "item_id": "semantic-item-1"},
+        ),
+        (
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "semantic-item-1",
+                "audio_start_ms": 120,
+            },
+            {
+                "type": "input_audio_buffer.speech_stopped",
+                "item_id": "semantic-item-1",
+                "audio_end_ms": 640,
+            },
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "content_index": 0,
+                "item_id": "semantic-item-1",
+                "transcript": "premature semantic final",
+            },
+        ),
+    ),
+    ids=(
+        "stopped-before-started",
+        "wrong-stop-item",
+        "duplicate-started",
+        "duplicate-stopped",
+        "duplicate-committed",
+        "final-before-committed",
+    ),
+)
+async def test_semantic_vad_invalid_boundary_sequences_fail_closed(
+    events: tuple[dict[str, object], ...],
+) -> None:
+    facts: list[SpeechDegradationFact] = []
+    semantic_echo = {"type": "semantic_vad", "eagerness": "auto"}
+    socket = FakeSocket((session_updated_event(semantic_echo),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+    ref = recognition_ref()
+    await provider.open_recognition(
+        RecognitionStreamRequest(
+            ref,
+            RecognitionTurnDetection.semantic_vad_configured(
+                SemanticVadEagerness.AUTO
+            ),
+        ),
+        timeout_seconds=2,
+    )
+    await provider.send_recognition_audio(recognition_frame(ref))
+    for event in events:
+        socket.push(event)
+
+    await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    assert [message["type"] for message in socket.sent].count(
+        "input_audio_buffer.commit"
+    ) == 0
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_manual_commit_wins_server_vad_race_without_a_second_commit() -> None:
     socket = BlockingCommitSocket((session_updated_event(server_vad_wire()),))
 
