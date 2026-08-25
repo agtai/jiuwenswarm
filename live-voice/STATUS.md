@@ -371,10 +371,22 @@ phase/incarnation/prefix/provider binding, reconstructible authority-free
 lifecycle/provenance truth anchored by a PR 07-owned effect-intent event appended
 through the accepted PR 05 canonical Task-event writer, per-dispatch evidence,
 reservation-aware tombstones and PR 10's bound public surface. PR 07 has no
-formal dependency on PR 06; its accepted internal
-continuation may later serve PR 06 only if a checkpoint payload authorization
+formal dependency on PR 06; its accepted internal continuation may later serve
+PR 06 only if a checkpoint payload authorization
 cannot become general provider-call authority. Exact requirements are in the
 [PR 07 packet](reviews/agentcore-pr-preparation/2026-08-25-pr07-effect-journal.md).
+PR 08 Task-event consumer-cursor preflight is now complete. The historical
+candidate destroys cursor/advance-receipt truth on normal Team clean and checks
+for a live Team before exact replay. Its mutable cursor is not anchored to the
+immutable forward receipt that established the current version, so deleting
+that receipt can let the old `advance_id` return a different covered-ACK result.
+The independent preflight reports `2 Critical / 4 Important`. Formal replay
+must inherit PR 05's stream-incarnation/legacy-baseline policy, rebuild the
+cursor as a receipt-chain/head-verified projection, preserve normal-clean
+tombstones, bind advance IDs to the full logical cursor, keep raw mutation seams
+internal until PR 09, and freeze typed read, registration/retirement and bounded
+receipt-growth semantics. Exact requirements are in the
+[PR 08 packet](reviews/agentcore-pr-preparation/2026-08-25-pr08-event-cursor.md).
 No result changes Live Voice authority, performs composition/migration, or
 grants deletion credit.
 

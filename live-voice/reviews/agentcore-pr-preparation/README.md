@@ -6,11 +6,12 @@ technical candidates. PR 03 is Tier-3 technical-ready (`573` affected tests,
 `130` race repeats, independent `Critical 0 / Important 0`) but none of these
 packages is submission-ready: the required real issue reference is still
 missing, local history must be packaged/reworded accordingly, and nothing has
-been pushed or submitted. PR 04 through PR 07 have completed read-only preflight
+been pushed or submitted. PR 04 through PR 08 have completed read-only preflight
 only. PR 06's independent preflight found `4 Critical / 2 Important` in the
 historical checkpoint candidate; PR 07 found `5 Critical / 6 Important` in the
-historical effect-journal candidate. Those findings are replay requirements, not
-implemented or reviewed formal branches.
+historical effect-journal candidate; PR 08 found `2 Critical / 4 Important` in
+the historical event-cursor candidate. Those findings are replay requirements,
+not implemented or reviewed formal branches.
 
 ## Refreshed upstream drift
 
@@ -56,7 +57,7 @@ replayed first.
 | 5 | Canonical Task events and dispatch | PR 03, PR 04 | [PR 05](2026-08-25-pr05-event-dispatch.md) | preflight blockers recorded; formal replay blocked on accepted PR 04 base |
 | 6 | Execution-checkpoint publication | PR 03, PR 05; add accepted PR 07 only if continuation reuse is selected | [PR 06](2026-08-25-pr06-checkpoint.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 and safe payload-effect topology/dependency freeze |
 | 7 | External-effect journal | PR 03, PR 05 | [PR 07](2026-08-25-pr07-effect-journal.md) | preflight blockers recorded; formal replay blocked on accepted PR 03/05 and continuation/prefix/public-boundary scope freeze |
-| 8 | Task-event consumer cursor | PR 05 | [PR 08](2026-08-25-pr08-event-cursor.md) | plan ready; replay pending |
+| 8 | Task-event consumer cursor | PR 05 | [PR 08](2026-08-25-pr08-event-cursor.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 identity/baseline contract and cursor/receipt/public-boundary scope freeze |
 | 9 | Bound TeamTask/checkpoint authority | PR 01, 03, 04, 05, 06, 08 | [PR 09](2026-08-25-pr09-bound-task.md) | plan ready; replay pending |
 | 10 | Bound external-effect authority | PR 07, PR 09 | [PR 10](2026-08-25-pr10-bound-effect.md) | plan ready; replay pending |
 
@@ -65,9 +66,11 @@ replayed first.
 1. Record the new develop base and compare public API/schema drift before
    applying any candidate code. The first replay must use 6390bbf2 or a newer
    fetched develop, never the historical 4f2c29c3 base.
-2. Restore the owned tests first and preserve the red result. Tests may remain
-   unstaged while source is implemented so the repository-required commit
-   order remains source, tests, docs.
+2. Establish the owned failing tests first. Rebuild them from the accepted
+   contract when the dedicated packet identifies obsolete historical oracles;
+   restore only fixtures that the packet still accepts. Tests may remain
+   unstaged while source is implemented so the repository-required commit order
+   remains source, tests, docs.
 3. Use existing commits as evidence, not as authority to blindly cherry-pick.
    Resolve every upstream conflict by the owning capability contract.
 4. Fold fbfb4c5f and 50c065dc hunks into their owner packets:

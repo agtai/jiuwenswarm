@@ -209,7 +209,7 @@ changing its base. Replay must preserve upstream session-file hydration and
 write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
 the affected upstream tests.
 
-Read-only replay preflight is now complete through PR 07. PR 04 must preserve
+Read-only replay preflight is now complete through PR 08. PR 04 must preserve
 the accepted execution-quiescence, review-round, Team-tombstone, terminal and
 SessionFileStore contracts. PR 05 additionally requires non-cascading
 session-domain event/dispatch history, an explicit retired-Task/incarnation
@@ -239,9 +239,18 @@ provider/prefix authority, pair genesis with a PR 07-owned effect-intent event
 appended through the accepted PR 05 canonical Task-event writer as the
 journal-external presence anchor, keep raw seams internal until PR 10, and
 preserve current DDL/SessionFileStore behaviour. PR 07 can be replayed from
-accepted PR 03/05 without PR 06; only its later
-accepted internal primitive may be evaluated for checkpoint reuse. None of PR
-04–07 has started formal implementation; all remain blocked on accepted,
+accepted PR 03/05 without PR 06; only its later accepted internal primitive may
+be evaluated for checkpoint reuse. PR 08's historical Team cascade deletes
+cursor and replay truth during normal
+clean, and its live-Team-first lock prevents exact replay after retirement. Its
+cursor projection is not anchored by the immutable forward receipt that created
+its current version: deleting that receipt can rebind the old `advance_id` to a
+different covered-ACK result. The independent PR 08 preflight reports `2
+Critical / 4 Important`. Replay must inherit PR 05's stream incarnation and
+legacy baseline, use a reconstructible receipt chain/head, preserve normal-clean
+tombstones, scope replay identity to the complete bound cursor, keep raw seams
+internal until PR 09 and retain current DDL/SessionFileStore behaviour. None of
+PR 04–08 has started formal implementation; all remain blocked on accepted,
 reviewable dependency tips.
 
 For every PR:

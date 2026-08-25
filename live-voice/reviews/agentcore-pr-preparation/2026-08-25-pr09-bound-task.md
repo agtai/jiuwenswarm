@@ -38,6 +38,11 @@ records. Session release or rebinding invalidates the handle.
 - TeamTaskAuthority exposes get, list, apply_update, get_event_head,
   read_events, read_unread, advance_cursor, publish_execution_checkpoint and
   read_current_execution_checkpoint.
+- Cursor construction binds the accepted PR 08 physical session/Team/stream
+  incarnation or legacy baseline plus the exact member/application principal.
+  Product mapping may request an opaque consumer/channel registration, but the
+  facade derives and retains its internal identity; callers cannot select
+  another consumer/channel or invoke raw CursorDao/Manager mutation methods.
 - CanonicalTeamTask, CanonicalTaskExecution, CanonicalTaskSnapshot,
   CanonicalTaskResultRef and CanonicalTaskCommandDecision are verified public
   projections, not storage rows.
