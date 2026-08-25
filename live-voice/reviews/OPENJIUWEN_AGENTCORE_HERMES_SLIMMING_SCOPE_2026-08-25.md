@@ -5,6 +5,11 @@ This record defines what the isolated preparation branch may produce and what
 must not flow into the moving LiveVoice feature branch without a later,
 separately accepted implementation decision.
 
+Execution follows the
+[slimming preparation implementation plan](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_EXECUTION_PLAN_2026-08-25.md),
+which closes inventory and classification before prototype adjudication or
+AgentCore PR preparation.
+
 ## 1. Goal
 
 Reduce LiveVoice's long-term ownership and code volume by determining, without

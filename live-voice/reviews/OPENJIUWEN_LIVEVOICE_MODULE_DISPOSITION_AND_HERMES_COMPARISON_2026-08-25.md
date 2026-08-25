@@ -1,0 +1,343 @@
+# OpenJiuwen LiveVoice module disposition and Hermes comparison — 2026-08-25
+
+Status: Task 1 machine inventory complete; semantic disposition, Hermes relation
+and AgentCore classification are in progress under the accepted
+[scope](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md) and
+[execution plan](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_EXECUTION_PLAN_2026-08-25.md).
+This is a preparation review, not product progress or migration approval.
+
+Risk: Tier 0 documentation. Any later code change keeps the risk assigned by
+root `TESTING.md`.
+
+## 1. Observed sources and moving-baseline rule
+
+| Source | Observed branch / source | Observed HEAD | Use |
+|---|---|---|---|
+| Moving LiveVoice product fact | `hx/0812_live_voice_w3` | `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc` | read-only inventory and semantic truth |
+| Isolated preparation evidence | `codex/livevoice-agentcore-hermes-prep` | `a663cec2b09a3daa18cbbe449fe5d9e71cf5f27e` before this review batch | tracked analysis and candidate evidence |
+| Local AgentCore candidate | `codex/oj-g2-local-base` | `db8216839562de36fa24fd6f5ce807acea5a132a` | public-boundary and PR-candidate audit |
+| Hermes architecture mirror | `main` | `fc9cbc872d8050c22f1192b16bc5ff4aed471e10` | read-only responsibility comparison |
+
+The LiveVoice feature branch is still moving. These hashes make this audit
+reproducible but do not become durable symbol locators. Before each semantic
+batch, Main re-reads the current feature-branch HEAD and reconciles changed,
+added or removed files by path and responsibility. Long-lived conclusions use
+module paths, symbols, contracts and capability IDs, never source line numbers.
+
+All four worktrees were clean when their observed source was recorded. The
+preparation worktree becomes intentionally dirty only for the review documents
+owned by this batch.
+
+During Task 1 the product source advanced from `510f616d` to `1742c1b4`. The
+ten intervening commits changed P3 Task presentation/bridge code, their tests
+and STATUS, but none of the 31 audio/speech/media/TTS modules closed in §7.
+The complete tracked-file projection and current capability matrix were rerun
+on `1742c1b4` before this batch was closed.
+
+## 2. Production-code manifest boundary
+
+The manifest contains both dedicated LiveVoice modules and shared host files
+with substantive LiveVoice-owned registration, lifecycle, protocol, safety or
+presentation segments. A disposition for a shared host row applies only to its
+LiveVoice segment; it never authorizes deleting or moving the unrelated module.
+
+| Group | Inclusion rule | Files |
+|---|---|---:|
+| Backend server | immediate Python modules under `jiuwenswarm/server/live_voice` | 66 |
+| Gateway | immediate Python modules under `jiuwenswarm/gateway/live_voice` | 8 |
+| Shared schema | the two dedicated LiveVoice common schema modules | 2 |
+| Web deployment | deployment observer and preflight modules | 2 |
+| Formal Agent adapter | `server/runtime/agent_adapter/formal_live_voice.py` | 1 |
+| Frontend feature | tracked files under `frontend/src/features/live-voice` | 42 |
+| Frontend dedicated carrier | LiveVoice panels, styles, browser-ownership hook and Task presentation helper | 7 |
+| Shared host segment | non-dedicated files with substantive LiveVoice integration code | 24 |
+| **Total** | exact union, zero overlap | **152** |
+
+The shared-host set was obtained by scanning production source outside the
+dedicated paths for case-insensitive `live voice`, `live_voice`,
+`live-voice`, `liveVoice` and `formal_live_voice` references, then
+inspecting each hit. Pure translations, environment declarations, package
+scripts and benchmark runners are support assets in §3. General JiuwenSwarm
+dependencies with no LiveVoice-owned segment are dependencies, not mislabeled
+LiveVoice modules.
+
+Package `__init__` files and production CSS remain visible because they are
+tracked package or carrier surfaces. Tests, fixtures, launchers, validation
+scripts and environment profiles are recorded separately: they may be required
+oracles or deployment owners, but are not silently counted as production code.
+
+## 3. Test, fixture and support groups
+
+| Group | Files | Treatment |
+|---|---:|---|
+| `tests/unit_tests/live_voice` | 71 | direct backend unit oracle group |
+| `tests/integration/live_voice` | 4 | opt-in integration oracle group |
+| Other named backend LiveVoice tests | 10 | Agent server, channel, common, gateway and Web privacy oracles |
+| `tests/support/live_voice` | 2 | reusable test support |
+| `tests/fixtures/live_voice*` | 13 | protocol, media, intent, composition and retirement fixtures |
+| Frontend LiveVoice tests/manual harness | 35 | Web unit/integration and physical-harness support |
+| `scripts/live_voice` | 28 | launcher, evidence, benchmark, historical-stage and validation assets |
+| Frontend LiveVoice config/build/translation assets | 7 | two env profiles, env declarations, package scripts, benchmark script and two locale files |
+
+These counts are grouping evidence, not test coverage or retention credit. Each
+oracle follows its owning production responsibility; stage-named or experimental
+assets require explicit re-home/remove decisions before deletion.
+
+## 4. Disposition row contract
+
+Every production path below must end with exactly one completed disposition row
+containing:
+
+| Field | Required meaning |
+|---|---|
+| Module | stable tracked path plus relevant public symbols; no line numbers |
+| Capability domain | one stable STATUS/design capability owner |
+| Responsibility | what outcome or invariant the module or LiveVoice segment owns |
+| Why necessary | product, platform, safety, compatibility or support reason |
+| State or authority | canonical truth, verified replica, presentation fact, Port/Adapter, stateless policy or no state |
+| AgentCore relation | direct reuse, Adapter reuse, AgentCore PR candidate or LiveVoice-owned |
+| Hermes relation | analogue, partial analogue, different owner or no analogue |
+| Size driver | independent responsibility clusters, validation/fencing, compatibility, duplication or generated/repetitive contract |
+| Proposed disposition | retain, consolidate, split, refactor, replace, re-home or remove-after-gate |
+| Dependencies/evidence | contracts, tests and predecessor/successor owners |
+| Confidence/open question | high/medium/low and the exact unresolved semantic question |
+
+A filename-based guess never closes a row. Tasks 2–5 populate these fields from
+source, tests, public APIs and architecture evidence.
+
+## 5. Exact production-code path manifest
+
+| Group | Module path |
+|---|---|
+| Shared host segment | `jiuwenswarm/agents/harness/common/auto_harness/project_execution.py` |
+| Shared host segment | `jiuwenswarm/agents/harness/common/auto_harness/scheduler.py` |
+| Shared host segment | `jiuwenswarm/agents/harness/common/auto_harness/service.py` |
+| Shared host segment | `jiuwenswarm/agents/harness/common/auto_harness/task_store.py` |
+| Shared host segment | `jiuwenswarm/channels/web/app_web.py` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/App.tsx` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/L0OrdinaryChromeBatchPanel.tsx` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceDemoBar.css` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceDemoBar.tsx` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.css` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/MessageItem.tsx` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/index.tsx` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/productTaskProgressPresentation.ts` |
+| Frontend dedicated carrier | `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/useProductVoiceBrowserOwnership.ts` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/featureFlags.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserAudioIOAdapter.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserDedicatedMediaRoute.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserGatewayMediaTransport.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserSpeechRecognitionAdapter.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserSpeechSynthesisAdapter.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/liveVoiceCaptureProcessor.js` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/audioPort.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/browserAudioDeviceSelection.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/browserLiveVoiceOwnership.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalP3TaskExperience.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskControlLeaf.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskIntentRoute.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/formalTaskResultRoute.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/gatewayBatchSpeechClient.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/integratedP1Route.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/integratedWebRouteShell.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/l0Measurement.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/l0OrdinaryChromeBatch.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceContractV2.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceObservability.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceRouteTelemetry.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productCompositionContract.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP2ActivationJournal.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP3ProgressGenerationJournal.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP3TaskTargetJournal.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productTextProgress.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productWebActivation.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/unifiedCommittedInputOwner.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webPlatformDiagnostics.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceCore.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceMessageGate.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceStreamingSpeech.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskAdapter.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskBridge.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskClient.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskMonitor.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTurnLifecycle.ts` |
+| Frontend feature | `jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/services/supplementOutputQuarantine.ts` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/utils/tts.ts` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/utils/ttsOutputOwnership.ts` |
+| Shared host segment | `jiuwenswarm/channels/web/frontend/src/utils/ttsText.ts` |
+| Web deployment | `jiuwenswarm/channels/web/live_voice_deployment_observer.py` |
+| Web deployment | `jiuwenswarm/channels/web/live_voice_deployment_preflight.py` |
+| Shared schema | `jiuwenswarm/common/schema/live_voice_contract.py` |
+| Shared schema | `jiuwenswarm/common/schema/live_voice_contract_v2.py` |
+| Shared host segment | `jiuwenswarm/common/schema/message.py` |
+| Shared host segment | `jiuwenswarm/gateway/app_gateway.py` |
+| Shared host segment | `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py` |
+| Shared host segment | `jiuwenswarm/gateway/channel_manager/web/web_connect.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/__init__.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/browser_gateway_media_transport.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/dedicated_media_registration.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/dedicated_media_route.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/product_streaming_synthesis.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/speech_rpc.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/streaming_speech_route.py` |
+| Gateway | `jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py` |
+| Shared host segment | `jiuwenswarm/server/agent_ws_server.py` |
+| Backend server | `jiuwenswarm/server/live_voice/__init__.py` |
+| Backend server | `jiuwenswarm/server/live_voice/agent_bridge.py` |
+| Backend server | `jiuwenswarm/server/live_voice/agent_bridge_runtime.py` |
+| Backend server | `jiuwenswarm/server/live_voice/agent_conversation_runtime.py` |
+| Backend server | `jiuwenswarm/server/live_voice/alpha_benchmark.py` |
+| Backend server | `jiuwenswarm/server/live_voice/alpha_privacy_conformance.py` |
+| Backend server | `jiuwenswarm/server/live_voice/batch_speech.py` |
+| Backend server | `jiuwenswarm/server/live_voice/conversation_runtime.py` |
+| Backend server | `jiuwenswarm/server/live_voice/conversation_runtime_loop.py` |
+| Backend server | `jiuwenswarm/server/live_voice/critical_token_safety.py` |
+| Backend server | `jiuwenswarm/server/live_voice/demo_fixture_contract.py` |
+| Backend server | `jiuwenswarm/server/live_voice/durability_authority.py` |
+| Backend server | `jiuwenswarm/server/live_voice/durability_checkpoint.py` |
+| Backend server | `jiuwenswarm/server/live_voice/durability_effects.py` |
+| Backend server | `jiuwenswarm/server/live_voice/durability_identity.py` |
+| Backend server | `jiuwenswarm/server/live_voice/durability_readers.py` |
+| Backend server | `jiuwenswarm/server/live_voice/durability_recovery_facts.py` |
+| Backend server | `jiuwenswarm/server/live_voice/executor_capabilities.py` |
+| Backend server | `jiuwenswarm/server/live_voice/executor_port.py` |
+| Backend server | `jiuwenswarm/server/live_voice/fake_verticals.py` |
+| Backend server | `jiuwenswarm/server/live_voice/formal_history_writer.py` |
+| Backend server | `jiuwenswarm/server/live_voice/formal_task_models.py` |
+| Backend server | `jiuwenswarm/server/live_voice/interaction_engine.py` |
+| Backend server | `jiuwenswarm/server/live_voice/jiuwenswarm_agent_adapter.py` |
+| Backend server | `jiuwenswarm/server/live_voice/jiuwenswarm_round_harness.py` |
+| Backend server | `jiuwenswarm/server/live_voice/latency_measurement.py` |
+| Backend server | `jiuwenswarm/server/live_voice/live_voice_configuration_declaration.py` |
+| Backend server | `jiuwenswarm/server/live_voice/observability.py` |
+| Backend server | `jiuwenswarm/server/live_voice/observability_correlation_contract.py` |
+| Backend server | `jiuwenswarm/server/live_voice/observability_exporter.py` |
+| Backend server | `jiuwenswarm/server/live_voice/observability_fault_harness.py` |
+| Backend server | `jiuwenswarm/server/live_voice/observability_otel_codec.py` |
+| Backend server | `jiuwenswarm/server/live_voice/openai_streaming_speech.py` |
+| Backend server | `jiuwenswarm/server/live_voice/p2_response_generation_store.py` |
+| Backend server | `jiuwenswarm/server/live_voice/p3_authenticated_composition.py` |
+| Backend server | `jiuwenswarm/server/live_voice/p3_confirmation.py` |
+| Backend server | `jiuwenswarm/server/live_voice/p3_model_resolution.py` |
+| Backend server | `jiuwenswarm/server/live_voice/p3_product_confirmation.py` |
+| Backend server | `jiuwenswarm/server/live_voice/p3_production_intent_composition.py` |
+| Backend server | `jiuwenswarm/server/live_voice/persistent_task_core.py` |
+| Backend server | `jiuwenswarm/server/live_voice/presentation_ledger.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_authority.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_composition_contract.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_composition_registry.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_composition_root.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_observability_adapter.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_observability_runtime.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_p2_interaction_adapter.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_p2_readiness.py` |
+| Backend server | `jiuwenswarm/server/live_voice/product_p3_text_adapter.py` |
+| Backend server | `jiuwenswarm/server/live_voice/production_task_classifier.py` |
+| Backend server | `jiuwenswarm/server/live_voice/production_task_intent.py` |
+| Backend server | `jiuwenswarm/server/live_voice/progress_notification_arbiter.py` |
+| Backend server | `jiuwenswarm/server/live_voice/project_code_executor.py` |
+| Backend server | `jiuwenswarm/server/live_voice/realtime_media.py` |
+| Backend server | `jiuwenswarm/server/live_voice/sli_window_contract.py` |
+| Backend server | `jiuwenswarm/server/live_voice/speech_ports.py` |
+| Backend server | `jiuwenswarm/server/live_voice/streaming_speech.py` |
+| Backend server | `jiuwenswarm/server/live_voice/task_core.py` |
+| Backend server | `jiuwenswarm/server/live_voice/task_event_subscription.py` |
+| Backend server | `jiuwenswarm/server/live_voice/task_progress_return.py` |
+| Backend server | `jiuwenswarm/server/live_voice/task_store.py` |
+| Backend server | `jiuwenswarm/server/live_voice/telemetry_privacy_contract.py` |
+| Backend server | `jiuwenswarm/server/live_voice/unified_committed_input.py` |
+| Backend server | `jiuwenswarm/server/live_voice/voice_task_bridge.py` |
+| Backend server | `jiuwenswarm/server/live_voice/voice_task_policy.py` |
+| Shared host segment | `jiuwenswarm/server/runtime/agent_adapter/agent_adapters.py` |
+| Formal Agent adapter | `jiuwenswarm/server/runtime/agent_adapter/formal_live_voice.py` |
+| Shared host segment | `jiuwenswarm/server/runtime/agent_adapter/interface.py` |
+| Shared host segment | `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py` |
+| Shared host segment | `jiuwenswarm/server/runtime/agent_manager.py` |
+| Shared host segment | `jiuwenswarm/server/runtime/session/session_history.py` |
+
+## 6. Inventory closure
+
+The manifest was produced from tracked paths in the clean moving LiveVoice
+worktree using the dedicated-path rules and inspected shared-host scan in §2.
+The union contains 152 unique paths, with zero cross-group duplicates. A
+mechanical set-equality check between this table and a fresh projection is
+required whenever the moving feature-branch HEAD changes and at final review.
+
+Semantic completion is deliberately not claimed here. Tasks 2–5 must populate
+all disposition fields for every path before this document can become the final
+module explanation.
+
+## 7. Completed semantic dispositions
+
+This section is the first completed semantic batch. `LiveVoice-owned` in the
+AgentCore column is a positive boundary decision: the capability is specific to
+voice media, browser I/O, product composition or LiveVoice operations and must
+not be moved into AgentCore merely to reduce the LiveVoice line count.
+
+### 7.1 Backend speech and realtime-media boundaries
+
+| Module / representative public symbols | Capability domain; responsibility and necessity | State authority | AgentCore relation | Hermes comparison | Size driver and proposed disposition | Dependencies, evidence, confidence |
+|---|---|---|---|---|---|---|
+| `jiuwenswarm/server/live_voice/batch_speech.py`<br>`BatchSpeechProvider`, `FormalBatchSpeechService`, `create_environment_batch_speech_provider` | **Speech Recognition / Speech Synthesis.** Defines the batch recognition/synthesis service and provider contract needed by the browser fallback and capability probes. | Owns request-local provider selection, normalization and speech result construction; it does not own conversation state. | `LiveVoice-owned`; no AgentCore reuse or downstream candidate. | Same architectural role as Hermes STT/TTS provider registries, but keeps Jiuwen capability and failure contracts. | Provider contracts, concrete provider parsing and service orchestration are combined; **SPLIT** contracts/provider/service while preserving one public speech service. | Called by Web handlers, speech RPC and dedicated-media registration; matching unit tests are the acceptance oracle. High confidence. |
+| `jiuwenswarm/server/live_voice/openai_streaming_speech.py`<br>`OpenAIStreamingSpeechProvider`, `select_environment_streaming_speech` | **Speech Recognition / Speech Synthesis.** Supplies the default-off OpenAI streaming speech adapter and explicit degradation behavior. | Owns one provider session and provider protocol state; no product or Agent state. | `LiveVoice-owned`; vendor adapter is not AgentCore infrastructure. | Hermes also isolates speech providers, but its implementation is not a contract to copy. | Vendor transport, event decoding and degradation selection are combined; **SPLIT** by provider transport and degradation policy after current feature work stabilizes. | Registered through the gateway speech composition path; provider conformance tests remain required. High confidence. |
+| `jiuwenswarm/server/live_voice/realtime_media.py`<br>`RealtimeMediaPort`, `RealtimeMediaRegistrationOwner`, `create_realtime_media_activation` | **Realtime Media.** Defines a conversation-neutral realtime media port, but the current product uses the gateway dedicated-media boundary instead. | Its port would own media-session activation; no production composition currently delegates authority to it. | `LiveVoice-owned`, but duplicated/uncomposed; not an AgentCore candidate. | Corresponds loosely to Hermes audio/platform abstractions, while the active Jiuwen boundary is the gateway transport. | Public factory and port have no production caller outside the module; **REMOVE AFTER GATE** or reduce to shared types only after tests confirm the gateway port is the sole owner. | Caller scan found definitions without production composition. Preserve tests as an oracle until removal is approved. Medium-high confidence. |
+| `jiuwenswarm/server/live_voice/speech_ports.py`<br>`RecognitionPort`, `SynthesisPort`, `SpeechCapability` | **Speech Recognition / Speech Synthesis.** Defines deterministic provider-neutral recognition and synthesis ports needed to keep product logic independent of vendors. | Owns contracts and request/result types only. | `LiveVoice-owned`; generic to speech, not to AgentCore Agent/Tool/Task execution. | Same architectural intent as Hermes provider interfaces. | Overlaps with streaming-speech identity and capability types; **CONSOLIDATE** shared speech contracts while retaining the port boundary. | Used by batch/streaming implementations and matching conformance tests. High confidence. |
+| `jiuwenswarm/server/live_voice/streaming_speech.py`<br>`NativeStreamingSpeechProvider`, `StreamingSpeechConformance`, `StreamingProviderCapability` | **Speech Recognition / Speech Synthesis.** Defines provider-neutral streaming speech conformance, events and lifecycle. | Owns stream-local lifecycle and event ordering, not conversation/product authority. | `LiveVoice-owned`; no AgentCore migration. | Mirrors Hermes' provider-neutral streaming boundary while retaining stricter Jiuwen event and failure semantics. | Capability, identity, event and lifecycle types are concentrated here; **RETAIN**, then **CONSOLIDATE** duplicated speech primitives with `speech_ports.py`. | Implemented by provider adapters and exercised by streaming conformance tests. High confidence. |
+| `jiuwenswarm/gateway/live_voice/browser_gateway_media_transport.py`<br>`create_gateway_media_activation`, `BoundedMediaSender`, `StrictMediaReceiver` | **Realtime Media.** Implements the server-side browser media wire, binding, sender and receiver required by the dedicated WebSocket route. | Owns connection-local queues, sequence validation and transport lifecycle. | `LiveVoice-owned`; this is a gateway/browser protocol boundary. | Hermes has platform/audio transport adapters, but not this Jiuwen WebSocket trust boundary. | Codec/types, queues and lifecycle are combined; **RETAIN** the transport and **SPLIT** wire codec/types from queue owners if that lowers coupling. | Used by dedicated-media route and registration; protocol parity and negative-path tests are required. High confidence. |
+| `jiuwenswarm/gateway/live_voice/dedicated_media_registration.py`<br>`DedicatedMediaProductRegistry`, `register_dedicated_media_rpc_handlers` | **Realtime Media / Configuration.** Central default-off composition and lifecycle registry for dedicated media. It is necessary because one owner must bind route, speech providers, synthesis and cleanup. | Owns gateway registration, per-connection composition and cleanup authority. | `LiveVoice-owned`; composition of voice transports is not AgentCore. | Hermes has a concentrated voice-session composition root, but Jiuwen additionally requires Web gateway registration and feature gates. | Registration, lifecycle, capability probing and observability are concentrated in a large module; **SPLIT** into registration, composition, lifecycle and diagnostics without changing authority. | Constructed by `app_web_handlers.py`; broad gateway and formal Web product tests are evidence. High confidence. |
+| `jiuwenswarm/gateway/live_voice/dedicated_media_route.py`<br>`create_dedicated_media_route`, `DedicatedMediaLeafCleanupOwner` | **Realtime Media.** Implements the same-origin dedicated media route and validates the media leaf protocol. | Owns route-local session validation and dispatch; registry remains composition owner. | `LiveVoice-owned`. | Similar to Hermes' voice transport leaf, but preserves Jiuwen identity, ACK and fail-closed requirements. | Route protocol handling and lifecycle are coupled; **RETAIN**, with a possible codec/validation extraction shared only by explicit schema—not by trusting frontend types. | Called by the registration owner; negative protocol and cleanup tests are mandatory. High confidence. |
+| `jiuwenswarm/gateway/live_voice/product_streaming_synthesis.py`<br>`ProductStreamingSynthesisSource` | **Speech Synthesis / Realtime Media.** Thin product bridge from streaming synthesis output to ordered media frames. | Owns only request-local projection; upstream route owns synthesis and downstream transport owns delivery. | `LiveVoice-owned`. | Comparable to Hermes' streaming TTS consumer boundary. | Already narrow; **RETAIN AS THIN BRIDGE** and resist absorbing route or transport state. | Used by dedicated-media registration. High confidence. |
+| `jiuwenswarm/gateway/live_voice/speech_rpc.py`<br>`register_speech_rpc_handlers` | **Speech Recognition / Speech Synthesis.** Registers the gateway-local batch speech RPC surface used by Web clients. | Owns RPC validation/delegation only. | `LiveVoice-owned`; not an AgentCore RPC. | No useful direct Hermes analogue beyond an API leaf. | Already narrow; **RETAIN AS ENTRY LEAF**. | Composed by Web handlers and delegates to the batch speech service. High confidence. |
+| `jiuwenswarm/gateway/live_voice/streaming_speech_route.py`<br>`StreamingRecognitionRouteOwner` | **Speech Recognition.** Owns the gateway product route for streaming recognition, including fallback and event projection. | Owns recognition-route lifecycle; provider owns provider session and product route owns client delivery. | `LiveVoice-owned`. | Same pipeline position as Hermes streaming STT consumption, with Jiuwen gateway/fail-closed contracts. | Route, fallback and projection are combined; **RETAIN**, then **SPLIT** fallback and event projection if they can remain pure. | Composed by handlers/registration and covered by streaming route tests. High confidence. |
+| `jiuwenswarm/gateway/live_voice/streaming_synthesis_route.py`<br>`StreamingSynthesisRouteOwner` | **Speech Synthesis.** Owns product streaming synthesis requests, buffering and pull/delivery coordination. | Owns synthesis-route state and ordered buffering; media transport owns final frame delivery. | `LiveVoice-owned`. | Same pipeline position as Hermes streaming TTS consumer and playout feeder. | Route state, buffering and pull protocol are concentrated; **SPLIT** route state from buffering/pull mechanics while retaining one authority. | Composed by the dedicated-media registry; interruption, ordering and cleanup tests are required. High confidence. |
+| `jiuwenswarm/channels/web/live_voice_deployment_observer.py`<br>`observe_live_voice_deployment_runtime`, `LiveVoiceDeploymentObservationResult` | **Observability / Configuration cleanup.** Deployment-time observer for streaming readiness and runtime evidence. | Owns observation state only; it must not become product authority. | `LiveVoice-owned support`; no AgentCore relation. | No product-architecture analogue is needed. | Operational evidence logic is large relative to the product path; **RE-HOME** under LiveVoice validation tooling after current acceptance, preserving its executable evidence role. | Invoked by LiveVoice deployment/validation flows. Medium-high confidence. |
+| `jiuwenswarm/channels/web/live_voice_deployment_preflight.py`<br>`evaluate_live_voice_deployment_preflight`, `DeploymentPreflightResult` | **Configuration cleanup / Automated verification.** Performs deployment preflight checks before the streaming path is treated as usable. | Owns validation results only. | `LiveVoice-owned support`. | No Hermes analogue is required. | **RE-HOME** beside validation tooling; do not fold preflight policy into runtime modules. | Deployment scripts and operator acceptance depend on it. High confidence. |
+
+### 7.2 Browser audio and product speech boundaries
+
+| Module / representative public symbols | Capability domain; responsibility and necessity | State authority | AgentCore relation | Hermes comparison | Size driver and proposed disposition | Dependencies, evidence, confidence |
+|---|---|---|---|---|---|---|
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserAudioIOAdapter.ts`<br>`BrowserAudioIOAdapter`, `inspectBrowserAudioPlatform` | **Audio Device & browser I/O.** Implements browser device capture, playback, acknowledgements and fencing for the formal product route. | Owns browser audio-device and playout lifecycle; it does not own conversation or task state. | `LiveVoice-owned`; browser media I/O does not belong in AgentCore. | Covers Hermes AudioRecorder, playback and platform-adapter roles, with additional browser ACK/fencing. | Multiple audio lifecycle roles are concentrated; **SPLIT** device/capture/playout-confirmation helpers while retaining one browser audio authority. | Instantiated by `productP1VoiceRoute.ts`; fake adapter and browser route tests are oracles. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserDedicatedMediaRoute.ts`<br>`createBrowserDedicatedMediaRoute`, `BrowserDedicatedMediaSocketLeaf` | **Realtime Media.** Binds the browser-side dedicated media connection to the product route. | Owns browser route lifecycle and validated event dispatch. | `LiveVoice-owned`. | Comparable to a Hermes transport leaf, but implements Jiuwen's WebSocket protocol and browser failure rules. | Protocol validation and lifecycle are coupled; **RETAIN**, with a possible pure validation extraction. | Used by `productP1VoiceRoute.ts`; must remain parity-tested with the gateway route. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserGatewayMediaTransport.ts`<br>`createBrowserGatewayMediaActivation`, `BoundedMediaSender`, `StrictMediaReceiver`, `BrowserGatewayMediaRegistrationOwner` | **Realtime Media.** Implements browser wire types, codec, sender, receiver and registration for gateway media. | Owns browser connection queues and transport sequence state. | `LiveVoice-owned`. | Hermes abstracts audio transports but has no equivalent Jiuwen browser/gateway trust boundary. | Wire types, codec and queue owners are combined; **SPLIT** only along those internal seams and keep explicit cross-language parity checks. | Used by browser dedicated-media route/product route. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserSpeechRecognitionAdapter.ts`<br>`BrowserSpeechRecognitionAdapter` | **Speech Recognition / legacy compatibility.** Adapts browser speech recognition for the legacy integrated route. | Owns a legacy browser-recognition session only. | `LiveVoice-owned legacy`; no AgentCore relation. | Hermes provider abstraction does not justify retaining a browser-only duplicate path. | Production callers are confined to `integratedP1Route.ts`; **REMOVE AFTER GATE** with the legacy lane, preserving any still-useful tests as oracles. | Caller scan found only the legacy integrated route. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/browserSpeechSynthesisAdapter.ts`<br>`BrowserSpeechSynthesisAdapter` | **Speech Synthesis / legacy compatibility.** Adapts browser speech synthesis for the legacy integrated route. | Owns legacy browser speech-synthesis lifecycle. | `LiveVoice-owned legacy`. | Hermes TTS providers do not require this duplicate browser path. | Confined to the legacy lane; **REMOVE AFTER GATE** once formal gateway synthesis owns accepted playout. | Caller scan found only `integratedP1Route.ts`. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/integratedP1Route.ts`<br>`createIntegratedP1Route` | **Integrated Web / legacy compatibility.** Legacy browser-local P1 route predating the formal gateway product route. | Owns a parallel legacy recognition/synthesis state machine. | `LiveVoice-owned legacy`, not AgentCore. | It resembles an all-local Hermes voice loop, but keeping two LiveVoice owners creates ambiguity. | Duplicate authority is the size driver; **REPLACE/REMOVE AFTER GATE** with `useLiveVoiceDemo` when formal route acceptance and rollback evidence allow. | Production caller is the legacy demo hook. High confidence on classification; removal timing remains gated. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/adapters/liveVoiceCaptureProcessor.js`<br>registered AudioWorklet processor `jiuwenswarm-live-voice-capture-v1` | **Audio Device & browser I/O.** AudioWorklet processor that captures PCM at the browser audio edge. | Owns worklet-local buffering only. | `LiveVoice-owned`. | Same audio-edge role as Hermes recorder internals. | Already focused; **RETAIN**. | Loaded by `browserAudioIOAdapter.ts`; browser audio tests and manual device validation apply. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/audioPort.ts`<br>`AudioPort`, `createCapturedAudioFrame`, `createAudioRenderPlan` | **Audio Device & browser I/O.** Formal browser audio port and shared audio types that keep product routing testable. | Contract only; concrete adapter owns device state. | `LiveVoice-owned`. | Matches Hermes' platform/audio abstraction intent. | Contains production and fake-facing surface; **RETAIN CONTRACT**, then remove fake-only members after oracle migration if unused. | Used by real/fake audio adapters and product-route tests. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/browserAudioDeviceSelection.ts`<br>`BrowserAudioDeviceSelectionOwner` | **Audio Device & browser I/O / Integrated Web.** Discovers, selects and persists the user's browser audio-device choice. | Owns product-local device selection, not the media stream itself. | `LiveVoice-owned`. | Partial analogue to Hermes platform/device selection, adapted for browser permissions. | **RETAIN** as a separate product/device owner; do not merge permission policy into transport. | Used by `LiveVoiceIntegratedRoutePanel.tsx`. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/browserLiveVoiceOwnership.ts`<br>`createBrowserLiveVoiceOwnership`, `createBrowserLiveVoiceOwnershipBarrier` | **Audio Device & browser I/O / Integrated Web.** Enforces browser-global capture/playout ownership so parallel UI paths cannot mutate the same devices. | Owns the browser process ownership lease and cleanup. | `LiveVoice-owned`. | Hermes uses process-global interruption flags, which are not a safe substitute for Jiuwen's explicit ownership/fencing. | **RETAIN**, then evaluate consolidation with output ownership only after legacy TTS is retired. | Mounted through `useProductVoiceBrowserOwnership.ts`; negative tests must prove forbidden side effects are zero. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/gatewayBatchSpeechClient.ts`<br>`GatewayBatchSpeechClient`, `capturedFramesToPcm16Wav` | **Speech Recognition / Speech Synthesis.** Browser client for gateway batch speech, including wire validation and PCM conversion. | Owns request-local client lifecycle; gateway service owns provider execution. | `LiveVoice-owned`. | Equivalent pipeline role to a client of Hermes speech providers, but the Web RPC contract is Jiuwen-specific. | Wire validation, PCM conversion, capability and client logic are concentrated; **SPLIT** pure codec/conversion from client state. | Used by `productP1VoiceRoute.ts`; client/server contract tests apply. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts`<br>`ProductP1VoiceRouteOwner` | **Conversation Runtime / Integrated Web.** Current formal browser product state machine coordinating capture, recognition, synthesis, playback and diagnostics. | Owns product-route lifecycle and transitions; it delegates device, transport and provider state to their ports. | `LiveVoice-owned`; this is the voice product composition root, not AgentCore. | Corresponds to Hermes' voice-session loop while preserving Jiuwen committed-input, identity, ACK and failure contracts. | Several state-machine facets are concentrated in one large module; **SPLIT** capture, recognition, playout and diagnostics into pure/projected subcomponents without creating parallel authorities. | Imports the formal audio adapter, gateway media/speech clients and L0 measurement. Highest-risk refactor; high classification confidence. |
+| `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/useProductVoiceBrowserOwnership.ts`<br>`useProductVoiceBrowserOwnership` | **Integrated Web.** React lifecycle hook that mounts the formal browser ownership barrier and guarantees cleanup. | Owns hook lifetime only; `browserLiveVoiceOwnership.ts` owns the lease semantics. | `LiveVoice-owned`. | No distinct Hermes analogue is needed. | Already a thin carrier; **RETAIN AS THIN HOOK**. | Used by the integrated product panel/host composition. High confidence. |
+
+### 7.3 Shared text and output-ownership segments
+
+| Module or segment / representative public symbols | Capability domain; responsibility and necessity | State authority | AgentCore relation | Hermes comparison | Size driver and proposed disposition | Dependencies, evidence, confidence |
+|---|---|---|---|---|---|---|
+| `jiuwenswarm/channels/web/frontend/src/utils/ttsText.ts`<br>`makeLiveVoiceTextSpeakable`, `sanitizeLiveVoiceTtsText`, `splitLiveVoiceTtsText` | **Speech Synthesis.** Sanitizes and chunks multilingual/Markdown-heavy text before speech; this prevents malformed, silently truncated or unbounded TTS requests. | Pure transformation; no runtime authority. | `LiveVoice-owned speech utility`, not AgentCore. | Direct architectural analogue to Hermes `SentenceChunker`, but Jiuwen's implementation covers Chinese and technical/Markdown text and should not be replaced for parity. | The useful generic speech-text contract is hidden under a broad utility name; **RE-HOME/RENAME** to an explicit speech-text module and reuse from all TTS paths. | Imported through `tts.ts` and LiveVoice callers; pure unit tests are the oracle. High confidence. |
+| `jiuwenswarm/channels/web/frontend/src/utils/ttsOutputOwnership.ts`<br>`acquireLiveVoiceTtsOutputOwnership`, `beginServerTtsOutput`, `canCompleteServerTtsOutput` | **Speech Synthesis / Integrated Web compatibility.** Fences legacy/manual server TTS against formal LiveVoice playout. | Owns browser output-ownership revision and leases for shared/legacy TTS. | `LiveVoice-owned host integration segment`. | Hermes' global interrupt flag is less explicit and is not a replacement. | Exists because two output paths coexist; **CONSOLIDATE AFTER GATE** with formal browser ownership once legacy/manual output integration is retired. | Used by shared TTS and message rendering. High confidence; retirement timing is gated. |
+| LiveVoice segment of `jiuwenswarm/channels/web/frontend/src/utils/tts.ts`<br>LiveVoice text exports plus shared `stopAllTts`, `fetchTtsAudio`, `playAudioBase64` interactions | **Speech Synthesis / shared compatibility.** The module remains the shared legacy/manual server-TTS owner and also re-exports LiveVoice text helpers; only those LiveVoice integrations are classified here. | Owns the shared global legacy audio instance and stop event; it does not own the formal LiveVoice playout route. | Shared host module; LiveVoice-specific exports/interruption integration are `LiveVoice-owned`, while the whole module is not a downstream candidate. | Hermes' TTS service and interrupt path are only partial analogues because this is Jiuwen shared-chat compatibility. | **RETAIN** the shared TTS owner; **RE-HOME** LiveVoice text exports to the named speech-text boundary and later consolidate stop/ownership integration after legacy-route retirement. | Used by shared chat/message flows; caller graph and negative output-fence tests govern changes. High confidence. |
+| LiveVoice segment of `jiuwenswarm/channels/web/frontend/src/components/ChatPanel/MessageItem.tsx`<br>manual-message TTS output fence | **Integrated Web / Speech Synthesis compatibility.** Prevents manual historical-message TTS from playing while LiveVoice owns audio output. The rest of the shared component is out of scope. | Reads output ownership and blocks a forbidden side effect; it must not own LiveVoice state. | `LiveVoice-owned host integration segment`. | Hermes does not face this Jiuwen shared-UI collision. | **RETAIN HOST GUARD** until one unified output owner exists; then simplify the segment, never migrate the whole component. | Depends on `ttsOutputOwnership.ts`; negative UI tests must assert zero playback while fenced. High confidence. |
+
+## 8. Batch conclusion and remaining coverage
+
+This batch finds no AgentCore downstream candidate inside audio, speech provider,
+browser media or TTS ownership. Their line count is predominantly caused by
+real media protocol, provider, browser lifecycle, failure and composition
+boundaries. Slimming here therefore means removing the parallel legacy route,
+retiring the unused realtime port, splitting concentrated owners without
+duplicating authority, and consolidating speech/text contracts—not moving voice
+code into AgentCore.
+
+The remaining inventory still requires the same semantic treatment for Agent
+bridge, Task/Executor, persistence/durability, observability, product
+composition, frontend UI/presentation, shared host segments and support assets.
+No migration or deletion is authorized by the dispositions above.
