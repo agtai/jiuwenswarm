@@ -4,76 +4,294 @@
 > superpowers:test-driven-development while replaying this plan, then use
 > superpowers:requesting-code-review before declaring the local package ready.
 
-**Goal:** Expose the least-privilege, session-bound public TeamTask API needed
-by downstream products without exporting TaskDao or TeamTaskManager.
+**Goal:** Expose the least-privilege, lifecycle-bound public TeamTask API needed
+by generic downstream applications without exporting TaskDao, TeamTaskManager,
+raw cursor mutation or checkpoint-finalization authority.
 
-**Architecture:** TeamAgent.task_authority returns TeamTaskAuthority bound to
-the exact Team/member/session lifecycle. The facade validates and projects
-canonical snapshots, command decisions, events, cursors and checkpoint
-records. Session release or rebinding invalidates the handle.
+**Architecture:** `TeamAgent` obtains an internal, opaque session-lease
+capability and projects only the reader/command/cursor/checkpoint sub-authorities
+granted to its exact principal. Binding includes the physical session lease,
+Team/member incarnation and capability set; a same-ID rebind still creates a new
+lease and invalidates the old handle. PR 09 composes the accepted PR 04/05/06/08
+validators and mutation primitives instead of duplicating their schema or
+integrity logic. Public reads are bounded and redacted; public writes are
+purpose-specific and cannot be recreated from authority-free records.
 
-**Risk and dependency:** Tier 3 public authority boundary. Depends on PR 01,
-03, 04, 05, 06 and 08. The review-only source diff is
-2cc81078..503cf538 on codex/ac-pr09-bound-task.
+**Risk and dependency:** Tier 3 public authority/security boundary. Depends on
+accepted PR 01, 03, 04, 05, 06 and 08 contracts. The historical review-only
+range is `2cc81078..503cf538` on `codex/ac-pr09-bound-task`; it is evidence, not
+a replay base.
 
 ## Owned surfaces
 
-- Public facade/export: openjiuwen/agent_teams/task_authority.py,
-  openjiuwen/agent_teams/__init__.py and
-  openjiuwen/agent_teams/agent/team_agent.py.
-- Lifecycle: openjiuwen/agent_teams/agent/session_manager.py.
-- Narrow subordinate verification support: schema/task.py,
-  tools/database/cursor_dao.py, tools/database/task_dao.py,
-  tools/database/engine.py, tools/models.py and tools/task_manager.py.
-- Primary tests: tests/unit_tests/agent_teams/test_task_authority.py,
-  test_task_authority_checkpoint.py and test_session_manager.py.
+- Public facade/export:
+  `openjiuwen/agent_teams/task_authority.py`,
+  `openjiuwen/agent_teams/__init__.py` and
+  `openjiuwen/agent_teams/agent/team_agent.py`.
+- Lifecycle and opaque lease construction:
+  `openjiuwen/agent_teams/agent/session_manager.py` plus the minimum internal
+  registry/factory support required by the selected lease design.
+- Narrow subordinate composition support only: accepted public/internal
+  projections in `schema/task.py`, `tools/database/task_dao.py`,
+  `tools/database/cursor_dao.py`, `tools/task_manager.py` and the PR 06
+  checkpoint coordinator. PR 09 does not fork their validators or persistence
+  models.
+- Compatibility boundary: every current caller of `TeamAgent.task_manager`,
+  `TeamAgent.team_backend`, `TeamDatabase.task`, raw cursor methods or a raw
+  checkpoint finalizer. The
+  public-manager compatibility decision must be frozen before implementation;
+  it cannot remain an authority bypass behind a deprecation comment.
+- Primary tests:
+  `tests/unit_tests/agent_teams/test_task_authority.py`,
+  `test_task_authority_checkpoint.py` and `test_session_manager.py`, plus root
+  export-lock and accepted PR 04/05/06/08 public-boundary regressions.
 - Historical candidate docs are F_89/S_31 and F_90/S_32; allocate fresh names
-  at replay (tentatively F_107/S_34 and F_108/S_35).
+  at replay after recounting the then-current documentation tree.
 
 ## Contract
 
-- TeamTaskAuthorityBinding fixes session_id, team_name and member_name.
-  Executor capability is a facade property derived from the bound manager, not
-  a field that callers can place in the binding.
-- TeamTaskAuthority exposes get, list, apply_update, get_event_head,
-  read_events, read_unread, advance_cursor, publish_execution_checkpoint and
-  read_current_execution_checkpoint.
-- Cursor construction binds the accepted PR 08 physical session/Team/stream
-  incarnation or legacy baseline plus the exact member/application principal.
-  Product mapping may request an opaque consumer/channel registration, but the
-  facade derives and retains its internal identity; callers cannot select
-  another consumer/channel or invoke raw CursorDao/Manager mutation methods.
-- CanonicalTeamTask, CanonicalTaskExecution, CanonicalTaskSnapshot,
-  CanonicalTaskResultRef and CanonicalTaskCommandDecision are verified public
-  projections, not storage rows.
-- Foreign ambient session, released handle, binding drift, malformed
-  subordinate results, incomplete event history and corrupt checkpoint source
-  fail before returning authority or writing.
-- task_authority/checkpoint quality corrections from fbfb4c5f belong here.
+- A public binding identifies the session/Team/member for diagnostics but is
+  not itself a capability. Authority acquisition requires a non-exported,
+  caller-unconstructable lease generated by the active `SessionManager`; a
+  caller-supplied string, boolean, dataclass, `_bind` call or raw Manager cannot
+  mint authority. Freeze the Python in-process threat boundary explicitly: the
+  public API resists ordinary import/construction and stale-object reuse, but
+  does not claim safety from an attacker with arbitrary memory/private-object
+  access inside the trusted process.
+- The lease binds physical session identity and lease epoch, Team and member
+  incarnation, one opaque principal identity established by the trusted host
+  integration, and an explicit capability set. AgentCore binds that identity;
+  it does not authenticate Jiuwen/LiveVoice principals or let an ordinary
+  caller substitute another identity after minting. Release, failed bind or any
+  rebind (including the same textual session ID) revokes the prior active lease.
+  Member/Team retirement revokes active mutation/executor authority; any
+  tombstone read, exact replay or terminal drain uses a separately explicit
+  read/replay capability under the accepted PR 05/06/08 retirement policy and
+  never crosses same-name reincarnation. An operation and revocation have one
+  defined linearization order: if revocation wins, the operation has zero Task,
+  cursor, checkpoint, payload-store, file or other-scope effects; after release
+  returns, no old active operation can newly commit.
+- Least privilege is structural. Reader/member identity alone does not
+  automatically grant Task command, consumer-cursor or executor-checkpoint
+  authority; each is explicit under the frozen generic capability matrix.
+  Checkpoint publication is granted only to the exact active executor/runtime/
+  phase/execution incarnation selected by PR 06; `member_name` equality and an
+  `executor_authority = False` display property are not authorization checks.
+- The public facade is a small capability bundle, not one monolithic handle
+  whose every holder can call get/list/update/cursor/checkpoint. Final naming
+  may retain `TeamTaskAuthority`, but the exposed sub-authorities and their
+  capability matrix must be explicit and root-export locked.
+- Task reads reuse accepted canonical Task/execution/result projections where
+  possible. Before adding `CanonicalTeamTask` or another status/title/content
+  model, compare it with existing `schema.task.TaskDetail`, `TaskSummary` and
+  monitor projections; create only the additional immutable authority facts the
+  existing types cannot express. PR 09 projects the accepted PR 04
+  `TaskResultRef` into a redacted public view containing only opaque result ID/
+  digest; it does not change PR 04's internal schema/type or expose its optional
+  filesystem/object-store locator or a live token. Result artifact resolution
+  remains with its separately selected downstream/AgentCore owner; PR 09 creates
+  no payload loader. Checkpoint bytes use only the bound PR 06 load operation
+  below.
+- `list` is a bounded summary operation. It does not call full `get` once per
+  row, return every Task content/result/checkpoint by default or silently create
+  an N+1 verifier path. Detail reads remain bounded, and checkpoint payload
+  reads require the checkpoint sub-authority.
+- Task commands call the accepted PR 04 decision primitive and return its typed,
+  verified projection. PR 09 performs binding, capability admission and
+  redaction only; it does not duplicate command-ledger/event-stream validation.
+- Event reads compose the accepted PR 05 verified stream primitive. Cursor
+  registration binds the PR 08 physical session/Team/stream incarnation or
+  declared legacy baseline plus principal and an internally derived opaque
+  consumer/channel identity. A caller cannot select another cursor identity or
+  call raw read/advance Manager/DAO seams.
+- Checkpoint publication composes PR 06's preauthorization -> server-derived
+  scoped payload key -> payload `put` -> exact one-use finalize topology. The
+  bound public call does not accept `payload_locator`, digest/size truth or a raw
+  finalizer. Initially invalid/stale/foreign callers never reach the payload
+  Port. Verified payload reads validate the checkpoint/source event before
+  `get`; authority-free metadata cannot load bytes.
+- Foreign ambient context, released/rebound lease, wrong capability/principal/
+  incarnation, Manager drift, malformed subordinate result, incomplete event
+  history and corrupt cursor/checkpoint source fail closed. Temporary context
+  activation restores the caller's prior `ContextVar` value on success,
+  exception and cancellation, but the `ContextVar` alone is never authority.
+- Ordinary Task deletion and normal Team clean retain accepted event/cursor/
+  checkpoint tombstones and identity-first exact replay according to PR 05/06/
+  08. Explicit session-domain destruction is their only cleanup path. Current
+  DDL, `DbSessions` serialization and `SessionFileStore` hydration/rollback
+  behaviour remain unchanged unless an owning dependency explicitly changes
+  them.
 
 ## Replay and verification
 
-1. Rebase after all declared dependencies and record their SHAs.
-2. Restore the three primary tests from f927f86c/503cf538 plus owned
-   fbfb4c5f corrections; run before implementation and record red:
+1. Rebase after all declared dependencies and record their exact SHAs. Recount
+   current public exports, Manager/DAO consumers and docs identifiers before
+   freezing compatibility.
+2. Rebuild the three primary files from the contract, using `f927f86c` and
+   `503cf538` only as historical evidence. Keep useful context-restoration and
+   malformed-projection oracles; do not restore direct `_bind`, caller-selected
+   cursor identity, raw checkpoint-finalizer or payload-first-orphan positive
+   tests. Run before implementation and record red:
 
        uv run pytest tests/unit_tests/agent_teams/test_task_authority.py tests/unit_tests/agent_teams/test_task_authority_checkpoint.py tests/unit_tests/agent_teams/test_session_manager.py -q
 
-3. Reimplement 9cc5727e and 503cf538 as one coherent public-boundary PR; fold
-   only owned fbfb4c5f hunks.
-4. Rerun primary tests plus PR 04/05/06/08 affected public-boundary suites.
-5. Run root-export lock tests, file-backed SQLite bind/reopen/concurrency cases,
-   changed-file Ruff/format, isolated Mypy for task_authority.py, compileall and
-   git diff --check.
-6. Obtain Tier-3 review focused on session-context restoration, least
-   privilege, projection verification and avoidance of DAO/Manager exposure.
+3. Reimplement the public boundary from the accepted dependency tips. Fold only
+   PR 09-owned `fbfb4c5f` quality corrections; do not cherry-pick `9cc5727e` or
+   `503cf538` mechanically.
+4. Rerun the primary tests plus accepted PR 04 command, PR 05 event, PR 06
+   checkpoint and PR 08 cursor suites. Repeat release/rebind/operation races in
+   both linearization orders across independent database sessions.
+5. Run root-export/import locks, supported-dialect DDL compilation, file-backed
+   SQLite bind/reopen/concurrency/cleanup cases, current
+   `test_database.py`, `test_database_concurrency.py`,
+   `test_db_sessions_watchdog.py`, `test_task_manager.py` and
+   `team_workspace/test_session_file_store.py`; byte-compare rejected-path file
+   state.
+6. Run changed-file Ruff/format, isolated Mypy for the facade, compileall and
+   `git diff --check`.
+7. Obtain an independent Tier-3 review focused on construction bypass,
+   capability separation, same-ID lifecycle ABA, in-flight revocation,
+   projection redaction and raw DAO/Manager/coordinator exposure.
+
+## Replay preflight — 2026-08-25
+
+Formal replay is blocked on accepted PR 01/03/04/05/06/08 tips and on the
+public-manager compatibility, lease-incarnation and capability-matrix decisions
+below. Historical commits are `9cc5727e` (source), `f927f86c` (tests),
+`a514fe06` (docs) and `503cf538` (checkpoint binding); their 17-file,
+4,700-insertion range must not be layered onto a formal dependency branch.
+
+The historical implementation cannot be replayed mechanically. Reimplementation
+must:
+
+- eliminate the construction bypass. `TeamAgent.task_manager` still returns the
+  raw Manager, root exports the authority/binding classes, `_bind` is directly
+  callable and `_agentcore_binding=True` is only a caller-supplied convention.
+  Historical tests invoke `_bind` themselves. A public API cannot claim that
+  Manager/DAO authority is hidden while those paths remain available;
+- replace string-only binding with an opaque lease epoch and durable logical
+  incarnations. The historical handle stores only session/Team/member text and
+  the Manager stores one `_authority_session_id`; rebinding the same session ID
+  leaves an old handle valid, and member/Team same-name recreation is not bound;
+- linearize every call with release/rebind. The historical session generation
+  only fences asynchronous bind completion. It does not belong to the returned
+  handle, and methods such as `apply_update` can await a write and return after
+  revocation without a shared lease/transaction fence. Define both lock orders,
+  including cancellation and commit-before-return recovery;
+- replace monolithic authority with structural least privilege. Every
+  `TeamAgent` currently receives read/list/update/event/cursor/checkpoint methods;
+  member identity is checked only for drift and the always-false
+  `executor_authority` property does not prevent checkpoint publication. Freeze
+  which principal/role/assignment/execution ownership grants each sub-authority;
+- expose PR 08 only through a bound opaque cursor capability. Historical methods
+  accept caller-selected `consumer_id` and `channel`, so one holder can target
+  another consumer. Preserve PR 08's receipt-chain/head verification, typed
+  failure, registration/retirement, bounded growth and identity-first replay;
+- reject the historical checkpoint topology and tests. The coordinator writes
+  payload bytes before authority admission; tests positively require foreign-
+  session and stale-owner payload orphans. `publish_execution_checkpoint`
+  accepts caller-asserted locator/digest/size and is callable without executor
+  authority. Rebuild against PR 06's safe preauthorization and expose only its
+  exact bound orchestration, never the raw metadata finalizer;
+- redact storage authority. Historical checkpoint and result projections expose
+  `payload_locator`/`locator`. PR 09 leaves the accepted PR 04 internal
+  `TaskResultRef` unchanged but returns a redacted ID/digest-only public view and
+  leaves artifact resolution to its separate owner; checkpoint payloads use PR
+  06's bound verified load. Neither public view returns transferable object-
+  store/file identifiers;
+- compose subordinate validators instead of copying them. Historical
+  `task_authority.py` repeats Task, execution, event, cursor and checkpoint
+  parsing/integrity checks already owned by PR 04/05/06/
+  08. PR 09 should remain a binding/capability/redaction layer, and any new
+  public Task model must first pass the existing-type reuse audit;
+- make read/list semantics bounded and least-privilege. Historical `get` and
+  `get_event_head` rescan the complete event prefix; `list` repeats that full
+  path for as many as 1,000 Tasks and can reject even `limit=1` when the Team is
+  larger. Freeze cumulative query/work budgets and a large-head strategy; do
+  not create an N+1 or content/result exfiltration surface;
+- discard dependency/storage hunks bundled into `9cc5727e`. Command schema and
+  mutation belong to PR 04, events to PR 05 and cursors to PR 08. The historical
+  DDL predates current write-lock/candidate-snapshot/watchdog behavior, and its
+  65,535-character projected content versus 255-character update bound conflicts
+  with current `SessionFileStore` hydration. PR 09 adopts the accepted dependency
+  APIs and content policy rather than silently owning those decisions; and
+- preserve the accepted normal-clean tombstones, identity-first exact replay,
+  current DDL and `SessionFileStore`. Historical pass counts, source docs and
+  review conclusions are not evidence for the rebuilt boundary.
+
+Before rebuilding the red suite, freeze:
+
+1. the in-process threat boundary and the non-exported lease/factory mechanism;
+2. public `TeamAgent.task_manager`/`TeamAgent.team_backend`/`TeamDatabase.task`
+   compatibility and the
+   exact root export set;
+3. session lease epoch plus Team/member/stream/execution incarnation identity;
+4. opaque trusted-host principal binding plus reader, command, cursor and
+   checkpoint grants by generic role/assignment/executor truth, without moving
+   Jiuwen/LiveVoice authentication into AgentCore;
+5. release/rebind linearization and draining/cancellation rules;
+6. public summary/detail/result/checkpoint projections and locator redaction;
+7. opaque cursor registration/retirement and PR 06 checkpoint orchestration;
+   and
+8. reuse of accepted subordinate validators and current DDL/SessionFileStore
+   integration.
+
+If the selected lease or Team/member incarnation requires a new persisted
+schema/shared protocol rather than PR 09-owned internal lifecycle state, stop
+and route that change to its owning dependency with a fresh scope/risk
+checkpoint. PR 09 must not acquire migration ownership silently.
+
+Tier-3 red/green evidence must rebuild, rather than copy, the historical cases
+and record the complete D-032 matrix:
+
+- **P:** a real non-Voice `TeamAgent` session obtains each deliberately granted
+  sub-authority, performs bounded summary/detail read, one accepted PR 04
+  update, PR 05 event read plus PR 08 opaque-cursor advance/replay and one PR 06
+  checkpoint publish/load; exact authoritative truth survives reopen;
+- **N/I:** wrong ambient/physical session, lease epoch, Team/member/principal,
+  Team/member/Task/stream/execution incarnation, role/capability, assignee,
+  executor owner/runtime/phase and cursor identity reject with zero Task/event/
+  cursor/checkpoint/payload/file/other-scope effects;
+- **B:** empty/malformed/maximum IDs, list/page limits, text/payload bounds,
+  integer/version edges, oversized subordinate projections and redacted
+  locator/token fields are explicit and bounded;
+- **S/T:** release, failed bind, same-ID rebind, Team/member delete/recreate,
+  Task retirement, normal clean, explicit session destruction, stale/delayed/
+  duplicate handles and terminal cursor/checkpoint replay obey the accepted
+  tombstone and non-revival contracts. Active mutation/executor leases revoke;
+  separately granted tombstone read/replay/drain follows the frozen PR 05/06/08
+  rule and never revives an old identity;
+- **C:** operation versus release/rebind in both orders for every read and write
+  sub-authority, two independent database sessions, concurrent same/different
+  commands/cursors/checkpoints and cancellation at each await prove the selected
+  linearization and zero forbidden post-revocation commit;
+- **R:** exact replay after restart, commit-before-return, rollback, payload
+  `put`/finalize crash windows, context cancellation and corrupt/missing
+  subordinate rows remain truthful. Initially invalid callers produce zero
+  payload `put`; only PR 06-authorized post-write orphans use its durable reaper;
+- **F:** unavailable dependency, malformed subordinate return, revoked
+  capability and denied optional checkpoint/cursor capability fail closed. No
+  voice, Provider, browser/device or product fallback is claimed;
+- **K:** accepted PR 01/03/04/05/06/08 suites, current Manager/Session callers,
+  root imports, database dialect compilation and `SessionFileStore` regression
+  stay compatible with the explicitly selected public-manager transition; and
+- **X:** exact clean AgentCore with real `TeamAgent`/`SessionManager`, real
+  file-backed SQLite, accepted DAO/Manager primitives and a real PR 06 payload
+  Port proves the generic seam. LiveVoice composition, physical media and
+  external Provider behavior remain explicit non-claims.
+
+The independent preflight review reports **5 Critical / 4 Important** against
+the historical candidate. These findings are replay requirements above, not
+findings accepted into a formal branch. Historical tests and review counts do
+not transfer. Formal PR 09 branch readiness is **No**.
 
 ## Commit and PR package
 
 Keep three consecutive commits: source, tests, then docs. Proposed title:
-“feat(agent-teams): expose a session-bound TeamTask authority”.
+“feat(agent-teams): expose lifecycle-bound TeamTask capabilities”.
 
-The PR body must explain bound lifecycle, public verified projections,
-checkpoint seam and fail-closed subordinate validation. Exclude external
-effects, LiveVoice intent/confirmation, product response and presentation
-state, composition activation and direct DAO/Manager exports.
+The PR body must explain the lease/incarnation model, capability matrix,
+verified/redacted projections, opaque cursor construction, safe checkpoint seam
+and release/rebind evidence. Exclude external effects, LiveVoice intent/
+confirmation, product response/presentation state, composition activation,
+direct DAO/Manager exports, migration and remote submission.

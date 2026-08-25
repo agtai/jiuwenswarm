@@ -45,11 +45,11 @@ Current resolutions that affect this map are:
 
 | Earlier question | Current local candidate decision |
 |---|---|
-| Public Task facade | `TeamAgent.task_authority` returns a session/team/member-bound `TeamTaskAuthority`; no DAO/Manager is the product API. |
+| Public Task facade | `TeamAgent.task_authority` returns a lifecycle-lease-bound capability bundle with explicit reader/command/cursor/checkpoint grants; a public binding is diagnostic, not authority, and no DAO/Manager/raw finalizer is the product API. |
 | Public effect facade | `TeamAgent.effect_authority` returns a separate `TeamExecutionEffectAuthority`; generic reaper/provider/product policy is not exposed. |
-| Checkpoint link | `ExecutionCheckpointCoordinator` stores opaque payload first; bound `TeamTaskAuthority` publishes and reads the only resume-authoritative Task/execution reference. |
+| Checkpoint link | The bound checkpoint capability first obtains exact PR 06 preauthorization, then writes to a server-derived scoped key and atomically finalizes the only resume-authoritative reference; initially invalid callers never reach the payload Port and public views expose no locator. |
 | Effect owner placement | A subordinate `EffectDao` shares the AgentTeams database/session/Task execution boundary. Workflow engine remains business-neutral. |
-| Cursor scope | Internal `CursorDao` owns only generic Task-event consumer/channel ACK beside the accepted event reader; PR 09 binds the public principal/cursor construction. Response closure, DOM adoption and playout remain product facts. |
+| Cursor scope | Internal `CursorDao` owns only generic Task-event consumer/channel ACK beside the accepted event reader; PR 09 derives an opaque consumer/channel capability bound to principal, lease and stream incarnation. Callers cannot select another cursor; response closure, DOM adoption and playout remain product facts. |
 | Terminal/result vocabulary | `ExecutionOutcome`, immutable `TaskResultRef`, command decisions and token-fenced settlement are local `ADD-01` candidates. |
 | Dispatch boundary | `TaskDispatchRecord` plus claim/receipt/release/recovery is the local `ADD-02` candidate beside Task events and Scheduler. |
 | Cancellation ordering | A1 monotonic runtime cancellation is composed with A2 quiesce-before-durable-settlement helpers; a reset-before-cancel product path is not accepted. |
@@ -1077,7 +1077,7 @@ The first group repairs or exposes existing AgentCore owners:
 | `SCOPE_CANDIDATE` | mandatory `(team_name, task_id)` predicates in `TaskDao` / `TeamTaskManager` | the locked/base dependency permits unscoped access; the local correction is not installed |
 | `A1_CANDIDATE` | monotonic `AsyncToolRuntime` cancel/wait/terminal callback and reused-ID fencing | the required lifecycle semantics exist only in the local candidate |
 | `A2_CANDIDATE` | canonical Task/execution relation, admission, claim, reconcile and token-fenced settlement | the locked/base Task owner lacks this durable execution contract |
-| bound Task/checkpoint facade candidate | `TeamAgent.task_authority` returning `TeamTaskAuthority` plus `ExecutionCheckpointCoordinator` | Manager/DAO access is not an acceptable public product API, and the bound handle is local only |
+| bound Task/checkpoint facade candidate | `TeamAgent.task_authority` returning lifecycle-bound reader/command/cursor/checkpoint sub-authorities over the accepted internal owners | The historical monolithic handle is string-bound and construction-bypassable, while Manager/DAO/raw checkpoint finalization is not an acceptable public product API; PR 09 must rebuild an opaque lease, capability matrix, redacted views and same-ID rebind/in-flight revocation fencing |
 | bound effect facade candidate | `TeamAgent.effect_authority` returning `TeamExecutionEffectAuthority` | the least-privilege continuation handle is local only and intentionally excludes reaper/provider policy |
 
 The remaining candidates add generic non-Voice capabilities to the smallest

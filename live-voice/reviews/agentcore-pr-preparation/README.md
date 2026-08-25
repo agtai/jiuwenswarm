@@ -6,12 +6,13 @@ technical candidates. PR 03 is Tier-3 technical-ready (`573` affected tests,
 `130` race repeats, independent `Critical 0 / Important 0`) but none of these
 packages is submission-ready: the required real issue reference is still
 missing, local history must be packaged/reworded accordingly, and nothing has
-been pushed or submitted. PR 04 through PR 08 have completed read-only preflight
+been pushed or submitted. PR 04 through PR 09 have completed read-only preflight
 only. PR 06's independent preflight found `4 Critical / 2 Important` in the
 historical checkpoint candidate; PR 07 found `5 Critical / 6 Important` in the
 historical effect-journal candidate; PR 08 found `2 Critical / 4 Important` in
-the historical event-cursor candidate. Those findings are replay requirements,
-not implemented or reviewed formal branches.
+the historical event-cursor candidate; PR 09 found `5 Critical / 4 Important`
+in the historical bound-authority candidate. Those findings are replay
+requirements, not implemented or reviewed formal branches.
 
 ## Refreshed upstream drift
 
@@ -58,7 +59,7 @@ replayed first.
 | 6 | Execution-checkpoint publication | PR 03, PR 05; add accepted PR 07 only if continuation reuse is selected | [PR 06](2026-08-25-pr06-checkpoint.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 and safe payload-effect topology/dependency freeze |
 | 7 | External-effect journal | PR 03, PR 05 | [PR 07](2026-08-25-pr07-effect-journal.md) | preflight blockers recorded; formal replay blocked on accepted PR 03/05 and continuation/prefix/public-boundary scope freeze |
 | 8 | Task-event consumer cursor | PR 05 | [PR 08](2026-08-25-pr08-event-cursor.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 identity/baseline contract and cursor/receipt/public-boundary scope freeze |
-| 9 | Bound TeamTask/checkpoint authority | PR 01, 03, 04, 05, 06, 08 | [PR 09](2026-08-25-pr09-bound-task.md) | plan ready; replay pending |
+| 9 | Bound TeamTask/checkpoint authority | PR 01, 03, 04, 05, 06, 08 | [PR 09](2026-08-25-pr09-bound-task.md) | preflight blockers recorded; formal replay blocked on accepted dependencies and lease/capability/public-manager scope freeze |
 | 10 | Bound external-effect authority | PR 07, PR 09 | [PR 10](2026-08-25-pr10-bound-effect.md) | plan ready; replay pending |
 
 ## Common replay rules

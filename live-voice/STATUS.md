@@ -387,6 +387,21 @@ tombstones, bind advance IDs to the full logical cursor, keep raw mutation seams
 internal until PR 09, and freeze typed read, registration/retirement and bounded
 receipt-growth semantics. Exact requirements are in the
 [PR 08 packet](reviews/agentcore-pr-preparation/2026-08-25-pr08-event-cursor.md).
+PR 09 bound TeamTask/checkpoint-authority preflight is now complete. The
+historical facade still exposes raw `TeamAgent.task_manager`, exports directly
+constructible binding/authority machinery and binds a handle only to textual
+session/Team/member values. Same-ID rebinding can therefore preserve stale
+authority, release is not linearized with in-flight writes, and every member
+receives one monolithic read/update/cursor/checkpoint surface without a real
+capability matrix. Its caller-selected cursor identity violates PR 08, while
+its raw locator/digest/size checkpoint finalizer and payload-first orphan tests
+violate PR 06. Formal replay must rebuild an opaque lease/incarnation model,
+structural reader/command/cursor/checkpoint grants, bounded/redacted projections,
+same-ID and in-flight revocation fencing, opaque cursor construction and the PR
+06 safe checkpoint orchestration while reusing accepted subordinate validators.
+The independent preflight reports `5 Critical / 4 Important`.
+Exact requirements are in the
+[PR 09 packet](reviews/agentcore-pr-preparation/2026-08-25-pr09-bound-task.md).
 No result changes Live Voice authority, performs composition/migration, or
 grants deletion credit.
 

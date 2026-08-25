@@ -66,7 +66,7 @@ commit group must be rebased or replayed onto the then-current AgentCore
 | 6 | `ADD-05`: execution-checkpoint publication | `5e4355ec`, `30897cd0`, `7c08730f` | `KEEP / REPLAY` | Base Checkpointer can store payload but cannot make it resume-authoritative for an exact TeamTask execution. Product codecs and project payload policy stay in adapters. |
 | 7 | `ADD-04`: external-effect journal and continuation fencing | `398454d0`, `bead0a87`, `8f30c02c` | `KEEP / REPLAY` | Generic intent/dispatch/receipt/observation/settlement truth is absent from Workflow Journal and Session VCS. Project/file probes and compensation policy stay downstream. |
 | 8 | `ADD-03`: Task-event consumer cursor | `73301660`, `15bd4cbc`, `2cc81078` | `KEEP / REPLAY` | Generic ordered consumers need scoped unread/ACK CAS. DOM adoption, playout and response-generation receipts remain LiveVoice facts. |
-| 9 | Bound Task facade plus bound checkpoint seam | `9cc5727e`, `f927f86c`, `a514fe06`, `503cf538` | `KEEP / REPLAY` | `TeamAgent.task_authority` supplies the least-privilege public API needed by a thin product adapter without exposing Manager/DAO. |
+| 9 | Bound Task facade plus bound checkpoint seam | `9cc5727e`, `f927f86c`, `a514fe06`, `503cf538` | `KEEP / REIMPLEMENT` | A generic lifecycle-bound public capability remains necessary, but the historical monolithic handle exposes construction/Manager bypasses, lacks capability and same-ID lease fencing, lets callers select cursor identity and preserves the rejected payload-first/raw-finalizer checkpoint seam. |
 | 10 | Bound external-effect facade | `53dfcc7c`, `8db056f5`, `db821683` | `KEEP / REPLAY` | `TeamAgent.effect_authority` separates external-call continuation authority from ordinary Task readers and writers. Reaper/provider/product policy is not exposed. |
 
 The following cleanup commits are retained as review fixes, not as standalone
@@ -88,8 +88,8 @@ The accepted public composition is:
 | Consumer need | AgentCore target | Downstream responsibility |
 |---|---|---|
 | Run foreground Agent or stream results | existing public `Runner.run_agent` / `Runner.run_agent_streaming` and existing Agent bases | authenticate principal/project/session, select the Jiuwen project Agent, translate committed context and stream observations |
-| Read/update canonical TeamTask, read events and ACK a generic consumer cursor | `TeamAgent.task_authority` returning `TeamTaskAuthority` | product intent, confirmation, response reservation, DOM/playout and voice presentation policy |
-| Store/reload opaque checkpoint bytes | `ExecutionCheckpointCoordinator` over bound `TeamTaskAuthority` | checkpoint codec, project payload store, compatibility and retention policy |
+| Read/update canonical TeamTask, read events and ACK a generic consumer cursor | lifecycle-bound `TeamAgent.task_authority` reader/command/cursor sub-authorities; the cursor identity is opaque and principal-derived | product intent, confirmation, response reservation, DOM/playout and voice presentation policy |
+| Store/reload opaque checkpoint bytes | executor/runtime/phase-bound checkpoint sub-authority composing PR 06 preauthorization and verified load | checkpoint codec, project payload Port, compatibility and retention policy; no raw locator/finalizer |
 | Journal and invoke one external effect | `TeamAgent.effect_authority`, `TeamExecutionEffectAuthority` and `ExternalEffectCoordinator` | provider credentials, request body, project/file probe, compensation and user confirmation policy |
 | Background Tool lifecycle | `AsyncToolRuntime` plus the exact A2 execution token | product timeout/escalation reporting and project resource cleanup |
 
@@ -209,7 +209,7 @@ changing its base. Replay must preserve upstream session-file hydration and
 write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
 the affected upstream tests.
 
-Read-only replay preflight is now complete through PR 08. PR 04 must preserve
+Read-only replay preflight is now complete through PR 09. PR 04 must preserve
 the accepted execution-quiescence, review-round, Team-tombstone, terminal and
 SessionFileStore contracts. PR 05 additionally requires non-cascading
 session-domain event/dispatch history, an explicit retired-Task/incarnation
@@ -249,9 +249,19 @@ different covered-ACK result. The independent PR 08 preflight reports `2
 Critical / 4 Important`. Replay must inherit PR 05's stream incarnation and
 legacy baseline, use a reconstructible receipt chain/head, preserve normal-clean
 tombstones, scope replay identity to the complete bound cursor, keep raw seams
-internal until PR 09 and retain current DDL/SessionFileStore behaviour. None of
-PR 04–08 has started formal implementation; all remain blocked on accepted,
-reviewable dependency tips.
+internal until PR 09 and retain current DDL/SessionFileStore behaviour. PR 09's
+historical public facade then defeats its own least-privilege claim:
+`TeamAgent.task_manager`, `_bind` and caller-supplied construction machinery
+remain available; a handle has no lease epoch or Team/member incarnation; and
+release/rebind is not linearized with in-flight mutation. The same monolithic
+handle also accepts caller-selected cursor identity and raw checkpoint locator/
+digest/size finalization without executor authority, preserving the PR 08 and
+PR 06 violations. Replay must rebuild structural reader/command/cursor/
+checkpoint grants over an opaque lifecycle lease, redact locators, bound list
+work, compose accepted subordinate validators and explicitly resolve raw
+Manager compatibility. The independent historical-source review reports `5
+Critical / 4 Important`; none of PR 04–09 has started formal implementation.
+All remain blocked on accepted, reviewable dependency tips.
 
 For every PR:
 

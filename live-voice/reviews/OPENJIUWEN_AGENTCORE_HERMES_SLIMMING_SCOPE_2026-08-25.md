@@ -108,9 +108,9 @@ decision is detailed in the
 
 | Commit | Candidate boundary | Final preparation decision |
 |---|---|---|
-| `9c820fe1` | OpenJiuwen Task facade | rewrite as a thin public-`TeamTaskAuthority` scope/mapping boundary; retain tests as oracles |
+| `9c820fe1` | OpenJiuwen Task facade | rewrite as a thin scope/mapping boundary over the exact PR 09 lifecycle-bound reader/command/cursor/checkpoint grants; retain tests as oracles |
 | `1a84b541` | asynchronous product query owner | retain only the optional async seam design; rewrite the adapter without mirror authority/models |
-| `0228b738` | D1 checkpoint Adapter | rewrite as codec/payload-policy mapping into `ExecutionCheckpointCoordinator`; retain durability oracles |
+| `0228b738` | D1 checkpoint Adapter | rewrite as codec/payload-policy mapping into the executor/runtime/phase-bound PR 09 checkpoint capability over PR 06 safe preauthorization; retain durability oracles |
 | `b0575038` | project/file effect Adapter | discard implementation; extract a public product `ProjectEffectPort` before writing any thin continuation adapter |
 | `561e5e5f` | presentation cursor Adapter | retain product receipt proof and optional async seam design; rewrite cursor mapping against final public types |
 
