@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -261,3 +262,61 @@ def test_run_report_requires_the_exact_medium_long_slot_population() -> None:
 
     assert report["status"] == "FAIL"
     assert report["decision"] == "INTEGRITY_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_population_retains_every_slot_after_an_attempt_failure() -> None:
+    seen: list[tuple[str, int]] = []
+
+    async def fake_measure(_facade, workload, attempt_index):
+        seen.append((workload.workload_id, attempt_index))
+        if workload.workload_id == "medium" and attempt_index == 0:
+            return screen.Attempt.failed(
+                workload.workload_id, attempt_index, "CONTROLLED_FAILURE"
+            )
+        return screen.Attempt.completed(
+            workload.workload_id, attempt_index, 400.0, 800.0, 1200.0
+        )
+
+    attempts = await screen.collect_attempts(
+        object(), screen.WORKLOADS, 5, measure=fake_measure
+    )
+
+    assert seen == [
+        *(("medium", index) for index in range(5)),
+        *(("long", index) for index in range(5)),
+    ]
+    assert len(attempts) == 10
+    assert attempts[0].outcome == "failed"
+    assert all(attempt.outcome == "completed" for attempt in attempts[1:])
+
+
+@pytest.mark.parametrize(
+    "process_control",
+    (asyncio.CancelledError(), KeyboardInterrupt(), SystemExit(2)),
+)
+def test_cli_does_not_convert_process_control(
+    monkeypatch: pytest.MonkeyPatch,
+    process_control: BaseException,
+) -> None:
+    args = SimpleNamespace(
+        command="smoke",
+        project_dir="/project",
+        output="/output",
+        git_commit="a" * 40,
+        agent_core_commit="b" * 40,
+    )
+
+    class _Parser:
+        @staticmethod
+        def parse_args():
+            return args
+
+    async def raise_process_control(_args):
+        raise process_control
+
+    monkeypatch.setattr(screen, "_parser", lambda: _Parser())
+    monkeypatch.setattr(screen, "_run", raise_process_control)
+
+    with pytest.raises(type(process_control)):
+        screen.main()

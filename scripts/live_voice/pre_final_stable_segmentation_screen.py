@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Awaitable, Callable, Iterable
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -595,6 +595,20 @@ def validate_source(
         raise ValueError("Agent-Core commit does not match the installed dependency")
 
 
+async def collect_attempts(
+    facade: object,
+    workloads: tuple[Workload, ...],
+    attempts_per_workload: int,
+    *,
+    measure: Callable[[object, Workload, int], Awaitable[Attempt]] = measure_attempt,
+) -> tuple[Attempt, ...]:
+    attempts: list[Attempt] = []
+    for workload in workloads:
+        for attempt_index in range(attempts_per_workload):
+            attempts.append(await measure(facade, workload, attempt_index))
+    return tuple(attempts)
+
+
 async def _run(args: argparse.Namespace) -> int:
     root = Path(__file__).resolve().parents[2]
     output = Path(args.output).resolve()
@@ -606,7 +620,7 @@ async def _run(args: argparse.Namespace) -> int:
     from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
     manager = AgentManager()
-    attempts: list[Attempt] = []
+    attempts: tuple[Attempt, ...] = ()
     try:
         facade = await manager.get_agent(
             channel_id="live_voice_pre_final_segmentation_screen",
@@ -617,29 +631,21 @@ async def _run(args: argparse.Namespace) -> int:
             raise RuntimeError("formal Agent facade is unavailable")
         workloads = WORKLOADS[:1] if args.command == "smoke" else WORKLOADS
         count = 1 if args.command == "smoke" else 5
-        failed = False
-        for workload in workloads:
-            for attempt_index in range(count):
-                attempt = await measure_attempt(facade, workload, attempt_index)
-                attempts.append(attempt)
-                print(
-                    json.dumps(
-                        {
-                            "workload_id": workload.workload_id,
-                            "attempt_index": attempt_index,
-                            "outcome": attempt.outcome,
-                            "agent_to_candidate_ms": attempt.agent_to_candidate_ms,
-                            "candidate_to_final_ms": attempt.candidate_to_final_ms,
-                            "agent_to_final_ms": attempt.agent_to_final_ms,
-                        }
-                    ),
-                    flush=True,
-                )
-                if attempt.outcome != "completed":
-                    failed = True
-                    break
-            if failed:
-                break
+        attempts = await collect_attempts(facade, workloads, count)
+        for attempt in attempts:
+            print(
+                json.dumps(
+                    {
+                        "workload_id": attempt.workload_id,
+                        "attempt_index": attempt.attempt_index,
+                        "outcome": attempt.outcome,
+                        "agent_to_candidate_ms": attempt.agent_to_candidate_ms,
+                        "candidate_to_final_ms": attempt.candidate_to_final_ms,
+                        "agent_to_final_ms": attempt.agent_to_final_ms,
+                    }
+                ),
+                flush=True,
+            )
     finally:
         await asyncio.wait_for(manager.cleanup(), timeout=15)
 
@@ -647,7 +653,7 @@ async def _run(args: argparse.Namespace) -> int:
         mode=args.command,
         git_commit=args.git_commit,
         agent_core_commit=args.agent_core_commit,
-        attempts=tuple(attempts),
+        attempts=attempts,
     )
     write_report(output, report)
     return 0 if report["status"] == "PASS" else 2
@@ -671,7 +677,7 @@ def main() -> int:
         raise SystemExit("commit arguments must be full lowercase SHA-1 values")
     try:
         return asyncio.run(_run(args))
-    except BaseException as error:
+    except Exception as error:
         print(f"PRE_FINAL_STABLE_SEGMENTATION_FAILED: {type(error).__name__}")
         return 1
 
