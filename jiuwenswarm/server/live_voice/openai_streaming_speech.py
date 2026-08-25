@@ -27,7 +27,6 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
-from urllib.parse import urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -38,6 +37,17 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SPEECH_STT_MODEL_ENV,
     SPEECH_TTS_MODEL_ENV,
     SPEECH_TTS_VOICE_ENV,
+)
+from jiuwenswarm.server.live_voice.openai_realtime_session import (
+    MAX_REALTIME_WIRE_MESSAGE_BYTES,
+    REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS as _REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS,
+    RealtimeSocket,
+    RealtimeSocketCleanupOwner,
+    RealtimeSocketFactory,
+    RealtimeTransport,
+    default_realtime_socket_factory as _default_socket_factory,
+    official_realtime_url,
+    validate_official_openai_api_base as _validate_api_base,
 )
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
@@ -79,7 +89,8 @@ DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe-2025-12-15"
 DEFAULT_TTS_MODEL = "gpt-4o-mini-tts-2025-12-15"
 DEFAULT_TTS_VOICE = "marin"
 OPENAI_PCM_RATE_HZ = 24_000
-MAX_WIRE_MESSAGE_BYTES = 1_048_576
+MAX_WIRE_MESSAGE_BYTES = MAX_REALTIME_WIRE_MESSAGE_BYTES
+REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS = _REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS
 MAX_SSE_LINE_BYTES = 262_144
 MAX_SSE_EVENT_BYTES = 1_048_576
 MAX_STREAM_AUDIO_BYTES = 8 * 1024 * 1024
@@ -101,14 +112,6 @@ MAX_DEGRADATION_SINK_TASKS_PER_OWNER = 4
 MAX_DEGRADATION_SINK_TASKS_GLOBAL = 16
 TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS = 0.05
 TRANSPORT_CLEANUP_CLOSE_BUDGET_SECONDS = 0.1
-# ``websockets`` otherwise inherits the Provider connect budget here (up to
-# five seconds).  That makes an ordinary peer which doesn't acknowledge our
-# close frame outlive both cleanup-owner budgets and turns a successful stream
-# into ``SPEECH_PROVIDER_CLEANUP_INCOMPLETE``.  The frame is sent before this
-# timeout starts; when it expires, websockets aborts the transport.  Reserving
-# half the attempt budget leaves time for connection-lost bookkeeping while
-# keeping the public cleanup call hard-bounded.
-REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS = TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS / 2
 MAX_INCOMPLETE_TRANSPORT_CLEANUPS = 32
 
 _PROVIDER = ProviderRef("openai-streaming-speech", "formal")
@@ -215,23 +218,12 @@ class OpenAIStreamingSpeechConfig:
             raise ValueError("connect timeout must be finite and in (0, 30]")
 
 
-class RealtimeSocket(Protocol):
-    async def send(self, message: str) -> None: ...
-
-    async def recv(self) -> str | bytes: ...
-
-    async def close(self) -> None: ...
-
-
 class SpeechSseStream(Protocol):
     def __aiter__(self) -> AsyncIterator[str]: ...
 
     async def aclose(self) -> None: ...
 
 
-RealtimeSocketFactory = Callable[
-    [str, Mapping[str, str], float], Awaitable[RealtimeSocket]
-]
 SpeechSseFactory = Callable[
     [str, Mapping[str, str], Mapping[str, str], float],
     Awaitable[SpeechSseStream],
@@ -641,7 +633,7 @@ class _RecognitionCommitOwner(StrEnum):
 @dataclass(slots=True)
 class _RecognitionSession:
     request: RecognitionStreamRequest
-    socket: RealtimeSocket = field(repr=False)
+    transport: RealtimeTransport = field(repr=False)
     resampler: _StreamingLinearResampler
     events: asyncio.Queue[StreamingRecognitionOutput] = field(repr=False)
     ready: asyncio.Future[None] = field(repr=False)
@@ -665,6 +657,10 @@ class _RecognitionSession:
     @property
     def ref(self) -> RecognitionStreamRef:
         return self.request.ref
+
+    @property
+    def socket(self) -> RealtimeSocket:
+        return self.transport.socket
 
 
 @dataclass(slots=True)
@@ -765,26 +761,6 @@ class _HttpxSseStream:
         await self._client.aclose()
 
 
-async def _default_socket_factory(
-    url: str, headers: Mapping[str, str], timeout_seconds: float
-) -> RealtimeSocket:
-    import websockets
-
-    kwargs: dict[str, object] = {
-        "open_timeout": timeout_seconds,
-        "close_timeout": REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS,
-        "max_size": MAX_WIRE_MESSAGE_BYTES,
-        "compression": None,
-    }
-    parameter = (
-        "additional_headers"
-        if "additional_headers" in inspect.signature(websockets.connect).parameters
-        else "extra_headers"
-    )
-    kwargs[parameter] = dict(headers)
-    return await websockets.connect(url, **kwargs)
-
-
 async def _default_sse_factory(
     url: str,
     headers: Mapping[str, str],
@@ -854,6 +830,11 @@ class OpenAIStreamingSpeechProvider:
             )
         self._fallback_tier = fallback_tier
         self._degradation_sink_tasks = _DegradationSinkTaskOwner()
+        self._socket_cleanup_tasks = RealtimeSocketCleanupOwner(
+            attempt_timeout_seconds=TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS,
+            close_timeout_seconds=TRANSPORT_CLEANUP_CLOSE_BUDGET_SECONDS,
+            max_incomplete_resources=MAX_INCOMPLETE_TRANSPORT_CLEANUPS,
+        )
         self._transport_cleanup_tasks = _TransportCleanupOwner()
         self._monotonic = monotonic
         self._capability = StreamingProviderCapability(
@@ -913,7 +894,19 @@ class OpenAIStreamingSpeechProvider:
 
     @property
     def cleanup_snapshot(self) -> TransportCleanupSnapshot:
-        return self._transport_cleanup_tasks.snapshot()
+        adapter = self._transport_cleanup_tasks.snapshot()
+        sockets = self._socket_cleanup_tasks.snapshot()
+        return TransportCleanupSnapshot(
+            retained_task_count=(
+                adapter.retained_task_count + sockets.retained_task_count
+            ),
+            failed_resource_count=(
+                adapter.failed_resource_count + sockets.failed_resource_count
+            ),
+            incomplete_kinds=tuple(
+                sorted((*adapter.incomplete_kinds, *sockets.incomplete_kinds))
+            ),
+        )
 
     async def open_recognition(
         self,
@@ -957,7 +950,7 @@ class OpenAIStreamingSpeechProvider:
             loop = asyncio.get_running_loop()
             session = _RecognitionSession(
                 request=request,
-                socket=socket,
+                transport=RealtimeTransport(socket),
                 resampler=_StreamingLinearResampler(
                     ref.capture.sample_rate_hz, OPENAI_PCM_RATE_HZ
                 ),
@@ -2072,9 +2065,7 @@ class OpenAIStreamingSpeechProvider:
         return fact
 
     async def _close_socket(self, socket: RealtimeSocket) -> bool:
-        return await self._transport_cleanup_tasks.attempt(
-            kind="socket", resource=socket, cleanup=socket.close
-        )
+        return await self._socket_cleanup_tasks.close_socket(socket)
 
     async def _close_stream(self, stream: SpeechSseStream) -> bool:
         return await self._transport_cleanup_tasks.attempt(
@@ -2083,11 +2074,15 @@ class OpenAIStreamingSpeechProvider:
 
     async def _finalize_cleanup_owners(self) -> None:
         failure: BaseException | None = None
-        cleanup_snapshot = self._transport_cleanup_tasks.snapshot()
         try:
-            cleanup_snapshot = await self._transport_cleanup_tasks.close()
+            await self._socket_cleanup_tasks.close()
         except BaseException as exc:
             failure = _safe_boundary_exception(exc)
+        try:
+            await self._transport_cleanup_tasks.close()
+        except BaseException as exc:
+            if failure is None:
+                failure = _safe_boundary_exception(exc)
         try:
             await self._degradation_sink_tasks.close()
         except BaseException as exc:
@@ -2095,6 +2090,7 @@ class OpenAIStreamingSpeechProvider:
                 failure = _safe_boundary_exception(exc)
         if failure is not None:
             raise failure from None
+        cleanup_snapshot = self.cleanup_snapshot
         if not cleanup_snapshot.clean:
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_CLEANUP_INCOMPLETE",
@@ -2109,9 +2105,18 @@ class OpenAIStreamingSpeechProvider:
 
     def _require_cleanup_capacity(self) -> None:
         snapshot = self._conformance.snapshot()
-        self._transport_cleanup_tasks.require_session_capacity(
-            active_sessions=snapshot.active_recognition + snapshot.active_synthesis
-        )
+        cleanup = self.cleanup_snapshot
+        active_sessions = snapshot.active_recognition + snapshot.active_synthesis
+        if (
+            cleanup.retained_task_count
+            + cleanup.failed_resource_count
+            + (active_sessions + 1) * 2
+            > MAX_INCOMPLETE_TRANSPORT_CLEANUPS
+        ):
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_CLEANUP_CAPACITY",
+                "streaming Speech cleanup capacity is exhausted",
+            )
 
     def _require_recognition(self, ref: RecognitionStreamRef) -> _RecognitionSession:
         session = self._recognition.get(_recognition_key(ref))
@@ -2437,24 +2442,6 @@ async def _settle_close_action(action: Awaitable[object]) -> object:
         return failure
 
 
-def _validate_api_base(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("API base is required")
-    parsed = urlparse(value)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "api.openai.com"
-        or parsed.port not in {None, 443}
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path.rstrip("/") != "/v1"
-    ):
-        raise ValueError("streaming Speech requires the official OpenAI HTTPS API base")
-    return "https://api.openai.com/v1"
-
-
 def _realtime_url(api_base: str) -> str:
     """Build the realtime transcription session URL.
 
@@ -2465,11 +2452,7 @@ def _realtime_url(api_base: str) -> str:
     carried by the ``session.update`` payload as
     ``session.audio.input.transcription.model`` instead.
     """
-    parsed = urlparse(api_base)
-    path = f"{parsed.path.rstrip('/')}/realtime"
-    return urlunparse(
-        ("wss", parsed.netloc, path, "", urlencode({"intent": "transcription"}), "")
-    )
+    return official_realtime_url(api_base, intent="transcription")
 
 
 def _required_secret(value: object) -> None:

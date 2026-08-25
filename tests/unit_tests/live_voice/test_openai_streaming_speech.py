@@ -47,6 +47,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     _reason_for_exception,
     select_environment_streaming_speech,
 )
+from jiuwenswarm.server.live_voice.openai_realtime_session import RealtimeTransport
 from jiuwenswarm.server.live_voice.speech_ports import (
     RecognitionEventKind,
     SynthesisEventKind,
@@ -680,6 +681,47 @@ async def test_cancelled_synthesis_registration_rolls_back_exact_session() -> No
     assert provider.degradation_facts == ()
     assert_zero_business_effects(provider)
     await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_realtime_transport_characterization_freezes_wire_and_order() -> None:
+    socket = FakeSocket((session_updated_event(),))
+    connect_calls: list[tuple[str, dict[str, str], float]] = []
+
+    async def socket_factory(
+        url: str, headers: Mapping[str, str], timeout: float
+    ) -> FakeSocket:
+        connect_calls.append((url, dict(headers), timeout))
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=2)
+
+    assert len(connect_calls) == 1
+    url, headers, timeout = connect_calls[0]
+    assert url == "wss://api.openai.com/v1/realtime?intent=transcription"
+    assert headers == {"Authorization": "Bearer private-test-key"}
+    assert 0 < timeout <= 2
+    assert [event["type"] for event in socket.sent] == ["session.update"]
+    assert isinstance(provider._require_recognition(ref).transport, RealtimeTransport)
+    assert socket.sent[0] == {
+        "type": "session.update",
+        "session": {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24_000},
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": None,
+                }
+            },
+        },
+    }
+
+    await provider.close()
+    await provider.close()
+    assert socket.closed is True
 
 
 @pytest.mark.asyncio

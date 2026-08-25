@@ -230,9 +230,9 @@ git commit -m "feat(live-voice): freeze native interaction contract"
 **Interfaces:**
 
 - Consumes: existing socket fake shape `send(str)`, `recv()`, `close()` and OpenAI API-base/secret rules.
-- Produces: `OpenAIRealtimeSession`, `OpenAIRealtimeSessionConfig`, `OpenAIRealtimeEvent`, `RealtimeSessionState`, `RealtimeSessionSnapshot`, `RealtimeSocket`, `RealtimeSocketFactory`, `official_realtime_url()`.
+- Produces: `OpenAIRealtimeSession`, `OpenAIRealtimeSessionConfig`, `OpenAIRealtimeEvent`, `RealtimeSessionState`, `RealtimeSessionSnapshot`, `RealtimeTransport`, `RealtimeSocket`, `RealtimeSocketFactory`, `RealtimeSocketCleanupOwner`, `default_realtime_socket_factory()`, `official_realtime_url()`, and `validate_official_openai_api_base()`.
 
-- [ ] **Step 1: Add Speech characterization tests before extraction**
+- [x] **Step 1: Add Speech characterization tests before extraction**
 
 Freeze existing behavior for connect headers, transcription URL, session update order, receive timeout, duplicate close, receive-task cancellation, cleanup failure precedence, process-control propagation, and secret redaction. Add assertions to `test_openai_streaming_speech.py` that examine fake socket events without depending on private helper names.
 
@@ -244,7 +244,7 @@ Run:
 
 Expected: characterization suite passes before extraction.
 
-- [ ] **Step 2: Write failing kernel tests**
+- [x] **Step 2: Write failing kernel tests**
 
 ```python
 @pytest.mark.asyncio
@@ -282,7 +282,7 @@ async def test_changed_provider_event_replay_fails_and_close_remains_unique() ->
     assert socket.close_calls == 1
 ```
 
-- [ ] **Step 3: Run kernel tests RED and implement the minimal owner**
+- [x] **Step 3: Run kernel tests RED and implement the minimal owner**
 
 Use this API:
 
@@ -305,18 +305,18 @@ The class implements exact public methods `open(*, session_update) -> None`, `se
 
 `open()` connects to `wss://api.openai.com/v1/realtime?model=<urlencoded model>`, uses only `Authorization: Bearer`, requires `session.created`, sends one closed `session.update`, then requires matching `session.updated`. `send_event()` assigns monotonic `client_event_00000001` IDs. `receive_event()` parses one bounded JSON object, requires bounded `type` and `event_id`, exact-replays identical events, rejects changed replay and ledger overflow. One lock owns state transition and one close task owns transport finalization. First primary error remains primary; close error is retained in snapshot.
 
-- [ ] **Step 4: Make Speech consume the kernel without changing Speech semantics**
+- [x] **Step 4: Make Speech consume the kernel without changing Speech semantics**
 
 Move `RealtimeSocket`, socket factory compatibility, official API-base validation, WebSocket close timeout, realtime URL builder, and unique socket close into the kernel. Configure Speech transcription with `intent=transcription` via `official_realtime_url(intent="transcription")`; Native uses `model=<model>` via the same builder. `_RecognitionSession` holds the kernel transport/session handle; Speech retains recognition conformance and event parsing, and the existing cleanup owner retains only adapter receive tasks and SSE synthesis resources.
 
-- [ ] **Step 5: Run focused and characterization GREEN**
+- [x] **Step 5: Run focused and characterization GREEN**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m pytest -q tests/unit_tests/live_voice/test_openai_realtime_session.py tests/unit_tests/live_voice/test_openai_streaming_speech.py
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m ruff check jiuwenswarm/server/live_voice/openai_realtime_session.py jiuwenswarm/server/live_voice/openai_streaming_speech.py tests/unit_tests/live_voice/test_openai_realtime_session.py tests/unit_tests/live_voice/test_openai_streaming_speech.py
 ```
 
-- [ ] **Step 6: Commit the shared kernel**
+- [x] **Step 6: Commit the shared kernel**
 
 ```powershell
 git add jiuwenswarm/server/live_voice/openai_realtime_session.py jiuwenswarm/server/live_voice/openai_streaming_speech.py tests/unit_tests/live_voice/test_openai_realtime_session.py tests/unit_tests/live_voice/test_openai_streaming_speech.py
