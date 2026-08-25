@@ -4,14 +4,16 @@
 > superpowers:test-driven-development while replaying this plan, then use
 > superpowers:requesting-code-review before declaring the local package ready.
 
-**Goal:** Expose a least-privilege, session-bound public continuation authority
-for the generic external-effect journal.
+**Goal:** Expose a least-privilege, session-bound public external-effect
+orchestration facade for the generic journal.
 
 **Architecture:** TeamAgent.effect_authority returns
 TeamExecutionEffectAuthority bound to the same TeamTaskAuthority identity. The
 facade verifies journal projections and fact prefixes before delegating to
-EffectDao. ExternalEffectCoordinator consumes the public protocol; callers
-cannot construct continuation authority directly.
+EffectDao. Its bound coordinator consumes purpose-specific continuations,
+invokes the exact declared adapter namespace and alone finalizes the returned
+receipt/observation; callers cannot construct continuation authority, recover a
+live token from a projection or write an evidence enum directly.
 
 **Risk and dependency:** Tier 3 public external side-effect boundary. Depends
 on PR 07 and PR 09. The review-only source diff is
@@ -31,15 +33,18 @@ on PR 07 and PR 09. The review-only source diff is
 
 ## Contract
 
-- ExecutionEffectAuthority defines plan, claim, dispatch, receipt,
-  observation, settlement, get, prefix read and reconciliation operations.
+- ExecutionEffectAuthority defines plan, purpose-bound call/observe
+  orchestration, settlement, redacted get/prefix read and reconciliation
+  operations. Raw claim tokens and receipt/observation writers remain internal;
+  exact public method names are frozen only after accepted PR 07 replay.
 - TeamExecutionEffectAuthority binds Team/member/session and validates every
-  record, fact prefix, token, integer bound and subordinate result.
+  record, fact prefix, runtime/phase/incarnation/provider binding, integer bound
+  and subordinate result provenance.
 - TeamAgent.effect_authority is the construction path; direct construction and
   root exports must not allow forged call authority.
 - Released/foreign sessions, stale global prefix, malformed projection,
-  incomplete call and wrong expected version have zero database/provider
-  effects.
+  incomplete call, forged evidence and wrong expected version have zero
+  database/provider effects.
 - Provider/project/file and product confirmation/compensation policy remain
   downstream.
 - effect_authority.py quality corrections from fbfb4c5f belong here.
@@ -47,13 +52,17 @@ on PR 07 and PR 09. The review-only source diff is
 ## Replay and verification
 
 1. Rebase after accepted PR 07/09 and record their SHAs.
-2. Restore test_effect_authority.py and affected journal/task-authority tests
-   from 8db056f5 plus fbfb4c5f corrections; run before implementation and
-   record red:
+2. Rebuild test_effect_authority.py and the affected journal/task-authority
+   tests from the accepted PR 07/09 contracts, using `8db056f5` and the
+   PR-owned `fbfb4c5f` corrections only as historical evidence. Do not restore
+   raw evidence writers, reusable tokens or tests that bypass the bound
+   coordinator. Run the rebuilt tests before implementation and record red:
 
        uv run pytest tests/unit_tests/agent_teams/test_effect_authority.py tests/unit_tests/agent_teams/test_execution_effect_journal.py tests/unit_tests/agent_teams/test_task_authority.py -q
 
-3. Reimplement 53dfcc7c and fold only the PR-owned fbfb4c5f corrections.
+3. From the exact accepted dependency tips, implement only the accepted bound
+   facade delta. Treat `53dfcc7c` and `fbfb4c5f` as evidence, not commits to
+   replay.
 4. Rerun all three files and repeat version/prefix races, session release,
    cancellation-context restoration and root-export lock tests.
 5. Run file-backed SQLite reopen/concurrency/corruption cases, changed-file

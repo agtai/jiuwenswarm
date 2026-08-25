@@ -360,6 +360,21 @@ payload write -> atomic finalize topology, durable/reapable post-authorization
 orphans, PR 07 overlap, tombstone identity and the PR 09 public boundary. Exact
 requirements are in the
 [PR 06 packet](reviews/agentcore-pr-preparation/2026-08-25-pr06-checkpoint.md).
+PR 07 external-effect-journal preflight is also complete. Its historical suite
+allows an unconsumed CALL/RECONCILE token to manufacture receipt or observation
+facts without calling the provider, repeats OBSERVE authorization, trusts
+corrupt unchecked projection state, leaks live claim tokens through an
+authority-free record and destroys effect history on normal Team clean. The
+independent preflight reports `5 Critical / 6 Important`. Formal replay must
+rebuild purpose-specific one-use CALL/OBSERVE/result finalization, exact runtime/
+phase/incarnation/prefix/provider binding, reconstructible authority-free
+lifecycle/provenance truth anchored by a PR 07-owned effect-intent event appended
+through the accepted PR 05 canonical Task-event writer, per-dispatch evidence,
+reservation-aware tombstones and PR 10's bound public surface. PR 07 has no
+formal dependency on PR 06; its accepted internal
+continuation may later serve PR 06 only if a checkpoint payload authorization
+cannot become general provider-call authority. Exact requirements are in the
+[PR 07 packet](reviews/agentcore-pr-preparation/2026-08-25-pr07-effect-journal.md).
 No result changes Live Voice authority, performs composition/migration, or
 grants deletion credit.
 

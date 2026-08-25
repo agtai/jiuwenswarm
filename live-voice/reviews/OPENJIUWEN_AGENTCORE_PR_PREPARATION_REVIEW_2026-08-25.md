@@ -156,18 +156,22 @@ separately authorized.
 3. Durable Task execution ownership (`A2`).
 4. Task command and immutable result authority (`ADD-01`).
 5. Task events and transactional dispatch (`ADD-02`).
-6. Execution-checkpoint publication (`ADD-05`).
-7. External-effect journal and continuation fencing (`ADD-04`).
+6. External-effect journal and continuation fencing (`ADD-04`), which can be
+   replayed directly from the accepted execution/event contracts.
+7. Execution-checkpoint publication (`ADD-05`), after selecting reuse of an
+   accepted internal effect primitive or a strictly checkpoint-only
+   reservation.
 8. Task-event consumer cursor (`ADD-03`); it depends on events, not on
    checkpoint/effect, so its review may occur earlier once `ADD-02` is stable.
 9. Bound Task authority and checkpoint public seam.
 10. Bound external-effect public seam.
 
-The following local branch refs expose that order as ten reviewable stacked
-diffs. Each physical base is the preceding stacked review ref; this ancestry is
-only a convenient local diff view and does not imply semantic dependency.
-Semantic dependencies are defined by the dedicated replay packets. None of
-these refs has an upstream or remote ref.
+The following immutable historical branch refs retain the original PR numbers
+and expose ten reviewable stacked diffs. Their physical sequence places PR 06
+before PR 07, but that numbering is evidence identity, not replay order. Each
+physical base is the preceding stacked review ref; semantic replay dependencies
+are defined by the dedicated packets and may therefore execute PR 07 before PR
+06. None of these refs has an upstream or remote ref.
 
 | PR | Local candidate ref | Review base | Candidate head |
 |---:|---|---|---|
@@ -205,7 +209,7 @@ changing its base. Replay must preserve upstream session-file hydration and
 write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
 the affected upstream tests.
 
-Read-only replay preflight is now complete through PR 06. PR 04 must preserve
+Read-only replay preflight is now complete through PR 07. PR 04 must preserve
 the accepted execution-quiescence, review-round, Team-tombstone, terminal and
 SessionFileStore contracts. PR 05 additionally requires non-cascading
 session-domain event/dispatch history, an explicit retired-Task/incarnation
@@ -223,8 +227,22 @@ before payload `get`, and raw mutation authority must not escape ahead of the
 bound PR 09 facade. The independent PR 06 preflight reports `4 Critical / 2
 Important`; its remaining scope freeze must decide whether to reuse PR 07's
 accepted effect continuation or own a strictly checkpoint-only reservation.
-None of PR 04–06 has started formal implementation; all remain blocked on
-accepted, reviewable dependency tips.
+PR 07's historical continuation is not yet that accepted primitive: CALL ignores
+the authorization's current prefix, OBSERVE is repeatable, and CALL/RECONCILE
+tokens can append the wrong evidence type without any provider call. Its
+projection is not reconstructibly checked against the fact prefix, leaks live
+claim tokens, retains stale observation truth across retry and cascades all
+effect tombstones on normal Team clean. The independent PR 07 preflight reports
+`5 Critical / 6 Important`. Replay must rebuild purpose-specific one-use
+authorization/result finalization under exact runtime/phase/incarnation/
+provider/prefix authority, pair genesis with a PR 07-owned effect-intent event
+appended through the accepted PR 05 canonical Task-event writer as the
+journal-external presence anchor, keep raw seams internal until PR 10, and
+preserve current DDL/SessionFileStore behaviour. PR 07 can be replayed from
+accepted PR 03/05 without PR 06; only its later
+accepted internal primitive may be evaluated for checkpoint reuse. None of PR
+04–07 has started formal implementation; all remain blocked on accepted,
+reviewable dependency tips.
 
 For every PR:
 

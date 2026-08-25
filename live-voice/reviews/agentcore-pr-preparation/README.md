@@ -6,10 +6,11 @@ technical candidates. PR 03 is Tier-3 technical-ready (`573` affected tests,
 `130` race repeats, independent `Critical 0 / Important 0`) but none of these
 packages is submission-ready: the required real issue reference is still
 missing, local history must be packaged/reworded accordingly, and nothing has
-been pushed or submitted. PR 04 through PR 06 have completed read-only preflight
+been pushed or submitted. PR 04 through PR 07 have completed read-only preflight
 only. PR 06's independent preflight found `4 Critical / 2 Important` in the
-historical checkpoint candidate; those findings are replay requirements, not an
-implemented or reviewed formal branch.
+historical checkpoint candidate; PR 07 found `5 Critical / 6 Important` in the
+historical effect-journal candidate. Those findings are replay requirements, not
+implemented or reviewed formal branches.
 
 ## Refreshed upstream drift
 
@@ -40,15 +41,21 @@ review views. A worker executing a packet must compare with the then-current
 develop, establish a failing test first, reimplement only the owned boundary,
 run its affected evidence and obtain a new Tier-3 review.
 
-| Order | Capability | Dependency | Packet | Current state |
+The numeric PR labels below are immutable historical packet identities, not a
+semantic scheduler. In particular, PR 07 can replay from accepted PR 03/05. PR
+06 can also remain checkpoint-only from PR 03/05, but if its scope chooses to
+reuse an effect continuation, accepted PR 07 becomes a dependency and PR 07 is
+replayed first.
+
+| Historical PR | Capability | Dependency | Packet | Current state |
 |---:|---|---|---|---|
 | 1 | Mandatory TeamTask scope | current develop | [PR 01](2026-08-25-pr01-task-scope.md) | technical replay present; issue metadata/history package pending |
 | 2 | Monotonic AsyncTool cancellation | current develop | [PR 02](2026-08-25-pr02-async-cancel.md) | isolated technical candidate present; issue metadata/package pending |
 | 3 | Durable execution ownership | PR 01, PR 02 | [PR 03](2026-08-25-pr03-execution-owner.md) | technical Ready; issue metadata and three-commit package pending |
 | 4 | Command replay and immutable result | PR 01, PR 03 | [PR 04](2026-08-25-pr04-command-result.md) | preflight blockers recorded; formal replay blocked on packaged PR 03 base |
 | 5 | Canonical Task events and dispatch | PR 03, PR 04 | [PR 05](2026-08-25-pr05-event-dispatch.md) | preflight blockers recorded; formal replay blocked on accepted PR 04 base |
-| 6 | Execution-checkpoint publication | PR 03, PR 05 | [PR 06](2026-08-25-pr06-checkpoint.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 and safe payload-effect topology/dependency freeze |
-| 7 | External-effect journal | PR 03, PR 05 | [PR 07](2026-08-25-pr07-effect-journal.md) | plan ready; replay pending |
+| 6 | Execution-checkpoint publication | PR 03, PR 05; add accepted PR 07 only if continuation reuse is selected | [PR 06](2026-08-25-pr06-checkpoint.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 and safe payload-effect topology/dependency freeze |
+| 7 | External-effect journal | PR 03, PR 05 | [PR 07](2026-08-25-pr07-effect-journal.md) | preflight blockers recorded; formal replay blocked on accepted PR 03/05 and continuation/prefix/public-boundary scope freeze |
 | 8 | Task-event consumer cursor | PR 05 | [PR 08](2026-08-25-pr08-event-cursor.md) | plan ready; replay pending |
 | 9 | Bound TeamTask/checkpoint authority | PR 01, 03, 04, 05, 06, 08 | [PR 09](2026-08-25-pr09-bound-task.md) | plan ready; replay pending |
 | 10 | Bound external-effect authority | PR 07, PR 09 | [PR 10](2026-08-25-pr10-bound-effect.md) | plan ready; replay pending |
