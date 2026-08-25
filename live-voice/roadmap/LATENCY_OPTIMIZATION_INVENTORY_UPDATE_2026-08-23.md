@@ -63,6 +63,11 @@ Historical LVL-10 worker branches `latency/lvl10-provider-screen` and
 validation runner, fixtures, tests and documentation; product source remained
 on the one-request full-final route.
 
+The Agent first-visible-delta baseline is separately bound to branch
+`latency/agent-first-delta-probe`, JiuwenSwarm `f71a5d830` and installed
+Agent-Core `94e10cb61`. It exercises a real formal Agent with tools disabled,
+but bypasses Browser, Speech, presentation and playout.
+
 Status terms used here:
 
 - **Accepted — causal component scope:** the named owner and boundary passed
@@ -121,10 +126,11 @@ compatible feature-off/on p50/p95 population.
 | TTS downlink decoupled from successor-capture ACK | **ACCEPTED — first-audio causal component scope** | P1/P2 seam; `productP1VoiceRoute.ts`, `dedicated_media_registration.py` | First-source p50 saved **5.8 ms / 255.1 ms / 756.1 ms** under injected ACK delays of 0/250/750 ms | A1/B/A2 returned to the original timing; at 750 ms, first source changed from 756.5 to 0.48 ms | UPDATE 2026-08-23: retained receipt settlement was separately decoupled from successor generation by hx `1fec48027` (+ Tier-3 review in `c31e85ade`), closing inventory ref #5 without changing this experiment's first-audio credit. |
 | Fixed VAD reduction from 1200 to 900/800 ms | **REJECTED** | P1 input; `streaming_speech.py`, `openai_streaming_speech.py` | Successful turns exposed **285–412 ms** of potential endpointing headroom | Both candidates preserved only 15/20 turns; every 1000 ms natural-pause case failed 0/5 | The headroom is real, but a global fixed threshold cannot safely recover it. Keep 1200 ms. |
 | Application-level TTS HTTPX client reuse | **REJECTED AND REVERTED** | P1 TTS Provider; `openai_streaming_speech.py` | No gain; warm first-PCM regressed **57.8 ms / 7.0%** | B produced **0/3 warm TCP/TLS reuse**; 832.0→889.9 ms warm p50 | Do not reintroduce this implementation unchanged. |
-| Runtime-owned stable-sentence Agent→TTS overlap | **SHORT/MEDIUM `STOP`; LONG-FORM MATERIALITY PACKET PREPARED, NOT IMPLEMENTED** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Tested short/medium candidate→final/projected-gain p50 **177.2 ms**, p95 **425.3 ms**; relative p50 **7.43%**; long-form `UNKNOWN` | 3/3 short/medium pilot attempts completed, exact prefix 3/3, mismatch 0, zero forbidden effects; credited v2 artifacts survive in the durable latency-runs archive with matching hashes | Failed the declared gates for those workloads only. A separate three-workload/five-attempt long-form exact-prefix screen must measure pre-final materiality before any PresentationUnit or product TTS design; LVL-10/LVL-10L cannot supply that evidence. |
+| Runtime-owned stable-sentence Agent→TTS overlap | **SHORT `STOP`; MEDIUM/LONG EXACT-PREFIX SCREEN JUSTIFIED, NOT IMPLEMENTED** | Pure response policy, real formal Agent and benchmark-only real TTS; no Runtime/P2/Browser wiring | Real first-delta→final p50 short/medium/long **8.779 / 1676.287 / 3518.228 ms**; actual immutable-prefix headroom `UNKNOWN` | 15/15 first-delta baseline completed; earlier exact-prefix pilot covered only its original short/medium fixtures | Short is non-material. Medium/long now have a measured timing window, but must pass byte-exact stable-prefix validation before any PresentationUnit or product TTS design. |
 | LVL-10L completion-primary long-form chunked TTS | **DIRECTIONAL `STOP` — FORMAL ABORTED, NO PRODUCT CREDIT** | Validation-only post-final TTS runner; product source unchanged | Clean v2 pilot `long_2100`: B2 saved **6.93 s / 36.85%**, B4 saved **7.75 s / 41.27%** | 12/12 attempts, 24/24 requests, zero errors at `bcbf6a423`; prior v1 pilots isolated quota exhaustion and the one-request 8 MiB boundary | Repeats LVL-10's long direction but is one round. Hongxing requested stopping long-duration tests; no B2/B4 selection or Browser/product wiring. |
 | Accepted-optimizations combined checkpoint | **IMPROVED — DETERMINISTIC NO-CHROME CHECKPOINT COMPLETE AND REVIEWED** | Deterministic P1/P2 composition; `acceptedOptimizationsCheckpoint.ts` plus real P1/P2 owners | W1 **1015 ms / 12.688%**; W2 **4660 ms / 31.275%**; W3 **8570 ms / 49.971%** | A1, B and A2 each completed 15/15 attempts; A1/A2 drift was exactly 0% | This proves controlled owner-path gain only. It does not exercise the raw P2 response observer that caused the deployed TTS authorization failure, nor real Provider/network/Chrome/WebAudio/Agent/model timing. |
 | EOT/STT early result waiter | **REJECTED — NO MATERIAL SERIAL GAP** | P1/P2 Speech settlement; real `ProductP1VoiceRouteOwner` and registry result seam under deterministic dependencies | Largest removable-gap p50 **0.885 ms**; largest fraction p50 **0.015** | Complete A1 at `8e5dab8b8`: 20/20 exact, cleanup-complete attempts; ten marks/eight segments; zero forbidden effects | The 450.782 ms provider-slow diagnostic is legitimate remaining Provider wait. The credited final raw `/tmp` report no longer exists; reviewed sanitized tables remain authoritative, while an earlier diagnostic 20/20 raw report survives. Future credited runs must use the durable latency-runs root. |
+| Agent start → first visible delta baseline | **MEASURED DIAGNOSTIC — NO PRODUCT CHANGE** | Formal real Agent seam; no Browser, STT, TTS, Tool or Task | First-delta p50 short/medium/long **522.856 / 543.185 / 591.914 ms**; delta→final p50 **8.779 / 1676.287 / 3518.228 ms** | 15/15 completed at `f71a5d830`; nearest-rank P95 first-delta **1337.260 / 682.479 / 742.521 ms**; zero forbidden effects | Medium/long timing windows justify an exact-prefix screen; the first delta itself has no stable-speech authority. See the [baseline](../evidence/AGENT_FIRST_DELTA_BASELINE_2026-08-25.md). |
 
 ## 4. Combined checkpoint result
 
@@ -477,7 +483,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **TARGET MATERIALITY PASS; PHYSICAL ACCEPTANCE INCOMPLETE; DEFAULT REMAINS 1000 MS**. Hook remains clamped to [160,1000] ms; setup branch `latency/adaptive-playout-lead-experiment` at `5b37103a2` | **670.117–672.874 ms / 93.26–93.29% measured target headroom**; A1/A2 target drift **2.757 ms / 0.383%** | `browserAudioIOAdapter.ts`; private source-bound A1/B/A2 preparer/driver | Same-workload target values were 718.549/48.432/721.306 ms. A1/B completed; A2 cancelled after the target mark, so no physical completion/default credit follows. Upstream TTS/Agent drift consumed the target gain in total first-audio. See the [pilot result](../evidence/LVL09_ADAPTIVE_PLAYOUT_LEAD_PILOT_RESULT_2026-08-25.md). |
 | 5 | Separate retained receipt settlement from successor readiness | **DONE — SCOPED LIFECYCLE SOURCE/AUTOMATION** — hx `1fec48027`, review in `c31e85ade` | Earlier controlled waits exposed approximately **254/754/1007 ms**; no new physical gain is credited | P2 activation journal, retained presentation ACK and next-turn ownership | The retained predecessor settles independently of the successor generation. This is lifecycle closure, not a p50/p95 latency population. |
-| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SHORT/MEDIUM `STOP`; LONG-FORM MATERIALITY PACKET PREPARED, NOT IMPLEMENTED** | Tested short/medium: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%**; long-form `UNKNOWN` | Existing validation-only policy/runner plus a prospective isolated long-form screen; no Runtime/P2/Browser product wiring | The tested workloads remain stopped. A distinct long-form exact-prefix screen is now prepared conceptually; it must prove candidate→final headroom and byte-exact stability before any pre-final product speech. |
+| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SHORT `STOP`; MEDIUM/LONG EXACT-PREFIX SCREEN JUSTIFIED, NOT IMPLEMENTED** | First-delta→final p50 **8.779 / 1676.287 / 3518.228 ms** for short/medium/long; immutable-prefix headroom `UNKNOWN` | Existing validation-only policy/runner plus real-Agent first-delta baseline; no Runtime/P2/Browser product wiring | The timing gate is material for medium/long only. A separate exact-prefix screen must prove byte-exact stability before any pre-final product speech. |
 | 7 | Bounded next-sentence TTS prefetch | **PROPOSED** | **100–800 ms between sentences** | Conversation Runtime, streaming synthesis route, bounded semantic queue | Primarily improves continuity, not first-sentence latency. It must discard prefetched speech on replacement/barge-in. |
 | 8 | Fixed authoritative phrase cache | **PROPOSED** | **800–1400 ms per cache hit** | Conversation Runtime and TTS cache keyed by text hash, locale, model, voice and render version | Suitable only for stable non-private acknowledgements. It must not cache arbitrary Agent or user content. |
 | 9 | Authoritative accepted/queued acknowledgement | **OPPORTUNITY SCREEN READY — CANDIDATE NOT IMPLEMENTED** on `latency/task-ack-latency-experiment` at `e38cb7b38` | **2–7 s perceived hypothesis**; actual gain `UNMEASURED` | Existing Task acceptance→presentation probe and offline strict reducer | Twelve tests prove strict canonical input, denominator/integrity precedence and private exclusive output. The screen measures only maximum opportunity; it neither accelerates Task completion nor proves spoken feedback. |
@@ -538,8 +544,8 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    attempting connection reuse, warm-up or prompt/history/tool reductions.
    Queue, connection, Provider and model subdivisions remain unclaimed until
    directly observed.
-6. Keep stable-sentence stopped for short/medium while preparing a separate
-   validation-only long-form exact-prefix screen. Keep LVL-10/LVL-10L stopped
+6. Keep stable-sentence stopped for short while preparing a separate
+   validation-only medium/long exact-prefix screen. Keep LVL-10/LVL-10L stopped
    and independent because they start after authoritative `chat.final`.
 7. Consider authoritative P3 acknowledgements and fixed non-private phrase
    caching only when perceived Task latency is a product priority; neither
@@ -631,10 +637,10 @@ now has approximately 670–673 ms of measured same-workload target headroom wit
 acceptance remains incomplete and production stays at 1000 ms. Provider-native
 Semantic VAD completes the protocol path and shows 684–734 ms EOT gain on two
 cases, but AUTO is rejected for early EOT at 600/1000 ms and HIGH remains
-unrun. The isolated Agent first-delta
-producer packet passes Tier-2 review but remains unmeasured; a distinct long-form pre-final
-exact-prefix screen are preparation packets with no current latency or product
-credit.
+unrun. The isolated Agent first-delta packet now has a 15/15 real-Agent
+baseline: first-delta p50 is 523–592 ms, while delta→final p50 is approximately
+9 ms for short, 1.68 s for medium and 3.52 s for long output. This is diagnostic
+materiality, not proof of an immutable prefix or product latency credit.
 The 2026-08-24 SOTA review introduced LVL-10 as a separate materiality question
 from LVL-07. The completed screen grants no product credit: the current
 full-final SSE route remains unchanged, Browser Lane C is closed, and the
