@@ -874,6 +874,10 @@ def test_semantic_summaries_preserve_mode_eagerness_and_explicit_arm_order() -> 
     assert semantic.turn_detection_mode == "semantic_vad"
     assert semantic.silence_duration_ms is None
     assert semantic.semantic_eagerness == "auto"
+    assert semantic.eot_to_final_ms_p50 == 100.0
+    assert semantic.eot_to_final_ms_p95 == 100.0
+    assert semantic.total_ms_p50 == 400.0
+    assert semantic.total_ms_p95 == 400.0
 
 
 @pytest.mark.asyncio

@@ -379,6 +379,10 @@ class VadConfigurationSummary:
     invalid: int
     eot_ms_p50: float | None
     eot_ms_p95: float | None
+    eot_to_final_ms_p50: float | None
+    eot_to_final_ms_p95: float | None
+    total_ms_p50: float | None
+    total_ms_p95: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,11 +457,23 @@ def _safe_summary(attempts: Sequence[VadAttemptResult]) -> tuple[VadConfiguratio
         key=lambda value: (CONFIGURATION_ORDER[value[0]], value[4]),
     ):
         rows = grouped[key]
-        values = [
+        eot_values = [
             row.final_voiced_frame_to_eot_ms
             for row in rows
             if row.outcome is VadAttemptOutcome.COMPLETED
             and row.final_voiced_frame_to_eot_ms is not None
+        ]
+        finalization_values = [
+            row.eot_to_final_ms
+            for row in rows
+            if row.outcome is VadAttemptOutcome.COMPLETED
+            and row.eot_to_final_ms is not None
+        ]
+        total_values = [
+            row.final_voiced_frame_to_final_ms
+            for row in rows
+            if row.outcome is VadAttemptOutcome.COMPLETED
+            and row.final_voiced_frame_to_final_ms is not None
         ]
         summaries.append(
             VadConfigurationSummary(
@@ -467,8 +483,14 @@ def _safe_summary(attempts: Sequence[VadAttemptResult]) -> tuple[VadConfiguratio
                 sum(row.outcome is VadAttemptOutcome.FAILED for row in rows),
                 sum(row.outcome is VadAttemptOutcome.UNKNOWN for row in rows),
                 sum(row.outcome is VadAttemptOutcome.INVALID for row in rows),
-                statistics.median(values) if values else None,
-                _nearest_rank(values, 0.95),
+                statistics.median(eot_values) if eot_values else None,
+                _nearest_rank(eot_values, 0.95),
+                statistics.median(finalization_values)
+                if finalization_values
+                else None,
+                _nearest_rank(finalization_values, 0.95),
+                statistics.median(total_values) if total_values else None,
+                _nearest_rank(total_values, 0.95),
             )
         )
     return tuple(summaries)
