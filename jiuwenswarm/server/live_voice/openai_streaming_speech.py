@@ -881,6 +881,7 @@ class OpenAIStreamingSpeechProvider:
                 provider_cancel_ack=CapabilityProvenance.UNAVAILABLE,
                 native_partials=CapabilityProvenance.PROVIDER_NATIVE,
                 server_vad=CapabilityProvenance.PROVIDER_NATIVE,
+                semantic_vad=CapabilityProvenance.PROVIDER_NATIVE,
             ),
             synthesis=SynthesisProviderSupport(
                 modes=frozenset({SpeechMode.STREAM}),
@@ -1479,7 +1480,10 @@ class OpenAIStreamingSpeechProvider:
         if kind == "input_audio_buffer.speech_started":
             if (
                 session.request.turn_detection.mode
-                is not RecognitionTurnDetectionMode.SERVER_VAD
+                not in {
+                    RecognitionTurnDetectionMode.SERVER_VAD,
+                    RecognitionTurnDetectionMode.SEMANTIC_VAD,
+                }
                 or session.speech_item_id is not None
             ):
                 raise OpenAIStreamingSpeechError(
@@ -1505,7 +1509,10 @@ class OpenAIStreamingSpeechProvider:
             async with session.send_lock:
                 if (
                     session.request.turn_detection.mode
-                    is not RecognitionTurnDetectionMode.SERVER_VAD
+                    not in {
+                        RecognitionTurnDetectionMode.SERVER_VAD,
+                        RecognitionTurnDetectionMode.SEMANTIC_VAD,
+                    }
                     or session.speech_item_id is None
                     or session.speech_end_ms is not None
                     or item_id != session.speech_item_id
@@ -1629,7 +1636,11 @@ class OpenAIStreamingSpeechProvider:
             hypothesis=hypothesis,
             timing_basis=(
                 RecognitionTimingBasis.PROVIDER_TIME
-                if session.commit_owner is _RecognitionCommitOwner.SERVER_VAD
+                if session.commit_owner
+                in {
+                    _RecognitionCommitOwner.SERVER_VAD,
+                    _RecognitionCommitOwner.SEMANTIC_VAD,
+                }
                 else RecognitionTimingBasis.EXACT_SOURCE_CURSOR
             ),
         )
@@ -1971,7 +1982,10 @@ class OpenAIStreamingSpeechProvider:
     def _recognition_event_cursor(
         session: _RecognitionSession, kind: RecognitionEventKind
     ) -> int | None:
-        if session.commit_owner is _RecognitionCommitOwner.SERVER_VAD:
+        if session.commit_owner in {
+            _RecognitionCommitOwner.SERVER_VAD,
+            _RecognitionCommitOwner.SEMANTIC_VAD,
+        }:
             OpenAIStreamingSpeechProvider._require_committed(session)
             return None
         if kind is RecognitionEventKind.FINAL:

@@ -353,6 +353,25 @@ def test_server_vad_request_requires_exact_provider_capability_before_allocation
     assert_zero_authority_effects(runtime)
 
 
+def test_semantic_vad_request_requires_exact_provider_capability_before_allocation() -> (
+    None
+):
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    with pytest.raises(StreamingSpeechViolation) as unavailable:
+        runtime.start_recognition(
+            RecognitionStreamRequest(
+                recognition_ref(),
+                RecognitionTurnDetection.semantic_vad_configured(
+                    SemanticVadEagerness.AUTO
+                ),
+            ),
+            timeout_seconds=5,
+        )
+    assert unavailable.value.reason == "SEMANTIC_VAD_UNAVAILABLE"
+    assert runtime.snapshot().active_recognition == 0
+    assert_zero_authority_effects(runtime)
+
+
 def test_server_vad_wrong_item_fails_closed_and_fences_input() -> None:
     capability = replace(
         native_capability(),

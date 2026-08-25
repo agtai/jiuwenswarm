@@ -584,6 +584,16 @@ class StreamingSpeechConformance:
                     "SERVER_VAD_UNAVAILABLE",
                     "recognition Provider cannot honor server VAD",
                 )
+            if (
+                request.turn_detection.mode
+                is RecognitionTurnDetectionMode.SEMANTIC_VAD
+                and self._capability.recognition.semantic_vad
+                is not CapabilityProvenance.PROVIDER_NATIVE
+            ):
+                raise StreamingSpeechViolation(
+                    "SEMANTIC_VAD_UNAVAILABLE",
+                    "recognition Provider cannot honor semantic VAD",
+                )
             ref = request.ref
             _validate_recognition_ref(ref)
             timeout = _timeout_seconds(timeout_seconds)
@@ -726,12 +736,22 @@ class StreamingSpeechConformance:
                         "recognition Provider event sequence must be contiguous",
                     )
                 if event.audio_cursor is None:
+                    provider_vad_supported = (
+                        state.turn_detection.mode
+                        is RecognitionTurnDetectionMode.SERVER_VAD
+                        and self._capability.recognition.server_vad
+                        is CapabilityProvenance.PROVIDER_NATIVE
+                    ) or (
+                        state.turn_detection.mode
+                        is RecognitionTurnDetectionMode.SEMANTIC_VAD
+                        and self._capability.recognition.semantic_vad
+                        is CapabilityProvenance.PROVIDER_NATIVE
+                    )
                     if (
                         event.timing_basis is not RecognitionTimingBasis.PROVIDER_TIME
                         or event.timing_provenance
                         is not CapabilityProvenance.ADAPTER_DERIVED
-                        or self._capability.recognition.server_vad
-                        is not CapabilityProvenance.PROVIDER_NATIVE
+                        or not provider_vad_supported
                         or not state.provider_committed
                     ):
                         raise StreamingSpeechViolation(
@@ -826,15 +846,21 @@ class StreamingSpeechConformance:
             self._require_not_terminal_recognition(state)
             try:
                 self._require_before_deadline_recognition(state)
-                if (
+                detection_supported = (
                     state.turn_detection.mode
-                    is not RecognitionTurnDetectionMode.SERVER_VAD
-                    or self._capability.recognition.server_vad
-                    is not CapabilityProvenance.PROVIDER_NATIVE
-                ):
+                    is RecognitionTurnDetectionMode.SERVER_VAD
+                    and self._capability.recognition.server_vad
+                    is CapabilityProvenance.PROVIDER_NATIVE
+                ) or (
+                    state.turn_detection.mode
+                    is RecognitionTurnDetectionMode.SEMANTIC_VAD
+                    and self._capability.recognition.semantic_vad
+                    is CapabilityProvenance.PROVIDER_NATIVE
+                )
+                if not detection_supported:
                     raise StreamingSpeechViolation(
                         "TURN_BOUNDARY_UNNEGOTIATED",
-                        "Provider turn boundaries require negotiated server VAD",
+                        "Provider turn boundaries require negotiated VAD",
                     )
                 if event.provider != self._capability.provider:
                     raise StreamingSpeechViolation(

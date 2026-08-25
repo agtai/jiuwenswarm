@@ -595,6 +595,79 @@ async def test_server_vad_fences_input_and_final_uses_provider_time_truth() -> N
 
 
 @pytest.mark.asyncio
+async def test_semantic_vad_owns_provider_turn_boundaries_and_final() -> None:
+    semantic_echo = {"type": "semantic_vad", "eagerness": "auto"}
+    socket = FakeSocket((session_updated_event(semantic_echo),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    assert (
+        provider.capability.recognition.semantic_vad
+        is CapabilityProvenance.PROVIDER_NATIVE
+    )
+    ref = recognition_ref()
+    detection = RecognitionTurnDetection.semantic_vad_configured(
+        SemanticVadEagerness.AUTO
+    )
+    await provider.open_recognition(
+        RecognitionStreamRequest(ref, detection), timeout_seconds=2
+    )
+    await provider.send_recognition_audio(recognition_frame(ref))
+    socket.push(
+        {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "semantic-item-1",
+            "audio_start_ms": 120,
+        }
+    )
+    socket.push(
+        {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "semantic-item-1",
+            "audio_end_ms": 640,
+        }
+    )
+
+    started = await provider.next_recognition_event(ref, timeout_seconds=1)
+    stopped = await provider.next_recognition_event(ref, timeout_seconds=1)
+    assert isinstance(started, RecognitionTurnBoundaryEvent)
+    assert isinstance(stopped, RecognitionTurnBoundaryEvent)
+    assert started.kind is RecognitionTurnBoundaryKind.SPEECH_STARTED
+    assert stopped.kind is RecognitionTurnBoundaryKind.SPEECH_STOPPED
+    assert await provider.commit_recognition(ref) in {
+        RecognitionCommitDisposition.SEMANTIC_VAD_PENDING,
+        RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED,
+    }
+    assert [message["type"] for message in socket.sent].count(
+        "input_audio_buffer.commit"
+    ) == 0
+
+    socket.push(
+        {"type": "input_audio_buffer.committed", "item_id": "semantic-item-1"}
+    )
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "semantic-item-1",
+            "transcript": "semantic provider final",
+        }
+    )
+    committed = await provider.next_recognition_event(ref, timeout_seconds=1)
+    final = await provider.next_recognition_event(ref, timeout_seconds=1)
+    assert isinstance(committed, RecognitionTurnBoundaryEvent)
+    assert committed.kind is RecognitionTurnBoundaryKind.COMMITTED
+    assert final.kind is RecognitionEventKind.FINAL
+    assert final.timing_basis is RecognitionTimingBasis.PROVIDER_TIME
+    assert final.hypothesis is not None
+    assert final.hypothesis.selected.display_text == "semantic provider final"
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_manual_commit_wins_server_vad_race_without_a_second_commit() -> None:
     socket = BlockingCommitSocket((session_updated_event(server_vad_wire()),))
 
