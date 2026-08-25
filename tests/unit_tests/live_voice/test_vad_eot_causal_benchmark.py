@@ -859,6 +859,8 @@ def test_semantic_attempt_fields_are_closed_and_failed_timings_are_null() -> Non
     assert failed.final_voiced_frame_to_eot_ms is None
     with pytest.raises(ValueError, match="VAD_ATTEMPT_RESULT_INVALID"):
         replace(completed, turn_detection_mode="server_vad", semantic_eagerness=None)
+    with pytest.raises(ValueError, match="VAD_ATTEMPT_RESULT_INVALID"):
+        replace(completed, semantic_eagerness="high")
 
 
 @pytest.mark.asyncio
