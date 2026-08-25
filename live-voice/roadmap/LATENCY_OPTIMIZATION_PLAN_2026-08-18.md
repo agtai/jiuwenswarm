@@ -75,6 +75,13 @@
 > materiality screen may reopen that hypothesis, while LVL-10/LVL-10L remain
 > stopped post-final chunking work.
 
+> **2026-08-25 LVL-09 result:** same-workload schedule-to-start values were
+> 718.549/48.432/721.306 ms for A1=1000/B=250/A2=1000, exposing approximately
+> 670–673 ms of target headroom with 2.757 ms control drift. A1/B completed;
+> A2 cancelled after the target mark. Treat this as target materiality, not a
+> total-latency or physical/default acceptance result. Upstream Agent/TTS drift
+> consumed the target gain in the single-run end-to-end totals.
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -118,7 +125,7 @@ Important code facts are:
 | Task commands | `voice_task_bridge.py::resolve_unified` already has a structured Task route and short authoritative speech for supported Task operations. | A new generic “fast Task route” is not the first task; its truth and latency should be measured and repaired where necessary. |
 | TTS start | `productP1VoiceRoute.ts::playAgentText` sends the complete authoritative text. The Gateway pulls the first Provider audio before returning the downlink ticket. | Streaming exists below the full-text gate, so first audio still waits for `chat.final`. |
 | Capture/playback overlap | The accepted first-audio path and later retained-receipt lifecycle no longer require successor readiness to own predecessor output. | Preserve the accepted decoupling; future receipt work needs new evidence rather than reopening this seam. |
-| Browser playout | `browserAudioIOAdapter.ts` keeps `PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 1000` and exposes a clamped 160–1000 ms diagnostic hook. | One unmatched 250 ms round is promising but cannot change the default; LVL-09 requires compatible physical A1/B/A2. |
+| Browser playout | `browserAudioIOAdapter.ts` keeps `PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 1000` and exposes a clamped 160–1000 ms diagnostic hook. | LVL-09 measured approximately 670–673 ms same-workload target headroom with near-zero control drift, but A2 cancelled after first-start; physical completion and a default change remain open. |
 | Backpressure | the synthesis media queues default to eight frames, or 160 ms at 20 ms/frame. | Raising every queue to 64 frames would add up to 1.28 seconds of stale/cancel backlog and does not by itself solve Provider seed gaps. |
 
 The only repository benchmark close to the whole route is
@@ -436,9 +443,9 @@ Current latency work should be packetized in this dependency order:
 1. preserve the accepted D-094 P2 default and retained ACK/receipt lifecycle;
    the missing fixed-corpus off/on population is an evidence gap, not an open
    repair;
-2. execute LVL-09 Browser A1=1000/B=250/A2=1000 first using the same source,
-   workload and manifest. Treat the initial three-arm run as a physical pilot
-   and keep 1000 ms as default until the broader Browser Gate passes;
+2. preserve the LVL-09 target materiality result of approximately 670–673 ms.
+   A2 cancelled after first-start, so keep 1000 ms as default until completed
+   physical playout and reliability evidence close the Browser Gate;
 3. execute LVL-08 Provider-native Semantic VAD with the 1200 ms fallback and
    natural-pause/false-EOT gates;
 4. connect the existing Agent start/first-delta probe points, measure the

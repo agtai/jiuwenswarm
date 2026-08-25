@@ -6,12 +6,12 @@
 > credit by itself. The formal baseline procedure remains §7.6 of
 > [E2E_RUNBOOK](E2E_RUNBOOK.md); this driver automates its mechanics.
 
-As of 2026-08-25, the next use is the LVL-09 physical
-A1=1000/B=250/A2=1000 pilot. The setup is bound to the clean experiment
-worktree, but the initial three-arm run is still pilot evidence: it does not
-close the broader Browser/manual-driver Gate or authorize changing the 1000 ms
-production default. Scoped verification belongs in the optimization inventory
-and retained run artifacts rather than this operator procedure.
+On 2026-08-25 LVL-09 measured approximately 670–673 ms of target-segment
+headroom, but A2 cancelled after first-start. A later use of this driver must
+retain the same-tab allocator and wait through complete playout; the result
+does not authorize changing the 1000 ms default. Scoped verification belongs
+in the optimization inventory and retained run artifacts rather than this
+operator procedure.
 
 ## 1. What the driver does
 
@@ -65,18 +65,21 @@ Topology note: in dev there are exactly THREE processes. The Gateway binds
 - Open one of the stage URLs; create/open ONE session bound to the
   registered disposable project. Task stages have real side effects there.
 - Keep the same tab for all stages; reload between stages preserves the
-  per-profile `round_index` in `sessionStorage`.
+  per-profile `round_index` in `sessionStorage`. Opening another tab or
+  relaunching with cleared session state can restart at round 0 and invalidate
+  later arms.
 - A `completed` round reaches export after playout ACK + successor capture
   ready. Reloading, barge-in or advancing earlier can export a `cancelled`
   batch instead.
-- In the current driver, the beep and `[probe] N batches exported` count every
-  new JSONL batch; **beep does not mean completed**. Before advancing, inspect
-  `terminal_outcome`, `profile_id` and `round_index` in the exported batch.
+- In LVL-09 manifest mode, only an exact matching `completed` batch is
+  advance-eligible. Cancelled/failed/unknown rows are retained and named from
+  their authoritative profile/case/round/outcome, but do not advance.
 - Failed/cancelled rounds do not receive complete-round credit. Observed
   same-clock mark pairs may be preserved as explicitly partial diagnostics;
   absent pairs remain `unknown` and must not enter p50/p95 or A/B/A summaries.
-- The current stage-number snapshot name is operator state, not authoritative
-  batch identity. Do not infer profile or round from the filename alone.
+- For a startup-lead screen, use a short frozen workload whose playout remains
+  below the 30-second successor-capture rotation boundary. Do not speak, reload
+  or disable Live Voice until playout finishes and the eligible beep sounds.
 
 ## 4. Usage
 
@@ -85,6 +88,8 @@ lv-driver.sh <run-id> --launch     # launch stack + collect + report on q
 lv-driver.sh <run-id>              # attach mode: stack already running
 lv-driver.sh <run-id> --smoke      # non-interactive: start, validate ports,
                                    # graceful shutdown, generate report
+LV_WORKTREE=<clean-lvl09-worktree> lv-driver.sh <run-id> --launch \
+  --lvl09-manifest=<run-dir>/lvl09-arms.json
 ```
 
 Interactive commands: `[Enter]`=next stage · `b`=back one stage ·
@@ -111,9 +116,10 @@ plus `DATA_DIR=`). Logs: `<run-dir>/logs/{agentserver,gateway,vite,driver}.log`.
 | Startup fails closed, path error | `P3 database must remain under the application-owned P3 directory` | DB path must be under `<DATA_DIR>/live_voice/p3alpha/` |
 | Page stuck at "Loading conversation history…" | gateway log: `未连接 AgentServer，请先调用 connect(uri)` | Gateway lost its AgentServer link (driver died) — relaunch the stack |
 | Voice recovery failed (text, `UNIFIED_INPUT_FAILED`) | agentserver: `handle_unified_submit() got an unexpected keyword argument 'latency_probe'` | Merge regression — fixed on `497831f58+`; keep registry/server in sync |
-| Beep occurs but round is `cancelled` | batch `terminal_outcome: cancelled` | Current beep detects export, not success. Inspect terminal/profile/round; do not advance or credit the round |
-| Snapshot is labelled for the next stage | filename stage differs from batch `profile_id` | Current snapshots use operator stage. Treat the batch payload as authoritative |
-| Vite/Gateway remains after driver exit | port still bound after `q` | Current wrapper-PID shutdown may leave child processes. Stop the complete process group/tree before starting a new run |
+| LVL-09 row is retained but cannot advance | terminal is not `completed`, or profile/case/round differs from the manifest arm | Preserve the row as partial/failed evidence; changed frozen state requires a fresh run |
+| LVL-09 A2 reaches first start but exports `cancelled` | `live_voice.composition.p2.barge_in` after the first-start mark | Retain the target pair as partial diagnostic only; a completed replacement requires a fresh run and no speech/reload/disable action until playout ends |
+| LVL-09 arm restarts at round 0 | unified submit carries an earlier `round_index` than the manifest arm | The Browser allocator lost `sessionStorage`; use one unchanged Chrome tab for the complete fresh run |
+| Vite/Gateway remains after driver exit | port still bound after `q` | Treat this as cleanup failure; stop only the driver-owned process group/tree before a new run |
 | Port 19000 bind conflict (`Errno 98`) | two services racing | Do not run `app_web` in dev; Gateway owns 19000 |
 
 ## 6. Non-claims
@@ -124,8 +130,9 @@ separation, full denominators, frozen corpus). Remote refs, credentials and
 project registration state remain outside Git and require their own
 authority.
 
-The driver version bound in
+The historical driver version bound in
 [the 2026-08-24 muted pilot](../evidence/MANUAL_MUTED_LATENCY_PILOT_20260824_37da36e68.md)
-also lacks terminal/profile/round-aware advance and complete process-tree
-shutdown. Close those orchestration defects before using it for a credited
-Browser population.
+lacked terminal/profile/round-aware advance and complete process-tree
+shutdown. The later private LVL-09 setup repairs those mechanics, but the
+2026-08-25 [pilot](../evidence/LVL09_ADAPTIVE_PLAYOUT_LEAD_PILOT_RESULT_2026-08-25.md)
+still grants target materiality only, not physical acceptance.

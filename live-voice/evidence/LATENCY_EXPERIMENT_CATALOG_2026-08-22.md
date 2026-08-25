@@ -107,7 +107,7 @@ a frozen-corpus off/on waterfall.
 | `LVL-06` | EOT/STT early-result waiter materiality | Deterministic Gate A; component total | Largest removable-gap p50 **0.885 ms**, fraction **0.015**, `MEASURED` + `DERIVED` | Stop: no material serial tail; no candidate B |
 | `LVL-07` | Stable-sentence Agent→TTS overlap | Real Agent + real Provider screen; projected perceived latency | Projected gain p50 **177.2 ms**, p95 **425.3 ms**, `DERIVED`; final-gated baseline `ESTIMATED` | Stop for tested workloads; failed all three latency materiality gates |
 | `LVL-08` | Provider-native Semantic VAD | Specified no-Browser Provider screen | Numeric result `UNKNOWN`; no run has executed | Next already-specified no-Browser screen after LVL-10 stopped inconclusive; retain 1200 ms fallback |
-| `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser diagnostic; estimated schedule boundary | One unmatched-round schedule→start estimate **578.998→46.703 ms**, delta **-532.295 ms**, `MEASURED` + `DIAGNOSTIC` | Default remains 1000 ms; clean same-source/workload A1/B/A2 required |
+| `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser target diagnostic; estimated schedule boundary | Same-workload target **718.549/48.432/721.306 ms**, B gain **670.117–672.874 ms**; A2 later cancelled | Target materiality only; default remains 1000 ms and physical acceptance is incomplete |
 | `LVL-10` | Authoritative-final chunked TTS | Real-Provider no-Browser `A1/B/A2`; two formal 45/45 populations | **INCONCLUSIVE:** medium A1/A2 drift 426.8 ms in run 1; long drift 321.7 ms in run 2. Long completion B repeated **20–24%** improvement, while medium regressed | Stop before Browser/product wiring; a completion-primary long-form follow-up requires a new prospective hypothesis/spec |
 | `LVL-10L` | Completion-primary long-form chunked TTS | Real-Provider no-Browser A1/B2/B4/A2 pilots; formal stopped | **DIRECTIONAL:** clean v2 pilot 12/12, B2/B4 2100-character completion gain **6.93 s / 36.85%** and **7.75 s / 41.27%**; five-round formal has no attempt artifacts | Stop long-duration testing per Hongxing; no arm selection, Browser or product wiring |
 
@@ -609,6 +609,26 @@ but this is `MEASURED` + `DIAGNOSTIC`, not a valid A/B result. Production remain
 1000 ms until same-source/same-workload A1=1000/B=250/A2=1000 passes completion,
 audible-output and underrun/rebuffer gates.
 
+### 13.1 2026-08-25 same-workload physical pilot
+
+A source-bound pilot on `latency/adaptive-playout-lead-experiment` at
+`5b37103a2` used the same short no-Tool input in A1=1000/B=250/A2=1000. A1 and
+B completed. A2 recorded the target pair and then cancelled on explicit
+barge-in before playout completion.
+
+| Metric | A1 1000 | B 250 | A2 1000 partial |
+|---|---:|---:|---:|
+| Schedule -> estimated start | 718.549 ms | 48.432 ms | 721.306 ms |
+| B target improvement | — | 670.117 ms / 93.260% vs A1 | 672.874 ms / 93.286% vs A2 |
+| EOT -> estimated start | 3,918.449 ms | 4,051.032 ms | 4,296.706 ms |
+| Terminal outcome | completed | completed | cancelled |
+
+Control target drift was only 2.757 ms / 0.383%, establishing approximately
+670–673 ms of target-segment headroom. Upstream Agent/TTS variation consumed
+that gain in total first-audio. A2 receives partial diagnostic credit only;
+the 1000 ms default remains. See the
+[dedicated result](LVL09_ADAPTIVE_PLAYOUT_LEAD_PILOT_RESULT_2026-08-25.md).
+
 ## 14. LVL-10 — authoritative-final segmented-TTS materiality screen
 
 This candidate starts only after one complete authoritative
@@ -688,7 +708,7 @@ the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md).
 |---|---|
 | Do we have real Browser/device capture-ready→ACK timings? | Yes, only the seven `LVL-00` development diagnostics: 15.352–32.512 s. They are not a compatible baseline. |
 | Do we have real Browser-clock EOT→ACK timings? | Yes, only `LVL-00`: 9.832–25.234 s, with semantic/run-integrity limitations. |
-| Do we have a clean physical A/B/A for any optimization? | No. LVL-09 is one unmatched diagnostic comparison only. |
+| Do we have a clean physical A/B/A for any optimization? | No. LVL-09 now has a same-workload target trio with 2.757 ms control drift, but A2 cancelled before playout completion. |
 | Do we have full-round causal composition timings? | Yes, `LVL-05`, but they are controlled 6.985–10.240 s B totals, not physical E2E. |
 | Do we have accepted real-Provider component timings? | Yes for the VAD rejection, connection-reuse rejection and stable-sentence materiality stop; each excludes Browser/full E2E. |
 | Is approximately 46% a locally verified product gain? | No. It remains `REPORTED_EXTERNAL`. LVL-01D later closed the workflow defect for one accepted human run but did not reproduce the feature-off/on percentage. |
@@ -713,7 +733,7 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-06 | Credited final raw report is lost; sanitized final evidence survives; earlier diagnostic raw survives |
 | LVL-07 | Credited v2 artifacts survive with verified bindings; unversioned pilot directories are superseded |
 | LVL-08 | No run artifact exists |
-| LVL-09 | Reused manual run directory survives, but its manifest/report cannot bind a compatible A/B population |
+| LVL-09 | The older reused manual directory remains incompatible; the 2026-08-25 run binds a same-workload target trio but A2 is partial/cancelled |
 | LVL-10 | Failed 2-second preflight, corrected 9/9 pilot and two 45/45 formal real-Provider populations survive with hashes bound in the [LVL-10 result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md) |
 | LVL-10L | Quota-rejected v1 pilot, cap-boundary v1 pilot and passing v2 pilot survive under `latency-runs/lvl10l`; the stopped v2 formal retains only run/manifest. Hashes are bound in the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md) |
 
@@ -725,21 +745,18 @@ artifact ledger. The repository stores only sanitized evidence.
 2. Preserve LVL-10 as `INCONCLUSIVE` and LVL-10L as directionally positive but
    formally incomplete. Stop additional long-duration chunking tests and keep
    the one-request product path.
-3. Repair or replace the manual driver before another physical population: a
-   beep must identify profile/round/terminal, advancement must reject a
-   mismatched or extra batch, and shutdown must retire the complete process
-   tree. LVL-00M3 grants localization only.
+3. Preserve the LVL-09 target materiality result of approximately 670–673 ms.
+   The repaired driver bound profile/round/terminal correctly, but A2 cancelled
+   after first-start. Keep 1000 ms until completed playout and reliability
+   evidence close physical acceptance.
 4. Run the already specified Provider-native Semantic VAD causal
    screen with the 1200 ms fallback and natural-pause integrity gates.
-5. Run a clean same-source/same-workload LVL-09
-   A1=1000/B=250/A2=1000 Browser screen. Do not change the default from the
-   unmatched diagnostic.
-6. Treat native speech-to-speech as a strategic architecture study requiring a
+5. Treat native speech-to-speech as a strategic architecture study requiring a
    separate authority decision, not as the next optimization packet.
-7. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
+6. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
    stable-sentence packet closed unless a new reviewed mechanism or workload
    hypothesis changes the materiality question.
-8. Keep batch-32, server push and coalescing frozen until a deployed waterfall
+7. Keep batch-32, server push and coalescing frozen until a deployed waterfall
    demonstrates material residual P2 backlog.
 
 Every future result uses

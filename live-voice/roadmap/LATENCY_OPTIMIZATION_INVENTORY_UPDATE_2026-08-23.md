@@ -475,7 +475,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
 | 2 | Provider-native Semantic VAD with 1200 ms fallback | **FAST-SCREEN IMPLEMENTED — PROVIDER PILOT PENDING** on `latency/semantic-vad-experiment` at `5038c41c4` | **250–400 ms hypothesis**, not accepted gain | P1 Interaction Intelligence; typed Speech/OpenAI/Gateway support and no-Browser runner | The 702 ms EOT→STT value remains a diagnostic finalization segment, not credited headroom. Separate `auto` and `high` A1/B/A blocks now pass 333 affected tests and independent Tier-3 review. No real Provider timing, product activation, expanded corpus or Gate C credit exists. See the local [spec](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md) and [plan](SEMANTIC_VAD_CAUSAL_BENCHMARK_IMPLEMENTATION_PLAN_2026-08-21.md). |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
-| 4 | Adaptive WebAudio startup lead | **SETUP VERIFIED — FIRST PHYSICAL PILOT NEXT; DEFAULT REMAINS 1000 MS**. Hook remains clamped to [160,1000] ms; setup branch `latency/adaptive-playout-lead-experiment` at `5b37103a2` | **532.295 ms measured segment delta in one unmatched-round comparison; population headroom UNKNOWN** | `browserAudioIOAdapter.ts`; private source-bound A1/B/A2 preparer/driver | The repaired driver passes deterministic manifest, identity, Vite-restart and process-group tests; the affected Browser Audio suite passes 111/111 on the clean worktree. Run A1=1000/B=250/A2=1000 first, but the initial three-arm result remains pilot evidence until the broader Browser/manual-driver Gate closes. |
+| 4 | Adaptive WebAudio startup lead | **TARGET MATERIALITY PASS; PHYSICAL ACCEPTANCE INCOMPLETE; DEFAULT REMAINS 1000 MS**. Hook remains clamped to [160,1000] ms; setup branch `latency/adaptive-playout-lead-experiment` at `5b37103a2` | **670.117–672.874 ms / 93.26–93.29% measured target headroom**; A1/A2 target drift **2.757 ms / 0.383%** | `browserAudioIOAdapter.ts`; private source-bound A1/B/A2 preparer/driver | Same-workload target values were 718.549/48.432/721.306 ms. A1/B completed; A2 cancelled after the target mark, so no physical completion/default credit follows. Upstream TTS/Agent drift consumed the target gain in total first-audio. See the [pilot result](../evidence/LVL09_ADAPTIVE_PLAYOUT_LEAD_PILOT_RESULT_2026-08-25.md). |
 | 5 | Separate retained receipt settlement from successor readiness | **DONE — SCOPED LIFECYCLE SOURCE/AUTOMATION** — hx `1fec48027`, review in `c31e85ade` | Earlier controlled waits exposed approximately **254/754/1007 ms**; no new physical gain is credited | P2 activation journal, retained presentation ACK and next-turn ownership | The retained predecessor settles independently of the successor generation. This is lifecycle closure, not a p50/p95 latency population. |
 | 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SHORT/MEDIUM `STOP`; LONG-FORM MATERIALITY PACKET PREPARED, NOT IMPLEMENTED** | Tested short/medium: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%**; long-form `UNKNOWN` | Existing validation-only policy/runner plus a prospective isolated long-form screen; no Runtime/P2/Browser product wiring | The tested workloads remain stopped. A distinct long-form exact-prefix screen is now prepared conceptually; it must prove candidate→final headroom and byte-exact stability before any pre-final product speech. |
 | 7 | Bounded next-sentence TTS prefetch | **PROPOSED** | **100–800 ms between sentences** | Conversation Runtime, streaming synthesis route, bounded semantic queue | Primarily improves continuity, not first-sentence latency. It must discard prefetched speech on replacement/barge-in. |
@@ -527,10 +527,10 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    optimization off/on, identical environment/config, successful completion,
    TTS/playout truth and a stage/total waterfall. This closes or rejects the
    P2 product candidate; the externally reported 46% alone grants no credit.
-3. Run Adaptive WebAudio first as a clean physical
-   A1=1000/B=250/A2=1000 pilot. Preserve the 1000 ms production default and do
-   not treat the initial three arms as acceptance evidence while the broader
-   Browser/manual-driver Gate remains open.
+3. Preserve the measured LVL-09 target result of approximately 670–673 ms with
+   2.757 ms A1/A2 target drift. A2 cancelled after first-start, so keep the
+   1000 ms default until completed physical playout and reliability evidence
+   close the broader Browser/manual-driver Gate.
 4. Run Provider-native Semantic VAD `auto` and `high` causal pilots with the
    1200 ms fallback. Timed Provider populations run sequentially, not in
    parallel.
@@ -625,11 +625,12 @@ remained `INCONCLUSIVE` because each violated A1/A2 drift. Long completion
 improved 20–24% while medium completion regressed. LVL-10L then passed a clean
 12/12, 24-request v2 pilot with 6.93–7.75 seconds of derived 2100-character
 completion gain, but its formal stopped before attempt artifacts on Hongxing's
-direction. This is directional, not formal/product credit. Adaptive WebAudio is
-now the first prepared physical pilot; its 250 ms arm retains only a promising
-532.295 ms unmatched-round segment signal, and production remains at 1000 ms.
-Provider-native Semantic VAD remains the next prepared no-Browser Provider
-pilot. Agent first-delta decomposition and a distinct long-form pre-final
+direction. This is directional, not formal/product credit. Adaptive WebAudio
+now has approximately 670–673 ms of measured same-workload target headroom with
+2.757 ms A1/A2 target drift. A2 cancelled after first-start, so physical
+acceptance remains incomplete and production stays at 1000 ms. Provider-native
+Semantic VAD remains the next prepared no-Browser Provider pilot. Agent
+first-delta decomposition and a distinct long-form pre-final
 exact-prefix screen are preparation packets with no current latency or product
 credit.
 The 2026-08-24 SOTA review introduced LVL-10 as a separate materiality question
