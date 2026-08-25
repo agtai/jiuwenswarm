@@ -668,6 +668,16 @@ def _l0_media_binding(
         return None
 
 
+@dataclass(slots=True)
+class _SynthesisAuthorityTransfer:
+    """A bounded P2 notification handoff, claimable by one media operation."""
+
+    content_sha256: str
+    expires_at: float
+    claimed_subject_id: str | None = None
+    claimed_operation_id: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _ProductActivationAuthority:
     session_id: str
@@ -677,6 +687,9 @@ class _ProductActivationAuthority:
     activation_id: str
     activation_generation: int
     expires_at: float
+    synthesis_content_sha256: OrderedDict[
+        tuple[ResponseRef, str, str, int], _SynthesisAuthorityTransfer
+    ] = field(default_factory=OrderedDict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2560,6 +2573,8 @@ class DedicatedMediaProductRegistry:
                     authority.activation_generation,
                 ):
                     self._revoke_media_for_product_activation(existing)
+                elif existing is not None:
+                    authority.synthesis_content_sha256.update(existing.synthesis_content_sha256)
                 self._product_activations[key] = authority
                 self._product_activations.move_to_end(key)
                 while len(self._product_activations) > self._capacity:
@@ -2724,16 +2739,9 @@ class DedicatedMediaProductRegistry:
             # synthesis. Without this sliding renewal a turn begun just before
             # the fixed activation deadline can lose cleanup authority while
             # its downlink or successor capture is still completing.
-            self._product_activations[activation_key] = _ProductActivationAuthority(
-                session_id=activation.session_id,
-                connection_id=activation.connection_id,
-                correlation_id=activation.correlation_id,
-                interaction_id=activation.interaction_id,
-                activation_id=activation.activation_id,
-                activation_generation=activation.activation_generation,
-                expires_at=now + self._authority_ttl,
+            retained_synthesis_content = OrderedDict(
+                activation.synthesis_content_sha256
             )
-            self._product_activations.move_to_end(activation_key)
             for record in self._records.values():
                 if (
                     record.binding.session_id != session_id
@@ -2748,7 +2756,7 @@ class DedicatedMediaProductRegistry:
                     or not self._has_retained_product_activation(record, now)
                 ):
                     continue
-                record.synthesis_content_sha256[(ref, unit_id)] = hashlib.sha256(
+                content_sha256 = hashlib.sha256(
                     canonical_json_bytes(
                         {
                             "response": {
@@ -2766,6 +2774,93 @@ class DedicatedMediaProductRegistry:
                         }
                     )
                 ).hexdigest()
+                transfer_key = (
+                    ref,
+                    unit_id,
+                    record.locale,
+                    record.binding.frame_format.sample_rate_hz,
+                )
+                existing_transfer = retained_synthesis_content.get(transfer_key)
+                transfer = self._retain_synthesis_transfer(
+                    retained_synthesis_content,
+                    key=transfer_key,
+                    content_sha256=content_sha256,
+                    now=now,
+                    expires_at=now + self._authority_ttl,
+                )
+                if transfer is not None:
+                    record.synthesis_content_sha256[(ref, unit_id)] = (
+                        transfer.content_sha256
+                    )
+                elif (
+                    existing_transfer is not None
+                    and existing_transfer.content_sha256 != content_sha256
+                ):
+                    # A trusted final that changes the exact render digest
+                    # fences the old operation.  The replacement gets a new
+                    # unclaimed transfer rather than inheriting its claim.
+                    retained_synthesis_content[transfer_key] = (
+                        _SynthesisAuthorityTransfer(
+                            content_sha256, now + self._authority_ttl
+                        )
+                    )
+                    record.synthesis_content_sha256[(ref, unit_id)] = content_sha256
+            self._product_activations[activation_key] = _ProductActivationAuthority(
+                session_id=activation.session_id,
+                connection_id=activation.connection_id,
+                correlation_id=activation.correlation_id,
+                interaction_id=activation.interaction_id,
+                activation_id=activation.activation_id,
+                activation_generation=activation.activation_generation,
+                expires_at=now + self._authority_ttl,
+                synthesis_content_sha256=retained_synthesis_content,
+            )
+            self._product_activations.move_to_end(activation_key)
+
+    @staticmethod
+    def _retain_synthesis_transfer(
+        transfers: OrderedDict[
+            tuple[ResponseRef, str, str, int], _SynthesisAuthorityTransfer
+        ],
+        *,
+        key: tuple[ResponseRef, str, str, int],
+        content_sha256: str,
+        now: float,
+        expires_at: float,
+    ) -> _SynthesisAuthorityTransfer | None:
+        DedicatedMediaProductRegistry._prune_synthesis_transfers(transfers, now)
+        existing = transfers.get(key)
+        if existing is not None:
+            if existing.content_sha256 != content_sha256:
+                return None
+            transfers.move_to_end(key)
+            return existing
+        while len(transfers) >= _P2_NOTIFICATION_BATCH_MAX:
+            evicted_key = next(
+                (
+                    candidate_key
+                    for candidate_key, candidate in transfers.items()
+                    if candidate.claimed_subject_id is None
+                ),
+                None,
+            )
+            if evicted_key is None:
+                return None
+            transfers.pop(evicted_key)
+        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at)
+        transfers[key] = transfer
+        return transfer
+
+    @staticmethod
+    def _prune_synthesis_transfers(
+        transfers: OrderedDict[
+            tuple[ResponseRef, str, str, int], _SynthesisAuthorityTransfer
+        ],
+        now: float,
+    ) -> None:
+        for key, transfer in tuple(transfers.items()):
+            if now > transfer.expires_at:
+                transfers.pop(key, None)
 
     def context_for(
         self,
@@ -2848,10 +2943,37 @@ class DedicatedMediaProductRegistry:
             if binding.operation == SYNTHESIZE_OPERATION:
                 if binding.response is None or binding.unit_id is None:
                     return None
-                expected = record.synthesis_content_sha256.get(
-                    (binding.response, binding.unit_id)
+                activation = self._product_activations.get(
+                    (
+                        record.binding.session_id,
+                        record.binding.connection_id,
+                        record.binding.interaction_id,
+                    )
                 )
-                return binding if expected == binding.content_sha256 else None
+                if activation is None:
+                    return None
+                transfer = activation.synthesis_content_sha256.get(
+                    (
+                        binding.response,
+                        binding.unit_id,
+                        record.locale,
+                        record.binding.frame_format.sample_rate_hz,
+                    )
+                )
+                if transfer is None or transfer.content_sha256 != binding.content_sha256:
+                    return None
+                if transfer.claimed_subject_id is None:
+                    transfer.claimed_subject_id = record.subject_id
+                    transfer.claimed_operation_id = binding.operation_id
+                elif (
+                    transfer.claimed_subject_id != record.subject_id
+                    or transfer.claimed_operation_id != binding.operation_id
+                ):
+                    return None
+                record.synthesis_content_sha256[(binding.response, binding.unit_id)] = (
+                    transfer.content_sha256
+                )
+                return binding
             return None
 
     async def try_streaming_synthesis(
@@ -3555,6 +3677,8 @@ class DedicatedMediaProductRegistry:
                 self._pending_tickets.pop(ticket, None)
 
     def _prune(self, now: float) -> None:
+        for authority in self._product_activations.values():
+            self._prune_synthesis_transfers(authority.synthesis_content_sha256, now)
         expired = [
             record_id
             for record_id, record in self._records.items()
@@ -3618,6 +3742,7 @@ class DedicatedMediaProductRegistry:
     def _revoke_media_for_product_activation(
         self, authority: _ProductActivationAuthority
     ) -> None:
+        authority.synthesis_content_sha256.clear()
         record_ids = [
             record_id
             for record_id, record in self._records.items()

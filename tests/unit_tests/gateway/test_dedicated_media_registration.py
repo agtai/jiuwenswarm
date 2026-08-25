@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import base64
+import io
 import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+import wave
 
 import pytest
 
@@ -45,6 +47,13 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
 )
 from jiuwenswarm.gateway.channel_manager.web import web_connect
 from jiuwenswarm.server.live_voice.batch_speech import (
+    BatchSpeechProvider,
+    FormalBatchSpeechService,
+    ProviderCapability,
+    ProviderRecognitionRequest,
+    ProviderRecognitionResult,
+    ProviderSynthesisRequest,
+    ProviderSynthesisResult,
     RECOGNIZE_OPERATION,
     SYNTHESIZE_OPERATION,
     SpeechAuthorizationBinding,
@@ -54,6 +63,38 @@ from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 
 
 ORIGIN = "https://voice.example.test"
+
+
+def _wav(sample_rate: int) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(b"\x00\x00" * 320)
+    return output.getvalue()
+
+
+class _CountingBatchSpeechProvider(BatchSpeechProvider):
+    def __init__(self) -> None:
+        self.synthesize_calls = 0
+
+    def capability(self) -> ProviderCapability:
+        return ProviderCapability("counting", True, True, True)
+
+    async def recognize(
+        self, request: ProviderRecognitionRequest
+    ) -> ProviderRecognitionResult:
+        del request
+        raise AssertionError("recognition is outside this speech-authority test")
+
+    async def synthesize(
+        self, request: ProviderSynthesisRequest
+    ) -> ProviderSynthesisResult:
+        self.synthesize_calls += 1
+        return ProviderSynthesisResult(
+            _wav(request.required_sample_rate_hz), "counting-tts", "counting-voice"
+        )
 
 
 def _params(**updates: object) -> dict[str, object]:
@@ -1440,6 +1481,463 @@ def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> No
         content_sha256="f" * 64,
     )
     assert registry.authorize(wrong) is None
+
+
+def _observe_task_notification(
+    registry: DedicatedMediaProductRegistry,
+    *,
+    response_id: str = "response-task-progress-1",
+    unit_id: str = "unit-1",
+    text: str = "Task progress notification",
+    response_generation: int = 0,
+) -> ResponseRef:
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": response_id,
+                    "response_generation": response_generation,
+                },
+                "agent_event": {"event_type": "chat.final", "text": text},
+                "presentation_unit": {"surface": "text", "unit_id": unit_id},
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+    return ResponseRef("interaction-1", response_id, response_generation)
+
+
+def _task_synthesis_request(
+    *,
+    subject_id: str,
+    response: ResponseRef,
+    unit_id: str = "unit-1",
+    request_id: str = "request-task-progress",
+    operation_id: str = "operation-task-progress",
+    locale: str = "zh-CN",
+    sample_rate_hz: int = 16_000,
+    text: str = "Task progress notification",
+    session_id: str = "session-1",
+) -> dict[str, object]:
+    return {
+        "contract_version": "live-voice.contract.v2",
+        "request_id": request_id,
+        "operation_id": operation_id,
+        "operation": SYNTHESIZE_OPERATION,
+        "correlation_id": "correlation-1",
+        "session_id": session_id,
+        "scope": {
+            "subject_id": subject_id,
+            "project_id": None,
+            "session_id": session_id,
+            "assurance": Assurance.AUTHENTICATED.value,
+        },
+        "timeout_ms": 1_000,
+        "response": {
+            "interaction_id": response.interaction_id,
+            "response_id": response.response_id,
+            "response_generation": response.response_generation,
+        },
+        "unit_id": unit_id,
+        "render_plan": {
+            "display_text": text,
+            "spoken_text": text,
+            "transforms": [],
+        },
+        "authoritative_agent_text": True,
+        "locale": locale,
+        "voice": None,
+        "required_sample_rate_hz": sample_rate_hz,
+    }
+
+
+def test_task_notification_speech_authority_hands_off_to_rotated_media_owner() -> None:
+    registry = _active_registry()
+    initial = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    original = registry.consume_ticket(_media_ticket(initial), request_origin=ORIGIN)
+    assert original is not None
+    original.route_completed = True
+    response = {
+        "interaction_id": "interaction-1",
+        "response_id": "response-task-progress-1",
+        "response_generation": 0,
+    }
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": response,
+                "agent_event": {
+                    "event_type": "chat.final",
+                    "text": "Task progress notification",
+                },
+                "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+    ref = ResponseRef("interaction-1", "response-task-progress-1", 0)
+    expected = original.synthesis_content_sha256[(ref, "unit-1")]
+
+    registry.revoke(
+        params={
+            "session_id": "session-1",
+            "subject_id": initial["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    successor = registry.activate(
+        params=_params(capture_id="capture-2", track_id="track-2"),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    current = registry.consume_ticket(_media_ticket(successor), request_origin=ORIGIN)
+    assert current is not None
+    current.route_completed = True
+    scope = ScopeRef(
+        str(successor["subject_id"]), None, "session-1", Assurance.AUTHENTICATED
+    )
+    binding = SpeechAuthorizationBinding(
+        subject_id=scope.subject_id,
+        scope=scope,
+        operation=SYNTHESIZE_OPERATION,
+        operation_id="synthesize-task-progress-after-rotation",
+        correlation_id="correlation-1",
+        capture_id=None,
+        capture_generation=None,
+        track_id=None,
+        response=ref,
+        unit_id="unit-1",
+        content_sha256=expected,
+    )
+
+    assert registry.authorize(binding) == binding
+
+
+@pytest.mark.asyncio
+async def test_task_notification_speech_transfer_claims_one_successor_operation() -> None:
+    registry = _active_registry()
+    initial = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    original = registry.consume_ticket(_media_ticket(initial), request_origin=ORIGIN)
+    assert original is not None
+    original.route_completed = True
+    response = _observe_task_notification(registry)
+    registry.revoke(
+        params={
+            "session_id": "session-1",
+            "subject_id": initial["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    provider = _CountingBatchSpeechProvider()
+    service = FormalBatchSpeechService(provider, authorization_resolver=registry)
+    no_owner = _task_synthesis_request(
+        subject_id=str(initial["subject_id"]), response=response
+    )
+    no_owner_result = await service.synthesize(
+        no_owner,
+        SpeechRpcContext(str(initial["subject_id"]), "session-1", Assurance.AUTHENTICATED),
+    )
+    assert no_owner_result["error"]["reason"] == "SPEECH_OPERATION_NOT_AUTHORIZED"
+    assert provider.synthesize_calls == 0
+
+    successor = registry.activate(
+        params=_params(capture_id="capture-2", track_id="track-2"),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    current = registry.consume_ticket(_media_ticket(successor), request_origin=ORIGIN)
+    assert current is not None
+    current.route_completed = True
+    request = _task_synthesis_request(
+        subject_id=str(successor["subject_id"]), response=response
+    )
+    context = SpeechRpcContext(
+        str(successor["subject_id"]), "session-1", Assurance.AUTHENTICATED
+    )
+    first = await service.synthesize(request, context)
+    assert first["ok"] is True
+    assert provider.synthesize_calls == 1
+    retry = await service.synthesize(request, context)
+    assert retry["ok"] is True
+    assert provider.synthesize_calls == 1
+
+    registry.revoke(
+        params={
+            "session_id": "session-1",
+            "subject_id": successor["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    later = registry.activate(
+        params=_params(capture_id="capture-3", track_id="track-3"),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    later_record = registry.consume_ticket(
+        _media_ticket(later), request_origin=ORIGIN
+    )
+    assert later_record is not None
+    later_record.route_completed = True
+    replay = await service.synthesize(
+        _task_synthesis_request(
+            subject_id=str(later["subject_id"]),
+            response=response,
+            request_id="request-later",
+            operation_id="operation-later",
+        ),
+        SpeechRpcContext(
+            str(later["subject_id"]), "session-1", Assurance.AUTHENTICATED
+        ),
+    )
+    assert replay["error"]["reason"] == "SPEECH_OPERATION_NOT_AUTHORIZED"
+    assert provider.synthesize_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "no_owner",
+        "wrong_session",
+        "wrong_connection",
+        "activation_generation",
+        "locale",
+        "sample_rate",
+        "stale_response",
+        "stale_unit",
+    ],
+)
+async def test_task_notification_speech_authority_failures_never_call_provider(
+    failure: str,
+) -> None:
+    registry = _active_registry()
+    initial = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    original = registry.consume_ticket(_media_ticket(initial), request_origin=ORIGIN)
+    assert original is not None
+    original.route_completed = True
+    response = _observe_task_notification(registry)
+    registry.revoke(
+        params={
+            "session_id": "session-1",
+            "subject_id": initial["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    subject_id = str(initial["subject_id"])
+    locale = "zh-CN"
+    sample_rate_hz = 16_000
+    if failure != "no_owner":
+        successor_params = _params(capture_id="capture-2", track_id="track-2")
+        if failure == "locale":
+            successor_params["locale"] = "en-US"
+            locale = "en-US"
+        if failure == "sample_rate":
+            successor_params["sample_rate_hz"] = 48_000
+            sample_rate_hz = 48_000
+        successor = registry.activate(
+            params=successor_params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+            user_id="user-1",
+        )
+        successor_record = registry.consume_ticket(
+            _media_ticket(successor), request_origin=ORIGIN
+        )
+        assert successor_record is not None
+        successor_record.route_completed = True
+        subject_id = str(successor["subject_id"])
+    request_response = (
+        ResponseRef("interaction-1", "response-stale", 1)
+        if failure == "stale_response"
+        else response
+    )
+    unit_id = "unit-stale" if failure == "stale_unit" else "unit-1"
+    session_id = "session-other" if failure == "wrong_session" else "session-1"
+    request = _task_synthesis_request(
+        subject_id=subject_id,
+        response=request_response,
+        unit_id=unit_id,
+        request_id=f"request-{failure}",
+        operation_id=f"operation-{failure}",
+        locale=locale,
+        sample_rate_hz=sample_rate_hz,
+        session_id=session_id,
+    )
+    context = SpeechRpcContext(subject_id, session_id, Assurance.AUTHENTICATED)
+    if failure == "wrong_connection":
+        context = registry.context_for(
+            SimpleNamespace(_jiuwen_ws_id="connection-other"),
+            request,
+            "session-1",
+            "user-1",
+        )
+    if failure == "activation_generation":
+        _trust_product_activation(
+            registry,
+            _params(activation_id="activation-2", activation_generation=2),
+        )
+    provider = _CountingBatchSpeechProvider()
+    result = await FormalBatchSpeechService(
+        provider, authorization_resolver=registry
+    ).synthesize(request, context)
+    assert result["ok"] is False
+    assert provider.synthesize_calls == 0
+
+
+def test_task_notification_transfer_ledger_has_deterministic_capacity_and_expiry() -> None:
+    now = [0.0]
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now[0],
+        authority_ttl_seconds=1.0,
+    )
+    registry.set_provider_available(True)
+    activation = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    for index in range(17):
+        _observe_task_notification(
+            registry,
+            response_id=f"response-capacity-{index}",
+            unit_id=f"unit-capacity-{index}",
+            text=f"Task progress {index}",
+            response_generation=index,
+        )
+    authority = registry._product_activations[
+        ("session-1", "connection-1", "interaction-1")
+    ]
+    assert len(authority.synthesis_content_sha256) == 16
+    assert (
+        ResponseRef("interaction-1", "response-capacity-0", 0),
+        "unit-capacity-0",
+        "zh-CN",
+        16_000,
+    ) not in authority.synthesis_content_sha256
+
+    now[0] = 2.0
+    assert registry.authorize(
+        SpeechAuthorizationBinding(
+            subject_id=str(activation["subject_id"]),
+            scope=ScopeRef(
+                str(activation["subject_id"]),
+                None,
+                "session-1",
+                Assurance.AUTHENTICATED,
+            ),
+            operation=SYNTHESIZE_OPERATION,
+            operation_id="operation-expired",
+            correlation_id="correlation-1",
+            capture_id=None,
+            capture_generation=None,
+            track_id=None,
+            response=ResponseRef("interaction-1", "response-capacity-16", 16),
+            unit_id="unit-capacity-16",
+            content_sha256="0" * 64,
+        )
+    ) is None
+    assert registry._product_activations == {}
+    assert authority.synthesis_content_sha256 == {}
+
+
+def test_task_notification_transfer_expiry_is_not_renewed_by_later_notifications() -> None:
+    now = [0.0]
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now[0],
+        authority_ttl_seconds=1.0,
+    )
+    registry.set_provider_available(True)
+    activation = _activate(
+        registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    first_response = _observe_task_notification(registry, response_id="response-first")
+    digest = record.synthesis_content_sha256[(first_response, "unit-1")]
+    now[0] = 0.5
+    _observe_task_notification(registry, response_id="response-later")
+    now[0] = 1.1
+    binding = SpeechAuthorizationBinding(
+        subject_id=str(activation["subject_id"]),
+        scope=ScopeRef(
+            str(activation["subject_id"]), None, "session-1", Assurance.AUTHENTICATED
+        ),
+        operation=SYNTHESIZE_OPERATION,
+        operation_id="operation-expired-transfer",
+        correlation_id="correlation-1",
+        capture_id=None,
+        capture_generation=None,
+        track_id=None,
+        response=first_response,
+        unit_id="unit-1",
+        content_sha256=digest,
+    )
+    assert registry.authorize(binding) is None
+    authority = registry._product_activations[
+        ("session-1", "connection-1", "interaction-1")
+    ]
+    assert (
+        first_response,
+        "unit-1",
+        "zh-CN",
+        16_000,
+    ) not in authority.synthesis_content_sha256
 
 
 def test_mismatched_notification_batch_has_zero_partial_speech_authority() -> None:
