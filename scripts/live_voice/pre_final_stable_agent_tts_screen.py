@@ -56,7 +56,10 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
-from scripts.live_voice import pre_final_stable_segmentation_screen as prefix_screen
+if __package__:
+    from scripts.live_voice import pre_final_stable_segmentation_screen as prefix_screen
+else:
+    import pre_final_stable_segmentation_screen as prefix_screen
 
 
 REPORT_SCHEMA_VERSION = "live-voice.pre-final-stable-agent-tts-screen.v0"
