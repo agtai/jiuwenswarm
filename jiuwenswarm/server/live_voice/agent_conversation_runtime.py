@@ -11,6 +11,7 @@ import threading
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
@@ -73,6 +74,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeInteractionBinding,
 )
 from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeHistoryAdmission,
     NativeInteractionRuntimeOwner,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
@@ -101,6 +103,9 @@ _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
 _MAX_FORMAL_CONTEXT_ENTRIES = 8
 _MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
+_DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS = 25.0
+_MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS = 28.0
+_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS = 1.0
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -469,6 +474,14 @@ class FormalHistoryWriter(Protocol):
         channel_id: str,
     ) -> tuple[bool, ...]: ...
 
+    async def persist_native_assistant(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        session_id: str,
+        channel_id: str,
+    ) -> bool: ...
+
 
 @dataclass(slots=True)
 class _AdmissionOutcome:
@@ -579,6 +592,9 @@ class AgentConversationRuntime:
         harness: JiuWenSwarmRoundHarness | None = None,
         bridge: AgentBridgeRuntime | None = None,
         response_generation_owner: Callable[[str, int], int] | None = None,
+        native_delegate_timeout_seconds: float = (
+            _DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS
+        ),
     ) -> None:
         if not isinstance(scope, ScopeRef):
             raise AgentConversationRuntimeViolation(
@@ -608,6 +624,19 @@ class AgentConversationRuntime:
                     f"{name} must be a positive integer",
                     ErrorCode.INVALID_ARGUMENT,
                 )
+        if (
+            isinstance(native_delegate_timeout_seconds, bool)
+            or not isinstance(native_delegate_timeout_seconds, (int, float))
+            or not math.isfinite(native_delegate_timeout_seconds)
+            or native_delegate_timeout_seconds <= 0
+            or native_delegate_timeout_seconds > _MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NATIVE_DELEGATE_TIMEOUT",
+                "Native delegate timeout must be finite, positive, and below "
+                "the 30 second carrier deadline",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         self._scope = scope
         self._instance_id = instance_id
         self._facade = facade
@@ -634,6 +663,7 @@ class AgentConversationRuntime:
             reservation_ttl_seconds=reservation_ttl_seconds,
         )
         self._history_writer = history_writer or SessionFormalHistoryWriter()
+        self._native_delegate_timeout_seconds = float(native_delegate_timeout_seconds)
         self._max_requests = max_requests
         self._notifications = _BoundedNotificationBuffer(
             observer_capacity=notification_capacity,
@@ -663,6 +693,12 @@ class AgentConversationRuntime:
         self._pending_history: dict[
             tuple[ResponseRef, PresentationSurface, int],
             tuple[PresentationHistoryIntent, str, str],
+        ] = {}
+        self._native_history_results: dict[
+            ResponseRef, tuple[NativeHistoryAdmission, str, bool]
+        ] = {}
+        self._pending_native_history: dict[
+            ResponseRef, tuple[NativeHistoryAdmission, str, str]
         ] = {}
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
         self._task_presentation_reservations: dict[
@@ -905,7 +941,55 @@ class AgentConversationRuntime:
                 response_ref=source_response,
                 adapter=JiuWenSwarmAgentAdapter(round_handle),
             )
-            completion = await submission.completion
+            try:
+                completion = await asyncio.wait_for(
+                    submission.completion,
+                    timeout=self._native_delegate_timeout_seconds,
+                )
+            except TimeoutError as timeout_error:
+                cancel = CommandEnvelope.from_dict(
+                    {
+                        "contract_version": "live-voice.contract.v2",
+                        "request_id": request_id,
+                        "command_id": (
+                            "native-delegate-timeout-"
+                            + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+                        ),
+                        "command_type": "round.cancel",
+                        "issued_at": datetime.now(UTC)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z"),
+                        "scope": commit.scope.to_dict(),
+                        "correlation_id": correlation_id,
+                        "causation_id": None,
+                        "origin": {
+                            "kind": "committed_turn",
+                            "turn_id": commit.turn_id,
+                            "commit_id": commit.commit_id,
+                        },
+                        "target_ref": {
+                            "kind": "round",
+                            "id": round_handle.round_id,
+                        },
+                        "context_refs": [],
+                        "required_capabilities": ["round.cancel"],
+                        "payload": {},
+                        "extensions": {},
+                    }
+                )
+                round_handle.cancel(cancel)
+                try:
+                    await asyncio.wait_for(
+                        submission.completion,
+                        timeout=_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS,
+                    )
+                except TimeoutError:
+                    pass
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_DELEGATE_AGENT_TIMEOUT",
+                    "Native Agent delegate exceeded its server-owned deadline",
+                    ErrorCode.TIMEOUT,
+                ) from timeout_error
             if (
                 completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED
                 or completion.terminal_outcome is not TerminalOutcome.COMPLETED
@@ -3020,6 +3104,110 @@ class AgentConversationRuntime:
         self._pending_user_history.pop(commit_id, None)
         return written
 
+    async def persist_native_assistant_history(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> bool:
+        """Consume one Native eligibility fact through the canonical writer."""
+
+        self._require_started()
+        if not isinstance(admission, NativeHistoryAdmission):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_ADMISSION_INVALID",
+                "Native history requires one Runtime-issued admission",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            not isinstance(channel_id, str)
+            or not channel_id
+            or channel_id != channel_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_CHANNEL_INVALID",
+                "Native history requires one exact channel identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        interaction = next(
+            (
+                item
+                for item in self._cr.snapshot().conversation.interactions
+                if item.interaction_id == admission.response.interaction_id
+            ),
+            None,
+        )
+        if interaction is None:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_RESPONSE_STALE",
+                "Native history response is not owned by this Runtime",
+                ErrorCode.STALE,
+            )
+        session_id = self._scope.session_id
+        assert isinstance(session_id, str)
+        key = admission.response
+        async with self._ack_lock:
+            completed = self._native_history_results.get(key)
+            if completed is not None:
+                if completed[0] != admission or completed[1] != channel_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_HISTORY_REPLAY_CONFLICT",
+                        "Native history replay cannot change its admission",
+                        ErrorCode.CONFLICT,
+                    )
+                return completed[2]
+            pending = self._pending_native_history.get(key)
+            if pending is not None and pending != (admission, session_id, channel_id):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_REPLAY_CONFLICT",
+                    "Native history retry cannot change its admission",
+                    ErrorCode.CONFLICT,
+                )
+            if (
+                pending is None
+                and len(self._native_history_results)
+                + len(self._pending_native_history)
+                >= self._max_requests
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_LEDGER_FULL",
+                    "bounded Native history ledger is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            try:
+                written = await self._history_writer.persist_native_assistant(
+                    admission,
+                    session_id=session_id,
+                    channel_id=channel_id,
+                )
+            except BaseException as error:  # noqa: BLE001
+                self._pending_native_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                    raise
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_WRITE_FAILED",
+                    "canonical Native assistant history remains pending",
+                    ErrorCode.UNAVAILABLE,
+                ) from error
+            if type(written) is not bool:
+                self._pending_native_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_WRITE_FAILED",
+                    "canonical Native assistant history returned no exact outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            self._pending_native_history.pop(key, None)
+            self._native_history_results[key] = (admission, channel_id, written)
+            return written
+
     async def request_response_cancel(
         self, command_id: str, ref: ResponseRef
     ) -> ResponseCancelResult:
@@ -3205,7 +3393,9 @@ class AgentConversationRuntime:
                 for entry in self._effect_claims.values()
             ),
             pending_history_intents=(
-                len(self._pending_history) + len(self._pending_user_history)
+                len(self._pending_history)
+                + len(self._pending_native_history)
+                + len(self._pending_user_history)
             ),
             conversation=self._cr.snapshot(),
             bridge=self._bridge.snapshot(),
@@ -3591,7 +3781,11 @@ class AgentConversationRuntime:
             final_drain_capability = (
                 None if final_drain_lease is None else final_drain_lease.lease
             )
-            if self._pending_history or self._pending_user_history:
+            if (
+                self._pending_history
+                or self._pending_native_history
+                or self._pending_user_history
+            ):
                 return AgentConversationShutdownResult(
                     AgentConversationShutdownStatus.FAILED,
                     "history_write_intents_pending",

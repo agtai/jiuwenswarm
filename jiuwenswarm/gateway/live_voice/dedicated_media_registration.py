@@ -1160,6 +1160,7 @@ class DedicatedMediaProductRegistry:
                     "next_event",
                     "admit_response",
                     "cancel_response",
+                    "send_delegate_result",
                     "close",
                 )
             ):

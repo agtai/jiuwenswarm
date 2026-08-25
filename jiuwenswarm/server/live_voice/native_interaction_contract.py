@@ -247,9 +247,7 @@ _AUDIO_OBSERVATION_KEYS = frozenset(
         "response",
     }
 )
-_RESPONSE_REF_KEYS = frozenset(
-    {"interaction_id", "response_id", "response_generation"}
-)
+_RESPONSE_REF_KEYS = frozenset({"interaction_id", "response_id", "response_generation"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +280,9 @@ class NativeAudioObservation:
         if (
             type(self.content_sha256) is not str
             or len(self.content_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in self.content_sha256)
+            or any(
+                character not in "0123456789abcdef" for character in self.content_sha256
+            )
         ):
             raise NativeInteractionContractViolation(
                 "NATIVE_AUDIO_DIGEST_INVALID",
@@ -318,9 +318,7 @@ class NativeAudioObservation:
                 interaction_id=_identity(
                     response["interaction_id"], "response.interaction_id"
                 ),
-                response_id=_identity(
-                    response["response_id"], "response.response_id"
-                ),
+                response_id=_identity(response["response_id"], "response.response_id"),
                 response_generation=_positive_generation(
                     response["response_generation"], "response.response_generation"
                 ),

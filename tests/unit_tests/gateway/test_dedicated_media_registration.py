@@ -439,6 +439,10 @@ class _FakeNativeEngine:
         return ("provider-output-event-1", "provider-response-create-1")
 
 
+class _IncompleteNativeEngine(_FakeNativeEngine):
+    send_delegate_result = None
+
+
 def _native_activation() -> GatewayNativeActivation:
     return GatewayNativeActivation(
         binding=NativeInteractionBinding(
@@ -453,6 +457,35 @@ def _native_activation() -> GatewayNativeActivation:
         capability="a" * 64,
         connection_id="connection-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_native_engine_missing_delegate_result_is_rejected_before_start() -> None:
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    engine = _IncompleteNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+
+    try:
+        with pytest.raises(MediaTransportViolation) as rejected:
+            await registry.begin_native_interaction(uplink)
+        assert rejected.value.reason_id == "MEDIA_NATIVE_PROVIDER_UNAVAILABLE"
+        assert engine.started is False
+        assert registry._native_sessions == {}
+    finally:
+        await registry.close_native_interaction(uplink)
 
 
 async def _present_native_test_audio_unit(

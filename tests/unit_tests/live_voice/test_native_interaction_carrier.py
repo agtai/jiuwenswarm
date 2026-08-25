@@ -107,9 +107,9 @@ def test_native_proposal_carries_only_audio_metadata_and_never_pcm() -> None:
     assert NativeInteractionProposal.from_dict(payload) == proposal
     assert proposal.audio_observation is not None
     assert proposal.audio_observation.sample_count == 480
-    assert proposal.audio_observation.content_sha256 == hashlib.sha256(
-        pcm16
-    ).hexdigest()
+    assert (
+        proposal.audio_observation.content_sha256 == hashlib.sha256(pcm16).hexdigest()
+    )
     assert set(payload["audio_observation"]) == {
         "provider_event_id",
         "provider_response_id",

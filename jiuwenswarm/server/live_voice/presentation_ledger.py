@@ -135,9 +135,7 @@ class PresentationLedger:
             tuple[ResponseRef, PresentationSurface], dict[int, PresentationAck]
         ] = {}
         self._sealed: dict[tuple[ResponseRef, PresentationSurface], int] = {}
-        self._completed: dict[
-            tuple[ResponseRef, PresentationSurface], None
-        ] = {}
+        self._completed: dict[tuple[ResponseRef, PresentationSurface], None] = {}
 
     def begin_response(self, ref: ResponseRef, policy: HistorySurfacePolicy) -> None:
         with self._lock:
@@ -429,9 +427,7 @@ class PresentationLedger:
                 completed_surfaces=tuple(self._completed),
             )
 
-    def _refresh_completion(
-        self, key: tuple[ResponseRef, PresentationSurface]
-    ) -> None:
+    def _refresh_completion(self, key: tuple[ResponseRef, PresentationSurface]) -> None:
         count = self._sealed.get(key)
         if count is None or count == 0:
             return

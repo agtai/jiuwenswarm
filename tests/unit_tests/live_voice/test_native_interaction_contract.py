@@ -96,8 +96,7 @@ def test_native_audio_observation_is_closed_metadata_only() -> None:
     assert observation.sample_count == 480
     assert observation.content_sha256 == "a" * 64
     assert not any(
-        name in observation.to_dict()
-        for name in ("pcm16", "audio", "bytes", "base64")
+        name in observation.to_dict() for name in ("pcm16", "audio", "bytes", "base64")
     )
 
 

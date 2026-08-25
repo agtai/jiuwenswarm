@@ -1051,8 +1051,10 @@ class AgentServerProductCompositionRegistry:
             str, _RetainedProductOperation
         ] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
+        self._native_delegate_operations: dict[str, _RetainedProductOperation] = {}
         self._native_propose_operations: dict[str, _NativeProductOperation] = {}
-        self._native_ack_operations: dict[str, _NativeProductOperation] = {}
+        self._native_ack_operations: dict[str, _RetainedProductOperation] = {}
+        self._native_close_pending_operations: dict[str, _RetainedProductOperation] = {}
         self._native_close_operations: dict[str, _NativeProductOperation] = {}
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
@@ -4620,6 +4622,17 @@ class AgentServerProductCompositionRegistry:
                 message=str(exc),
             )
 
+        if proposal.delegate is not None:
+            return await self._handle_native_delegate_propose(
+                binding=binding,
+                capability=capability,
+                fingerprint=fingerprint,
+                parsed_request_id=parsed_request_id,
+                proposal=proposal,
+                request_id=request_id,
+                routed_session=routed_session,
+            )
+
         async with self._lock:
             if self._stopped:
                 return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
@@ -4645,6 +4658,13 @@ class AgentServerProductCompositionRegistry:
             if prior is not None:
                 if prior.fingerprint_sha256 == fingerprint:
                     return prior.result
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                    code=ErrorCode.CONFLICT,
+                )
+            retained_delegate = self._native_delegate_operations.get(parsed_request_id)
+            if retained_delegate is not None:
                 return _error_result(
                     request_id,
                     reason="NATIVE_REQUEST_REPLAY_CONFLICT",
@@ -4744,186 +4764,7 @@ class AgentServerProductCompositionRegistry:
                         },
                     }
                 elif proposal.delegate is not None:
-                    if (
-                        proposal.action is None
-                        or proposal.action.operation != "DELEGATE"
-                        or proposal.turn_commit is not None
-                        or proposal.audio_observation is not None
-                        or proposal.provider_done is not None
-                        or dict(proposal.action.payload)
-                        != {
-                            "provider_call_id": proposal.delegate.provider_call_id,
-                            "turn_id": proposal.delegate.turn_id,
-                        }
-                    ):
-                        raise NativeInteractionRuntimeError(
-                            "NATIVE_DELEGATE_PROPOSAL_INVALID",
-                            "Native delegate must be one exact DELEGATE proposal",
-                        )
-                    context = await route.activation_lease.select_formal_context(
-                        route.binding
-                    )
-                    accepted, delegate_admission = await owner.admit_delegate(
-                        proposal.delegate,
-                        committed_at=datetime.now(UTC)
-                        .isoformat(timespec="microseconds")
-                        .replace("+00:00", "Z"),
-                        context_refs=tuple(entry.ref for entry in context.entries),
-                    )
-                    bridge = self._task_intent_bridge
-                    if bridge is None:
-                        raise NativeInteractionRuntimeError(
-                            "NATIVE_DELEGATE_RESOLVER_UNAVAILABLE",
-                            "Native delegate has no unified committed-input resolver",
-                        )
-                    current: PersistentTaskRecord | None = None
-                    background_authority_unavailable = False
-                    if self._settings.p3_text_enabled:
-                        try:
-                            current = await self._p3_composition.read_current_background_task_native(
-                                route.native_p3_authority,
-                                session_id=routed_session,
-                            )
-                        except FormalTaskViolation as exc:
-                            if exc.code not in {
-                                ErrorCode.UNAUTHENTICATED,
-                                ErrorCode.PERMISSION_DENIED,
-                            }:
-                                raise
-                            background_authority_unavailable = True
-                    current_context = self._current_background_context(current)
-                    resolution = bridge.resolve_unified(
-                        delegate_admission.turn_commit,
-                        delegate_admission.turn_commit.scope,
-                        current_context,
-                    )
-                    resolution = self._bind_frozen_one_current_task_status(
-                        resolution,
-                        commit=delegate_admission.turn_commit,
-                        current_task=current_context,
-                    )
-                    delegate_request_id = (
-                        "native-delegate-"
-                        + hashlib.sha256(
-                            canonical_json_bytes(
-                                {
-                                    "provider_call_id": (
-                                        proposal.delegate.provider_call_id
-                                    ),
-                                    "turn_commit_id": (
-                                        delegate_admission.turn_commit.commit_id
-                                    ),
-                                    "source_response": {
-                                        "response_id": (
-                                            delegate_admission.source_response.response_id
-                                        ),
-                                        "response_generation": (
-                                            delegate_admission.source_response.response_generation
-                                        ),
-                                    },
-                                }
-                            )
-                        ).hexdigest()
-                    )
-                    native_business_task_id: str | None = None
-                    if resolution.route is UnifiedCommittedInputRoute.DIALOGUE:
-                        canonical_text = (
-                            await route.activation_lease.execute_native_delegate(
-                                route.binding,
-                                request_id=f"native-agent-{delegate_request_id}",
-                                source_response=delegate_admission.source_response,
-                                correlation_id=binding.correlation_id,
-                                commit=delegate_admission.turn_commit,
-                                context=context,
-                                channel_id="web",
-                                allow_tools=True,
-                            )
-                        )
-                    else:
-                        admitted_at = time.monotonic()
-                        task_outcome = await self._run_unified_submit(
-                            retained=route,
-                            request_id=f"native-task-{delegate_request_id}",
-                            voice_identity=delegate_request_id.removeprefix(
-                                "native-delegate-"
-                            ),
-                            fingerprint=bytes.fromhex(fingerprint),
-                            commit=delegate_admission.turn_commit,
-                            context=context,
-                            resolution=resolution,
-                            current=current,
-                            background_authority_unavailable=(
-                                background_authority_unavailable
-                            ),
-                            auth_token=None,
-                            channel_id="web",
-                            l0_commit_admission=_L0CommitAdmissionClock(
-                                observed_at=datetime.now(UTC)
-                                .isoformat(timespec="microseconds")
-                                .replace("+00:00", "Z"),
-                                monotonic_ms=admitted_at * 1_000.0,
-                                duration_ms=0.0,
-                            ),
-                            native_result_only=True,
-                            native_p3_authority=route.native_p3_authority,
-                        )
-                        task_result_payload = task_outcome.payload.get("result")
-                        canonical_text = (
-                            task_result_payload.get("canonical_text")
-                            if task_outcome.ok
-                            and isinstance(task_result_payload, Mapping)
-                            else None
-                        )
-                        candidate_task_id = (
-                            task_result_payload.get("task_id")
-                            if isinstance(task_result_payload, Mapping)
-                            else None
-                        )
-                        if type(candidate_task_id) is str:
-                            native_business_task_id = candidate_task_id
-                        if type(canonical_text) is not str:
-                            raise NativeInteractionRuntimeError(
-                                "NATIVE_TASK_DELEGATE_RESULT_INVALID",
-                                "Native Task delegate produced no canonical result",
-                            )
-                    delegate_result = await owner.accept_delegate_result(
-                        delegate_admission,
-                        canonical_text=canonical_text,
-                        route=resolution.route,
-                    )
-                    if native_business_task_id is not None and (
-                        native_business_task_id in self._voice_task_origins
-                        or len(self._voice_task_origins)
-                        < self._PRODUCT_OPERATION_CAPACITY
-                    ):
-                        self._voice_task_origins[native_business_task_id] = (
-                            _VoiceTaskOrigin(
-                                session_id=route.binding.session_id,
-                                interaction_id=route.binding.interaction_id,
-                                activation_id=route.binding.activation_id,
-                                activation_generation=(
-                                    route.binding.activation_generation
-                                ),
-                                correlation_id=route.binding.correlation_id,
-                                response_ref=delegate_result.response,
-                            )
-                        )
-                    result_payload = {
-                        "kind": "delegate",
-                        "status": "completed",
-                        "accepted": accepted,
-                        "provider_call_id": proposal.delegate.provider_call_id,
-                        "route": resolution.route.value,
-                        "turn_commit_id": delegate_result.turn_commit.commit_id,
-                        "canonical_text": delegate_result.canonical_text,
-                        "response": {
-                            "interaction_id": (delegate_result.response.interaction_id),
-                            "response_id": delegate_result.response.response_id,
-                            "response_generation": (
-                                delegate_result.response.response_generation
-                            ),
-                        },
-                    }
+                    raise RuntimeError("Native delegate bypassed retained admission")
                 elif (
                     proposal.action is not None and proposal.action.operation == "SPEAK"
                 ):
@@ -5012,6 +4853,314 @@ class AgentServerProductCompositionRegistry:
                 _NativeProductOperation(fingerprint, result)
             )
             return result
+
+    async def _handle_native_delegate_propose(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        fingerprint: str,
+        parsed_request_id: str,
+        proposal: NativeInteractionProposal,
+        request_id: str,
+        routed_session: str,
+    ) -> P3RouteResult:
+        fingerprint_bytes = bytes.fromhex(fingerprint)
+        async with self._lock:
+            if self._stopped:
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
+            route = self._p2_routes.get((routed_session, binding.interaction_id))
+            if (
+                route is None
+                or route.native_runtime_owner is None
+                or route.native_p3_authority is None
+                or route.native_capability is None
+                or route.native_closed
+                or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
+                or route.binding.scope != binding.scope
+                or route.binding.correlation_id != binding.correlation_id
+                or route.binding.activation_id != binding.activation_id
+                or route.binding.activation_generation != binding.activation_generation
+                or not hmac.compare_digest(route.native_capability, capability)
+            ):
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                    code=ErrorCode.PERMISSION_DENIED,
+                )
+            completed = self._native_propose_operations.get(parsed_request_id)
+            if completed is not None:
+                if completed.fingerprint_sha256 == fingerprint:
+                    return completed.result
+                return _error_result(
+                    request_id,
+                    reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                    code=ErrorCode.CONFLICT,
+                )
+            retained = self._native_delegate_operations.get(parsed_request_id)
+            if retained is not None:
+                if retained.fingerprint != fingerprint_bytes:
+                    return _error_result(
+                        request_id,
+                        reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                        code=ErrorCode.CONFLICT,
+                    )
+            else:
+                try:
+                    self._require_product_request_not_evicted(
+                        "native.propose", parsed_request_id
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                    )
+                if (
+                    len(self._native_delegate_operations)
+                    >= self._PRODUCT_OPERATION_CAPACITY
+                    and not self._evict_completed_product_operation(
+                        self._native_delegate_operations,
+                        namespace="native.propose",
+                    )
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_OPERATION_LEDGER_FULL",
+                        code=ErrorCode.UNAVAILABLE,
+                    )
+                owner = route.native_runtime_owner
+                native_p3_authority = route.native_p3_authority
+                assert owner is not None
+                assert native_p3_authority is not None
+                task = asyncio.create_task(
+                    self._run_native_delegate_propose(
+                        binding=binding,
+                        fingerprint=fingerprint,
+                        native_p3_authority=native_p3_authority,
+                        owner=owner,
+                        proposal=proposal,
+                        request_id=request_id,
+                        retained_route=route,
+                        routed_session=routed_session,
+                    ),
+                    name=f"live-voice-native-delegate:{parsed_request_id}",
+                )
+                retained = _RetainedProductOperation(
+                    fingerprint_bytes,
+                    task,
+                    p2_binding=route.binding,
+                )
+                self._native_delegate_operations[parsed_request_id] = retained
+        return await asyncio.shield(retained.task)
+
+    async def _run_native_delegate_propose(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        fingerprint: str,
+        native_p3_authority: NativeP3ActivationAuthority,
+        owner: NativeInteractionRuntimeOwner,
+        proposal: NativeInteractionProposal,
+        request_id: str,
+        retained_route: _P2Route,
+        routed_session: str,
+    ) -> P3RouteResult:
+        delegate = proposal.delegate
+        try:
+            if (
+                delegate is None
+                or proposal.action is None
+                or proposal.action.operation != "DELEGATE"
+                or proposal.turn_commit is not None
+                or proposal.audio_observation is not None
+                or proposal.provider_done is not None
+                or dict(proposal.action.payload)
+                != {
+                    "provider_call_id": delegate.provider_call_id,
+                    "turn_id": delegate.turn_id,
+                }
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_PROPOSAL_INVALID",
+                    "Native delegate must be one exact DELEGATE proposal",
+                )
+            retained_route.activation_lease.propose_action(
+                retained_route.binding, proposal.action
+            )
+            context = await retained_route.activation_lease.select_formal_context(
+                retained_route.binding
+            )
+            accepted, delegate_admission = await owner.admit_delegate(
+                delegate,
+                committed_at=datetime.now(UTC)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z"),
+                context_refs=tuple(entry.ref for entry in context.entries),
+            )
+            bridge = self._task_intent_bridge
+            if bridge is None:
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_RESOLVER_UNAVAILABLE",
+                    "Native delegate has no unified committed-input resolver",
+                )
+            current: PersistentTaskRecord | None = None
+            background_authority_unavailable = False
+            if self._settings.p3_text_enabled:
+                try:
+                    current = (
+                        await self._p3_composition.read_current_background_task_native(
+                            native_p3_authority,
+                            session_id=routed_session,
+                        )
+                    )
+                except FormalTaskViolation as exc:
+                    if exc.code not in {
+                        ErrorCode.UNAUTHENTICATED,
+                        ErrorCode.PERMISSION_DENIED,
+                    }:
+                        raise
+                    background_authority_unavailable = True
+            current_context = self._current_background_context(current)
+            resolution = bridge.resolve_unified(
+                delegate_admission.turn_commit,
+                delegate_admission.turn_commit.scope,
+                current_context,
+            )
+            resolution = self._bind_frozen_one_current_task_status(
+                resolution,
+                commit=delegate_admission.turn_commit,
+                current_task=current_context,
+            )
+            delegate_request_id = (
+                "native-delegate-"
+                + hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "provider_call_id": delegate.provider_call_id,
+                            "turn_commit_id": delegate_admission.turn_commit.commit_id,
+                            "source_response": {
+                                "response_id": delegate_admission.source_response.response_id,
+                                "response_generation": (
+                                    delegate_admission.source_response.response_generation
+                                ),
+                            },
+                        }
+                    )
+                ).hexdigest()
+            )
+            native_business_task_id: str | None = None
+            if resolution.route is UnifiedCommittedInputRoute.DIALOGUE:
+                canonical_text = (
+                    await retained_route.activation_lease.execute_native_delegate(
+                        retained_route.binding,
+                        request_id=f"native-agent-{delegate_request_id}",
+                        source_response=delegate_admission.source_response,
+                        correlation_id=binding.correlation_id,
+                        commit=delegate_admission.turn_commit,
+                        context=context,
+                        channel_id="web",
+                        allow_tools=True,
+                    )
+                )
+            else:
+                admitted_at = time.monotonic()
+                task_outcome = await self._run_unified_submit(
+                    retained=retained_route,
+                    request_id=f"native-task-{delegate_request_id}",
+                    voice_identity=delegate_request_id.removeprefix("native-delegate-"),
+                    fingerprint=bytes.fromhex(fingerprint),
+                    commit=delegate_admission.turn_commit,
+                    context=context,
+                    resolution=resolution,
+                    current=current,
+                    background_authority_unavailable=(background_authority_unavailable),
+                    auth_token=None,
+                    channel_id="web",
+                    l0_commit_admission=_L0CommitAdmissionClock(
+                        observed_at=datetime.now(UTC)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z"),
+                        monotonic_ms=admitted_at * 1_000.0,
+                        duration_ms=0.0,
+                    ),
+                    native_result_only=True,
+                    native_p3_authority=native_p3_authority,
+                )
+                task_result_payload = task_outcome.payload.get("result")
+                canonical_text = (
+                    task_result_payload.get("canonical_text")
+                    if task_outcome.ok and isinstance(task_result_payload, Mapping)
+                    else None
+                )
+                candidate_task_id = (
+                    task_result_payload.get("task_id")
+                    if isinstance(task_result_payload, Mapping)
+                    else None
+                )
+                if type(candidate_task_id) is str:
+                    native_business_task_id = candidate_task_id
+                if type(canonical_text) is not str:
+                    raise NativeInteractionRuntimeError(
+                        "NATIVE_TASK_DELEGATE_RESULT_INVALID",
+                        "Native Task delegate produced no canonical result",
+                    )
+            delegate_result = await owner.accept_delegate_result(
+                delegate_admission,
+                canonical_text=canonical_text,
+                route=resolution.route,
+            )
+            if native_business_task_id is not None:
+                async with self._lock:
+                    if (
+                        native_business_task_id in self._voice_task_origins
+                        or len(self._voice_task_origins)
+                        < self._PRODUCT_OPERATION_CAPACITY
+                    ):
+                        self._voice_task_origins[native_business_task_id] = (
+                            _VoiceTaskOrigin(
+                                session_id=retained_route.binding.session_id,
+                                interaction_id=retained_route.binding.interaction_id,
+                                activation_id=retained_route.binding.activation_id,
+                                activation_generation=(
+                                    retained_route.binding.activation_generation
+                                ),
+                                correlation_id=retained_route.binding.correlation_id,
+                                response_ref=delegate_result.response,
+                            )
+                        )
+            result_payload: dict[str, object] = {
+                "kind": "delegate",
+                "status": "completed",
+                "accepted": accepted,
+                "provider_call_id": delegate.provider_call_id,
+                "route": resolution.route.value,
+                "turn_commit_id": delegate_result.turn_commit.commit_id,
+                "canonical_text": delegate_result.canonical_text,
+                "response": {
+                    "interaction_id": delegate_result.response.interaction_id,
+                    "response_id": delegate_result.response.response_id,
+                    "response_generation": delegate_result.response.response_generation,
+                },
+            }
+            return _success_result(request_id, result_payload, retained_route.manifest)
+        except (FormalTaskViolation, NativeInteractionRuntimeError) as exc:
+            return _error_result(
+                request_id,
+                reason=exc.reason,
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+                manifest=retained_route.manifest,
+            )
+        except Exception as exc:
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "NATIVE_RUNTIME_REJECTED"),
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+                manifest=retained_route.manifest,
+            )
 
     async def handle_native_presentation_ack(
         self,
@@ -5143,7 +5292,7 @@ class AgentServerProductCompositionRegistry:
                         "params": dict(params),
                     }
                 )
-            ).hexdigest()
+            ).digest()
         except FormalTaskViolation as exc:
             return _error_result(
                 request_id,
@@ -5180,72 +5329,122 @@ class AgentServerProductCompositionRegistry:
                     reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
                     code=ErrorCode.PERMISSION_DENIED,
                 )
-            prior = self._native_ack_operations.get(parsed_request_id)
-            if prior is not None:
-                if prior.fingerprint_sha256 == fingerprint:
-                    return prior.result
-                return _error_result(
-                    request_id,
-                    reason="NATIVE_REQUEST_REPLAY_CONFLICT",
-                    code=ErrorCode.CONFLICT,
-                )
-            try:
-                self._require_product_request_not_evicted(
-                    "native.presentation_ack", parsed_request_id
-                )
+            entry = self._native_ack_operations.get(parsed_request_id)
+            if entry is not None:
+                if entry.fingerprint != fingerprint:
+                    return _error_result(
+                        request_id,
+                        reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                        code=ErrorCode.CONFLICT,
+                    )
+            else:
+                try:
+                    self._require_product_request_not_evicted(
+                        "native.presentation_ack", parsed_request_id
+                    )
+                except Exception as exc:
+                    return _error_result(
+                        request_id,
+                        reason=getattr(
+                            exc,
+                            "reason",
+                            "NATIVE_PRESENTATION_ACK_REJECTED",
+                        ),
+                        code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                        message=str(exc),
+                        manifest=route.manifest,
+                    )
+                if (
+                    len(self._native_ack_operations) >= self._PRODUCT_OPERATION_CAPACITY
+                    and not self._evict_completed_product_operation(
+                        self._native_ack_operations,
+                        namespace="native.presentation_ack",
+                    )
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_OPERATION_LEDGER_FULL",
+                        code=ErrorCode.UNAVAILABLE,
+                        manifest=route.manifest,
+                    )
                 owner = route.native_runtime_owner
                 assert owner is not None
-                if ack is not None:
-                    history = await owner.acknowledge_audio(ack)
-                    result_payload: dict[str, object] = {
-                        "kind": "presentation_ack",
-                        "status": "observed",
-                        "history_eligible": history is not None,
-                    }
-                    if history is not None:
-                        result_payload["history"] = {
-                            "response": {
-                                "interaction_id": history.response.interaction_id,
-                                "response_id": history.response.response_id,
-                                "response_generation": (
-                                    history.response.response_generation
-                                ),
-                            },
-                            "transcript": history.transcript,
-                            "presented_at": history.presented_at,
-                        }
-                else:
-                    assert cursor is not None and action_id is not None
-                    barge = await owner.barge_in(
-                        action_id=action_id,
-                        response=cursor.response,
-                        cursor=cursor,
+
+                async def acknowledge_native() -> P3RouteResult:
+                    try:
+                        if ack is not None:
+                            history = await owner.acknowledge_audio(ack)
+                            result_payload: dict[str, object] = {
+                                "kind": "presentation_ack",
+                                "status": "observed",
+                                "history_eligible": history is not None,
+                            }
+                            if history is not None:
+                                await route.activation_lease.persist_native_assistant_history(
+                                    route.binding,
+                                    history,
+                                    channel_id="web",
+                                )
+                                result_payload["history"] = {
+                                    "response": {
+                                        "interaction_id": (
+                                            history.response.interaction_id
+                                        ),
+                                        "response_id": history.response.response_id,
+                                        "response_generation": (
+                                            history.response.response_generation
+                                        ),
+                                    },
+                                    "transcript": history.transcript,
+                                    "presented_at": history.presented_at,
+                                }
+                        else:
+                            assert cursor is not None and action_id is not None
+                            barge = await owner.barge_in(
+                                action_id=action_id,
+                                response=cursor.response,
+                                cursor=cursor,
+                            )
+                            result_payload = {
+                                "kind": "played_cursor",
+                                "status": "observed",
+                                "applied": barge.applied,
+                                "cancel_command_id": barge.cancel_command_id,
+                            }
+                    except Exception as exc:
+                        return _error_result(
+                            request_id,
+                            reason=getattr(
+                                exc,
+                                "reason",
+                                "NATIVE_PRESENTATION_ACK_REJECTED",
+                            ),
+                            code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                            message=str(exc),
+                            manifest=route.manifest,
+                        )
+                    return _success_result(
+                        request_id,
+                        result_payload,
+                        route.manifest,
                     )
-                    result_payload = {
-                        "kind": "played_cursor",
-                        "status": "observed",
-                        "applied": barge.applied,
-                        "cancel_command_id": barge.cancel_command_id,
-                    }
-            except Exception as exc:
-                return _error_result(
-                    request_id,
-                    reason=getattr(exc, "reason", "NATIVE_PRESENTATION_ACK_REJECTED"),
-                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
-                    message=str(exc),
-                    manifest=route.manifest,
+
+                task = asyncio.create_task(
+                    acknowledge_native(),
+                    name=f"live-voice-native-presentation-ack:{parsed_request_id}",
                 )
-            result = _success_result(request_id, result_payload, route.manifest)
-            if len(self._native_ack_operations) >= self._PRODUCT_OPERATION_CAPACITY:
-                expired_request_id = next(iter(self._native_ack_operations))
-                self._native_ack_operations.pop(expired_request_id)
-                self._mark_evicted_product_request(
-                    "native.presentation_ack", expired_request_id
+                entry = _RetainedProductOperation(
+                    fingerprint,
+                    task,
+                    p2_binding=route.binding,
                 )
-            self._native_ack_operations[parsed_request_id] = _NativeProductOperation(
-                fingerprint, result
-            )
-            return result
+                self._native_ack_operations[parsed_request_id] = entry
+        result = await asyncio.shield(entry.task)
+        if not result.ok:
+            async with self._lock:
+                if self._native_ack_operations.get(parsed_request_id) is entry:
+                    self._native_ack_operations.pop(parsed_request_id, None)
+        return result
 
     async def handle_native_close(
         self,
@@ -5316,42 +5515,116 @@ class AgentServerProductCompositionRegistry:
                     reason="NATIVE_REQUEST_REPLAY_CONFLICT",
                     code=ErrorCode.CONFLICT,
                 )
-            if self._stopped:
-                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
-            route = self._p2_routes.get((routed_session, binding.interaction_id))
-            if (
-                route is None
-                or route.native_runtime_owner is None
-                or route.native_capability is None
-                or route.native_closed
-                or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
-                or route.binding.scope != binding.scope
-                or route.binding.correlation_id != binding.correlation_id
-                or route.binding.activation_id != binding.activation_id
-                or route.binding.activation_generation != binding.activation_generation
-                or not hmac.compare_digest(route.native_capability, capability)
-            ):
-                return _error_result(
-                    request_id,
-                    reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
-                    code=ErrorCode.PERMISSION_DENIED,
+            pending = self._native_close_pending_operations.get(parsed_request_id)
+            if pending is not None:
+                if pending.fingerprint != bytes.fromhex(fingerprint):
+                    return _error_result(
+                        request_id,
+                        reason="NATIVE_REQUEST_REPLAY_CONFLICT",
+                        code=ErrorCode.CONFLICT,
+                    )
+            else:
+                if self._stopped:
+                    return _error_result(
+                        request_id, reason="PRODUCT_COMPOSITION_STOPPED"
+                    )
+                route = self._p2_routes.get((routed_session, binding.interaction_id))
+                if (
+                    route is None
+                    or route.native_runtime_owner is None
+                    or route.native_capability is None
+                    or route.native_closed
+                    or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
+                    or route.binding.scope != binding.scope
+                    or route.binding.correlation_id != binding.correlation_id
+                    or route.binding.activation_id != binding.activation_id
+                    or route.binding.activation_generation
+                    != binding.activation_generation
+                    or not hmac.compare_digest(route.native_capability, capability)
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="NATIVE_RUNTIME_CAPABILITY_REJECTED",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                try:
+                    self._require_product_request_not_evicted(
+                        "native.close", parsed_request_id
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                        manifest=route.manifest,
+                    )
+                if (
+                    len(self._native_close_pending_operations)
+                    >= self._PRODUCT_OPERATION_CAPACITY
+                    and not self._evict_completed_product_operation(
+                        self._native_close_pending_operations,
+                        namespace="native.close",
+                    )
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_OPERATION_LEDGER_FULL",
+                        code=ErrorCode.UNAVAILABLE,
+                        manifest=route.manifest,
+                    )
+                owner = route.native_runtime_owner
+                assert owner is not None
+                route.native_closed = True
+                task = asyncio.create_task(
+                    self._run_native_close(
+                        fingerprint=fingerprint,
+                        owner=owner,
+                        parsed_request_id=parsed_request_id,
+                        request_id=request_id,
+                        retained_route=route,
+                    ),
+                    name=f"live-voice-native-close:{parsed_request_id}",
                 )
-            try:
-                self._require_product_request_not_evicted(
-                    "native.close", parsed_request_id
+                pending = _RetainedProductOperation(
+                    bytes.fromhex(fingerprint),
+                    task,
+                    p2_binding=route.binding,
                 )
-                await route.native_runtime_owner.close()
-            except Exception as exc:
-                return _error_result(
-                    request_id,
-                    reason=getattr(exc, "reason", "NATIVE_RUNTIME_CLOSE_FAILED"),
-                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
-                    message=str(exc),
-                    manifest=route.manifest,
-                )
-            route.native_runtime_owner = None
-            route.native_capability = None
-            route.native_closed = True
+                self._native_close_pending_operations[parsed_request_id] = pending
+        return await asyncio.shield(pending.task)
+
+    async def _run_native_close(
+        self,
+        *,
+        fingerprint: str,
+        owner: NativeInteractionRuntimeOwner,
+        parsed_request_id: str,
+        request_id: str,
+        retained_route: _P2Route,
+    ) -> P3RouteResult:
+        delegate_tasks = tuple(
+            entry.task
+            for ledger in (
+                self._native_delegate_operations,
+                self._native_ack_operations,
+            )
+            for entry in ledger.values()
+            if entry.p2_binding == retained_route.binding
+        )
+        if delegate_tasks:
+            await asyncio.gather(*delegate_tasks, return_exceptions=True)
+        try:
+            await owner.close()
+        except Exception as exc:
+            result = _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "NATIVE_RUNTIME_CLOSE_FAILED"),
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+                manifest=retained_route.manifest,
+            )
+        else:
             result = _success_result(
                 request_id,
                 {
@@ -5359,8 +5632,18 @@ class AgentServerProductCompositionRegistry:
                     "status": "closed",
                     "accepted": True,
                 },
-                route.manifest,
+                retained_route.manifest,
             )
+        async with self._lock:
+            route = self._p2_routes.get(
+                (
+                    retained_route.binding.session_id,
+                    retained_route.binding.interaction_id,
+                )
+            )
+            if route is retained_route and route.native_runtime_owner is owner:
+                route.native_runtime_owner = None
+                route.native_capability = None
             if len(self._native_close_operations) >= self._PRODUCT_OPERATION_CAPACITY:
                 expired_request_id = next(iter(self._native_close_operations))
                 self._native_close_operations.pop(expired_request_id)
@@ -5368,7 +5651,8 @@ class AgentServerProductCompositionRegistry:
             self._native_close_operations[parsed_request_id] = _NativeProductOperation(
                 fingerprint, result
             )
-            return result
+            self._native_close_pending_operations.pop(parsed_request_id, None)
+        return result
 
     @staticmethod
     def _parse_p2_route_binding(
@@ -14936,6 +15220,19 @@ class AgentServerProductCompositionRegistry:
         for adoption in tuple(self._progress_route_adoptions.values()):
             adoption.set()
         self._progress_route_adoptions.clear()
+        native_lifecycle_tasks = tuple(
+            entry.task
+            for ledger in (
+                self._native_delegate_operations,
+                self._native_ack_operations,
+                self._native_close_pending_operations,
+            )
+            for entry in ledger.values()
+        )
+        if native_lifecycle_tasks:
+            await asyncio.shield(
+                asyncio.gather(*native_lifecycle_tasks, return_exceptions=True)
+            )
         await self.close_active_routes()
         drain_tasks = tuple(self._presentation_drain_tasks)
         if drain_tasks:

@@ -320,9 +320,7 @@ class ConversationRuntime:
         with self._lock:
             self._require_enabled()
             parsed_turn_id = self._require_id(turn_id, "turn_id")
-            parsed_interaction_id = self._require_id(
-                interaction_id, "interaction_id"
-            )
+            parsed_interaction_id = self._require_id(interaction_id, "interaction_id")
             parsed_commit_id = self._require_id(commit_id, "commit_id")
             turn = self._turn(parsed_turn_id)
             if scope != self._scope or turn.interaction_id != parsed_interaction_id:

@@ -48,6 +48,7 @@ from .conversation_runtime_loop import BargeInResult
 from .interaction_engine import InteractionAction, InteractionEnginePort
 from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeOwner
+from .native_interaction_runtime import NativeHistoryAdmission
 from .presentation_ledger import (
     PresentationAck,
     PresentationSurface,
@@ -761,6 +762,38 @@ class P2ActivationLease:
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
+
+    async def persist_native_assistant_history(
+        self,
+        binding: P2InteractionBinding,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str = "web",
+    ) -> bool:
+        """Consume one Native history admission through the retained Runtime."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            persist = getattr(
+                self._runtime,
+                "persist_native_assistant_history",
+                None,
+            )
+            if not callable(persist):
+                raise _violation(
+                    "NATIVE_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime has no canonical Native history writer",
+                    ErrorCode.UNAVAILABLE,
+                )
+            written = await persist(admission, channel_id=channel_id)
+            if type(written) is not bool:
+                raise _violation(
+                    "NATIVE_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime returned no exact Native history outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            return written
 
     async def accept_task_origin(
         self,
