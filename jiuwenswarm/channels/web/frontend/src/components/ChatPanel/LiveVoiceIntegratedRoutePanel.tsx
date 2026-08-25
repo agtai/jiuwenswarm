@@ -111,6 +111,24 @@ export function createProductP2ActivationOwner(input: ProductP2ActivationOwnerIn
   });
 }
 
+export function normalizeProductP1StatusForP2Retirement(
+  status: ProductP1VoiceStatus,
+  reason: string | null,
+  p2RetirementStarted: boolean,
+): Readonly<{ status: ProductP1VoiceStatus; reason: string | null }> {
+  if (
+    p2RetirementStarted
+    && status === 'failed'
+    && reason === 'STREAMING_SPEECH_ROUTE_ABORTED'
+  ) {
+    return Object.freeze({
+      status: 'cleanup_pending',
+      reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+    });
+  }
+  return Object.freeze({ status, reason });
+}
+
 export interface LiveVoiceIntegratedRoutePanelProps {
   activeSessionId: string | null;
   isConnected: boolean;
@@ -4781,18 +4799,29 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         request: productRequest,
         on_status: (status, reason) => {
           if (callbackOwner !== null && p1VoiceOwnerRef.current === callbackOwner) {
-            if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
+            // Revoking an old P2 activation also aborts its streaming Speech
+            // leaf. That terminal is expected once retirement has started; it
+            // remains cleanup truth, not a user-visible route failure. The
+            // same reason on the current activation still fails normally.
+            const normalized = normalizeProductP1StatusForP2Retirement(
+              status,
+              reason,
+              activationOwner.retirementStarted() || activationOwnerRef.current !== activationOwner,
+            );
+            const publishedStatus = normalized.status;
+            const publishedReason = normalized.reason;
+            if (publishedStatus !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
               terminalAnnouncementSpeechOwnerRef.current = null;
             }
-            if (status === 'recognized' && terminalAnnouncementStateRef.current === 'suspending_capture') {
+            if (publishedStatus === 'recognized' && terminalAnnouncementStateRef.current === 'suspending_capture') {
               p1VoiceCaptureBindingRef.current = null;
               updateTerminalAnnouncementState('fetching');
             }
-            setP1VoiceStatus(status);
-            setP1VoiceReason(reason);
+            setP1VoiceStatus(publishedStatus);
+            setP1VoiceReason(publishedReason);
             const diagnostics = callbackOwner.captureDiagnostics();
             setInterruptionDegradedReason(
-              ['playing', 'recognized'].includes(status)
+              ['playing', 'recognized'].includes(publishedStatus)
               && diagnostics.successor_readiness === 'degraded'
                 ? diagnostics.successor_readiness_reason
                 : null,
@@ -4816,7 +4845,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   ? activeResponse
                   : null;
               const seam: ProductLiveVoiceRecoveryDiagnostic['seam'] = response === null ? 'activation' : 'tts';
-              if (status === 'cleanup_pending' && reason !== 'FORMAL_P1_CLEANUP_IN_PROGRESS') {
+              if (publishedStatus === 'cleanup_pending' && publishedReason !== 'FORMAL_P1_CLEANUP_IN_PROGRESS') {
                 const retainedDiagnostic = recoveryDiagnosticRef.current;
                 const retainsExactTerminalTruth =
                   retainedDiagnostic?.disposition === 'terminal' &&
@@ -4832,20 +4861,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   publishProductRecoveryDiagnostic({
                     seam,
                     disposition: 'retrying',
-                    reason: stableProductTextReason(reason, 'FORMAL_P1_CLEANUP_PENDING'),
+                    reason: stableProductTextReason(publishedReason, 'FORMAL_P1_CLEANUP_PENDING'),
                     binding,
                     response,
                   });
                 }
-              } else if (status === 'failed') {
+              } else if (publishedStatus === 'failed') {
                 publishProductRecoveryDiagnostic({
                   seam,
                   disposition: 'terminal',
-                  reason: stableProductTextReason(reason, 'PRODUCT_P1_ROUTE_FAILED'),
+                  reason: stableProductTextReason(publishedReason, 'PRODUCT_P1_ROUTE_FAILED'),
                   binding,
                   response,
                 });
-              } else if (['idle', 'capturing', 'recognized', 'closed'].includes(status)) {
+              } else if (['idle', 'capturing', 'recognized', 'closed'].includes(publishedStatus)) {
                 clearProductRecoveryDiagnostic({ seam: 'activation', binding });
               }
             }

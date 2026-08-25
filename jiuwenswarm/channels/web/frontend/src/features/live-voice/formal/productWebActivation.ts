@@ -966,6 +966,10 @@ export class ProductWebP2ActivationOwner {
     return Object.freeze({ status: this.status, binding: this.binding, reason: this.reason });
   }
 
+  retirementStarted(): boolean {
+    return this.closing;
+  }
+
   needsCleanup(): boolean {
     return this.activationPromise !== null || this.mediaAuthorityRefreshPromise !== null || this.mediaStartReservation !== null || this.cleanupRequired;
   }
@@ -1351,7 +1355,19 @@ export class ProductWebP2ActivationOwner {
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_INTERRUPT_GENERATION_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireDurableP2OperationResult(operation, value);
+        let result: JsonObject;
+        try {
+          result = requireDurableP2OperationResult(operation, value);
+        } catch (error) {
+          // A response was received, so a binding/schema failure is
+          // deterministic rather than ambiguous transport loss. Retaining it
+          // would make every recovery poll replay the same invalid response
+          // forever. Release only this exact entry and fail closed instead.
+          if (this.generationInterrupts.get(fingerprint) === entry) {
+            this.generationInterrupts.delete(fingerprint);
+          }
+          throw error;
+        }
         entry.result = result;
         return result;
       })

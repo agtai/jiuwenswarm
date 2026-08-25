@@ -160,6 +160,13 @@ class _ProductRegistry:
         self.calls.append(("p2.barge_in", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"applied": True}})
 
+    async def handle_p2_interrupt_generation(self, **kwargs):
+        self.calls.append(("p2.interrupt_generation", kwargs))
+        return P3RouteResult(
+            True,
+            {"ok": True, "result": {"status": "generation_interrupted"}},
+        )
+
     async def handle_p3_confirmation_issue(self, **kwargs):
         self.calls.append(("p3.confirmation.issue", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"issued": True}})
@@ -523,6 +530,7 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.p2.presentation.ack",
         "live_voice.composition.p2.presentation.failed",
         "live_voice.composition.p2.barge_in",
+        "live_voice.composition.p2.interrupt_generation",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",
         "live_voice.composition.p3.intent.status",
@@ -969,6 +977,11 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
         (
             ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
             "p2.barge_in",
+            False,
+        ),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P2_INTERRUPT_GENERATION,
+            "p2.interrupt_generation",
             False,
         ),
         (

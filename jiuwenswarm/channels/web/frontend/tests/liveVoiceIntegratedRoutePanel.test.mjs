@@ -7,6 +7,8 @@ import React from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import * as integratedPanelModule from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
 import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
@@ -39,6 +41,32 @@ import {
   terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
+test('P2 retirement hides only its expected streaming-route abort from recovery UI', () => {
+  const normalize = integratedPanelModule.normalizeProductP1StatusForP2Retirement;
+  assert.equal(typeof normalize, 'function');
+  assert.deepEqual(
+    normalize('failed', 'STREAMING_SPEECH_ROUTE_ABORTED', true),
+    {
+      status: 'cleanup_pending',
+      reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+    },
+  );
+  assert.deepEqual(
+    normalize('failed', 'STREAMING_SPEECH_ROUTE_ABORTED', false),
+    {
+      status: 'failed',
+      reason: 'STREAMING_SPEECH_ROUTE_ABORTED',
+    },
+  );
+  assert.deepEqual(
+    normalize('failed', 'MEDIA_TRANSPORT_CLOSED', true),
+    {
+      status: 'failed',
+      reason: 'MEDIA_TRANSPORT_CLOSED',
+    },
+  );
+});
 
 test('Panel P2 owner factory defaults production to sixteen and injects one for A/B baseline', async () => {
   const binding = {
