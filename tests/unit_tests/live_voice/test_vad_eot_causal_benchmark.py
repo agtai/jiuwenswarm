@@ -1114,6 +1114,62 @@ def test_semantic_formal_decision_requires_integrity_and_per_case_total_gain(
     ) == "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
 
 
+@pytest.mark.asyncio
+async def test_injected_semantic_main_writes_exact_three_arm_private_report(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest = _corpus(tmp_path)
+    output = tmp_path / "semantic-auto-report.json"
+    clock = ManualClock()
+    allocation_index = 0
+
+    async def provider_factory(turn_detection):
+        nonlocal allocation_index
+        case = manifest.cases[allocation_index % len(manifest.cases)]
+        allocation_index += 1
+        if turn_detection.mode is runner.RecognitionTurnDetectionMode.SEMANTIC_VAD:
+            return SemanticFakeProvider(case)
+        assert turn_detection.server_vad is not None
+        return FakeProvider(case, turn_detection.server_vad.silence_duration_ms)
+
+    exit_code = await runner._main(
+        [
+            "pilot",
+            "--experiment",
+            "semantic-auto",
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(output),
+            "--run-id",
+            "semantic-auto-injected",
+            "--git-commit",
+            "a" * 40,
+        ],
+        environ={"LIVE_VOICE_SPEECH_STT_MODEL": "gpt-4o-mini-transcribe"},
+        source_commit="a" * 40,
+        source_clean=True,
+        provider_factory=provider_factory,
+        monotonic=clock.now,
+        sleep=clock.sleep,
+        source_state_factory=lambda: ("a" * 40, True),
+    )
+
+    assert exit_code == 0
+    assert output.stat().st_mode & 0o777 == 0o600
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["schema_version"] == "live-voice.vad-eot-causal-report.v1"
+    assert report["experiment"] == "semantic-auto"
+    assert report["decision"] == "READY_FOR_SCREENING"
+    assert len(report["attempts"]) == 12
+    assert [
+        summary["configuration_id"] for summary in report["summaries"][::4]
+    ] == ["A1_1200", "B_AUTO", "A2_1200"]
+    serialized = output.read_text(encoding="utf-8")
+    assert "private-item" not in serialized
+    assert "first clause" not in serialized
+
+
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = support.load_vad_corpus_manifest(config.manifest_path)
