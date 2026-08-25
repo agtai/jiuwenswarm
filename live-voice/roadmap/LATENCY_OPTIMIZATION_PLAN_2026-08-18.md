@@ -88,8 +88,9 @@
 > AUTO saved 684–734 ms of EOT on no-pause/300 ms cases but ended the 600/1000
 > ms pause cases early, so it is integrity-rejected. HIGH was not run and 1200
 > ms remains unchanged. Separately, Agent first-visible-delta commits
-> `3b85425ac` and `4efd2b6c0` pass Tier-2 re-review but remain isolated and
-> unmeasured.
+> `3b85425ac` and `4efd2b6c0` passed Tier-2 re-review but were still isolated
+> and unmeasured at that checkpoint; the later result below supersedes that
+> execution state.
 
 > **2026-08-25 Agent first-delta result:** source `f71a5d830` completed a
 > content-free real-Agent population, 15/15. Agent-start→first-delta p50 was
@@ -100,6 +101,14 @@
 > not decompose queue, request preparation, connection/network or model
 > first-token latency. See the
 > [source-bound baseline](../evidence/AGENT_FIRST_DELTA_BASELINE_2026-08-25.md).
+
+> **2026-08-25 LVL-12 result:** the conservative pre-final exact-prefix screen
+> at `ea6475120` completed 10/10 real-Agent medium/long slots. Candidate→final
+> p50 is 1587.308/3573.381 ms and Agent→candidate p50 is
+> 657.947/707.935 ms. Both workloads pass the 500 ms materiality gate with zero
+> forbidden effects. This authorizes only a separate no-Browser Agent→TTS
+> component screen; it grants no `PresentationUnit`, speech, Browser or product
+> authority. See the [LVL-12 result](../evidence/LVL12_PRE_FINAL_STABLE_SEGMENTATION_RESULT_2026-08-25.md).
 
 ## 1. Outcome and judgement
 
@@ -470,8 +479,9 @@ Current latency work should be packetized in this dependency order:
 4. preserve the 15/15 real-Agent first-delta baseline, then decompose queue,
    request preparation, connection/network and model first-token latency before
    specifying connection, warm-up or prompt-size candidates;
-5. run a separate medium/long pre-final exact-prefix materiality screen. Keep
-   short output stopped and keep post-final LVL-10/LVL-10L independent;
+5. preserve the LVL-12 medium/long exact-prefix materiality PASS and short
+   STOP. Run a separate no-Browser real Agent→TTS component screen while
+   keeping post-final LVL-10/LVL-10L independent;
 6. consider authoritative acknowledgements for genuinely long Task operations
    only when perceived latency is the product priority;
 7. treat native speech-to-speech as a separate strategic architecture study,
