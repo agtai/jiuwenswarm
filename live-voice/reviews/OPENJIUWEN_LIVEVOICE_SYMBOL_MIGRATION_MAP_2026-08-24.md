@@ -46,7 +46,7 @@ Current resolutions that affect this map are:
 | Earlier question | Current local candidate decision |
 |---|---|
 | Public Task facade | `TeamAgent.task_authority` returns a lifecycle-lease-bound capability bundle with explicit reader/command/cursor/checkpoint grants; a public binding is diagnostic, not authority, and no DAO/Manager/raw finalizer is the product API. |
-| Public effect facade | `TeamAgent.effect_authority` returns a separate `TeamExecutionEffectAuthority`; generic reaper/provider/product policy is not exposed. |
+| Public effect facade | `TeamAgent.effect_authority` derives explicit plan/call/observe/settle/read grants from the same PR 09 lifecycle lease. A trusted-host registry binds a token-free Adapter namespace; live tokens, raw evidence writers and arbitrary per-call Adapter injection stay internal. |
 | Checkpoint link | The bound checkpoint capability first obtains exact PR 06 preauthorization, then writes to a server-derived scoped key and atomically finalizes the only resume-authoritative reference; initially invalid callers never reach the payload Port and public views expose no locator. |
 | Effect owner placement | A subordinate `EffectDao` shares the AgentTeams database/session/Task execution boundary. Workflow engine remains business-neutral. |
 | Cursor scope | Internal `CursorDao` owns only generic Task-event consumer/channel ACK beside the accepted event reader; PR 09 derives an opaque consumer/channel capability bound to principal, lease and stream incarnation. Callers cannot select another cursor; response closure, DOM adoption and playout remain product facts. |
@@ -1078,7 +1078,7 @@ The first group repairs or exposes existing AgentCore owners:
 | `A1_CANDIDATE` | monotonic `AsyncToolRuntime` cancel/wait/terminal callback and reused-ID fencing | the required lifecycle semantics exist only in the local candidate |
 | `A2_CANDIDATE` | canonical Task/execution relation, admission, claim, reconcile and token-fenced settlement | the locked/base Task owner lacks this durable execution contract |
 | bound Task/checkpoint facade candidate | `TeamAgent.task_authority` returning lifecycle-bound reader/command/cursor/checkpoint sub-authorities over the accepted internal owners | The historical monolithic handle is string-bound and construction-bypassable, while Manager/DAO/raw checkpoint finalization is not an acceptable public product API; PR 09 must rebuild an opaque lease, capability matrix, redacted views and same-ID rebind/in-flight revocation fencing |
-| bound effect facade candidate | `TeamAgent.effect_authority` returning `TeamExecutionEffectAuthority` | the least-privilege continuation handle is local only and intentionally excludes reaper/provider policy |
+| bound effect facade candidate | `TeamAgent.effect_authority` returning lifecycle-bound plan/call/observe/settle/read sub-authorities plus a trusted-registered token-free Adapter coordinator | The historical monolithic handle leaks tokens/raw writers, accepts arbitrary Adapter injection, separates provider return from finalization and conflates pre-call rejection with invoked-unknown; PR 10 must reimplement the public orchestration while leaving reaper/provider credentials/product policy downstream |
 
 The remaining candidates add generic non-Voice capabilities to the smallest
 existing owners. Each addition satisfies all five admission tests below.

@@ -402,6 +402,24 @@ same-ID and in-flight revocation fencing, opaque cursor construction and the PR
 The independent preflight reports `5 Critical / 4 Important`.
 Exact requirements are in the
 [PR 09 packet](reviews/agentcore-pr-preparation/2026-08-25-pr09-bound-task.md).
+PR 10 bound external-effect-authority preflight is now complete. The historical
+facade independently recreates PR 09's string-bound construction bypass and
+gives every member raw plan/claim/dispatch/receipt/observation/settlement
+methods. Public records/results leak live claim/CALL/OBSERVE tokens; the
+Coordinator invokes any caller-injected Adapter, returns its value without
+finalizing it, and collapses pre-call rejection with a possibly executed
+Provider exception into the same `None`. Receipt/observation/settlement writers
+also accept wrong-purpose tokens, so callers can manufacture durable success
+without a Provider call. Normal Team clean can then cascade every audit row
+while an external call is in flight. The independent preflight reports `5
+Critical / 4 Important`. Formal replay must inherit PR 09's exact lease and
+capability grants, compose PR 07's one-use/result-bound internals, use a trusted
+Adapter registry with registry-derived namespace/key and token-free requests,
+finalize typed results
+inside the coordinator, compose PR 07 effect-in-flight state with the PR 03/05
+Team-clean reservation, expose only redacted bounded views and preserve
+normal-clean tombstones. Exact requirements are in the
+[PR 10 packet](reviews/agentcore-pr-preparation/2026-08-25-pr10-bound-effect.md).
 No result changes Live Voice authority, performs composition/migration, or
 grants deletion credit.
 

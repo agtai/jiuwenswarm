@@ -67,7 +67,7 @@ commit group must be rebased or replayed onto the then-current AgentCore
 | 7 | `ADD-04`: external-effect journal and continuation fencing | `398454d0`, `bead0a87`, `8f30c02c` | `KEEP / REPLAY` | Generic intent/dispatch/receipt/observation/settlement truth is absent from Workflow Journal and Session VCS. Project/file probes and compensation policy stay downstream. |
 | 8 | `ADD-03`: Task-event consumer cursor | `73301660`, `15bd4cbc`, `2cc81078` | `KEEP / REPLAY` | Generic ordered consumers need scoped unread/ACK CAS. DOM adoption, playout and response-generation receipts remain LiveVoice facts. |
 | 9 | Bound Task facade plus bound checkpoint seam | `9cc5727e`, `f927f86c`, `a514fe06`, `503cf538` | `KEEP / REIMPLEMENT` | A generic lifecycle-bound public capability remains necessary, but the historical monolithic handle exposes construction/Manager bypasses, lacks capability and same-ID lease fencing, lets callers select cursor identity and preserves the rejected payload-first/raw-finalizer checkpoint seam. |
-| 10 | Bound external-effect facade | `53dfcc7c`, `8db056f5`, `db821683` | `KEEP / REPLAY` | `TeamAgent.effect_authority` separates external-call continuation authority from ordinary Task readers and writers. Reaper/provider/product policy is not exposed. |
+| 10 | Bound external-effect facade | `53dfcc7c`, `8db056f5`, `db821683` | `KEEP / REIMPLEMENT` | A generic bound public seam remains necessary, but the historical monolithic handle leaks live tokens/raw evidence writers, accepts arbitrary Adapter injection, separates provider return from finalization and conflates zero-call rejection with invoked-unknown. |
 
 The following cleanup commits are retained as review fixes, not as standalone
 PRs:
@@ -90,7 +90,7 @@ The accepted public composition is:
 | Run foreground Agent or stream results | existing public `Runner.run_agent` / `Runner.run_agent_streaming` and existing Agent bases | authenticate principal/project/session, select the Jiuwen project Agent, translate committed context and stream observations |
 | Read/update canonical TeamTask, read events and ACK a generic consumer cursor | lifecycle-bound `TeamAgent.task_authority` reader/command/cursor sub-authorities; the cursor identity is opaque and principal-derived | product intent, confirmation, response reservation, DOM/playout and voice presentation policy |
 | Store/reload opaque checkpoint bytes | executor/runtime/phase-bound checkpoint sub-authority composing PR 06 preauthorization and verified load | checkpoint codec, project payload Port, compatibility and retention policy; no raw locator/finalizer |
-| Journal and invoke one external effect | `TeamAgent.effect_authority`, `TeamExecutionEffectAuthority` and `ExternalEffectCoordinator` | provider credentials, request body, project/file probe, compensation and user confirmation policy |
+| Journal and invoke one external effect | PR 09-lease-bound effect grants plus the PR 10 trusted-registered token-free Adapter coordinator over accepted PR 07 | provider credentials and request body Port, project/file probe, compensation and user confirmation policy; no live token/raw finalizer |
 | Background Tool lifecycle | `AsyncToolRuntime` plus the exact A2 execution token | product timeout/escalation reporting and project resource cleanup |
 
 Important negative decisions:
@@ -209,7 +209,7 @@ changing its base. Replay must preserve upstream session-file hydration and
 write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
 the affected upstream tests.
 
-Read-only replay preflight is now complete through PR 09. PR 04 must preserve
+Read-only replay preflight is now complete through PR 10. PR 04 must preserve
 the accepted execution-quiescence, review-round, Team-tombstone, terminal and
 SessionFileStore contracts. PR 05 additionally requires non-cascading
 session-domain event/dispatch history, an explicit retired-Task/incarnation
@@ -260,8 +260,18 @@ PR 06 violations. Replay must rebuild structural reader/command/cursor/
 checkpoint grants over an opaque lifecycle lease, redact locators, bound list
 work, compose accepted subordinate validators and explicitly resolve raw
 Manager compatibility. The independent historical-source review reports `5
-Critical / 4 Important`; none of PR 04–09 has started formal implementation.
-All remain blocked on accepted, reviewable dependency tips.
+Critical / 4 Important`. PR 10's historical effect facade independently
+recreates that lease/construction bypass, exposes raw claim/CALL/OBSERVE tokens
+and evidence writers, accepts arbitrary caller-injected Adapters and separates
+Provider return from durable result finalization. Its coordinator also maps both
+pre-call rejection and possibly executed Provider failure to `None`, while Team
+clean can cascade the audit during an in-flight call. The independent PR 10
+review reports `5 Critical / 4 Important`. Replay must derive structural effect
+grants from PR 09, retain PR 07 tokens/result writers internally, bind a trusted
+registry-derived Adapter namespace/key and verified request, return typed zero-call/finalized/
+ambiguous outcomes and preserve reserved normal-clean tombstones. None of PR
+04–10 has started formal implementation. All remain blocked on accepted,
+reviewable dependency tips.
 
 For every PR:
 
