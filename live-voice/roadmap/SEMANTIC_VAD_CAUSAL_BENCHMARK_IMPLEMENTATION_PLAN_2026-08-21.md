@@ -238,7 +238,7 @@ git commit -m "feat(live-voice): preserve semantic VAD route authority"
 - Consumes: existing corpus loader, absolute pacing, Provider factory, integrity oracle, cleanup and mode-600 writer.
 - Produces: closed configs `A1_1200`, `B_AUTO`, `A2_1200`, `B_HIGH`; report schema revision with `turn_detection_mode` and nullable `semantic_eagerness`.
 
-- [ ] **Step 1: Write RED configuration/report tests**
+- [x] **Step 1: Write RED configuration/report tests**
 
 ```python
 assert parse_configuration("B_AUTO") == VadConfiguration(
@@ -252,13 +252,13 @@ assert parse_configuration("A1_1200").silence_duration_ms == 1200
 
 Assert the existing fixed-threshold CLI remains accepted, private fields remain rejected, non-success attempts carry no numeric latency and report overwrite/mode/hash protections remain intact.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py -q --no-cov
 ```
 
-- [ ] **Step 3: Generalize configuration only; reuse every existing oracle**
+- [x] **Step 3: Generalize configuration only; reuse every existing oracle**
 
 ```python
 def turn_detection_for(configuration: VadConfiguration) -> RecognitionTurnDetection:
@@ -272,7 +272,7 @@ def turn_detection_for(configuration: VadConfiguration) -> RecognitionTurnDetect
 
 Do not fork pacing, transcript comparison, event-order validation, forbidden counters or cleanup code. Add only the mode-specific expected commit disposition.
 
-- [ ] **Step 4: Add the exact A/B/A commands**
+- [x] **Step 4: Add the exact A/B/A commands**
 
 Extend the existing closed parser with one optional experiment selector:
 
@@ -294,7 +294,7 @@ arguments. The pilot uses one attempt per case; formal `run` uses five. The CLI
 refuses mixed corpora, dirty source for credited mode, changed model labels and
 reused run IDs.
 
-- [ ] **Step 5: Run GREEN and static checks**
+- [x] **Step 5: Run GREEN and static checks**
 
 ```bash
 uv run pytest tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py -q --no-cov
@@ -302,7 +302,7 @@ uv run ruff check scripts/live_voice/vad_eot_causal_benchmark.py scripts/live_vo
 uv run python -m py_compile scripts/live_voice/vad_eot_causal_benchmark.py scripts/live_voice/vad_eot_benchmark_support.py
 ```
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add scripts/live_voice/vad_eot_causal_benchmark.py scripts/live_voice/vad_eot_benchmark_support.py tests/unit_tests/live_voice/test_vad_eot_causal_benchmark.py
