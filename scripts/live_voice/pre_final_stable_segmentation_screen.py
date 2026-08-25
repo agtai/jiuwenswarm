@@ -9,11 +9,18 @@ exact immutable prefix before retaining any attractive latency.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
+import math
+import os
+import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from pathlib import Path
+from typing import Callable, Iterable
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -54,12 +61,25 @@ ZERO_FORBIDDEN_EFFECTS = {
     "product_downlinks": 0,
     "audio_playouts": 0,
 }
+REPORT_SCHEMA_VERSION = "live-voice.pre-final-stable-segmentation-screen.v0"
+MATERIALITY_THRESHOLD_MS = 500.0
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True, slots=True)
 class Workload:
     workload_id: str
     prompt: str
+
+
+WORKLOADS = (
+    Workload("medium", "Explain the complete water cycle in nature in 5 points."),
+    Workload(
+        "long",
+        "Please introduce Hangzhou in 8 detailed points, with at least two "
+        "sentences for each point, then give a summary.",
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,3 +386,217 @@ async def measure_attempt(
         (final_at - candidate_at) * 1000.0,
         (final_at - started_at) * 1000.0,
     )
+
+
+def _percentile(values: Iterable[float], percentile: float) -> float | None:
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    rank = max(0, math.ceil(percentile * len(ordered)) - 1)
+    return round(ordered[rank], 3)
+
+
+def build_report(
+    *,
+    mode: str,
+    git_commit: str,
+    agent_core_commit: str,
+    attempts: tuple[Attempt, ...],
+) -> dict[str, object]:
+    workloads = WORKLOADS[:1] if mode == "smoke" else WORKLOADS
+    attempts_per_workload = 1 if mode == "smoke" else 5
+    expected_count = len(workloads) * attempts_per_workload
+    summaries: dict[str, object] = {}
+    for workload in workloads:
+        selected = [attempt for attempt in attempts if attempt.workload_id == workload.workload_id]
+        completed = [attempt for attempt in selected if attempt.outcome == "completed"]
+        candidate_to_final = [
+            attempt.candidate_to_final_ms
+            for attempt in completed
+            if attempt.candidate_to_final_ms is not None
+        ]
+        candidate_p50 = _percentile(candidate_to_final, 0.50)
+        summaries[workload.workload_id] = {
+            "attempted": len(selected),
+            "completed": len(completed),
+            "agent_to_candidate_ms": {
+                "p50": _percentile(
+                    (
+                        attempt.agent_to_candidate_ms
+                        for attempt in completed
+                        if attempt.agent_to_candidate_ms is not None
+                    ),
+                    0.50,
+                ),
+                "p95_nearest_rank": _percentile(
+                    (
+                        attempt.agent_to_candidate_ms
+                        for attempt in completed
+                        if attempt.agent_to_candidate_ms is not None
+                    ),
+                    0.95,
+                ),
+            },
+            "candidate_to_final_ms": {
+                "p50": candidate_p50,
+                "p95_nearest_rank": _percentile(candidate_to_final, 0.95),
+            },
+            "agent_to_final_ms": {
+                "p50": _percentile(
+                    (
+                        attempt.agent_to_final_ms
+                        for attempt in completed
+                        if attempt.agent_to_final_ms is not None
+                    ),
+                    0.50,
+                ),
+                "p95_nearest_rank": _percentile(
+                    (
+                        attempt.agent_to_final_ms
+                        for attempt in completed
+                        if attempt.agent_to_final_ms is not None
+                    ),
+                    0.95,
+                ),
+            },
+            "materiality_threshold_ms": MATERIALITY_THRESHOLD_MS,
+            "materiality_pass": (
+                len(completed) == attempts_per_workload
+                and candidate_p50 is not None
+                and candidate_p50 >= MATERIALITY_THRESHOLD_MS
+            ),
+        }
+    integrity_pass = (
+        len(attempts) == expected_count
+        and all(attempt.outcome == "completed" for attempt in attempts)
+        and all(
+            attempt.reconciliation_disposition
+            == FinalReconciliationDisposition.EXACT_PREFIX.value
+            for attempt in attempts
+        )
+    )
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "mode": mode,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git_commit": git_commit,
+        "agent_core_commit": agent_core_commit,
+        "measurement_boundary": "agent_started_to_exact_prefix_candidate_to_chat_final",
+        "candidate_authority": "retrospective_validation_only",
+        "tools_allowed": False,
+        "agent_payload_retained": False,
+        "p95_method": "nearest_rank_small_population",
+        "intended_attempts": expected_count,
+        "status": "PASS" if integrity_pass else "FAIL",
+        "attempts": [attempt.to_dict() for attempt in attempts],
+        "summaries": summaries,
+        "forbidden_effects": dict(ZERO_FORBIDDEN_EFFECTS),
+    }
+
+
+def write_report(output: Path, report: dict[str, object]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ("git", *args), cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def validate_source(root: Path, git_commit: str, output: Path) -> None:
+    if output.exists():
+        raise FileExistsError("benchmark output already exists")
+    if _git(root, "rev-parse", "HEAD") != git_commit:
+        raise ValueError("git commit does not match the checked-out source")
+    if _git(root, "status", "--porcelain"):
+        raise ValueError("benchmark requires a clean source tree")
+
+
+async def _run(args: argparse.Namespace) -> int:
+    root = Path(__file__).resolve().parents[2]
+    output = Path(args.output).resolve()
+    validate_source(root, args.git_commit, output)
+    project_dir = Path(args.project_dir).resolve()
+    if not project_dir.is_dir():
+        raise ValueError("project directory does not exist")
+
+    from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+    manager = AgentManager()
+    attempts: list[Attempt] = []
+    try:
+        facade = await manager.get_agent(
+            channel_id="live_voice_pre_final_segmentation_screen",
+            mode="agent",
+            project_dir=str(project_dir),
+        )
+        if facade is None:
+            raise RuntimeError("formal Agent facade is unavailable")
+        workloads = WORKLOADS[:1] if args.command == "smoke" else WORKLOADS
+        count = 1 if args.command == "smoke" else 5
+        failed = False
+        for workload in workloads:
+            for attempt_index in range(count):
+                attempt = await measure_attempt(facade, workload, attempt_index)
+                attempts.append(attempt)
+                print(
+                    json.dumps(
+                        {
+                            "workload_id": workload.workload_id,
+                            "attempt_index": attempt_index,
+                            "outcome": attempt.outcome,
+                            "agent_to_candidate_ms": attempt.agent_to_candidate_ms,
+                            "candidate_to_final_ms": attempt.candidate_to_final_ms,
+                            "agent_to_final_ms": attempt.agent_to_final_ms,
+                        }
+                    ),
+                    flush=True,
+                )
+                if attempt.outcome != "completed":
+                    failed = True
+                    break
+            if failed:
+                break
+    finally:
+        await asyncio.wait_for(manager.cleanup(), timeout=15)
+
+    report = build_report(
+        mode=args.command,
+        git_commit=args.git_commit,
+        agent_core_commit=args.agent_core_commit,
+        attempts=tuple(attempts),
+    )
+    write_report(output, report)
+    return 0 if report["status"] == "PASS" else 2
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("smoke", "run"))
+    parser.add_argument("--project-dir", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--git-commit", required=True, type=str.lower)
+    parser.add_argument("--agent-core-commit", required=True, type=str.lower)
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    if not _COMMIT_RE.fullmatch(args.git_commit) or not _COMMIT_RE.fullmatch(
+        args.agent_core_commit
+    ):
+        raise SystemExit("commit arguments must be full lowercase SHA-1 values")
+    try:
+        return asyncio.run(_run(args))
+    except BaseException as error:
+        print(f"PRE_FINAL_STABLE_SEGMENTATION_FAILED: {type(error).__name__}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

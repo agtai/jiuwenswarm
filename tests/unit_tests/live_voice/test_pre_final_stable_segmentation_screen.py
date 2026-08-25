@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -143,3 +144,45 @@ async def test_timeout_fails_closed_and_cleans_up() -> None:
     assert attempt.agent_to_candidate_ms is None
     assert attempt.candidate_to_final_ms is None
     assert attempt.agent_to_final_ms is None
+
+
+def test_report_is_private_exclusive_and_mode_600(tmp_path: Path) -> None:
+    output = tmp_path / "report.json"
+    attempt = screen.Attempt.completed("medium", 0, 400.0, 800.0, 1200.0)
+    report = screen.build_report(
+        mode="smoke",
+        git_commit="a" * 40,
+        agent_core_commit="b" * 40,
+        attempts=(attempt,),
+    )
+
+    screen.write_report(output, report)
+    serialized = output.read_text(encoding="utf-8")
+    assert report["status"] == "PASS"
+    assert report["summaries"]["medium"]["materiality_pass"] is True
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert "private" not in serialized
+    assert "prompt" not in serialized
+    assert "content" not in serialized
+    with pytest.raises(FileExistsError):
+        screen.write_report(output, report)
+
+
+def test_source_validation_rejects_mismatch_dirty_and_existing_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "report.json"
+    answers = iter(("b" * 40, ""))
+    monkeypatch.setattr(screen, "_git", lambda *_args: next(answers))
+    with pytest.raises(ValueError, match="does not match"):
+        screen.validate_source(tmp_path, "a" * 40, output)
+
+    answers = iter(("a" * 40, "dirty"))
+    monkeypatch.setattr(screen, "_git", lambda *_args: next(answers))
+    with pytest.raises(ValueError, match="clean source"):
+        screen.validate_source(tmp_path, "a" * 40, output)
+
+    output.touch()
+    with pytest.raises(FileExistsError):
+        screen.validate_source(tmp_path, "a" * 40, output)
