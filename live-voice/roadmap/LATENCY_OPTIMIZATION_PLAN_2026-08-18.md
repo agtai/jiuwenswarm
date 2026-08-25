@@ -91,6 +91,16 @@
 > `3b85425ac` and `4efd2b6c0` pass Tier-2 re-review but remain isolated and
 > unmeasured.
 
+> **2026-08-25 Agent first-delta result:** source `f71a5d830` completed a
+> content-free real-Agent population, 15/15. Agent-start→first-delta p50 was
+> 522.856/543.185/591.914 ms and first-delta→final p50 was
+> 8.779/1676.287/3518.228 ms for short/medium/long output. Short remains
+> non-material for pre-final segmentation; medium/long now justify a separate
+> exact-prefix screen. This does not prove immutable-prefix authority and does
+> not decompose queue, request preparation, connection/network or model
+> first-token latency. See the
+> [source-bound baseline](../evidence/AGENT_FIRST_DELTA_BASELINE_2026-08-25.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -457,11 +467,11 @@ Current latency work should be packetized in this dependency order:
    physical playout and reliability evidence close the Browser Gate;
 3. preserve the LVL-08 protocol repair but reject AUTO after its 600/1000 ms
    continuation failures; retain 1200 ms and do not run HIGH;
-4. measure the isolated, Tier-2-reviewed Agent start/first-delta probe points, then
-   combined interval, and only then specify connection, warm-up or prompt-size
-   candidates where the measured local boundary is material;
-5. run a separate long-form pre-final stable-prefix materiality screen. Keep
-   short/medium LVL-07 stopped and keep post-final LVL-10/LVL-10L independent;
+4. preserve the 15/15 real-Agent first-delta baseline, then decompose queue,
+   request preparation, connection/network and model first-token latency before
+   specifying connection, warm-up or prompt-size candidates;
+5. run a separate medium/long pre-final exact-prefix materiality screen. Keep
+   short output stopped and keep post-final LVL-10/LVL-10L independent;
 6. consider authoritative acknowledgements for genuinely long Task operations
    only when perceived latency is the product priority;
 7. treat native speech-to-speech as a separate strategic architecture study,

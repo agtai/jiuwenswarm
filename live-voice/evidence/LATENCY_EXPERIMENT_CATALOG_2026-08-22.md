@@ -1,10 +1,10 @@
 # Live Voice latency experiment catalog
 
 > Catalog date: 2026-08-22
-> Last synchronized: 2026-08-24
+> Last synchronized: 2026-08-25
 >
 > This is the canonical English reading route for the latency experiments and
-> follow-up episodes recorded from 2026-08-20 through 2026-08-24. It is a dated
+> follow-up episodes recorded from 2026-08-20 through 2026-08-25. It is a dated
 > evidence catalog, not the mutable
 > product-status authority. [STATUS](../STATUS.md) owns current product
 > judgement; the
@@ -61,7 +61,7 @@ Gate C when product wiring, Browser audio or human-perceived output is affected.
 These branches remain separate because each owns a different candidate or
 measurement boundary.
 
-| Branch | Head at catalog construction | Role |
+| Branch | Evidence-bound head | Role |
 |---|---|---|
 | `0812_live_voice_w3_renan` | `c0f249d4363912c23835d3e133c7093459d2a25b` | Documentation hub, probe lineage and physical diagnostic origin |
 | `latency/p2-bounded-pull-b` | `465a21625bf253729f00b7c84e6cc08e9bd746a2` | P2 bounded-pull implementation/result owner |
@@ -70,10 +70,12 @@ measurement boundary.
 | `latency_checkpoint_accepted_optimizations` | `6843a4c233f926b73e1b4d972170409f9834c17e` | Controlled combined checkpoint and Semantic VAD spec owner |
 | `latency/eot-stt-settlement-overlap` | `9b4034cd9d7123cdfe8880b2a06c368a6f375f7b` | EOT/STT materiality and TTS first-audio evidence carrier |
 | `latency/stable-sentence-agent-tts` | `0c92b26264076d875a1247a0585dd8334898904f` | Stable-sentence screen/result owner |
+| `latency/agent-first-delta-probe` | `f71a5d8300f621616030c4dafa608edaec6e46b0` | Real-Agent first-visible-delta diagnostic owner |
 
-The exact A/reference commits, detached benchmark worktrees and remote-tracking
-refs are immutable evidence inputs. They are not documentation targets and do
-not receive credit from later documentation commits.
+The construction-time heads and later dated additions above are exact evidence
+inputs. A/reference commits, detached benchmark worktrees and remote-tracking
+refs are not documentation targets and do not receive credit from later
+documentation commits.
 
 ### 2.1 2026-08-23 composition overlay
 
@@ -110,6 +112,7 @@ a frozen-corpus off/on waterfall.
 | `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser target diagnostic; estimated schedule boundary | Same-workload target **718.549/48.432/721.306 ms**, B gain **670.117–672.874 ms**; A2 later cancelled | Target materiality only; default remains 1000 ms and physical acceptance is incomplete |
 | `LVL-10` | Authoritative-final chunked TTS | Real-Provider no-Browser `A1/B/A2`; two formal 45/45 populations | **INCONCLUSIVE:** medium A1/A2 drift 426.8 ms in run 1; long drift 321.7 ms in run 2. Long completion B repeated **20–24%** improvement, while medium regressed | Stop before Browser/product wiring; a completion-primary long-form follow-up requires a new prospective hypothesis/spec |
 | `LVL-10L` | Completion-primary long-form chunked TTS | Real-Provider no-Browser A1/B2/B4/A2 pilots; formal stopped | **DIRECTIONAL:** clean v2 pilot 12/12, B2/B4 2100-character completion gain **6.93 s / 36.85%** and **7.75 s / 41.27%**; five-round formal has no attempt artifacts | Stop long-duration testing per Hongxing; no arm selection, Browser or product wiring |
+| `LVL-11` | Agent first-visible-delta baseline | Real-Agent no-Browser/no-Speech diagnostic; 5 sequential attempts per short/medium/long workload | 15/15 complete; first-delta p50 **522.856 / 543.185 / 591.914 ms** and delta→final p50 **8.779 / 1676.287 / 3518.228 ms** | Diagnostic materiality only. Short stops; medium/long proceed to an exact-prefix screen before any pre-final speech authority |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -710,7 +713,28 @@ The clean pilot repeats LVL-10's long-form direction, but one round cannot
 select B2/B4 or satisfy a formal population. Product remains one request. See
 the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md).
 
-## 16. What has and has not been measured end to end
+## 16. LVL-11 — Agent first-visible-delta baseline
+
+This Gate-B diagnostic runs the real formal Agent with tools disabled and
+measures `agent.agent_started → first non-empty chat.delta → chat.final`. It
+bypasses Browser, capture, STT, presentation, TTS and playout and therefore has
+no physical first-audio or product end-to-end credit.
+
+| Workload | Agent start → first delta p50 / p95 | First delta → final p50 / p95 | Agent start → final p50 / p95 |
+|---|---:|---:|---:|
+| Short | 522.856 / 1337.260 ms | 8.779 / 8.853 ms | 531.645 / 1345.974 ms |
+| Medium | 543.185 / 682.479 ms | 1676.287 / 1699.966 ms | 2215.234 / 2359.441 ms |
+| Long | 591.914 / 742.521 ms | 3518.228 / 3637.023 ms | 4158.856 / 4260.749 ms |
+
+All 15 calls completed with zero forbidden Tool, Task, history, STT, TTS,
+Browser, product-downlink or audio-playout effects. With five samples per
+workload, P95 is the nearest-rank maximum and is not a production percentile.
+The first delta is not automatically a speakable immutable prefix. The medium
+and long windows justify a separate exact-prefix screen; they do not authorize
+a pre-final `PresentationUnit`. Detailed method and artifact hashes are in the
+[source-bound baseline](AGENT_FIRST_DELTA_BASELINE_2026-08-25.md).
+
+## 17. What has and has not been measured end to end
 
 | Question | Current answer |
 |---|---|
@@ -719,9 +743,10 @@ the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md).
 | Do we have a clean physical A/B/A for any optimization? | No. LVL-09 now has a same-workload target trio with 2.757 ms control drift, but A2 cancelled before playout completion. |
 | Do we have full-round causal composition timings? | Yes, `LVL-05`, but they are controlled 6.985–10.240 s B totals, not physical E2E. |
 | Do we have accepted real-Provider component timings? | Yes for the VAD rejection, connection-reuse rejection and stable-sentence materiality stop; each excludes Browser/full E2E. |
+| Do we have real-Agent first-delta timing? | Yes: LVL-11 completed 15/15 and measures the aggregate Agent-start→delta→final boundary. It does not decompose queue/network/model time or prove stable-prefix authority. |
 | Is approximately 46% a locally verified product gain? | No. It remains `REPORTED_EXTERNAL`. LVL-01D later closed the workflow defect for one accepted human run but did not reproduce the feature-off/on percentage. |
 
-## 17. Artifact retention summary
+## 18. Artifact retention summary
 
 The private archive is
 `/home/renan/openJiuwen-ai/live-voice-latency-runs/`. Its README is the full
@@ -740,12 +765,13 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-05 | Credited `accepted-checkpoint-20260821-v2/` population survives; unversioned population is superseded |
 | LVL-06 | Credited final raw report is lost; sanitized final evidence survives; earlier diagnostic raw survives |
 | LVL-07 | Credited v2 artifacts survive with verified bindings; unversioned pilot directories are superseded |
-| LVL-08 | No run artifact exists |
+| LVL-08 | The 12-slot AUTO retry report survives in the private latency-runs archive with SHA-256 `64bfcbd8d5601ae4e924b715e7833188bdf4ae26a4ec8e78f3b51bd85c94981c`; AUTO is integrity-rejected |
 | LVL-09 | The older reused manual directory remains incompatible; the 2026-08-25 run binds a same-workload target trio but A2 is partial/cancelled |
 | LVL-10 | Failed 2-second preflight, corrected 9/9 pilot and two 45/45 formal real-Provider populations survive with hashes bound in the [LVL-10 result](LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md) |
 | LVL-10L | Quota-rejected v1 pilot, cap-boundary v1 pilot and passing v2 pilot survive under `latency-runs/lvl10l`; the stopped v2 formal retains only run/manifest. Hashes are bound in the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md) |
+| LVL-11 | Content-free smoke and 15-attempt population reports survive under `latency-runs/agent-first-delta-20260825/`; population SHA-256 `c81fd7fcbcdc593d26f8ca30dd169164bc1c43c7f3998c59f944e19775fc16a4` |
 
-## 18. Current decision route
+## 19. Current decision route
 
 1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
    LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
@@ -757,14 +783,19 @@ artifact ledger. The repository stores only sanitized evidence.
    The repaired driver bound profile/round/terminal correctly, but A2 cancelled
    after first-start. Keep 1000 ms until completed playout and reliability
    evidence close physical acceptance.
-4. Run the already specified Provider-native Semantic VAD causal
-   screen with the 1200 ms fallback and natural-pause integrity gates.
-5. Treat native speech-to-speech as a strategic architecture study requiring a
+4. Preserve the LVL-08 protocol repair but reject AUTO after early EOT at
+   600/1000 ms. Keep the 1200 ms fallback and do not run HIGH without a new
+   continuation-safe hypothesis.
+5. Preserve the LVL-11 aggregate Agent baseline. Decompose queue, request,
+   connection/network and model first-token timing separately.
+6. Keep pre-final segmentation stopped for short output and run a medium/long
+   exact-prefix screen before any product or TTS wiring.
+7. Treat native speech-to-speech as a strategic architecture study requiring a
    separate authority decision, not as the next optimization packet.
-6. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
+8. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
    stable-sentence packet closed unless a new reviewed mechanism or workload
    hypothesis changes the materiality question.
-7. Keep batch-32, server push and coalescing frozen until a deployed waterfall
+9. Keep batch-32, server push and coalescing frozen until a deployed waterfall
    demonstrates material residual P2 backlog.
 
 Every future result uses
