@@ -9966,21 +9966,35 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure_reason", "expected_fallback_reason", "fail_first_text_push"),
+    (
+        "failure_reason",
+        "expected_fallback_reason",
+        "fail_first_text_push",
+        "foreground_busy",
+    ),
     [
         (
             "task_audio_playout_failed",
             "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED",
+            False,
             False,
         ),
         (
             "task_audio_owner_unavailable",
             "TASK_PROGRESS_AUDIO_OWNER_UNAVAILABLE",
             False,
+            False,
         ),
         (
             "task_audio_playout_failed",
             "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED",
+            True,
+            False,
+        ),
+        (
+            "task_audio_playout_failed",
+            "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED",
+            False,
             True,
         ),
     ],
@@ -9991,6 +10005,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
     failure_reason: str,
     expected_fallback_reason: str,
     fail_first_text_push: bool,
+    foreground_busy: bool,
 ) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
@@ -10001,11 +10016,13 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
     composition.subscription_events = source_events
     manager = _AgentManager()
     pushed: list[dict[str, object]] = []
+    fallback_emitted = asyncio.Event()
 
     async def push(message: dict[str, object]) -> bool:
         pushed.append(message)
         if fail_first_text_push and len(pushed) == 1:
             return False
+        fallback_emitted.set()
         return True
 
     registry = AgentServerProductCompositionRegistry(
@@ -10079,11 +10096,161 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         unit_id=audio_unit["unit_id"],
         failure_reason=failure_reason,
     )
+    foreground_notification: dict[str, object] | None = None
+    release_first_failure: asyncio.Event | None = None
+    first_failure_entered: asyncio.Event | None = None
+    task_authority_call_count = len(composition.production_authority_calls)
+    task_reader_call_count = len(composition.production_reader_calls)
+    subscription_count = len(composition.subscription_calls)
+    if foreground_busy:
+        submitted = await registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-audio-fallback-foreground",
+                turn_id="turn-audio-fallback-foreground",
+                response_id="response-audio-fallback-foreground",
+                committed_at=NOW,
+                text="keep the foreground response active",
+            ),
+            request_id="request-audio-fallback-foreground-submit",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+        assert submitted.ok
+        await asyncio.wait_for(manager.agent.wait_for_calls(1), timeout=1)
+        for _ in range(4):
+            sequence += 1
+            polled = await registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-audio-fallback-foreground-next-{sequence}",
+                session_id=SCOPE.session_id,
+            )
+            assert polled.ok
+            candidate = cast(dict[str, object], polled.payload["result"])
+            candidate_response = candidate.get("response")
+            if (
+                isinstance(candidate_response, Mapping)
+                and isinstance(candidate.get("presentation_unit"), Mapping)
+                and candidate_response.get("response_id")
+                == "response-audio-fallback-foreground"
+            ):
+                foreground_notification = candidate
+                break
+        assert foreground_notification is not None
+
+    if foreground_busy:
+        release_first_failure = asyncio.Event()
+        first_failure_entered = asyncio.Event()
+        emit_text_progress = registry._emit_text_progress
+
+        async def hold_first_failure(*args: object, **kwargs: object) -> object:
+            assert first_failure_entered is not None
+            assert release_first_failure is not None
+            first_failure_entered.set()
+            await release_first_failure.wait()
+            return await emit_text_progress(*args, **kwargs)
+
+        monkeypatch.setattr(registry, "_emit_text_progress", hold_first_failure)
+        first = asyncio.create_task(
+            registry.handle_p2_presentation_failed(
+                params=failure_params,
+                request_id="request-audio-fallback-failed",
+                session_id=SCOPE.session_id,
+            )
+        )
+        await asyncio.wait_for(first_failure_entered.wait(), timeout=1)
+        replay = asyncio.create_task(
+            registry.handle_p2_presentation_failed(
+                params=failure_params,
+                request_id="request-audio-fallback-failed",
+                session_id=SCOPE.session_id,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not replay.done()
+        release_first_failure.set()
+        failed, replayed = await asyncio.wait_for(
+            asyncio.gather(first, replay), timeout=1
+        )
+        assert failed.ok
+        assert replayed.payload == failed.payload
+        assert pushed == []
+        foreground_response = cast(
+            dict[str, object], foreground_notification["response"]
+        )
+        foreground_unit = cast(
+            dict[str, object], foreground_notification["presentation_unit"]
+        )
+        foreground_ack_params = _p2_params(
+            response_id=foreground_response["response_id"],
+            response_generation=foreground_response["response_generation"],
+            surface=foreground_unit["surface"],
+            unit_id=foreground_unit["unit_id"],
+            contiguous_cursor=foreground_unit["seq"],
+            presented_at=ACK_NOW,
+        )
+        assert {
+            key: foreground_ack_params[key]
+            for key in ("response_id", "response_generation", "surface", "unit_id")
+        } == {
+            "response_id": foreground_response["response_id"],
+            "response_generation": foreground_response["response_generation"],
+            "surface": foreground_unit["surface"],
+            "unit_id": foreground_unit["unit_id"],
+        }
+        acknowledged = await registry.handle_p2_presentation_ack(
+            params=foreground_ack_params,
+            request_id="request-audio-fallback-foreground-ack",
+            session_id=SCOPE.session_id,
+        )
+        assert acknowledged.ok
+        await asyncio.wait_for(fallback_emitted.wait(), timeout=1)
+        assert len(pushed) == 1
+        fallback_payload = cast(dict[str, object], pushed[0]["payload"])
+        assert fallback_payload["presentation_class"] == "text"
+        assert fallback_payload["fallback_reason"] == expected_fallback_reason
+        assert manager.agent.calls == 1
+        assert len(composition.production_authority_calls) == task_authority_call_count
+        assert len(composition.production_reader_calls) == task_reader_call_count
+        assert len(composition.subscription_calls) == subscription_count
+        assert (
+            store.unread_events_page(
+                task_id, SCOPE, presentation_class="voice", limit=500
+            ).watermark
+            == -1
+        )
+        assert (
+            store.unread_events_page(
+                task_id, SCOPE, presentation_class="text", limit=500
+            ).watermark
+            == -1
+        )
+        late_audio_ack = await registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=response["response_id"],
+                response_generation=response["response_generation"],
+                surface=audio_unit["surface"],
+                unit_id=audio_unit["unit_id"],
+                contiguous_cursor=audio_unit["seq"],
+                presented_at=ACK_NOW,
+            ),
+            request_id="request-audio-fallback-late-ack",
+            session_id=SCOPE.session_id,
+        )
+        assert not late_audio_ack.ok
+        assert cast(dict[str, object], late_audio_ack.payload["error"])["reason"] == (
+            "TASK_PROGRESS_PRESENTATION_CLOSED"
+        )
+        assert manager.agent.calls == 1
+        assert len(pushed) == 1
+        await registry.stop()
+        return
+
     failed = await registry.handle_p2_presentation_failed(
         params=failure_params,
         request_id="request-audio-fallback-failed",
         session_id=SCOPE.session_id,
     )
+
     retried = await registry.handle_p2_presentation_failed(
         params=failure_params,
         request_id="request-audio-fallback-failed",

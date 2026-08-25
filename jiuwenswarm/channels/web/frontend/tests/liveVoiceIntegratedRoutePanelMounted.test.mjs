@@ -1454,13 +1454,16 @@ function mountedP2SubmitResult(params, requestId) {
   };
 }
 
-async function waitForMounted(predicate, message, timeoutMs = 2_000) {
+async function waitForMountedDefault(predicate, message, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise(resolve => setTimeout(resolve, 5));
   }
 }
+
+const waitForMounted = (predicate, message, timeoutMs = 2_000) =>
+  waitForMountedDefault(predicate, message, timeoutMs);
 
 test('mounted placeholder new Session never allocates or retries Product voice authority', async () => {
   const i18n = await createI18n();
@@ -2799,12 +2802,14 @@ test('mounted Task intent response loss reconnects by content-free status with o
   }
 });
 
-test('mounted auto-submitted speech stays bound to the pre-rollover P2 activation', async () => {
+test('mounted predecessor submit cannot wake a same-Session successor notification lane', async () => {
   const i18n = await createI18n();
   const calls = [];
   const p2Activations = [];
   let activeMediaBinding = null;
   let rejectFirstNotification = null;
+  let releasePredecessorSubmit = null;
+  let successorNotificationCalls = 0;
   let renderer;
   const controlRef = { current: null };
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
@@ -2831,6 +2836,7 @@ test('mounted auto-submitted speech stays bound to the pre-rollover P2 activatio
           };
         });
       }
+      successorNotificationCalls += 1;
       return new Promise(() => {});
     }
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
@@ -2862,28 +2868,30 @@ test('mounted auto-submitted speech stays bound to the pre-rollover P2 activatio
       return mountedRecognition(params, 'Mounted stale activation speech', 1);
     }
     if (method === 'live_voice.composition.unified.submit') {
-      return {
-        request_id: options.requestId,
-        ok: true,
-        result: {
-          status: 'round_accepted',
-          session_id: params.session_id,
-          correlation_id: params.correlation_id,
-          interaction_id: params.interaction_id,
-          activation_id: params.activation_id,
-          activation_generation: params.activation_generation,
-          turn_id: params.turn_id,
-          commit_id: params.commit_id,
-          request_id: `mounted-rollover-agent-${params.voice_claim_id}`,
-          round_id: `mounted-rollover-round-${params.voice_claim_id}`,
-          response: {
+      return new Promise(resolve => {
+        releasePredecessorSubmit = () => resolve({
+          request_id: options.requestId,
+          ok: true,
+          result: {
+            status: 'round_accepted',
+            session_id: params.session_id,
+            correlation_id: params.correlation_id,
             interaction_id: params.interaction_id,
-            response_id: `mounted-rollover-response-${params.voice_claim_id}`,
-            response_generation: 0,
+            activation_id: params.activation_id,
+            activation_generation: params.activation_generation,
+            turn_id: params.turn_id,
+            commit_id: params.commit_id,
+            request_id: `mounted-rollover-agent-${params.voice_claim_id}`,
+            round_id: `mounted-rollover-round-${params.voice_claim_id}`,
+            response: {
+              interaction_id: params.interaction_id,
+              response_id: `mounted-rollover-response-${params.voice_claim_id}`,
+              response_generation: 0,
+            },
           },
-        },
-        error: null,
-      };
+          error: null,
+        });
+      });
     }
     throw new Error(`forbidden rollover business effect: ${method}`);
   };
@@ -2936,6 +2944,20 @@ test('mounted auto-submitted speech stays bound to the pre-rollover P2 activatio
     assert.equal(unified.params.activation_id, firstBinding.activation_id);
     assert.equal(unified.params.activation_generation, firstBinding.activation_generation);
     assert.equal(unified.params.text, 'Mounted stale activation speech');
+    assert.equal(typeof releasePredecessorSubmit, 'function', 'predecessor unified submit was not retained for the turnover fence');
+    await act(async () => {
+      releasePredecessorSubmit();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    assert.equal(
+      successorNotificationCalls,
+      0,
+      'a settled predecessor submit must not wake successor notification.next under its old foreground fence',
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
     assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length, 0);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
@@ -3703,8 +3725,9 @@ test('mounted non-stale Task AUDIO ACK waits for successful P1 playout and never
   }
 });
 
-test('mounted stale Task AUDIO stays side-effect free until foreground ACK then fails over without blocking later terminal AUDIO', async () => {
+test('mounted stale Task AUDIO settles a server-deferred TEXT fallback after foreground ACK without blocking later terminal AUDIO', async () => {
   const i18n = await createI18n();
+  const waitForMounted = (predicate, message) => waitForMountedDefault(predicate, message, 10_000);
   const sessionId = 'mounted-task-audio-success-session';
   const controlRef = { current: null };
   const calls = [];
@@ -3712,6 +3735,10 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
   const queuedNotifications = [];
   const notificationWaiters = [];
   const unifiedGate = deferred();
+  const serverDeferredTextFallbacks = [];
+  const serverDeferredTextDeliveries = [];
+  const eventOrder = [];
+  let foregroundAckObserved = false;
   let binding = null;
   let activeMediaBinding = null;
   let renderer;
@@ -3734,6 +3761,16 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
       return new Promise(resolve => notificationWaiters.push(resolve));
     }
     if (method === 'live_voice.composition.p2.presentation.ack') {
+      if (params.response_id === 'mounted-task-audio-foreground-response') {
+        foregroundAckObserved = true;
+        eventOrder.push('foreground-ack');
+        assert.equal(serverDeferredTextFallbacks.length, 1, 'the foreground ACK must release the one retained Task TEXT fallback');
+        serverDeferredTextDeliveries.push({
+          ...serverDeferredTextFallbacks[0],
+          released_after_foreground_ack: true,
+        });
+        eventOrder.push('deferred-text-release');
+      }
       return {
         request_id: options.requestId,
         ok: true,
@@ -3749,12 +3786,26 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
       };
     }
     if (method === 'live_voice.composition.p2.presentation.failed') {
+      assert.equal(
+        foregroundAckObserved,
+        false,
+        'Task AUDIO failure must reach the server while the foreground presentation is still busy',
+      );
+      eventOrder.push('task-audio-failure');
+      serverDeferredTextFallbacks.push({
+        ...params,
+        request_id: options.requestId,
+        status: 'presentation_failed_fallback_text',
+        fallback: 'text',
+        deferred: true,
+      });
       return {
         ok: true,
         result: {
           status: 'presentation_failed_fallback_text',
           ...params,
           fallback: 'text',
+          deferred: true,
           replayed: false,
         },
       };
@@ -3898,30 +3949,11 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
         },
       };
       publishNotification(notification);
-      await new Promise(resolve => globalThis.setTimeout(resolve, 25));
-      assert.equal(
-        calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length,
-        0,
-        'older Task AUDIO must not start TTS while the unified final is in flight',
-      );
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
-      unifiedGate.resolve();
-      await waitForMounted(() => notificationWaiters.length === 1, 'stale Task AUDIO did not release its notification lane');
-      publishNotification({
-        ok: true,
-        result: {
-          status: 'notification',
-          ...binding,
-          kind: 'transport.keepalive',
-          response: null,
-          agent_event: null,
-          progress_event: null,
-          presentation_unit: null,
-        },
-      });
       try {
-        await waitForMounted(() => notificationWaiters.length === 1, 'foreground successor poll did not start');
+        await waitForMounted(
+          () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 1,
+          'failed Task AUDIO did not settle through its exact failure owner before foreground ACK',
+        );
       } catch (error) {
         assert.fail(
           `${error.message}; states=${states
@@ -3930,6 +3962,25 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
             .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
         );
       }
+      assert.equal(foregroundAckObserved, false);
+      assert.equal(serverDeferredTextFallbacks.length, 1);
+      assert.equal(serverDeferredTextDeliveries.length, 0, 'the deferred TEXT fallback must not be delivered before foreground ACK');
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+      assert.equal(
+        calls.filter(
+          call =>
+            call.method === 'live_voice.speech.synthesize_batch' &&
+            call.params.response.response_id === 'mounted-task-audio-success-response',
+        ).length,
+        0,
+        'failed Task AUDIO must not start or replay TTS while its foreground-busy fallback is deferred',
+      );
+      unifiedGate.resolve();
+      await waitForMounted(
+        () => states.at(-1)?.text_status === 'waiting',
+        'the accepted foreground response did not establish its busy presentation fence',
+      );
+      await waitForMounted(() => notificationWaiters.length === 1, 'Task failure settlement did not release the foreground notification poll');
       publishNotification({
         ok: true,
         result: {
@@ -3987,7 +4038,7 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
     });
 
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 1);
     assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 0);
     await act(async () => {
       browser.endLatestSource();
@@ -4001,10 +4052,10 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
         'foreground successor playout did not emit its exact ACK',
       );
       await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 1,
-        'the deferred predecessor Task AUDIO did not settle through its exact failure owner',
+        () => serverDeferredTextDeliveries.length === 1,
+        'the exact foreground ACK did not release the server-deferred Task TEXT fallback',
       );
-      await waitForMounted(() => notificationWaiters.length === 1, 'the settled Task AUDIO did not release the next notification poll');
+      await waitForMounted(() => notificationWaiters.length === 1, 'foreground settlement did not release the next notification poll');
       publishNotification({
         ok: true,
         result: {
@@ -4105,10 +4156,61 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
     assert.equal(failures[0].params.surface, 'audio');
     assert.equal(failures[0].params.unit_id, 'mounted-task-audio-success-unit');
     assert.equal(failures[0].params.failure_reason, 'task_audio_playout_failed');
+    assert.deepEqual(
+      serverDeferredTextFallbacks.map(fallback => ({
+        response_id: fallback.response_id,
+        response_generation: fallback.response_generation,
+        surface: fallback.surface,
+        unit_id: fallback.unit_id,
+        status: fallback.status,
+        fallback: fallback.fallback,
+        deferred: fallback.deferred,
+      })),
+      [{
+        response_id: 'mounted-task-audio-success-response',
+        response_generation: 2,
+        surface: 'audio',
+        unit_id: 'mounted-task-audio-success-unit',
+        status: 'presentation_failed_fallback_text',
+        fallback: 'text',
+        deferred: true,
+      }],
+      'exactly one Task AUDIO failure must settle as the server-deferred TEXT fallback',
+    );
+    assert.deepEqual(
+      serverDeferredTextDeliveries.map(fallback => ({
+        response_id: fallback.response_id,
+        response_generation: fallback.response_generation,
+        surface: fallback.surface,
+        unit_id: fallback.unit_id,
+        released_after_foreground_ack: fallback.released_after_foreground_ack,
+      })),
+      [{
+        response_id: 'mounted-task-audio-success-response',
+        response_generation: 2,
+        surface: 'audio',
+        unit_id: 'mounted-task-audio-success-unit',
+        released_after_foreground_ack: true,
+      }],
+      'only the exact foreground ACK may release the one deferred Task TEXT fallback',
+    );
+    assert.deepEqual(
+      eventOrder,
+      ['task-audio-failure', 'foreground-ack', 'deferred-text-release'],
+      'the Task failure must precede the foreground ACK, which alone releases deferred TEXT',
+    );
     const syntheses = calls.filter(call => call.method === 'live_voice.speech.synthesize_batch');
     assert.deepEqual(
       syntheses.map(call => call.params.response.response_id),
-      ['mounted-task-audio-foreground-response', 'mounted-task-audio-subsequent-terminal-response'],
+      [
+        'mounted-task-audio-foreground-response',
+        'mounted-task-audio-subsequent-terminal-response',
+      ],
+    );
+    assert.equal(
+      syntheses.filter(call => call.params.response.response_id === 'mounted-task-audio-success-response').length,
+      0,
+      'failed Task AUDIO must not start or replay TTS after its accepted deferred TEXT fallback',
     );
     const p2Activations = calls.filter(call => call.method === 'live_voice.composition.p2.activate');
     assert.equal(p2Activations.length, 3);
@@ -4149,6 +4251,361 @@ test('mounted stale Task AUDIO stays side-effect free until foreground ACK then 
         call.params.response_id === 'mounted-task-audio-subsequent-terminal-response',
     );
     assert.equal(taskPlayoutReceiptIndex >= 0 && taskPlayoutReceiptIndex < taskPresentationAckIndex, true);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted stale Task TEXT defers to one foreground-ordered ACK without presentation failure or capture wedge', async () => {
+  const i18n = await createI18n();
+  const waitForMounted = (predicate, message) => waitForMountedDefault(predicate, message, 10_000);
+  const sessionId = 'mounted-task-text-deferred-session';
+  const controlRef = { current: null };
+  const calls = [];
+  const states = [];
+  const projectedMessages = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  const unifiedGate = deferred();
+  const eventOrder = [];
+  let foregroundAckObserved = false;
+  let binding = null;
+  let activeMediaBinding = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const publishNotification = notification => {
+    const waiter = notificationWaiters.shift();
+    if (waiter) waiter(notification);
+    else queuedNotifications.push(notification);
+  };
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      binding = { ...params };
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      return new Promise(resolve => notificationWaiters.push(resolve));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      if (params.response_id === 'mounted-task-text-foreground-response') {
+        foregroundAckObserved = true;
+        eventOrder.push('foreground-ack');
+      } else {
+        assert.equal(params.response_id, 'mounted-task-text-stale-response');
+        assert.equal(foregroundAckObserved, true, 'stale Task TEXT may ACK only after its authoritative foreground ACK');
+        eventOrder.push('deferred-text-ack');
+      }
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 0,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p2.presentation.failed') {
+      assert.fail('a stale Task TEXT presentation must never enter the AUDIO-only presentation.failed authority');
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-task-text-deferred-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'T'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, 'Read the latest background task update.', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      await unifiedGate.promise;
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'round_accepted',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+          request_id: `mounted-task-text-deferred-agent-${params.voice_claim_id}`,
+          round_id: `mounted-task-text-deferred-round-${params.voice_claim_id}`,
+          response: {
+            interaction_id: params.interaction_id,
+            response_id: 'mounted-task-text-foreground-response',
+            response_generation: 3,
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: `mounted-task-text-deferred-receipt-${params.response_id}`,
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'wav_pcm16_mono',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            data_base64: mountedWavBase64(),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    throw new Error(`unexpected Task TEXT deferred request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+          onProductVoiceMessage: event => projectedMessages.push(event),
+        }),
+      );
+      await waitForMounted(
+        () => controlRef.current !== null && states.at(-1)?.available === true,
+        'stale Task TEXT P1 owner did not activate',
+      );
+      await waitForMounted(() => notificationWaiters.length === 1, 'stale Task TEXT predecessor poll did not start');
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'stale Task TEXT capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'stale Task TEXT capture did not become ready');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.unified.submit'),
+        'stale Task TEXT source turn was not committed',
+      );
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'mounted-task-text-stale-response',
+            response_generation: 2,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'This stale Task TEXT must remain side-effect free until foreground settlement.',
+            source_provenance: 'server.task_notification',
+          },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-task-text-stale-unit',
+            seq: 0,
+            content_ref: `sha256:${'d'.repeat(64)}`,
+          },
+        },
+      });
+    });
+
+    assert.equal(foregroundAckObserved, false);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(
+      calls.filter(
+        call =>
+          call.method === 'live_voice.speech.synthesize_batch' &&
+          call.params.response.response_id === 'mounted-task-text-stale-response',
+      ).length,
+      0,
+      'stale Task TEXT must not synthesize before foreground settlement',
+    );
+    assert.equal(
+      projectedMessages.some(event => event.message.content.includes('This stale Task TEXT')),
+      false,
+      'stale Task TEXT must not project into UI/history before its ACK authority',
+    );
+
+    unifiedGate.resolve();
+    await act(async () => {
+      await waitForMounted(
+        () => states.at(-1)?.text_status === 'waiting',
+        'accepted foreground response did not establish its busy presentation fence',
+      );
+      try {
+        await waitForMounted(() => notificationWaiters.length === 1, 'foreground notification poll did not resume');
+      } catch (error) {
+        assert.fail(
+          `${error.message}; states=${states
+            .slice(-12)
+            .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}`)
+            .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+        );
+      }
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'mounted-task-text-foreground-response',
+            response_generation: 3,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'The foreground response remains authoritative.',
+            source_provenance: 'server.authoritative',
+          },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-task-text-foreground-unit',
+            seq: 0,
+            content_ref: `sha256:${'e'.repeat(64)}`,
+          },
+        },
+      });
+      await waitForMounted(
+        () =>
+          calls.some(
+            call =>
+              call.method === 'live_voice.speech.synthesize_batch' &&
+              call.params.response.response_id === 'mounted-task-text-foreground-response',
+          ),
+        'foreground successor did not reach the formal batch TTS owner',
+      );
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'foreground successor did not start browser playout');
+    });
+
+    await act(async () => {
+      browser.endLatestSource();
+      await waitForMounted(
+        () =>
+          calls.some(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.ack' &&
+              call.params.response_id === 'mounted-task-text-stale-response',
+          ),
+        'foreground settlement did not adopt the retained Task TEXT through its exact ACK authority',
+      );
+      try {
+        await waitForMounted(
+          () => calls.filter(call => call.method === 'live_voice.composition.p2.activate').length === 2,
+          'retained Task TEXT ACK did not release the successor capture activation',
+        );
+      } catch (error) {
+        assert.fail(
+          `${error.message}; states=${states
+            .slice(-12)
+            .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}`)
+            .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+        );
+      }
+    });
+
+    const acknowledgements = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
+    assert.deepEqual(
+      acknowledgements.map(call => ({
+        response_id: call.params.response_id,
+        response_generation: call.params.response_generation,
+        surface: call.params.surface,
+        unit_id: call.params.unit_id,
+      })),
+      [
+        {
+          response_id: 'mounted-task-text-foreground-response',
+          response_generation: 3,
+          surface: 'text',
+          unit_id: 'mounted-task-text-foreground-unit',
+        },
+        {
+          response_id: 'mounted-task-text-stale-response',
+          response_generation: 2,
+          surface: 'text',
+          unit_id: 'mounted-task-text-stale-unit',
+        },
+      ],
+      'foreground ACK must be the documented authority before exactly one retained Task TEXT ACK',
+    );
+    assert.deepEqual(eventOrder, ['foreground-ack', 'deferred-text-ack']);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(
+      calls.filter(
+        call =>
+          call.method === 'live_voice.speech.synthesize_batch' &&
+          call.params.response.response_id === 'mounted-task-text-stale-response',
+      ).length,
+      0,
+      'retained Task TEXT must ACK without a duplicate TTS replay',
+    );
+    assert.equal(
+      projectedMessages.some(event => event.message.content.includes('This stale Task TEXT')),
+      false,
+      'retained Task TEXT ACK must not create a duplicate UI/history projection',
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
+    assert.equal(
+      calls.some(
+        call =>
+          (call.method.includes('.task.') && call.method !== 'live_voice.task.list') ||
+          call.method.includes('.agent.') ||
+          call.method.includes('.tool.'),
+      ),
+      false,
+      'stale Task TEXT must not mutate Task, Agent, or Tool authority',
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 1);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
@@ -9759,6 +10216,7 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
   let unifiedAttempt = 0;
   let predecessorActivationGeneration = null;
   let predecessorCloseAttempts = 0;
+  let releasePredecessorPresentationFailure = null;
   const notificationWaiters = [];
   let firstAudioContextCloseStarted = false;
   let releaseFirstAudioContextClose = null;
@@ -9836,7 +10294,29 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
       };
     }
     if (method === 'live_voice.composition.p2.presentation.failed') {
-      throw new Error('Exit must leave deferred Task AUDIO settlement to exact P2 route close');
+      assert.equal(
+        params.response_id,
+        'mounted-exit-pending-stale-task-response',
+        'only the stale predecessor Task AUDIO may report failure during Exit',
+      );
+      assert.equal(params.response_generation, 0);
+      assert.equal(params.surface, 'audio');
+      assert.equal(params.unit_id, 'mounted-exit-pending-stale-task-unit');
+      assert.equal(params.failure_reason, 'task_audio_playout_failed');
+      return new Promise(resolve => {
+        releasePredecessorPresentationFailure = () => resolve({
+          request_id: options.requestId,
+          ok: true,
+          error: null,
+          result: {
+            status: 'presentation_failed_fallback_text',
+            ...params,
+            fallback: 'text',
+            deferred: true,
+            replayed: false,
+          },
+        });
+      });
     }
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.media.activate') {
@@ -10026,14 +10506,23 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
     let exitAndReenable = null;
     await act(async () => {
       publishNotificationForGeneration(predecessorGeneration, deferredStaleTaskPresentation);
-      await new Promise(resolve => setTimeout(resolve, 25));
+      await waitForMounted(
+        () =>
+          calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 1
+          && typeof releasePredecessorPresentationFailure === 'function',
+        'the stale predecessor Task AUDIO did not enter one retained presentation failure before Exit',
+      );
     });
     assert.equal(
       calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length,
       0,
       'the deferred stale Task AUDIO must have zero ACK effect before Exit',
     );
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length,
+      1,
+      'the stale predecessor Task AUDIO must report exactly one failure while its foreground submit remains pending',
+    );
     assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
     assert.equal(browser.counts.sourceStarts, 0);
     assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 0);
@@ -10052,8 +10541,14 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
         () => firstAudioContextCloseStarted && typeof releaseFirstAudioContextClose === 'function',
         'Exit did not enter the deterministic AudioContext cleanup gate',
       );
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length,
+        1,
+        'Exit must not replay the retained predecessor Task AUDIO failure before exact close',
+      );
       releaseFirstAudioContextClose();
-      await new Promise(resolve => setImmediate(resolve));
+      releasePredecessorPresentationFailure();
+      await Promise.resolve();
     });
     await act(async () => {
       await exitAndReenable;
@@ -10319,7 +10814,10 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
       ['mounted-exit-pending-task-after-exit-response', 'mounted-exit-pending-response-4'],
       'only the later exact Task AUDIO and current successor response may be ACKed',
     );
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+    const presentationFailures = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed');
+    assert.equal(presentationFailures.length, 1);
+    assert.equal(presentationFailures[0].params.response_id, 'mounted-exit-pending-stale-task-response');
+    assert.equal(presentationFailures[0].params.failure_reason, 'task_audio_playout_failed');
     assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 2);
     assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 2);
     assert.equal(calls.filter(call => call.method.startsWith('live_voice.task.') && call.method !== 'live_voice.task.list').length, 0);

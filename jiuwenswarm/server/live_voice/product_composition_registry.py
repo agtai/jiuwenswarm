@@ -159,6 +159,7 @@ from .product_p2_interaction_adapter import (
     P2LeaseState,
     P2LeaseCloseStatus,
     ProductP2InteractionAdapter,
+    ProductP2AdapterViolation,
 )
 from .product_p3_text_adapter import (
     ProductP3ProgressCleanupHandle,
@@ -2546,6 +2547,17 @@ class AgentServerProductCompositionRegistry:
                 or reserved.unit_id != handle.presentation_unit.unit_id
             ):
                 raise RuntimeError("Runtime published without exact Task reservation")
+        except ProductP2AdapterViolation as exc:
+            if exc.reason == "PRODUCT_TASK_NOTIFICATION_FOREGROUND_BUSY":
+                # AUDIO failure has already closed its exact reservation.  Keep
+                # the immutable TEXT fallback pending until the authoritative
+                # foreground ACK drains this route; returning a transient
+                # failure here lets a same-ID Gateway replay strand the browser
+                # settlement behind its own in-flight operation.
+                raise _ProgressPresentationDeferred(
+                    "Task TEXT fallback waits for the foreground presentation"
+                ) from exc
+            raise
         except BaseException:
             if reserved is not None:
                 with self._task_presentation_state_lock:
@@ -2659,7 +2671,7 @@ class AgentServerProductCompositionRegistry:
     async def _drain_voice_progress_for_p2_binding(
         self, binding: P2InteractionBinding
     ) -> None:
-        """Wake only deferred Task voice owned by the acknowledged P2 route."""
+        """Wake deferred Task presentations owned by the acknowledged P2 route."""
 
         async with self._lock:
             routes = tuple(
@@ -2681,6 +2693,12 @@ class AgentServerProductCompositionRegistry:
                 and origin.activation_generation == binding.activation_generation
             )
         for key, retained in routes:
+            # A failed AUDIO presentation may have retained an exact TEXT
+            # fallback while a foreground response still owned the Runtime
+            # lane. The foreground ACK is the authoritative release for both
+            # presentation classes; draining only voice leaves that fallback
+            # permanently pending and blocks browser capture recovery.
+            await self._drain_progress_presentation(key, "text")
             await self._drain_progress_presentation(key, "voice")
             await retained.progress_lease.drain_voice()
 

@@ -1383,6 +1383,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p2RecoveryEpoch, setP2RecoveryEpoch] = useState(0);
   const [retiredPresentationAckRecoveryEpoch, setRetiredPresentationAckRecoveryEpoch] = useState(0);
   const [p2NotificationWakeEpoch, setP2NotificationWakeEpoch] = useState(0);
+  const [foregroundPresentationEpoch, setForegroundPresentationEpoch] = useState(0);
   const [p3Activation, setP3Activation] = useState<Readonly<ProductWebP3ProgressSnapshot>>({
     status: FEATURE_LIVE_VOICE_INTEGRATED_WEB ? 'idle' : 'disabled',
     binding: null,
@@ -2105,7 +2106,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             response: retained.input,
           });
           if (
-            !settleDeferredTaskPresentationFailure(owner) &&
+            !settleDeferredTaskPresentation(owner) &&
             !continuePendingVoiceLoopP2Refresh()
           ) {
             scheduleProductVoiceLoopCapture();
@@ -2182,6 +2183,44 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       });
     retained.settlement = settlement;
     return settlement;
+  };
+
+  const settleDeferredTaskPresentation = (owner: ProductWebP2ActivationOwner) => {
+    const retained = currentDeferredTaskPresentation(owner);
+    if (retained === null || pendingPresentationAttemptRef.current !== null) return false;
+    if (retained.disposition.ack.surface === 'audio') {
+      return settleDeferredTaskPresentationFailure(owner);
+    }
+    if (retained.disposition.ack.surface !== 'text') return false;
+    const disposition = retained.disposition;
+    let markPlayoutSettled: () => void = () => undefined;
+    const playoutSettlement = new Promise<void>(resolve => {
+      markPlayoutSettled = resolve;
+    });
+    markPlayoutSettled();
+    const acknowledgementAttempt: PendingProductPresentationAttempt = {
+      owner,
+      input: {
+        ...disposition.ack,
+        presented_at: new Date().toISOString(),
+      },
+      response: disposition.response,
+      playoutSettlement,
+      markPlayoutSettled,
+      task_notification: {
+        task_id: createdProgressRouteRef.current?.task_id ?? terminalAnnouncementTaskIdRef.current ?? '',
+        disposition,
+        retry_count: 0,
+        retry_pending: false,
+      },
+      notification_repoll_before_capture: true,
+    };
+    deferredTaskPresentationRef.current = null;
+    pendingPresentationAttemptRef.current = acknowledgementAttempt;
+    updateTerminalAnnouncementState('acking');
+    setPendingPresentationAck(disposition.ack);
+    void settleProductPresentationAck(acknowledgementAttempt);
+    return true;
   };
 
   useEffect(() => {
@@ -2281,7 +2320,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         disposition.response ?? null,
       );
       const deferredTaskSettlementStarted = settlesForegroundPresentation
-        ? settleDeferredTaskPresentationFailure(owner)
+        ? settleDeferredTaskPresentation(owner)
         : false;
       if (settlesForegroundPresentation) {
         pendingForegroundPresentationRef.current = null;
@@ -2317,11 +2356,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // This poll completed after a newer authoritative voice final took the
       // foreground. The P2 owner has already dequeued this durable Task
       // presentation, so retain its exact identity locally without UI, TTS,
-      // ACK, failure or history effects. After the foreground response settles,
-      // the existing Task AUDIO failure owner releases the durable reservation
-      // through its formal TEXT fallback instead of forging an AUDIO ACK.
+      // ACK or history effects. AUDIO alone has the immediate failure
+      // authority while the foreground is busy: the Registry retains its safe
+      // TEXT fallback, and the authoritative foreground ACK releases that one
+      // deferred server presentation. A legitimate Task TEXT remains retained
+      // until that same ACK owner can acknowledge it without UI or TTS effects.
       retainDeferredTaskPresentation(owner, disposition);
-      setP2NotificationWakeEpoch(epoch => epoch + 1);
+      if (disposition.ack.surface === 'audio' && !settleDeferredTaskPresentationFailure(owner)) {
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+      }
       return disposition;
     }
     if (!disposition.task_notification && terminalAnnouncementStateRef.current === 'fetching' && terminalAnnouncementTaskIdRef.current !== null) {
@@ -4017,6 +4060,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p1VoiceStatus,
     p2Activation.binding,
     p2Activation.status,
+    foregroundPresentationEpoch,
     p2NotificationWakeEpoch,
     pendingPresentationAck,
     props.isConnected,
@@ -4587,7 +4631,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           retainsCurrentSession &&
           voiceLoopEnabledRef.current &&
           voiceLoopGenerationRef.current === originVoiceLoopGeneration;
-        if (retainsOriginVoiceLoop) pendingForegroundPresentationRef.current = presentationFence;
+        const currentActivation = activationOwnerRef.current?.snapshot();
+        const retainsSubmittingActivation =
+          retainsOriginVoiceLoop &&
+          currentActivation?.status === 'active' &&
+          currentActivation.binding !== null &&
+          sameProductP2ActivationBinding(currentActivation.binding, binding);
+        if (retainsSubmittingActivation) {
+          pendingForegroundPresentationRef.current = presentationFence;
+          // A retained Task presentation needs one post-fence poll admission.
+          // Both the scheduler wake and its foreground fence belong to the
+          // exact activation that submitted this final. A same-Session P2
+          // successor must own its own continuation.
+          if (deferredTaskPresentationRef.current?.owner === activationOwnerRef.current) {
+            setForegroundPresentationEpoch(epoch => epoch + 1);
+          }
+        }
         if (pendingUnifiedFinalRef.current?.input === input) {
           pendingUnifiedFinalRef.current = null;
         }
@@ -4621,7 +4680,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             return;
           }
         }
-        if (!retainsOriginVoiceLoop) return;
+        if (!retainsSubmittingActivation) return;
         if (
           !mountedRef.current ||
           activeSessionRef.current !== binding.session_id ||
@@ -4647,7 +4706,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (settledWithoutPresentation) {
           const activationOwner = activationOwnerRef.current;
           const deferredTaskSettlementStarted =
-            activationOwner !== null && settleDeferredTaskPresentationFailure(activationOwner);
+            activationOwner !== null && settleDeferredTaskPresentation(activationOwner);
           if (!deferredTaskSettlementStarted && !continuePendingVoiceLoopP2Refresh()) {
             scheduleProductVoiceLoopCapture();
           }
