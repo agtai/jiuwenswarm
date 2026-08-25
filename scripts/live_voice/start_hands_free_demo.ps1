@@ -2,6 +2,9 @@
 param(
     [ValidateSet('hands-free-demo', 'formal-web-validation')]
     [string]$RuntimeProfile = 'hands-free-demo',
+    [ValidateSet('hx/0812_live_voice_w3', 'hx/0823_generation_interruption')]
+    [string]$ExpectedSourceBranch = 'hx/0812_live_voice_w3',
+    [switch]$GenerationInterruption,
     [string]$ProjectPath,
     [string]$ProjectId,
     [string]$DataDir,
@@ -30,7 +33,6 @@ $FrontendRoot = Join-Path $RepoRoot 'jiuwenswarm\channels\web\frontend'
 $ProductionFrontendEnv = Join-Path $FrontendRoot '.env.production'
 $LiveVoiceFrontendEnv = Join-Path $FrontendRoot '.env.live-voice'
 $FormalWebRuntimeProbe = Join-Path $PSScriptRoot 'formal_web_runtime_probe.py'
-$ExpectedBranch = 'hx/0812_live_voice_w3'
 $FrontendPort = if ($RuntimeProfile -eq 'formal-web-validation') { 5173 } else { 6173 }
 $RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {
     'Formal Web validation'
@@ -337,6 +339,28 @@ function Wait-HttpResponse([string]$Uri, [DateTime]$Deadline) {
 }
 
 try {
+    if ($GenerationInterruption -and $RuntimeProfile -ne 'formal-web-validation') {
+        Fail 'GENERATION_INTERRUPTION_REQUIRES_FORMAL_WEB_VALIDATION: -GenerationInterruption 只允许 formal-web-validation profile。'
+    }
+    $generationInterruptionEnabled = [bool]$GenerationInterruption
+    if ($generationInterruptionEnabled) {
+        [Environment]::SetEnvironmentVariable(
+            'VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION',
+            'true',
+            'Process'
+        )
+    } else {
+        Remove-Item -LiteralPath 'Env:\VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION' `
+            -ErrorAction SilentlyContinue
+    }
+    $generationInterruptionFlagValue = (
+        [Environment]::GetEnvironmentVariable(
+            'VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION',
+            'Process'
+        ) -eq 'true'
+    ).ToString().ToLowerInvariant()
+    Write-Host "LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=$generationInterruptionFlagValue"
+
     Write-Step '检查源码与依赖'
     Set-Location -LiteralPath $RepoRoot
     if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
@@ -362,8 +386,8 @@ try {
         Fail 'Python 环境不能导入 openjiuwen.symphony/yaml；请重新运行 uv sync。'
     }
     $branch = (& git branch --show-current).Trim()
-    if ($branch -ne $ExpectedBranch) {
-        Fail "当前分支是 '$branch'，Demo 要求 '$ExpectedBranch'。"
+    if ($branch -ne $ExpectedSourceBranch) {
+        Fail "当前分支是 '$branch'，Demo 要求 '$ExpectedSourceBranch'。"
     }
     $head = (& git rev-parse --short=10 HEAD).Trim()
     Write-Pass "源码分支 $branch，HEAD $head"
@@ -866,6 +890,9 @@ try {
         project_remote_count      = $remotes.Count
         ports                     = $ExpectedPorts
         required_flags            = $validatedFlags
+        frontend_flags            = [ordered]@{
+            VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled
+        }
         executor_profile          = $ExecutorProfile
         credential                = 'ephemeral-process-only'
         speech_provider           = 'openai'
