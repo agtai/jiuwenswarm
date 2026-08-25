@@ -66,6 +66,9 @@ class CascadeActionOperation(StrEnum):
 CASCADE_ACTION_OPERATIONS = frozenset(
     operation.value for operation in CascadeActionOperation
 )
+# Native and Cascade engines intentionally share one closed proposal vocabulary.
+# Runtime remains the authority that admits or rejects every proposed operation.
+INTERACTION_ACTION_OPERATIONS = CASCADE_ACTION_OPERATIONS
 
 
 class CascadeObservationKind(StrEnum):

@@ -339,7 +339,7 @@ git commit -m "refactor(live-voice): share OpenAI Realtime session kernel"
 - Consumes: `OpenAIRealtimeSession`, `NativeInteractionBinding`, `NativeTurnCommit`, `NativeDelegateProposal`, and existing `InteractionAction` vocabulary.
 - Produces: `OpenAIRealtimeNativeInteractionEngine.start()`, `offer_audio()`, `next_event()`, `admit_response()`, `send_delegate_result()`, `cancel_response()`, `close()`.
 
-- [ ] **Step 1: Write failing direct-audio and multi-turn tests**
+- [x] **Step 1: Write failing direct-audio and multi-turn tests**
 
 ```python
 @pytest.mark.asyncio
@@ -373,11 +373,11 @@ async def test_two_turns_reuse_one_session_and_contiguous_audio_input() -> None:
     assert provider.appended_audio_sequences == [0, 1]
 ```
 
-- [ ] **Step 2: Write failing malformed/replay/state tests**
+- [x] **Step 2: Write failing malformed/replay/state tests**
 
 Cover unknown event type, missing/extra keys, bad base64, oversized delta, response/item mismatch, event ID changed replay, response before commit, audio before Runtime admission, speech restart before commit producing `REVISE`, queue capacity, operation timeout, remote close, cancel/process-control, and unique close. Snapshot action/audio/delegate sinks before each rejection and assert unchanged.
 
-- [ ] **Step 3: Run RED and implement Provider-facing state machine**
+- [x] **Step 3: Run RED and implement Provider-facing state machine**
 
 Define:
 
@@ -429,18 +429,18 @@ class NativeProviderDone:
 
 Session update uses audio input/output, `semantic_vad`, `create_response=true`, `interrupt_response=false`, and one strict `jiuwen_delegate` function. Provider `speech_started` → `LISTEN` and optional STOP candidate, `speech_stopped` → `SILENCE`, committed input item → `TURN_COMMIT`, response created → `SPEAK` candidate, output delta → fenced `NativeAudioOutput`, function arguments done → `DELEGATE`, speech restart before commit → `REVISE`, cancelled/done → observations only. Unknown events outside an explicit harmless allowlist fail closed.
 
-- [ ] **Step 4: Add Runtime admission hooks to the Engine**
+- [x] **Step 4: Add Runtime admission hooks to the Engine**
 
 `admit_response(provider_response_id, response_ref)` binds Provider response to exact Runtime ref once; changed replay fails. Audio before admission remains buffered only up to the bounded queue and is not released; on admission it is released in Provider sequence. `send_delegate_result(call_id, response_ref, output)` requires current delegate wait and sends one `conversation.item.create` function output followed by `response.create`. No result text is logged.
 
-- [ ] **Step 5: Run focused GREEN and Cascade interaction regressions**
+- [x] **Step 5: Run focused GREEN and Cascade interaction regressions**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m pytest -q tests/unit_tests/live_voice/test_openai_realtime_native_engine.py tests/unit_tests/live_voice/test_interaction_engine.py
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m ruff check jiuwenswarm/server/live_voice/openai_realtime_native_engine.py jiuwenswarm/server/live_voice/interaction_engine.py tests/unit_tests/live_voice/test_openai_realtime_native_engine.py tests/unit_tests/live_voice/test_interaction_engine.py
 ```
 
-- [ ] **Step 6: Commit the continuous Engine**
+- [x] **Step 6: Commit the continuous Engine**
 
 ```powershell
 git add jiuwenswarm/server/live_voice/openai_realtime_native_engine.py jiuwenswarm/server/live_voice/interaction_engine.py tests/unit_tests/live_voice/test_openai_realtime_native_engine.py tests/unit_tests/live_voice/test_interaction_engine.py

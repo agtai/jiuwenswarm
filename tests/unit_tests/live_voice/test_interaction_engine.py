@@ -15,8 +15,15 @@ from jiuwenswarm.server.live_voice.interaction_engine import (
     InteractionAction,
     InteractionEnginePort,
     InteractionEngineViolation,
+    INTERACTION_ACTION_OPERATIONS,
     ScriptedCascadeInteractionEngine,
 )
+
+
+def test_native_and_cascade_share_one_closed_action_vocabulary() -> None:
+    assert INTERACTION_ACTION_OPERATIONS == frozenset(
+        {"LISTEN", "SILENCE", "TURN_COMMIT", "SPEAK", "STOP", "REVISE", "DELEGATE"}
+    )
 
 
 _CASCADE_SCOPE = ScopeRef(
