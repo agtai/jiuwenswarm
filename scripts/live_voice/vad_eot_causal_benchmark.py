@@ -70,6 +70,14 @@ CONFIGURATION_ORDER = {
     "A2_1200": 2,
     "A2": 3,
 }
+SEMANTIC_DECISIONS = {
+    "SEMANTIC_VAD_AUTO_ELIGIBLE",
+    "SEMANTIC_VAD_HIGH_ELIGIBLE",
+    "SEMANTIC_VAD_NO_MATERIAL_GAIN",
+    "SEMANTIC_VAD_INTEGRITY_REJECTED",
+    "SEMANTIC_VAD_PROVIDER_INCOMPATIBLE",
+    "SEMANTIC_VAD_EVIDENCE_INCOMPLETE",
+}
 FRAME_SAMPLES = 960
 FRAME_SECONDS = 0.020
 EVENT_TIMEOUT_SECONDS = 20.0
@@ -511,7 +519,14 @@ def build_report(
         not _RUN_ID.fullmatch(corpus_id)
         or not re.fullmatch(r"[0-9a-f]{64}", corpus_manifest_sha256)
         or not all(_SAFE_LABEL.fullmatch(value) for value in (provider_id, provider_class, stt_model))
-        or decision not in {"READY_FOR_SCREENING", "LOWER_THRESHOLD_ELIGIBLE", "FIXED_THRESHOLD_REJECTED", "INCONCLUSIVE"}
+        or decision
+        not in {
+            "READY_FOR_SCREENING",
+            "LOWER_THRESHOLD_ELIGIBLE",
+            "FIXED_THRESHOLD_REJECTED",
+            "INCONCLUSIVE",
+            *SEMANTIC_DECISIONS,
+        }
     ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
     return VadBenchmarkReport(
@@ -1004,9 +1019,92 @@ async def create_real_streaming_provider(environ: Mapping[str, str]) -> OpenAISt
     return selected.provider
 
 
+def _semantic_decision(
+    config: VadBenchmarkConfig,
+    attempts: tuple[VadAttemptResult, ...],
+) -> str:
+    candidate_id = "B_AUTO" if config.experiment == "semantic-auto" else "B_HIGH"
+    eligible_decision = (
+        "SEMANTIC_VAD_AUTO_ELIGIBLE"
+        if candidate_id == "B_AUTO"
+        else "SEMANTIC_VAD_HIGH_ELIGIBLE"
+    )
+    if any(
+        attempt.reason
+        in {
+            VadAttemptReason.PROVIDER_PROTOCOL,
+            VadAttemptReason.PROVIDER_UNAVAILABLE,
+        }
+        for attempt in attempts
+    ):
+        return "SEMANTIC_VAD_PROVIDER_INCOMPATIBLE"
+    if any(attempt.outcome is not VadAttemptOutcome.COMPLETED for attempt in attempts):
+        return "SEMANTIC_VAD_INTEGRITY_REJECTED"
+    expected_slots = {
+        (configuration_id, case_id, attempt_index)
+        for configuration_id, _ in config.configuration_sequence
+        for case_id in (
+            "no-internal-pause",
+            "internal-pause-300",
+            "internal-pause-600",
+            "internal-pause-1000",
+        )
+        for attempt_index in range(config.attempts_per_case)
+    }
+    if {
+        (attempt.configuration_id, attempt.case_id, attempt.attempt_index)
+        for attempt in attempts
+    } != expected_slots:
+        return "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
+
+    summaries = {
+        (summary.configuration_id, summary.case_id): summary
+        for summary in _safe_summary(attempts)
+    }
+    for case_id in sorted({attempt.case_id for attempt in attempts}):
+        try:
+            a1 = summaries[("A1_1200", case_id)]
+            candidate = summaries[(candidate_id, case_id)]
+            a2 = summaries[("A2_1200", case_id)]
+        except KeyError:
+            return "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
+        controls = (a1, a2)
+        if (
+            a1.completed != a2.completed
+            or a1.completed != config.attempts_per_case
+            or candidate.completed != config.attempts_per_case
+            or a1.eot_ms_p50 is None
+            or a2.eot_ms_p50 is None
+        ):
+            return "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
+        if abs(a1.eot_ms_p50 - a2.eot_ms_p50) > (
+            max(a1.eot_ms_p50, a2.eot_ms_p50) * 0.10
+        ):
+            return "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
+        if any(
+            candidate.eot_ms_p50 is None
+            or control.eot_ms_p50 is None
+            or candidate.eot_ms_p50 >= control.eot_ms_p50
+            or candidate.eot_ms_p95 is None
+            or control.eot_ms_p95 is None
+            or candidate.eot_ms_p95 >= control.eot_ms_p95
+            or candidate.total_ms_p50 is None
+            or control.total_ms_p50 is None
+            or candidate.total_ms_p50 >= control.total_ms_p50
+            or candidate.total_ms_p95 is None
+            or control.total_ms_p95 is None
+            or candidate.total_ms_p95 >= control.total_ms_p95
+            for control in controls
+        ):
+            return "SEMANTIC_VAD_NO_MATERIAL_GAIN"
+    return eligible_decision
+
+
 def _decision(config: VadBenchmarkConfig, attempts: tuple[VadAttemptResult, ...]) -> str:
     if config.mode == "pilot":
         return "READY_FOR_SCREENING"
+    if config.experiment in {"semantic-auto", "semantic-high"}:
+        return _semantic_decision(config, attempts)
     summaries = {(row.configuration_id, row.case_id): row for row in _safe_summary(attempts)}
     cases = sorted({row.case_id for row in attempts})
     for case_id in cases:

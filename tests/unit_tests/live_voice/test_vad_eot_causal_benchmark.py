@@ -128,6 +128,77 @@ def _complete_pilot_attempts(manifest):
     return attempts
 
 
+def _semantic_formal_attempts(
+    manifest,
+    *,
+    candidate_id: str = "B_AUTO",
+    candidate_eot_ms: float = 300.0,
+    candidate_finalization_ms: float = 100.0,
+    a2_eot_ms: float = 1200.0,
+    failed_reason=None,
+):
+    attempts = []
+    sequence = ("A1_1200", candidate_id, "A2_1200")
+    for configuration_id in sequence:
+        configuration = runner.parse_configuration(configuration_id)
+        for case in manifest.cases:
+            for attempt_index in range(5):
+                labels = {
+                    "turn_detection_mode": configuration.mode.value,
+                    "semantic_eagerness": (
+                        configuration.semantic_eagerness.value
+                        if configuration.semantic_eagerness is not None
+                        else None
+                    ),
+                }
+                if configuration_id == candidate_id and failed_reason is not None:
+                    attempts.append(
+                        runner.VadAttemptResult.failed(
+                            configuration_id,
+                            None,
+                            case.case_id,
+                            attempt_index,
+                            failed_reason,
+                            speech_started_count=1,
+                            speech_stopped_count=1,
+                            committed_count=1,
+                            final_count=0,
+                            exact_identity=True,
+                            transcript_complete=False,
+                            cleanup_complete=True,
+                            pacing_valid=True,
+                            **labels,
+                        )
+                    )
+                    continue
+                if configuration_id == candidate_id:
+                    eot_ms = candidate_eot_ms
+                    finalization_ms = candidate_finalization_ms
+                elif configuration_id == "A2_1200":
+                    eot_ms = a2_eot_ms
+                    finalization_ms = 100.0
+                else:
+                    eot_ms = 1200.0
+                    finalization_ms = 100.0
+                attempts.append(
+                    runner.VadAttemptResult.completed(
+                        configuration_id,
+                        configuration.silence_duration_ms,
+                        case.case_id,
+                        attempt_index,
+                        final_voiced_frame_to_eot_ms=eot_ms,
+                        eot_to_final_ms=finalization_ms,
+                        final_voiced_frame_to_final_ms=eot_ms + finalization_ms,
+                        provider_reported_speech_end_ms=1000.0,
+                        pacing_p50_ms=0.0,
+                        pacing_p95_ms=0.0,
+                        pacing_max_ms=0.0,
+                        **labels,
+                    )
+                )
+    return tuple(attempts)
+
+
 class ManualClock:
     def __init__(self) -> None:
         self.value = 0.0
@@ -986,6 +1057,61 @@ def test_cli_accepts_only_closed_semantic_experiment_selector(
             source_commit="a" * 40,
             source_clean=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("experiment", "candidate_id", "expected"),
+    (
+        ("semantic-auto", "B_AUTO", "SEMANTIC_VAD_AUTO_ELIGIBLE"),
+        ("semantic-high", "B_HIGH", "SEMANTIC_VAD_HIGH_ELIGIBLE"),
+    ),
+)
+def test_semantic_formal_decision_requires_integrity_and_per_case_total_gain(
+    tmp_path: Path,
+    experiment: str,
+    candidate_id: str,
+    expected: str,
+) -> None:
+    base = _config(tmp_path, mode="run")
+    config = replace(base, experiment=experiment)
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+
+    assert runner._decision(
+        config,
+        _semantic_formal_attempts(manifest, candidate_id=candidate_id),
+    ) == expected
+    assert runner._decision(
+        config,
+        _semantic_formal_attempts(
+            manifest,
+            candidate_id=candidate_id,
+            candidate_eot_ms=1300.0,
+        ),
+    ) == "SEMANTIC_VAD_NO_MATERIAL_GAIN"
+    assert runner._decision(
+        config,
+        _semantic_formal_attempts(
+            manifest,
+            candidate_id=candidate_id,
+            failed_reason=runner.VadAttemptReason.EARLY_EOT,
+        ),
+    ) == "SEMANTIC_VAD_INTEGRITY_REJECTED"
+    assert runner._decision(
+        config,
+        _semantic_formal_attempts(
+            manifest,
+            candidate_id=candidate_id,
+            failed_reason=runner.VadAttemptReason.PROVIDER_PROTOCOL,
+        ),
+    ) == "SEMANTIC_VAD_PROVIDER_INCOMPATIBLE"
+    assert runner._decision(
+        config,
+        _semantic_formal_attempts(
+            manifest,
+            candidate_id=candidate_id,
+            a2_eot_ms=1500.0,
+        ),
+    ) == "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
 
 
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
