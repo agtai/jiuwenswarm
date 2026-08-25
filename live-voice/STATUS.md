@@ -337,6 +337,19 @@ adaptations for runtime quiescence, review-round CAS, version-0 terminal ABA,
 Team-clean reservation/tombstones, terminal consumers, command ordering and
 SessionFileStore zero-effect behaviour in
 the [PR 04 packet](reviews/agentcore-pr-preparation/2026-08-25-pr04-command-result.md).
+PR 05 event/dispatch preflight is also complete. It found that the historical
+candidate cannot preserve its canonical-stream claim while event/dispatch rows
+cascade with ordinary Team deletion, ordinary Team clean omits per-Task
+retirement facts, deleted Task identity is fenced only by an accidental
+sequence collision, and permanent rejection or an under-specified accepted
+receipt can leave execution truth without a safe recovery/quiescence boundary.
+The replay must also freeze Task-incarnation, legacy stream-baseline and
+authorization-expiry semantics, serialize the complete current writer inventory
+against Team deletion reservation, and close or explicitly narrow the existing
+SessionFileStore pre-transaction file-write gap while retaining current DDL
+behaviour.
+Exact requirements are in the
+[PR 05 packet](reviews/agentcore-pr-preparation/2026-08-25-pr05-event-dispatch.md).
 No result changes Live Voice authority, performs composition/migration, or
 grants deletion credit.
 

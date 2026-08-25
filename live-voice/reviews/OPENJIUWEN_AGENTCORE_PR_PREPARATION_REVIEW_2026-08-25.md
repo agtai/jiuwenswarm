@@ -205,6 +205,17 @@ changing its base. Replay must preserve upstream session-file hydration and
 write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
 the affected upstream tests.
 
+Read-only replay preflight is now complete through PR 05. PR 04 must preserve
+the accepted execution-quiescence, review-round, Team-tombstone, terminal and
+SessionFileStore contracts. PR 05 additionally requires non-cascading
+session-domain event/dispatch history, an explicit retired-Task/incarnation
+policy, complete Team-clean writer coverage, a declared legacy-stream baseline
+and truthful permanent-rejection, accepted-receipt and authorization-expiry
+semantics. Its complete atomicity claim also requires an explicit solution or
+scope reduction for SessionFileStore writes that currently occur before the SQL
+transaction. Neither packet has started formal implementation; both remain
+blocked on accepted, reviewable dependency tips.
+
 For every PR:
 
 - replay only the capability's implementation, tests and feature/spec updates
