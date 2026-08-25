@@ -38,7 +38,9 @@ They are potential AgentCore PR content, not LiveVoice product code.
 | AgentCore repository | `C:\Users\admin\Desktop\openjiuwen\agent-core-oj-g2-local-base` |
 | Candidate branch | `codex/oj-g2-local-base` |
 | Candidate HEAD | `50c065dc7fb5e0c21903128d1a033c52968be97e` |
-| Candidate base | `origin/develop@4f2c29c34899a45cec56a7d765fcc95e4002f60a` |
+| Historical candidate base | `4f2c29c34899a45cec56a7d765fcc95e4002f60a` |
+| Refreshed upstream after read-only fetch | `origin/develop@6390bbf230f4ea2dd7446bc01ee882e6a4413d4c`; ten commits after historical base |
+| Current replay drift | 13 candidate-owned paths changed upstream; historical `F_82`/`F_83`/`S_24` document names now collide |
 | Local commits over base | 33 |
 | Aggregate candidate diff | 73 files; 31,828 insertions; 646 deletions |
 | Worktree at review close | clean |
@@ -162,12 +164,14 @@ separately authorized.
 10. Bound external-effect public seam.
 
 The following local branch refs expose that order as ten reviewable stacked
-diffs. Each base is the preceding accepted dependency candidate; none has an
-upstream or remote ref.
+diffs. Each physical base is the preceding stacked review ref; this ancestry is
+only a convenient local diff view and does not imply semantic dependency.
+Semantic dependencies are defined by the dedicated replay packets. None of
+these refs has an upstream or remote ref.
 
 | PR | Local candidate ref | Review base | Candidate head |
 |---:|---|---|---|
-| 1 | `codex/ac-pr01-task-scope` | `origin/develop@4f2c29c3` | `ced87a3e` |
+| 1 | `codex/ac-pr01-task-scope` | historical base `4f2c29c3` | `ced87a3e` |
 | 2 | `codex/ac-pr02-async-cancel` | `codex/ac-pr01-task-scope` | `5c3ef668` |
 | 3 | `codex/ac-pr03-execution-owner` | `codex/ac-pr02-async-cancel` | `6551d023` |
 | 4 | `codex/ac-pr04-command-result` | `codex/ac-pr03-execution-owner` | `55b13458` |
@@ -183,6 +187,21 @@ These refs intentionally end before the cross-group quality commits
 but each future replay must put the relevant hunk into its owning PR rather than
 adding an eleventh cleanup PR. The refs are review views, not submission-ready
 branches.
+
+The dedicated test-first replay packets are indexed in
+[AgentCore local PR replay packets](agentcore-pr-preparation/README.md). Each
+packet names its exact owned source/tests, intended public contract, dependency
+order, red/green and compatibility commands, quality-fix ownership, proposed
+PR title/body content, risk and exclusions. Their existence closes planning,
+not implementation: every packet remains marked `replay pending`.
+
+The refreshed upstream drift is already material: current `origin/develop`
+is `6390bbf2`, and AgentTeams Task storage, session-table DDL,
+TeamAgent/Scheduler integrations and documentation identifiers moved after the
+historical candidate base. Therefore no review ref may be submitted by merely
+changing its base. Replay must preserve upstream session-file hydration and
+write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
+the affected upstream tests.
 
 For every PR:
 

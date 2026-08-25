@@ -22,7 +22,12 @@ below are historical investigation evidence. The current local implementation
 fact is the clean AgentCore preparation branch
 `codex/oj-g2-local-base@50c065dc7fb5e0c21903128d1a033c52968be97e`,
 stacked as 33 local commits over
-`origin/develop@4f2c29c34899a45cec56a7d765fcc95e4002f60a`.
+historical candidate base
+`4f2c29c34899a45cec56a7d765fcc95e4002f60a`. A later read-only fetch
+observed `origin/develop@6390bbf230f4ea2dd7446bc01ee882e6a4413d4c`,
+ten commits ahead. That drift changes thirteen candidate-owned paths and
+collides with historical candidate documentation identifiers, so the local
+refs are evidence views and must be replayed rather than rebased blindly.
 
 The complete retain/replay/drop decision, commit grouping, verification and PR
 order are recorded in the later

@@ -248,7 +248,7 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - [x] Split candidates by the smallest coherent AgentCore owner and shared
   contract so one PR does not couple unrelated scope, execution, event, cursor,
   checkpoint or effect changes.
-- [ ] For each candidate, create a dedicated implementation plan containing
+- [x] For each candidate, create a dedicated implementation plan containing
   exact source/tests, public signatures, red/green commands and compatibility
   checks before changing code.
 - [ ] Implement and verify each candidate in its AgentCore worktree; exclude
