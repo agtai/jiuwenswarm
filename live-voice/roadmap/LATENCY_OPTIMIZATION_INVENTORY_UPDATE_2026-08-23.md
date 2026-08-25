@@ -479,6 +479,48 @@ before `attempts.jsonl` or a report was written; only run/manifest survive and
 receive zero timing credit. See the
 [LVL-10L result](../evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md).
 
+### 5.11 LVL-13 pre-final exact-prefix Agent→TTS component screen
+
+LVL-12 first established that an exact-prefix candidate exists materially
+before `chat.final` for medium/long workloads. LVL-13 then measured the next
+boundary with the real formal Agent and real streaming Speech Provider. A1/A2
+wait for final and synthesize the complete final; B sends the first
+conservative candidate to TTS while Agent generation continues.
+
+| Workload / arm | Agent→candidate p50 | Candidate→final p50 | Agent→final p50 | TTS request→first PCM p50 | Agent→first PCM p50 / p95 |
+|---|---:|---:|---:|---:|---:|
+| Medium A1 | 696.904 ms | 1531.904 ms | 2227.543 ms | 918.076 ms | 3140.796 / 3371.752 ms |
+| Medium B | 634.413 ms | 1531.590 ms | 2166.120 ms | 868.886 ms | 1558.399 / 1875.545 ms |
+| Medium A2 | 682.965 ms | 1523.338 ms | 2219.224 ms | 1022.340 ms | 3422.333 / 3857.015 ms |
+| Long A1 | 700.731 ms | 3354.354 ms | 4055.085 ms | 982.608 ms | 4981.692 / 5351.788 ms |
+| Long B | 692.352 ms | 3240.800 ms | 3938.775 ms | 970.890 ms | 1657.019 / 1707.368 ms |
+| Long A2 | 693.380 ms | 3299.374 ms | 4050.683 ms | 1062.597 ms | 5177.037 / 5412.884 ms |
+
+| Workload | Interpolated control p50 | B p50 | Gain | Relative gain | A1/A2 drift | Result |
+|---|---:|---:|---:|---:|---:|---|
+| Medium | 3281.565 ms | 1558.399 ms | **1723.166 ms** | **52.510%** | 281.537 ms / 8.964% | pass |
+| Long | 5079.365 ms | 1657.019 ms | **3422.345 ms** | **67.377%** | 195.345 ms / 3.921% | pass |
+
+| Stage | Medium control / B / delta | Long control / B / delta |
+|---|---:|---:|
+| Agent→candidate | 689.935 / 634.413 / **+55.522 ms** | 697.055 / 692.352 / **+4.703 ms** |
+| Candidate→final | 1527.621 / 1531.590 / **−3.969 ms** | 3326.864 / 3240.800 / **+86.064 ms** |
+| Agent→final | 2223.383 / 2166.120 / **+57.264 ms** | 4052.884 / 3938.775 / **+114.109 ms** |
+| TTS dispatch→request | 0.118 / 0.065 / **+0.053 ms** | 0.217 / 0.038 / **+0.179 ms** |
+| TTS request→first PCM | 970.208 / 868.886 / **+101.322 ms** | 1022.602 / 970.890 / **+51.712 ms** |
+| **Agent→first PCM** | 3281.565 / 1558.399 / **+1723.166 ms** | 5079.365 / 1657.019 / **+3422.345 ms** |
+
+Positive delta means B was faster. These overlapping p50 observations are not
+additive; only Agent→first-PCM is the predeclared acceptance metric.
+
+The formal population completed 30/30 after one excluded warm-up, with exact
+prefixes and zero forbidden effects. The component candidate is accepted. Its
+gain combines overlap with a shorter first TTS request; it does not isolate
+those contributions or measure remaining-response completion. Runtime/P2,
+Browser, WebAudio and physical first-audible remain outside credit. See the
+[LVL-13 result](../evidence/LVL13_PRE_FINAL_STABLE_AGENT_TTS_RESULT_2026-08-25.md)
+and [all-run appendix](../evidence/LVL13_PRE_FINAL_STABLE_AGENT_TTS_RUNS_2026-08-25.md).
+
 ## 6. Recommended next optimization candidates
 
 The reference numbers below are stable inventory labels, not execution
@@ -617,6 +659,10 @@ listed as branch-bound paths rather than current-tree links.
 - [2026-08-24 SOTA latency review](../reviews/REALTIME_VOICE_SOTA_LATENCY_REVIEW_2026-08-24.md),
   including source-confidence labels, the one-round waterfall limits and the
   authority-compatible LVL-10 materiality question.
+- `latency/pre-final-stable-agent-tts-screen` at `9600adbcf` owns the LVL-13
+  runner and tests. The documentation hub owns the
+  [LVL-13 result](../evidence/LVL13_PRE_FINAL_STABLE_AGENT_TTS_RESULT_2026-08-25.md)
+  and [all-run appendix](../evidence/LVL13_PRE_FINAL_STABLE_AGENT_TTS_RUNS_2026-08-25.md).
 - UPDATE 2026-08-23 additions:
   - Manual run archive: `lv-manual-simple-to-paris-20260824-a/`
     (validated run.json; generated report; browser.jsonl, 6 batches).
@@ -653,6 +699,11 @@ unrun. The isolated Agent first-delta packet now has a 15/15 real-Agent
 baseline: first-delta p50 is 523–592 ms, while delta→final p50 is approximately
 9 ms for short, 1.68 s for medium and 3.52 s for long output. This is diagnostic
 materiality, not proof of an immutable prefix or product latency credit.
+LVL-12 subsequently proved exact-prefix materiality 10/10 for medium/long, and
+LVL-13 accepted the next real-Agent/real-TTS component screen 30/30: digital
+Agent→first-PCM p50 gain is 1.723 s / 52.510% medium and 3.422 s / 67.377% long.
+The delta combines overlap and shorter first-prefix input; remaining-response
+continuity, Runtime/P2, Browser and physical first-audible remain unmeasured.
 The 2026-08-24 SOTA review introduced LVL-10 as a separate materiality question
 from LVL-07. The completed screen grants no product credit: the current
 full-final SSE route remains unchanged, Browser Lane C is closed, and the

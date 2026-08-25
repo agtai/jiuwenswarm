@@ -95,6 +95,27 @@ That follow-up is catalogued as LVL-01D; it closes the LVL-01C functional
 defect for the declared run without retroactively changing LVL-01C or granting
 a frozen-corpus off/on waterfall.
 
+### 2.2 Documentation, implementation and artifact publication model
+
+The latency work intentionally uses three different owners:
+
+1. `latency/hx-optimizations` is the documentation consolidation branch. It
+   owns this catalog, both optimization inventories, current result summaries
+   and cross-experiment reading routes. It is not `develop`, the product
+   baseline or the implementation owner of every candidate.
+2. Each experiment branch owns the exact implementation and tests used for its
+   run. For LVL-13 that branch is
+   `latency/pre-final-stable-agent-tts-screen` at `9600adbcf`.
+3. Complete machine-private JSON reports remain in the durable
+   `/home/renan/openJiuwen-ai/live-voice-latency-runs/` archive with mode
+   `0600`. Git carries sanitized result/appendix documents and SHA-256 bindings,
+   not raw credentials, prompts, Agent text or audio.
+
+Publishing the documentation branch and the experiment branch to the same
+remote makes the catalog links and exact source refs independently reviewable.
+No result inherits credit merely because its documentation is present on the
+consolidation branch.
+
 ## 3. Experiment index
 
 | ID | Experiment or episode | Lane and total class | Headline result | Decision / next gate |
@@ -770,6 +791,12 @@ conservative exact-prefix candidate to TTS while the Agent continues, then
 requires exact-prefix reconciliation with the final response. One declared
 Agent/full-final-TTS warm-up is excluded from the 30-slot formal population.
 
+The runner uses the formal no-tools Agent harness, LVL-12 policy and real
+streaming Speech Provider. It timestamps Agent start, candidate, final, TTS
+dispatch, Provider request and first non-empty PCM on one monotonic clock. The
+complete implementation explanation and metric glossary are in the
+[source-bound result](LVL13_PRE_FINAL_STABLE_AGENT_TTS_RESULT_2026-08-25.md).
+
 | Workload | A1/B/A2 Agent→first-PCM p50 | Gain vs interpolated control | A1/A2 drift | Result |
 |---|---:|---:|---:|---|
 | Medium | 3140.796 / 1558.399 / 3422.333 ms | **1723.166 ms / 52.510%** | 281.537 ms / 8.964% | PASS |
@@ -780,8 +807,9 @@ This is a digital real-Agent/real-Provider component result ending at first
 PCM. It excludes STT, Runtime/P2 authority, Browser, WebAudio, physical
 audibility and product acceptance. Its delta combines Agent/TTS overlap with a
 shorter first-prefix request and does not measure remaining-response
-completion; response realizations may differ across arms. See the
-[source-bound LVL-13 result](LVL13_PRE_FINAL_STABLE_AGENT_TTS_RESULT_2026-08-25.md).
+completion; response realizations may differ across arms. All 30 formal rows
+and all retained run hashes are in the
+[LVL-13 run appendix](LVL13_PRE_FINAL_STABLE_AGENT_TTS_RUNS_2026-08-25.md).
 
 ## 19. What has and has not been measured end to end
 
@@ -822,7 +850,7 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-10L | Quota-rejected v1 pilot, cap-boundary v1 pilot and passing v2 pilot survive under `latency-runs/lvl10l`; the stopped v2 formal retains only run/manifest. Hashes are bound in the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md) |
 | LVL-11 | Content-free smoke and 15-attempt population reports survive under `latency-runs/agent-first-delta-20260825/`; population SHA-256 `c81fd7fcbcdc593d26f8ca30dd169164bc1c43c7f3998c59f944e19775fc16a4` |
 | LVL-12 | Accepted content-free v2 population survives under `latency-runs/pre-final-stable-segmentation-20260825/`; SHA-256 `a78295c33043f02c906e6c343506d42d367a2e43246c9530acbab5477150a7a9`. The prior population remains rejected diagnostic evidence. |
-| LVL-13 | Accepted content-free formal report survives under `latency-runs/pre-final-stable-agent-tts-20260825/`; SHA-256 `712eab619ece2e59f14c7b87d154cb2f4b8e46a5b232c971c5606ede31c271e9`. The cold pilot remains rejected drift diagnostic evidence. |
+| LVL-13 | Cold pilot, warm pilot and accepted formal report survive under `latency-runs/pre-final-stable-agent-tts-20260825/`; SHA-256 values `867fbe1a…`, `9e7e3a8a…` and `712eab61…`. The cold pilot remains rejected drift diagnostic evidence; full hashes and every formal attempt are in the [run appendix](LVL13_PRE_FINAL_STABLE_AGENT_TTS_RUNS_2026-08-25.md). |
 
 ## 21. Current decision route
 
