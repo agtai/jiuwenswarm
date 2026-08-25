@@ -100,16 +100,16 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - Produces: backend/gateway/shared rows whose responsibilities and ownership
   are understandable without reading implementation bodies.
 
-- [ ] Extract module docstrings, public classes/functions, internal imports and
+- [x] Extract module docstrings, public classes/functions, internal imports and
   direct AgentCore/JiuwenSwarm dependencies with read-only Python AST queries.
-- [ ] Group rows by Audio Edge, Speech, Realtime Media, Conversation Runtime,
+- [x] Group rows by Audio Edge, Speech, Realtime Media, Conversation Runtime,
   Interaction Intelligence, Agent Bridge, Task/Store, Executor/Durability,
   Voice–Task Bridge, Presentation, Composition, Observability and support.
-- [ ] For every row, distinguish product policy from generic task/execution/
+- [x] For every row, distinguish product policy from generic task/execution/
   event/effect truth; do not infer ownership from directory placement alone.
-- [ ] Explain large modules by independent responsibility clusters and record
+- [x] Explain large modules by independent responsibility clusters and record
   consolidation/split candidates without prescribing a source-line rewrite.
-- [ ] Reconcile every backend/gateway row against the existing 15-domain code
+- [x] Reconcile every backend/gateway row against the existing 15-domain code
   fact audit and record any stale, missing or contradicted prior finding.
 
 ### Task 3: Explain every frontend, production entry and validation-support module
@@ -127,15 +127,15 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - Produces: frontend/entry/support rows, including which files are product
   owners, carriers, test assets, legacy lanes or retirement candidates.
 
-- [ ] Extract TypeScript/TSX exports, local LiveVoice imports and composition
+- [x] Extract TypeScript/TSX exports, local LiveVoice imports and composition
   entrypoints using `rg` and existing build manifests.
-- [ ] Separate Audio/Media edge, Runtime replica, Task client/projection,
+- [x] Separate Audio/Media edge, Runtime replica, Task client/projection,
   Presentation/ACK, composition panel, diagnostics and legacy/demo lanes.
-- [ ] Explain why UI state is a verified replica or presentation fact rather
+- [x] Explain why UI state is a verified replica or presentation fact rather
   than canonical Task/Event/Effect truth.
-- [ ] Classify launch/config/scripts as production owner, acceptance tooling,
+- [x] Classify launch/config/scripts as production owner, acceptance tooling,
   reusable oracle, historical runner or retirement candidate.
-- [ ] Reconcile all rows with current STATUS capability ownership and the
+- [x] Reconcile all rows with current STATUS capability ownership and the
   existing retirement ledger.
 
 ### Task 4: Apply Hermes as an explanatory architecture mirror
@@ -153,17 +153,17 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - Produces: a Hermes relation for every LiveVoice production row and a
   capability-domain explanation of justified and unjustified complexity.
 
-- [ ] Revalidate the pinned Hermes checkout and the existing 16-file
+- [x] Revalidate the pinned Hermes checkout and the existing 16-file
   production/test focus manifests without fetching or modifying it.
-- [ ] Map Audio Edge/VAD, STT registry, TTS registry/chunker/consumer,
+- [x] Map Audio Edge/VAD, STT registry, TTS registry/chunker/consumer,
   generation/playout interruption, echo guard, platform adapter and
   Agent/session connection to LiveVoice responsibility groups.
-- [ ] Mark `analogue`, `partial analogue`, `different owner` or `no analogue`
+- [x] Mark `analogue`, `partial analogue`, `different owner` or `no analogue`
   for every LiveVoice row; absence in Hermes is not by itself a deletion reason.
-- [ ] Record which LiveVoice complexity is required by scoped authority,
+- [x] Record which LiveVoice complexity is required by scoped authority,
   committed input, durable task/effect/cursor truth, Web ACK and fail-closed
   recovery, and which complexity is duplication or historical layering.
-- [ ] Confirm no conclusion requests Hermes parity, copied code or dependency.
+- [x] Confirm no conclusion requests Hermes parity, copied code or dependency.
 
 ### Task 5: Close the AgentCore disposition map
 
@@ -183,24 +183,26 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
   product capability: direct reuse, Adapter reuse, AgentCore PR candidate, or
   LiveVoice-owned.
 
-- [ ] Re-read public AgentCore APIs for scope, Task query/command/result,
+- [x] Re-read public AgentCore APIs for scope, Task query/command/result,
   execution admission/settlement, Agent/Tool launch, events/cursors,
   checkpoint/recovery and effects; internal imports do not count as reuse.
-- [ ] For direct reuse, name the public contract and prove LiveVoice adds no
+- [x] For direct reuse, name the public contract and prove LiveVoice adds no
   competing authority.
-- [ ] For Adapter reuse, state the minimum translation/fence and prove the
+- [x] For Adapter reuse, state the minimum translation/fence and prove the
   Adapter owns no generic durable state machine.
-- [ ] For AgentCore PR candidates, state the generic non-Voice value, smallest
+- [x] For AgentCore PR candidates, state the generic non-Voice value, smallest
   existing AgentCore owner, missing public contract and required failing oracle.
-- [ ] For LiveVoice-owned rows, state the voice/product invariant that prevents
+- [x] For LiveVoice-owned rows, state the voice/product invariant that prevents
   downstream ownership.
-- [ ] Verify every module row references one capability disposition and every
+- [x] Verify every module row references one capability disposition and every
   capability disposition has at least one owning or consuming module row.
 
 ### Task 6: Adjudicate all current prototypes and tests
 
 **Files:**
 
+- Create:
+  `live-voice/reviews/OPENJIUWEN_LIVEVOICE_PROTOTYPE_ADJUDICATION_2026-08-25.md`
 - Modify:
   `live-voice/reviews/OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md`
 - Modify:
@@ -214,15 +216,15 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - Produces: keep/minimize/move/discard decisions for all five candidate commits,
   their tests/packets and the ignored EVT-02 archive.
 
-- [ ] Review each candidate commit as a complete diff against its parent and
+- [x] Review each candidate commit as a complete diff against its parent and
   identify reusable evidence separately from production code.
-- [ ] Specify the smallest future LiveVoice seam, if any; existing passing tests
+- [x] Specify the smallest future LiveVoice seam, if any; existing passing tests
   do not force retention.
-- [ ] Identify code and tests that belong in an AgentCore PR candidate and code
+- [x] Identify code and tests that belong in an AgentCore PR candidate and code
   that encodes LiveVoice policy.
-- [ ] Decide whether the EVT-02 archive remains discarded or supplies only a
+- [x] Decide whether the EVT-02 archive remains discarded or supplies only a
   test oracle after event/cursor classification.
-- [ ] Verify the preparation branch is still not a wholesale merge candidate.
+- [x] Verify the preparation branch is still not a wholesale merge candidate.
 
 ### Task 7: Prepare coherent local AgentCore PR candidates
 
@@ -240,10 +242,10 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - Produces: locally reviewable AgentCore commit series, test evidence and PR
   descriptions with no remote update.
 
-- [ ] Audit the existing AgentCore commits against selected rows; mark each
+- [x] Audit the existing AgentCore commits against selected rows; mark each
   retain, revise, split, squash-with-owner, or discard in the review before
   rewriting local history.
-- [ ] Split candidates by the smallest coherent AgentCore owner and shared
+- [x] Split candidates by the smallest coherent AgentCore owner and shared
   contract so one PR does not couple unrelated scope, execution, event, cursor,
   checkpoint or effect changes.
 - [ ] For each candidate, create a dedicated implementation plan containing

@@ -15,6 +15,46 @@ Risk: this document is Tier 0. Any later change to task authority, execution
 ownership, durable effects, ordering, cursors, or migration is Tier 3 until the
 applicable rules in [`TESTING.md`](../../TESTING.md) prove otherwise.
 
+## 0. 2026-08-25 candidate review update
+
+The earlier A1/A2 working-tree fingerprints and “implement ADD-01..05” wording
+below are historical investigation evidence. The current local implementation
+fact is the clean AgentCore preparation branch
+`codex/oj-g2-local-base@50c065dc7fb5e0c21903128d1a033c52968be97e`,
+stacked as 33 local commits over
+`origin/develop@4f2c29c34899a45cec56a7d765fcc95e4002f60a`.
+
+The complete retain/replay/drop decision, commit grouping, verification and PR
+order are recorded in the later
+[AgentCore local PR preparation review](OPENJIUWEN_AGENTCORE_PR_PREPARATION_REVIEW_2026-08-25.md).
+That review supersedes readiness/status statements in this older map; it does
+not supersede the symbol ownership classifications.
+
+The separate
+[LiveVoice prototype adjudication](OPENJIUWEN_LIVEVOICE_PROTOTYPE_ADJUDICATION_2026-08-25.md)
+applies these classifications to the five isolated downstream commits and the
+ignored EVT-02 archive. It selects thin future seams and test oracles, not the
+current prototype implementations.
+
+Current resolutions that affect this map are:
+
+| Earlier question | Current local candidate decision |
+|---|---|
+| Public Task facade | `TeamAgent.task_authority` returns a session/team/member-bound `TeamTaskAuthority`; no DAO/Manager is the product API. |
+| Public effect facade | `TeamAgent.effect_authority` returns a separate `TeamExecutionEffectAuthority`; generic reaper/provider/product policy is not exposed. |
+| Checkpoint link | `ExecutionCheckpointCoordinator` stores opaque payload first; bound `TeamTaskAuthority` publishes and reads the only resume-authoritative Task/execution reference. |
+| Effect owner placement | A subordinate `EffectDao` shares the AgentTeams database/session/Task execution boundary. Workflow engine remains business-neutral. |
+| Cursor scope | `CursorDao` owns only generic Task-event consumer/channel ACK. Response closure, DOM adoption and playout remain product facts. |
+| Terminal/result vocabulary | `ExecutionOutcome`, immutable `TaskResultRef`, command decisions and token-fenced settlement are local `ADD-01` candidates. |
+| Dispatch boundary | `TaskDispatchRecord` plus claim/receipt/release/recovery is the local `ADD-02` candidate beside Task events and Scheduler. |
+| Cancellation ordering | A1 monotonic runtime cancellation is composed with A2 quiesce-before-durable-settlement helpers; a reset-before-cancel product path is not accepted. |
+| `EXE-05` | No new AgentCore launch-lease PR. Existing public Agent/Runner invocation is reused through a thin authenticated Jiuwen project binding adapter. |
+| Physical migration | Still deliberately unresolved and unauthorized while the LiveVoice feature branch is moving. |
+
+All SCOPE/A1/A2/ADD-01..05/facade implementations remain local PR candidates,
+not installed AgentCore capability claims. None of their roughly 32K lines is a
+wholesale LiveVoice feature-branch deliverable.
+
 ## 1. Finding and scope
 
 The latest LiveVoice implementation already uses OpenJiuwen to construct and run
@@ -124,9 +164,9 @@ same owner and Gate; a listed symbol is not implicitly assigned to another row.
 
 | Classification | Meaning and required outcome |
 |---|---|
-| `DIRECT_AGENTCORE` | AgentCore base or Scope/A1/A2 already owns the generic contract. The row records `BASE_EXISTING`, `SCOPE_CANDIDATE`, `A1_CANDIDATE`, or `A2_CANDIDATE`. LiveVoice calls that precise API and retires its duplicate state only after the Gate. |
+| `DIRECT_AGENTCORE` | The locked/base AgentCore already exposes the suitable public contract. The row records `BASE_EXISTING`; LiveVoice may later call that precise API and retire duplicate state only after its Gate. |
 | `ADAPTER_DOWNSTREAM` | Generic state/logic moves into an existing or minimally extended AgentCore owner. JiuwenSwarm retains only identity/policy/protocol translation. AgentCore is the sole generic truth; adapter output is derived, not independently mutable truth. |
-| `AGENTCORE_ADD` | Base plus Scope/A1/A2 and their checked compositions cannot provide a generic non-Voice outcome. The addition extends the smallest existing owner and must not create a parallel `DurableTaskAuthority`. |
+| `AGENTCORE_PR_CANDIDATE` | The required contract exists only on a local SCOPE/A1/A2/ADD/facade candidate, not in the locked/base dependency. It must be replayed and accepted in the smallest existing AgentCore owner before LiveVoice can reuse it. |
 | `LIVEVOICE_KEEP` | The responsibility decides Voice turn/response/generation/presentation, ASR/TTS/media/barge-in, committed intent, destructive confirmation, product principal/project/session, product UI/composition, or project-code policy. It is not generic AgentCore truth. |
 
 ## 4. Authority boundary and call chain
@@ -217,7 +257,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | None. |
 | Existing AgentCore evidence | A2 `TeamExecutionAttemptBase`, `TaskExecutionRecord`, and `TaskDao.prepare_execution/start_execution/claim_execution`; A1 owns runtime cancellation. |
 | Composition attempted | A2 durable relation plus A1 worker lifecycle covers the generic state transitions; retaining this port would duplicate them. |
-| Classification | `DIRECT_AGENTCORE — A2_CANDIDATE` |
+| Classification | `AGENTCORE_PR_CANDIDATE — A2_CANDIDATE` |
 | Target owner/API | `openjiuwen.agent_teams.tools.task_manager.TeamTaskManager` facade over `TaskDao.prepare_execution/start_execution/claim_execution/get_execution/reconcile_execution`. Cancellation must first fence new continuations, await A1 `cancel`/`wait`, and only then call A2 cancel/reset settlement; the candidate `Team.cancel_member` reset-before-runtime-cancel order is not accepted production wiring. |
 | JiuwenSwarm Adapter | Map AgentCore attempt disposition/outcome to product `FormalAttemptState`; no writable state machine. |
 | Test oracle | Existing `test_task_core.py` transition/replay/cancel tests plus OJ-G1-A cancel/complete, restart, generation-race, and stale-zero-effect cases. |
@@ -243,7 +283,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Test oracle | Existing capability-selection tests and formal integration tests for exact profile, version mismatch with zero launch, and real carrier. |
 | Dependencies | `EXEC-OWN-01`. |
 | Retirement Gate | A2 persists/checks the opaque digest, JiuwenSwarm selection is a pure pre-admission adapter, and persisted LiveVoice selection is no longer independently mutable. |
-| Confidence/open issue | High for the opaque-digest path. A future cross-provider typed profile remains a separate open design and would require its own five-test `AGENTCORE_ADD`; it may not reuse D0/D1/D2 or project-policy fields as generic vocabulary. |
+| Confidence/open issue | High for the opaque-digest path. A future cross-provider typed profile remains a separate open design and would require its own five-test AgentCore PR-candidate admission; it may not reuse D0/D1/D2 or project-policy fields as generic vocabulary. |
 
 #### EXE-03 — durable attempt journal
 
@@ -257,7 +297,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Journal state is generic; worker body and project resources are product-specific. |
 | Existing AgentCore evidence | A2 Task/execution relation, owner/epoch/version/generation/profile CAS and reconcile. |
 | Composition attempted | A2 durable ownership covers this responsibility; A1 supplies the separate in-process lifecycle in `ASYNC-01`. |
-| Classification | `DIRECT_AGENTCORE — A2_CANDIDATE` |
+| Classification | `AGENTCORE_PR_CANDIDATE — A2_CANDIDATE` |
 | Target owner/API | A2 `TaskDao.prepare_execution/start_execution/claim_execution/reconcile_execution` and `TeamTaskManager` settlement. |
 | JiuwenSwarm Adapter | A worker factory keyed by AgentCore execution ID calls the project executor body and returns observations; it owns no disposition/lease. |
 | Test oracle | OJ-G1-A duplicate-ID, hostile unwind/spill, cancel/complete, restart-owner, mismatch-zero-effect and generation-race tests; project executor restart/capacity/cancel tests. |
@@ -277,7 +317,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Worker body, adjustment payload and project cleanup are product-specific; cancellation and continuation fencing are generic. |
 | Existing AgentCore evidence | A1 `AsyncToolRecord`; `AsyncToolRuntime.launch/_run/_try_set_terminal/_on_task_done/cancel/wait/cancel_all`; active duplicate fail-closed and reused-ID continuation identity fence. |
 | Composition attempted | A1 covers coroutine lifecycle directly. A2 supplies durable owner/generation but cannot wait for coroutine unwind; both are composed without dual ownership. |
-| Classification | `DIRECT_AGENTCORE — A1_CANDIDATE` |
+| Classification | `AGENTCORE_PR_CANDIDATE — A1_CANDIDATE` |
 | Target owner/API | A1 `AsyncToolRuntime.launch`, `get`, `list_all`, `has_running`, `cancel`, `wait`, `cancel_all` and internal monotonic settlement hooks; its live membership is passed to A2 `reconcile_execution` instead of persisted as a peer execution lease. `cancel_all` is cancellation fan-out only, so a quiescent close must subsequently await each accepted task through `cancel`/`wait`. |
 | JiuwenSwarm Adapter | Supplies the project Agent/Tool coroutine and typed success/failure/spill callbacks bound to the A2 execution token. |
 | Test oracle | OJ-G1-A hostile cancellation/spill, duplicate ID and cancel/complete cases; A1 hostile-cancel, reuse-isolation, wrapper-error and terminal-race unit tests; LiveVoice noncooperative close tests. |
@@ -359,7 +399,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Principal/project/session/route proof is product-specific; mandatory team/task predicate is generic. |
 | Existing AgentCore evidence | Scope candidate makes `team_name` mandatory for TaskDao/manager/monitor access and rejects cross-team task reuse. |
 | Composition attempted | Product verification -> team-name mapping -> Scope TaskDao predicate preserves both authorities without moving principal policy into AgentCore. |
-| Classification | `ADAPTER_DOWNSTREAM` |
+| Classification | `AGENTCORE_PR_CANDIDATE — SCOPE_CANDIDATE` |
 | Target owner/API | Scope candidate `TaskDao` and `TeamTaskManager` methods keyed by `(team_name, task_id)`; AgentCore never accepts an unscoped task ID. |
 | JiuwenSwarm Adapter | Input: verified principal/project/session. Output: immutable AgentCore team/scope key and task authorization request. It cannot decide Task state. |
 | Test oracle | OJ-G0 wrong-team isolation; Scope candidate manager/DAO tests; LiveVoice wrong principal/project/session and stale authorization tests with zero mutation/launch. |
@@ -379,7 +419,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Admission priority values and some retry policy are product choices; the Task/execution relation is generic. |
 | Existing AgentCore evidence | A2 `TeamTaskBase`, `TeamExecutionAttemptBase`, `TaskExecutionRecord`, `TaskExecutionOpResult`; `TaskDao.get_execution/get_execution_by_id/prepare_execution/_admit_execution/start_execution/claim_execution/reconcile_execution`; `TeamTaskManager.reset/complete/cancel` paths. |
 | Composition attempted | A2 dual-row transaction directly supplies the relation/CAS/restart outcome. A1 supplies coroutine quiescence. The current candidate `Team.cancel_member` resets the durable relation before sending runtime cancellation, so that call ordering is not reusable as production composition even though the two owners are. |
-| Classification | `DIRECT_AGENTCORE — A2_CANDIDATE` |
+| Classification | `AGENTCORE_PR_CANDIDATE — A2_CANDIDATE` |
 | Target owner/API | A2 TaskDao methods above and `TeamTaskManager` public facade; preserve one Task row and per-session execution child rows. |
 | JiuwenSwarm Adapter | Map product priority/retry request to generic prepare/reset; project executor consumes the returned execution token. |
 | Test oracle | OJ-G1-A atomic admission, cancel/complete, restart lost owner, generation race, mismatch zero effect; A2 ownership suite; LiveVoice create/retry/reopen/reconcile tests. |
@@ -399,7 +439,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | None material. |
 | Existing AgentCore evidence | Scope + A2 owns the same canonical Task/execution relation; command/event/scope segments are outside this record. |
 | Composition attempted | Keeping the model beside AgentCore would be a third state machine and supplies no production durability value. |
-| Classification | `DIRECT_AGENTCORE — A2_CANDIDATE` |
+| Classification | `AGENTCORE_PR_CANDIDATE — A2_CANDIDATE` |
 | Target owner/API | A2 TaskDao `prepare_execution/start_execution/claim_execution` and `TeamTaskManager.reset/complete/cancel`; test-only pure transition helpers may be rewritten against that canonical contract, not retained as authority. |
 | JiuwenSwarm Adapter | None beyond product command translation. |
 | Test oracle | Port unique Task/Attempt positive transition, competing terminal and cancel-ack tests to AgentCore conformance before retirement; replay/conflict/event tests close under their separate records. |
@@ -419,7 +459,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Specific update/reprioritize/adjust/successor vocabulary is product-facing; scoped command replay and CAS are generic. |
 | Existing AgentCore evidence | A2 execution version/owner CAS and Task settlement; base TaskManager events. No command ledger, payload fingerprint, replay result, or generic stale-precondition record exists. |
 | Composition attempted | A2 version CAS + Workflow Journal only handles execution/workflow replay; it cannot replay a Task command result or detect same-ID/different-payload conflicts. |
-| Classification | `AGENTCORE_ADD` — detailed as `ADD-01` |
+| Classification | `AGENTCORE_PR_CANDIDATE` — detailed as `ADD-01` |
 | Target owner/API | Extend TaskDao/`TeamTaskManager` with scoped `TaskCommandRecord`, `apply_command(command_id, fingerprint, expected_task_version, operation)` and deterministic replay result in the same transaction as Task mutation. |
 | JiuwenSwarm Adapter | Translate product command types/payloads to the generic operation; retain product-specific unsupported-control and confirmation policy. |
 | Test oracle | Existing persistent-core create/update/control/successor/adjust/retry replay/conflict tests; new AgentCore same-ID/same-payload replay and same-ID/different-payload zero-effect cases. |
@@ -439,7 +479,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Artifact types and user-facing result projection may be project/product-specific; terminal outcome and immutable references are generic. |
 | Existing AgentCore evidence | Base controller `TaskStatus` already has failed/canceled/paused/input-required/unknown vocabulary, and controller `Task` has outputs/error/metadata persisted through `TaskManagerState` and Session. A2 has completed/cancelled settlement and attempt dispositions; A1 fences callbacks. None provides a token-fenced immutable TeamTask result. |
 | Composition attempted | Controller Task/Session persistence can restore mutable controller output but is a different owner with no TeamTask scope/execution token or atomic command/settlement transaction. A1 + A2 can select one terminal callback but cannot persist/replay an immutable result. `ADD-01` must reconcile existing status names rather than invent gratuitous synonyms. |
-| Classification | `AGENTCORE_ADD` — part of `ADD-01` |
+| Classification | `AGENTCORE_PR_CANDIDATE` — part of `ADD-01` |
 | Target owner/API | Extend A2 execution row/`TeamTaskManager` settlement with `ExecutionOutcome`, immutable `TaskResultRef`, and token-fenced `settle_execution(execution_token, outcome, result_ref)`. |
 | JiuwenSwarm Adapter | Convert chat final/project patch/tool facts into bounded result/artifact references and product display data. |
 | Test oracle | Existing result projection, terminal ordering, stale observation, retry-readiness and applied-artifact tests; new restart/replay/immutable-conflict and stale-token zero-write conformance. |
@@ -459,7 +499,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Concrete executor adapter and priority policy are product choices; transactional Task-to-work handoff is generic. |
 | Existing AgentCore evidence | Base TeamScheduler scans and dispatches; A2 atomically admits Task/attempt and forwards review tokens. It has no transactional outbox, durable work claim/backoff, or delivery receipt. |
 | Composition attempted | A2 transaction followed by TeamScheduler message dispatch still has a crash gap; Scheduler followed by TaskDao update can launch unauthorized work. Logs/Workflow Journal do not close it. |
-| Classification | `AGENTCORE_ADD` — detailed as `ADD-02` |
+| Classification | `AGENTCORE_PR_CANDIDATE` — detailed as `ADD-02` |
 | Target owner/API | Extend TaskDao transaction with `TaskDispatchRecord`; extend TeamScheduler with `claim_dispatch/complete_dispatch/release_dispatch` using the A2 execution token. |
 | JiuwenSwarm Adapter | Map claimed generic dispatch/cancel/adjust record to project Runner/AsyncTool call and return a bounded delivery observation. |
 | Test oracle | Existing outbox claim/order/backoff/reopen/reconcile tests; new crash-after-commit-before-send, crash-after-send-before-ACK, wrong-token zero-launch and multi-team isolation conformance. |
@@ -479,7 +519,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Project checkpoint bytes and D0/D1/D2 capability profile are JiuwenSwarm executor semantics; monotonic checkpoint association is generic. |
 | Existing AgentCore evidence | Base Checkpointer `Storage.save/recover` and Agent/Workflow storage; A2 execution relation/profile/generation/owner; no atomic revisioned Task/checkpoint API. |
 | Composition attempted | A2 token + base Checkpointer can address the generic record, but Checkpointer data alone cannot authorize Task mutation or executor invocation. |
-| Classification | `AGENTCORE_ADD` — detailed as `ADD-05` |
+| Classification | `AGENTCORE_PR_CANDIDATE` — detailed as `ADD-05` |
 | Target owner/API | Extend the A2 TaskDao execution owner with an `ExecutionCheckpointRef` and token/version-fenced `publish_checkpoint_ref/read_checkpoint_ref`. Base Checkpointer stores opaque payload first; only the TaskDao-published reference is resume-authoritative. Exact same-store versus two-phase storage topology remains open. |
 | JiuwenSwarm Adapter | Encode/decode project D1 checkpoint and supply product capability/profile binding; verified facts remain authority-free inputs. |
 | Test oracle | Existing checkpoint prefix/corruption/profile/generation/reopen/recovery tests and OJ-G1-A mismatch-checkpoint zero-effect cases; new crash-before-publish, crash-after-payload-before-reference and stale-reference zero-launch conformance. |
@@ -521,7 +561,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Specific event payload/projection is product-facing; envelope, ordering and replay are generic. |
 | Existing AgentCore evidence | Base TaskManager callbacks, `WorkflowProgressEvent`, AgentRail/output stream and Scheduler messages; Session VCS has a per-session durable WAL with monotonic `LogEntry.event_id`, replay and truncation. Scope/A1/A2 add no Task event envelope. |
 | Composition attempted | Session VCS can replay session context/state deltas but is rewindable, not keyed to mandatory TeamTask scope/stream, and not in the TaskDao state/outbox transaction. Callback/progress payload + VCS therefore cannot reconstruct a canonical Task event head without a second owner or crash gap. |
-| Classification | `AGENTCORE_ADD` — event half of `ADD-02` |
+| Classification | `AGENTCORE_PR_CANDIDATE` — event half of `ADD-02` |
 | Target owner/API | Extend TaskDao with store-local `TaskEventEnvelope` and `append_event_in_transaction`; expose `read_events(scope, stream_id, after_seq, limit)` and atomic head. |
 | JiuwenSwarm Adapter | Map generic state/outcome/progress event payload to P3 status/result/text/voice projection; adapter never writes an alternate event sequence. |
 | Test oracle | Existing event identity/order/reopen/multi-task page/atomic replay tests; OJ-G0 event identity/watermark tests; new state-plus-event crash atomicity and cross-scope zero-read conformance. |
@@ -561,7 +601,7 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Consumer/channel labels and presentation class mapping are product-specific; monotonic cursor CAS is generic. |
 | Existing AgentCore evidence | `MessageDao.mark_message_read/mark_messages_read` stores timestamp-oriented read state. Base/Scope/A1/A2 have no stream sequence cursor. |
 | Composition attempted | Message timestamp watermark + EventEnvelope cannot distinguish consumers/channels, same-time events, or independent text/voice ACK and therefore loses/repeats presentation. |
-| Classification | `AGENTCORE_ADD` — detailed as `ADD-03` |
+| Classification | `AGENTCORE_PR_CANDIDATE` — detailed as `ADD-03` |
 | Target owner/API | Small `CursorStore` beside the AgentCore event owner: `(scope, stream_id, consumer_id, channel) -> sequence/version`; `read_unread` and idempotent `advance(expected_seq, event_id)`. |
 | JiuwenSwarm Adapter | Maps product response/task route to consumer/channel and translates DOM adoption or voice playout receipt to a cursor-advance request. |
 | Test oracle | Existing unread/ACK replay/conflict/same-time/multi-consumer tests; OJ-G0 watermark/ACK identity cases; new wrong-channel/wrong-scope/stale ACK zero-advance conformance. |
@@ -663,13 +703,13 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Product coupling | Effect kind-specific probe and compensation are product/Tool adapters; identity, phases, lease and reconciliation decision are generic. |
 | Existing AgentCore evidence | Workflow `engine.Journal` caches/finalizes completed workflow calls; Session VCS supplies a per-session WAL; Checkpointer stores context; AsyncTool runs/cancels; A2 owns execution. Scope/A1/A2 explicitly omit persistent effect receipt/reconcile. |
 | Composition attempted | Workflow Journal + Session VCS + Checkpointer + A1 + A2 cannot distinguish crash-before-call, call-without-receipt, receipt-without-settlement, or ambiguous external outcome. VCS is rewindable session state, not an effect ledger. Workflow `engine/` must remain business-agnostic and cannot import AgentTeams TaskDao/A2 modules, so its call cache cannot be made the Task effect transaction owner. |
-| Classification | `AGENTCORE_ADD` — detailed as `ADD-04` |
-| Target owner/API | Minimum owner boundary is `openjiuwen.agent_teams.tools.database`, sharing the TaskDao database/transaction boundary; whether methods live on TaskDao or a subordinate EffectDao remains open. Required APIs are `plan`, `claim`, `record_dispatch`, `record_receipt`, `record_observation`, `settle`, `read_prefix`, `reconcile`. Workflow `engine/` may accept only a business-neutral injected protocol; it may not import TaskDao/A2 or own their rows. |
+| Classification | `AGENTCORE_PR_CANDIDATE` — detailed as `ADD-04` |
+| Target owner/API | The current local candidate selects subordinate `openjiuwen.agent_teams.tools.database.EffectDao`, sharing the AgentTeams database/session and A2 execution identity while leaving TaskDao as the sole Task/checkpoint owner. Required APIs are `plan`, `claim`, `record_dispatch`, `record_receipt`, `record_observation`, `settle`, `read_prefix`, `reconcile`. Workflow `engine/` may accept only a business-neutral injected protocol; it may not import TaskDao/A2 or own their rows. |
 | JiuwenSwarm Adapter | Supplies file/project Tool effect binding, idempotency key, probe, verification and compensation callbacks; receives a journal-authorized continuation token. |
 | Test oracle | Existing D2 duplicate, prefix/corruption, crash-before/after, receipt/observation/settlement, stale authorization and project-effect tests; new non-Voice Tool effect conformance. |
 | Dependencies | `SCOPE-01`, `EXEC-OWN-01`, `ADD-02`, `TASK-05`, `ASYNC-01`. |
 | Retirement Gate | AgentCore journal is sole generic effect truth; every continuation is token-fenced; ambiguous effects are never silently retried; LiveVoice effect rows are quiesced/imported. |
-| Confidence/open issue | Medium. The AgentTeams database boundary is fixed; TaskDao-versus-subordinate-DAO placement, transaction topology and protocol injection remain unresolved and must be selected before implementation. Preserving the name “Workflow Journal” is not a valid reason to violate the engine boundary. |
+| Confidence/open issue | Medium-high. The local owner placement is resolved to subordinate `EffectDao`; upstream replay/review, exact transaction topology and business-neutral protocol injection remain open. Preserving the name “Workflow Journal” is not a valid reason to violate the engine boundary. |
 
 #### D2-02 — project/file Tool effect adapter
 
@@ -1002,12 +1042,10 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Substatus | LiveVoice responsibility to retire or redirect | Exact AgentCore target |
 |---|---|---|
 | `BASE_EXISTING` | legacy `AgentBridgePort` and generic Agent/Tool invocation | Agent/Team Runner, `create_deep_agent`, NativeHarness; Workflow/Agent storage remains only a checkpoint foundation |
-| `SCOPE_CANDIDATE` | unscoped or LiveVoice-only Task predicates | Scope `TaskDao`/`TeamTaskManager` mandatory `(team_name, task_id)` methods |
-| `A1_CANDIDATE` | background active-ID registry, cancel/wait, terminal callback/spill fence | `AsyncToolRecord`; `AsyncToolRuntime.launch/_run/_try_set_terminal/_on_task_done/cancel/wait/cancel_all` |
-| `A2_CANDIDATE` | `ExecutorPort`, LiveVoice Task/Attempt relation and `_DirectProjectAttemptJournal` execution truth | `TeamTaskBase`; `TeamExecutionAttemptBase`; `TaskExecutionRecord`; `TaskExecutionOpResult`; `TaskDao.get_execution/get_execution_by_id/prepare_execution/start_execution/claim_execution/reconcile_execution`; `TeamTaskManager.reset/complete/cancel` |
 
-These are target contracts, not installed capability claims. Scope/A1/A2 must be
-committed, reviewed, integrated and installed before any production redirect.
+Only the base Runner/Agent invocation contract is direct reuse today. The local
+Scope/A1/A2/ADD/facade implementations are classified separately as AgentCore
+PR candidates below; none is an installed capability claim.
 
 ### 8.2 Adapter-downstream list
 
@@ -1023,17 +1061,31 @@ committed, reviewed, integrated and installed before any production redirect.
 | D2 Tool effect | AgentCore EffectJournal owns identity, lease, phases and settlement | Project/file Tool adapter probes, verifies or compensates a concrete effect under a continuation token. |
 | P3/Web task facade | AgentCore owns Task/Attempt/Command/Event/Result/Effect/Cursor | P3/Web maps authentication, product envelopes, view state and confirmation; all browser caches are discardable. |
 
-### 8.3 Minimum AgentCore additions
+### 8.3 AgentCore PR candidates
 
-Each addition satisfies all five admission tests below. “Composition failure” is
-an authority/crash-safety failure, not a naming mismatch.
+All entries in this section exist only as local candidates and require replay,
+review, upstream acceptance and installation before LiveVoice can consume them.
+The first group repairs or exposes existing AgentCore owners:
+
+| Candidate | Generic owner and public outcome | Why it is not direct reuse |
+|---|---|---|
+| `SCOPE_CANDIDATE` | mandatory `(team_name, task_id)` predicates in `TaskDao` / `TeamTaskManager` | the locked/base dependency permits unscoped access; the local correction is not installed |
+| `A1_CANDIDATE` | monotonic `AsyncToolRuntime` cancel/wait/terminal callback and reused-ID fencing | the required lifecycle semantics exist only in the local candidate |
+| `A2_CANDIDATE` | canonical Task/execution relation, admission, claim, reconcile and token-fenced settlement | the locked/base Task owner lacks this durable execution contract |
+| bound Task/checkpoint facade candidate | `TeamAgent.task_authority` returning `TeamTaskAuthority` plus `ExecutionCheckpointCoordinator` | Manager/DAO access is not an acceptable public product API, and the bound handle is local only |
+| bound effect facade candidate | `TeamAgent.effect_authority` returning `TeamExecutionEffectAuthority` | the least-privilege continuation handle is local only and intentionally excludes reaper/provider policy |
+
+The remaining candidates add generic non-Voice capabilities to the smallest
+existing owners. Each addition satisfies all five admission tests below.
+“Composition failure” is an authority/crash-safety failure, not a naming
+mismatch.
 
 | ID and minimum owner | Locked/base absence | Checked composition remains insufficient | Scope/A1/A2 absence | Non-Voice value | Minimum schema/API and failing oracle; exclusions |
 |---|---|---|---|---|---|
 | `ADD-01` — extend existing TaskDao/`TeamTaskManager` execution owner with command, terminal outcome and result | AgentTeams `TeamTaskManager`/TaskDao has no durable command fingerprint/replay ledger or immutable token-fenced Task result. Base core controller already has broad `TaskStatus` vocabulary and mutable `Task.outputs/error_message/metadata`, serialized as `TaskManagerState` through Session. | Controller Task/Session restore is a different mutable owner with no TeamTask scope/execution token/command fingerprint, and its save is not the TaskDao transaction. Workflow Journal and Checkpointer likewise cannot atomically replay Task mutation/result. A1 only fences callbacks. | A2 owns execution admission and completed/cancelled settlement but no command ledger, broader outcome/result settlement or immutable result | Any long-running Agent/Tool Task needs idempotent controls and restart-stable outcome/result | Reconcile/reuse existing public status names where semantically equal; add `TaskCommandRecord`, scoped fingerprint/replay/CAS, opaque immutable `TaskResultRef`, and token-fenced settlement in the TaskDao transaction. Oracle: same-ID replay/conflict, stale-token zero effects, restart-stable immutable result. Exclude project artifact schema, UI display and Voice confirmation. |
 | `ADD-02` — extend TaskDao and TeamScheduler with EventEnvelope plus transactional dispatch outbox | Base Session VCS already has per-session WAL/replay and monotonic `LogEntry.event_id`; callbacks/progress/Scheduler messages also exist. None is a TaskDao-scoped immutable event plus state/dispatch transaction. | VCS is session-scoped, rewindable/truncatable and not atomic with TaskDao; TaskDao state then Scheduler send loses work, while send then state update can launch unauthorized work. Logs and Workflow Journal do not close either crash window. | Scope adds predicates; A1 worker safety; A2 atomic Task/attempt CAS. None stores Task EventEnvelope/outbox claim/receipt/order. | Any background Agent/Tool Task needs auditable replay and crash-safe dispatch | `TaskEventEnvelope`; `TaskDispatchRecord`; TaskDao state/event/dispatch atomic append; Scheduler claim/complete/release/reclaim. Oracle: crash windows, ordered replay, wrong-token zero launch, multi-team isolation. Exclude JiuwenSwarm transport, spoken policy and project priority policy. |
 | `ADD-03` — small CursorStore beside AgentCore event owner | `MessageDao` timestamp watermark is not a per-stream sequence cursor | Timestamp + events cannot isolate consumers/channels or order equal-time events; it cannot express text ACK separately from voice ACK. | No candidate adds cursor/ACK. | Any UI, webhook, audit reader or notification channel needs independent replay position | `(scope, stream, consumer, channel, sequence, version)`, atomic unread/head read and idempotent CAS advance. Oracle: same-time, duplicate, stale, wrong-channel/scope zero advance. Exclude DOM/playout receipt semantics and response generation. |
-| `ADD-04` — EffectJournal in AgentTeams database boundary, linked to A2 execution; DAO placement open | Checkpointer and business-neutral Workflow Journal store context/completed-call prefixes; Session VCS stores rewindable session deltas. None stores external-effect intent/dispatch/receipt/observation/ambiguous settlement. | Workflow `engine/` is forbidden from importing AgentTeams business modules; Session VCS is not an effect ledger; neither shares the A2 Task transaction. Adding AsyncTool still cannot distinguish crash-before-call from call-without-receipt or decide safe retry/compensation. | A1/A2 explicitly exclude persistent effect receipt/reconcile. | Any Agent Tool touching files, APIs, money, messages or external systems needs safe ambiguity handling | Minimum owner is `openjiuwen.agent_teams.tools.database`, sharing TaskDao transaction/identity; TaskDao methods versus subordinate EffectDao remains a Tier-3 choice. Add scoped effect phases, claim lease and continuation authorization; workflow engine sees at most a business-neutral injected protocol. Oracle: all crash windows, duplicate, stale generation, ambiguous no-retry. Exclude project/file probe, compensation policy and product confirmation. |
+| `ADD-04` — subordinate EffectJournal in the AgentTeams database boundary, linked to A2 execution | Checkpointer and business-neutral Workflow Journal store context/completed-call prefixes; Session VCS stores rewindable session deltas. None stores external-effect intent/dispatch/receipt/observation/ambiguous settlement. | Workflow `engine/` is forbidden from importing AgentTeams business modules; Session VCS is not an effect ledger; neither shares the A2 Task transaction. Adding AsyncTool still cannot distinguish crash-before-call from call-without-receipt or decide safe retry/compensation. | A1/A2 explicitly exclude persistent effect receipt/reconcile. | Any Agent Tool touching files, APIs, money, messages or external systems needs safe ambiguity handling | The local candidate places `EffectDao` in `openjiuwen.agent_teams.tools.database`, sharing the AgentTeams session/database and A2 execution identity while remaining subordinate to Task authority. Add scoped effect phases, claim lease and continuation authorization; workflow engine sees at most a business-neutral injected protocol. Oracle: all crash windows, duplicate, stale generation, ambiguous no-retry. Exclude project/file probe, compensation policy and product confirmation. |
 | `ADD-05` — execution-checkpoint publication in the A2 TaskDao owner | Base Checkpointer/Agent/Team/Workflow storage can save/recover opaque context; core controller Session persistence and VCS can restore state. None publishes a token/version-fenced checkpoint reference as canonical TeamTask resume authority. | Checkpointer payload + A2 relation without a publication link leaves crash ambiguity and lets callers mistake orphan/stale payload for authority; Session/controller restore is a different owner. | A2 stores profile/generation/owner/version but no checkpoint reference/publication API. Scope/A1 add none. | Any restartable non-Voice Agent/Task needs to bind resume data to the exact admitted execution. | `ExecutionCheckpointRef(sequence,digest,profile_digest,generation)` plus `publish_checkpoint_ref/read_checkpoint_ref` under A2 token/version CAS; same-store versus safe two-phase payload-first publication remains open. Oracle: crash-before/after payload, stale/corrupt/mismatched reference zero launch. Exclude project checkpoint codec and D2 effect facts. |
 
 No addition creates a new top-level `DurableTaskAuthority`: `ADD-01`, `ADD-02`
@@ -1119,7 +1171,11 @@ are explicitly split in the records above.
 | D2 | all effect/authority/prefix/recovery fact schemas and Store methods; direct executor project effect plan/dispatch/receipt/probe/reconcile/crash paths | `D2-01..03`, `EXE-06` |
 | Agent Bridge/composition/Web | legacy and runtime bridge, formal carrier/harness, real Agent adapter, P3 authenticated/product composition, production classifier/intent/policy/confirmation/model/route contract, committed formal history, Task Web client/bridge/monitor/formal owners | `BRIDGE-01..04`, `COMP-01..05`, `HIST-01`, `WEB-01..04` |
 
-## 12. Open questions
+## 12. Historical open questions
+
+The 2026-08-25 update in section 0 resolves the local candidate design questions
+below. They remain here to preserve why each composition was investigated.
+Physical migration and upstream acceptance remain open.
 
 1. Which stable public facade exposes A2 prepare/start/claim/settle without
    encouraging direct DAO calls? TaskDao remains the storage owner regardless.
@@ -1149,28 +1205,27 @@ are explicitly split in the records above.
    are a later migration packet. This review proposes authority boundaries but
    does not perform or approve that migration.
 
-## 13. Recommended local migration packet order
+## 13. Recommended local PR-preparation and later migration order
 
-1. `OJ-G1-SCOPE`: review/integrate the Scope candidate and run wrong-team
+1. `OJ-G1-SCOPE`: replay/review the Scope candidate and run wrong-team
    positive/negative/zero-effect conformance against its public seams.
-2. `OJ-G1-A1`: review/integrate the staged AsyncTool lifecycle candidate; prove
+2. `OJ-G1-A1`: replay/review the AsyncTool lifecycle candidate; prove
    hostile cancellation, reused-ID isolation and no spill/injection after cancel.
-3. `OJ-G1-A2`: review/integrate the stacked execution-ownership candidate, then
-   wire real Agent/Tool launch and all control/settlement callers to its token.
-4. `OJ-G1-TASK-RESULT`: implement `ADD-01` in TaskDao/`TeamTaskManager`; port command,
+3. `OJ-G1-A2`: replay/review the execution-ownership candidate. Real product
+   launch/control wiring is a later LiveVoice adapter packet.
+4. `OJ-G1-TASK-RESULT`: replay/review the local `ADD-01` candidate; verify command,
    terminal outcome and immutable-result conformance.
-5. `OJ-G1-EVENT-DISPATCH`: implement `ADD-02` in TaskDao/TeamScheduler and prove
+5. `OJ-G1-EVENT-DISPATCH`: replay/review the local `ADD-02` candidate and prove
    transactional event/outbox plus scheduler crash windows.
-6. `OJ-G1-D1`: implement `ADD-05`, selecting same-store or safe payload-first
-   publication, and prove orphan/stale checkpoint data has zero resume authority.
-7. `OJ-G1-D2`: select TaskDao versus subordinate EffectDao placement inside the
-   fixed AgentTeams database boundary without coupling Workflow `engine/` to
-   TaskDao, implement `ADD-04`, and inject real non-Voice and project/file Tool
-   crash windows.
-8. `OJ-G1-CURSOR`: implement `ADD-03`, then connect text and voice presentation
-   through separate consumer/channel ACK adapters.
-9. `OJ-G1-FACADE`: create an isolated JiuwenSwarm adapter over the complete
-   AgentCore contract and run server/Web/product integration without dual writes.
+6. `OJ-G1-D1`: replay/review the local payload-first `ADD-05` candidate and prove
+   orphan/stale checkpoint data has zero resume authority.
+7. `OJ-G1-D2`: replay/review the subordinate-EffectDao `ADD-04` candidate without
+   coupling Workflow `engine/` to TaskDao; use generic and non-Voice crash-window
+   evidence. Project/file adapters remain downstream.
+8. `OJ-G1-CURSOR`: replay/review `ADD-03`; product text/voice presentation ACK
+   adapters are later LiveVoice work.
+9. `OJ-G1-FACADE`: replay/review the bound Task/checkpoint/effect public seams.
+   Building the isolated JiuwenSwarm adapter is a later feature-branch packet.
 10. `OJ-G1-CUTOVER` (later, separately authorized): design and rehearse quiesced
    import, verification, rollback and canary; only after acceptance retire
    `SqliteTaskStore` generic tables, `_DirectProjectAttemptJournal` execution

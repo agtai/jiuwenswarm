@@ -16,7 +16,7 @@ root `TESTING.md`.
 |---|---|---|---|
 | Moving LiveVoice product fact | `hx/0812_live_voice_w3` | `acd873d0e93b2e82424e0d90a650df2c3515c34c` | read-only inventory and semantic truth |
 | Isolated preparation evidence | `codex/livevoice-agentcore-hermes-prep` | `a663cec2b09a3daa18cbbe449fe5d9e71cf5f27e` before this review batch | tracked analysis and candidate evidence |
-| Local AgentCore candidate | `codex/oj-g2-local-base` | `db8216839562de36fa24fd6f5ce807acea5a132a` | public-boundary and PR-candidate audit |
+| Local AgentCore candidate | `codex/oj-g2-local-base` | `50c065dc7fb5e0c21903128d1a033c52968be97e` | reviewed public-boundary and PR-candidate stack |
 | Hermes architecture mirror | `main` | `fc9cbc872d8050c22f1192b16bc5ff4aed471e10` | read-only responsibility comparison |
 
 The LiveVoice feature branch is still moving. These hashes make this audit
@@ -698,6 +698,14 @@ The semantic set now equals the machine manifest: **152/152 production paths,
 0 missing, 0 extra**. This closes the explanation/classification task at the
 module-path level for observed feature HEAD `acd873d0`; moving-branch changes
 still require incremental reconciliation by path/symbol/capability.
+
+The five preparation-only LiveVoice commits and the ignored EVT-02 archive are
+outside that 152-path product manifest. Their separate
+[prototype adjudication](OPENJIUWEN_LIVEVOICE_PROTOTYPE_ADJUDICATION_2026-08-25.md)
+selects no current implementation for wholesale integration: four boundaries
+must be minimized and rewritten against final public AgentCore contracts, the
+project/file Effect implementation is discarded, and EVT-02 contributes only
+test ideas for a later event-reader/projector boundary.
 
 The complete inventory supports four distinct outcomes rather than one
 headline deletion number:

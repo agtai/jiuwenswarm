@@ -102,25 +102,29 @@ change requires a separately scoped and risk-tiered implementation packet.
 ## 6. Treatment of the current preparation commits
 
 The following commits are retained only on the isolated preparation branch as
-candidate implementations and evidence:
+candidate implementations and evidence. Their final keep/minimize/discard
+decision is detailed in the
+[prototype adjudication](OPENJIUWEN_LIVEVOICE_PROTOTYPE_ADJUDICATION_2026-08-25.md):
 
-| Commit | Candidate boundary | Current treatment |
+| Commit | Candidate boundary | Final preparation decision |
 |---|---|---|
-| `9c820fe1` | OpenJiuwen Task facade | retain for direct/Adapter boundary analysis |
-| `1a84b541` | asynchronous product query owner | provisional compatibility seam; retain only if later selected and minimized |
-| `0228b738` | D1 checkpoint Adapter | retain for reuse and ownership analysis |
-| `b0575038` | project/file effect Adapter | retain for effect-authority analysis |
-| `561e5e5f` | presentation cursor Adapter | provisional compatibility seam; retain only if later selected and minimized |
+| `9c820fe1` | OpenJiuwen Task facade | rewrite as a thin public-`TeamTaskAuthority` scope/mapping boundary; retain tests as oracles |
+| `1a84b541` | asynchronous product query owner | retain only the optional async seam design; rewrite the adapter without mirror authority/models |
+| `0228b738` | D1 checkpoint Adapter | rewrite as codec/payload-policy mapping into `ExecutionCheckpointCoordinator`; retain durability oracles |
+| `b0575038` | project/file effect Adapter | discard implementation; extract a public product `ProjectEffectPort` before writing any thin continuation adapter |
+| `561e5e5f` | presentation cursor Adapter | retain product receipt proof and optional async seam design; rewrite cursor mapping against final public types |
 
 Together these commits add roughly ten thousand lines including tests and
 implementation packets. Their presence on this branch does not make them a
-LiveVoice integration candidate. At task closure each part must be explicitly
-retained, reduced, moved to an AgentCore PR candidate, or discarded.
+LiveVoice integration candidate. The adjudication above explicitly prevents
+those experimental lines from becoming a feature-branch merge unit.
 
 The uncommitted EVT-02 raw event-subscription prototype is outside the active
 implementation scope. It risks adding another LiveVoice polling/subscription
 state machine above the existing AgentCore/facade event-read boundary. It is
 kept only as a local, ignored recovery archive and is not a tracked deliverable.
+Its implementation and packet are discarded; only bounded replay/auth/race
+test ideas may be ported to the final event-reader/projector boundary.
 
 ## 7. Eventual integration boundary
 
