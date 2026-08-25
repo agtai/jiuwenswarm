@@ -1099,6 +1099,11 @@ def parse_args(
 
     parser = ClosedParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("mode", choices=("pilot", "run"))
+    parser.add_argument(
+        "--experiment",
+        choices=("fixed-threshold", "semantic-auto", "semantic-high"),
+        default="fixed-threshold",
+    )
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
@@ -1115,6 +1120,7 @@ def parse_args(
         values.output,
         values.git_commit,
         source_clean,
+        experiment=values.experiment,
     )
 
 

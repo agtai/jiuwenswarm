@@ -939,6 +939,51 @@ async def test_semantic_screening_uses_exact_three_arm_population_and_report_lab
     }
 
 
+@pytest.mark.parametrize("experiment", ("semantic-auto", "semantic-high"))
+def test_cli_accepts_only_closed_semantic_experiment_selector(
+    tmp_path: Path,
+    experiment: str,
+) -> None:
+    manifest_path, _ = _corpus(tmp_path)
+    config = runner.parse_args(
+        [
+            "pilot",
+            "--experiment",
+            experiment,
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(tmp_path / f"{experiment}.json"),
+            "--run-id",
+            experiment,
+            "--git-commit",
+            "a" * 40,
+        ],
+        source_commit="a" * 40,
+        source_clean=True,
+    )
+
+    assert config.experiment == experiment
+    with pytest.raises(ValueError, match="VAD_BENCHMARK_CONFIG_INVALID"):
+        runner.parse_args(
+            [
+                "pilot",
+                "--experiment",
+                "semantic-auto-high",
+                "--manifest",
+                str(manifest_path),
+                "--output",
+                str(tmp_path / "invalid.json"),
+                "--run-id",
+                "invalid-experiment",
+                "--git-commit",
+                "a" * 40,
+            ],
+            source_commit="a" * 40,
+            source_clean=True,
+        )
+
+
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = support.load_vad_corpus_manifest(config.manifest_path)
