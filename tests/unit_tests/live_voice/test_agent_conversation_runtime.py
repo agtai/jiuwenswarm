@@ -219,6 +219,24 @@ class BlockingHistoryWriter(RecordingHistoryWriter):
         )
 
 
+class BlockingNativeHistoryWriter(RecordingHistoryWriter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.native_started = asyncio.Event()
+        self.native_release = asyncio.Event()
+
+    async def persist_native_assistant(
+        self, admission, *, session_id: str, channel_id: str
+    ) -> bool:
+        self.native_started.set()
+        await self.native_release.wait()
+        return await super().persist_native_assistant(
+            admission,
+            session_id=session_id,
+            channel_id=channel_id,
+        )
+
+
 class AlwaysFailAssistantHistoryWriter(RecordingHistoryWriter):
     async def persist_assistant(
         self, intent, *, session_id: str, channel_id: str
@@ -468,6 +486,44 @@ async def test_native_history_writer_failure_is_retained_and_exact_retry_recover
     assert (await current.close(timeout_seconds=0.2)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_native_history_is_bounded_and_drained_during_close() -> None:
+    history = BlockingNativeHistoryWriter()
+    current = runtime(LowerFormalAdapter(), history, max_requests=1)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-history-drain")
+    admission = NativeHistoryAdmission(
+        response=ResponseRef(
+            "interaction-native-history-drain",
+            "response-native-history-drain",
+            1,
+        ),
+        transcript="Canonical drain answer.",
+        presented_at="2026-08-25T10:00:03Z",
+    )
+
+    assert await current.schedule_native_assistant_history(
+        admission,
+        channel_id="web",
+    )
+    assert await current.schedule_native_assistant_history(
+        admission,
+        channel_id="web",
+    )
+    await asyncio.wait_for(history.native_started.wait(), timeout=1.0)
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert history.native_assistant_intents == []
+
+    history.native_release.set()
+    closed = await current.close(timeout_seconds=0.2)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert history.native_assistant_intents == [
+        (admission, scope().session_id, "web")
+    ]
 
 
 async def _prepare_native_delegate_execution(

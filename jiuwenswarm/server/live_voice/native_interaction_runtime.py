@@ -84,7 +84,7 @@ class NativeAudioAdmission:
 class NativeBargeAdmission:
     applied: bool
     response: ResponseRef
-    cursor: NativePresentationCursor
+    cursor: NativePresentationCursor | None
     cancel_command_id: str
 
 
@@ -231,7 +231,8 @@ class NativeInteractionRuntimeOwner:
         self._audio_event_responses: dict[str, str] = {}
         self._done_event_ids: dict[str, NativeProviderDone] = {}
         self._barges: dict[
-            str, tuple[ResponseRef, NativePresentationCursor, NativeBargeAdmission]
+            str,
+            tuple[ResponseRef, NativePresentationCursor | None, NativeBargeAdmission],
         ] = {}
         self._delegates_by_call: dict[str, NativeDelegateAdmission] = {}
         self._delegate_event_calls: dict[str, str] = {}
@@ -775,6 +776,7 @@ class NativeInteractionRuntimeOwner:
             )
             retained.done = observation
             self._done_event_ids[observation.provider_event_id] = observation
+            await self._reconcile_history_locked(retained)
             return True
 
     async def acknowledge_audio(
@@ -801,33 +803,64 @@ class NativeInteractionRuntimeOwner:
                 await self._runtime.acknowledge_presentation(ack)
                 return retained.history
             await self._runtime.acknowledge_presentation(ack)
-            if retained.done is None or not retained.done.completed:
+            return await self._reconcile_history_locked(retained)
+
+    async def history_admission(
+        self, response: ResponseRef
+    ) -> NativeHistoryAdmission | None:
+        """Return the exact reconciled history fact without replaying Browser ACK."""
+
+        async with self._lock:
+            self._require_open()
+            if not isinstance(response, ResponseRef):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_HISTORY_RESPONSE_INVALID",
+                    "Native history lookup requires one exact ResponseRef",
+                )
+            retained = self._responses_by_ref.get(response)
+            if retained is None or retained is not self._current_response:
                 return None
-            if not await self._runtime.presentation_complete(
-                ack.ref, PresentationSurface.AUDIO
-            ):
-                return None
-            transcript = retained.done.transcript
-            if transcript is None:
-                return None
-            records = sorted(
-                (
-                    record
-                    for record in self._runtime.snapshot().presentation.records
-                    if record.unit.ref == ack.ref
-                    and record.unit.surface is PresentationSurface.AUDIO
-                ),
-                key=lambda record: record.unit.seq,
-            )
-            if not records or any(
-                record.state is not PresentationState.PRESENTED for record in records
-            ):
-                return None
-            presented_at = records[-1].presented_at
-            assert presented_at is not None
-            admission = NativeHistoryAdmission(ack.ref, transcript, presented_at)
-            retained.history = admission
-            return admission
+            return retained.history
+
+    async def _reconcile_history_locked(
+        self, retained: _RuntimeResponse
+    ) -> NativeHistoryAdmission | None:
+        if retained.history is not None:
+            return retained.history
+        if (
+            retained.cancelled
+            or retained.done is None
+            or not retained.done.completed
+            or retained.done.transcript is None
+        ):
+            return None
+        response = retained.admission.response
+        if not await self._runtime.presentation_complete(
+            response, PresentationSurface.AUDIO
+        ):
+            return None
+        records = sorted(
+            (
+                record
+                for record in self._runtime.snapshot().presentation.records
+                if record.unit.ref == response
+                and record.unit.surface is PresentationSurface.AUDIO
+            ),
+            key=lambda record: record.unit.seq,
+        )
+        if not records or any(
+            record.state is not PresentationState.PRESENTED for record in records
+        ):
+            return None
+        presented_at = records[-1].presented_at
+        assert presented_at is not None
+        admission = NativeHistoryAdmission(
+            response,
+            retained.done.transcript,
+            presented_at,
+        )
+        retained.history = admission
+        return admission
 
     async def barge_in(
         self,
@@ -898,6 +931,63 @@ class NativeInteractionRuntimeOwner:
                 cancel_command_id=parsed_action_id,
             )
             self._barges[parsed_action_id] = (response, cursor, admission)
+            if applied:
+                retained.cancelled = True
+            return admission
+
+    async def fence_response(
+        self,
+        *,
+        action_id: str,
+        response: ResponseRef,
+    ) -> NativeBargeAdmission:
+        """Fence one exact response when Audio I/O has no played cursor."""
+
+        async with self._lock:
+            self._require_open()
+            parsed_action_id = _identity(action_id, "action_id")
+            if not isinstance(response, ResponseRef):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_BARGE_INPUT_INVALID",
+                    "cursorless fence requires one exact ResponseRef",
+                )
+            prior = self._barges.get(parsed_action_id)
+            if prior is not None:
+                if prior[0] == response and prior[1] is None:
+                    return prior[2]
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_BARGE_ACTION_CONFLICT",
+                    "barge action cannot change response or cursor policy",
+                )
+            retained = self._responses_by_ref.get(response)
+            if (
+                retained is None
+                or retained is not self._current_response
+                or retained.cancelled
+                or retained.done is not None
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_BARGE_RESPONSE_STALE",
+                    "cursorless fence requires the exact current active response",
+                )
+            result = await self._runtime.barge_in(
+                parsed_action_id, response, cancel_response=True
+            )
+            effects = {
+                record.effect.effect_id: record.effect
+                for record in self._runtime.snapshot().effects
+            }
+            applied = any(
+                effects[effect_id].effect_type == "response.cancel"
+                for effect_id in result.effect_ids
+            )
+            admission = NativeBargeAdmission(
+                applied=applied,
+                response=response,
+                cursor=None,
+                cancel_command_id=parsed_action_id,
+            )
+            self._barges[parsed_action_id] = (response, None, admission)
             if applied:
                 retained.cancelled = True
             return admission

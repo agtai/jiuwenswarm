@@ -14,6 +14,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
+from jiuwenswarm.gateway.live_voice import native_interaction_runtime_client as client_module
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
     NATIVE_BROWSER_DESCRIPTOR_KEY,
     NATIVE_GATEWAY_DESCRIPTOR_KEY,
@@ -24,6 +25,7 @@ from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
 from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeDelegateProposal,
     NativeInteractionBinding,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
@@ -75,6 +77,31 @@ def audio_event() -> NativeEngineEvent:
     )
 
 
+def delegate_event() -> NativeEngineEvent:
+    delegate = NativeDelegateProposal(
+        binding=BINDING,
+        turn_id="native-turn-1",
+        response_generation=1,
+        provider_event_id="provider-function-event-1",
+        provider_call_id="provider-call-1",
+        provider_item_id="provider-function-item-1",
+        request_text="Use Jiuwen safely.",
+    )
+    return NativeEngineEvent(
+        action=InteractionAction(
+            action_id="native-delegate-action-1",
+            operation="DELEGATE",
+            interaction_id=BINDING.interaction_id,
+            scope=SCOPE,
+            payload=(
+                ("provider_call_id", delegate.provider_call_id),
+                ("turn_id", delegate.turn_id),
+            ),
+        ),
+        delegate=delegate,
+    )
+
+
 def activation_payload() -> dict[str, object]:
     return {
         "request_id": "activate-request-1",
@@ -116,11 +143,21 @@ class FakeAgentClient:
             envelope.method
             == ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK.value
         ):
-            result = {
-                "kind": "presentation_ack",
-                "status": "observed",
-                "history_eligible": False,
-            }
+            cursor = envelope.params.get("cursor")
+            result = (
+                {
+                    "kind": "response_fence",
+                    "status": "observed",
+                    "applied": True,
+                    "cancel_command_id": envelope.params.get("action_id"),
+                }
+                if isinstance(cursor, dict) and cursor.get("fence_only") is True
+                else {
+                    "kind": "presentation_ack",
+                    "status": "observed",
+                    "history_eligible": False,
+                }
+            )
         else:
             result = {
                 "kind": "action",
@@ -281,6 +318,44 @@ async def test_gateway_native_timeout_has_one_request_and_no_local_replay_record
     assert raised.value.reason == "NATIVE_RUNTIME_TIMEOUT"
     assert len(agent.requests) == 1
     assert client.snapshot().completed_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_delegate_uses_method_specific_thirty_second_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, agent, _sanitized = observed_client(timeout_seconds=0.01)
+    observed_deadlines: list[float] = []
+
+    async def capture_deadline(awaitable, *, timeout):
+        observed_deadlines.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(client_module.asyncio, "wait_for", capture_deadline)
+    agent.result_override = {
+        "kind": "delegate",
+        "status": "completed",
+        "accepted": True,
+        "provider_call_id": "provider-call-1",
+        "route": "dialogue",
+        "turn_commit_id": "native-delegate-commit-1",
+        "canonical_text": "Canonical Jiuwen result.",
+        "response": {
+            "interaction_id": BINDING.interaction_id,
+            "response_id": "native-delegate-response-1",
+            "response_generation": 2,
+        },
+    }
+
+    result = await client.propose(
+        binding=BINDING,
+        capability=CAPABILITY,
+        event=delegate_event(),
+        request_id="native-delegate-deadline-1",
+    )
+
+    assert result == agent.result_override
+    assert observed_deadlines == [30.0]
 
 
 @pytest.mark.asyncio
@@ -480,6 +555,13 @@ async def test_gateway_native_ack_and_close_use_only_closed_internal_methods() -
         request_id="native-ack-1",
         ack=ack,
     )
+    await client.presentation_ack(
+        binding=BINDING,
+        capability=CAPABILITY,
+        request_id="native-fence-1",
+        fence_response=ack.ref,
+        action_id="native-fence-action-1",
+    )
     await client.close(
         binding=BINDING,
         capability=CAPABILITY,
@@ -487,6 +569,7 @@ async def test_gateway_native_ack_and_close_use_only_closed_internal_methods() -
     )
 
     assert [item.method for item in agent.requests] == [
+        ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK.value,
         ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK.value,
         ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE.value,
     ]
@@ -502,5 +585,45 @@ async def test_gateway_native_ack_and_close_use_only_closed_internal_methods() -
         "contract_version",
         "binding",
         "capability",
+        "ack",
+        "cursor",
+        "action_id",
     }
+    assert agent.requests[1].params["cursor"] == {
+        "response": {
+            "interaction_id": ack.ref.interaction_id,
+            "response_id": ack.ref.response_id,
+            "response_generation": ack.ref.response_generation,
+        },
+        "fence_only": True,
+    }
+    assert set(agent.requests[2].params) == {
+        "contract_version",
+        "binding",
+        "capability",
+    }
+    assert client.snapshot().activation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_activation_abort_reuses_closed_native_close_variant() -> None:
+    agent = FakeAgentClient()
+    client = GatewayNativeInteractionRuntimeClient(
+        agent,
+        native_model="gpt-realtime-2.1-mini",
+        timeout_seconds=0.2,
+    )
+
+    result = await client.abort_activation_response(
+        activation_payload(),
+        routed_session_id=SCOPE.session_id,
+        connection_id="missing-web-connection",
+        request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        request_id="native-activation-aborted-1",
+    )
+
+    assert result == {"kind": "close", "status": "closed", "accepted": True}
+    assert len(agent.requests) == 1
+    assert agent.requests[0].method == ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE.value
+    assert agent.requests[0].params["disposition"] == "activation_aborted"
     assert client.snapshot().activation_count == 0

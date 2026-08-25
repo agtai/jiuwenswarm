@@ -75,7 +75,6 @@ const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
 const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
 const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
 const L0_WEBAUDIO_START_CONFIRMATION_RETRIES = 20;
-const NATIVE_AUDIO_MAX_FRAMES = 9_000;
 const NATIVE_AUDIO_MAX_BYTES = 8 * 1024 * 1024;
 
 type ProductP1SuccessorCaptureReadiness = 'not_started' | 'pending' | 'ready' | 'degraded';
@@ -1233,7 +1232,6 @@ export class ProductP1VoiceRouteOwner {
       }
       this.#audio.beginPlayout(result.response);
       if (native) {
-        this.#pendingSpeechStart = null;
         this.#bargeInSpeechStartDelivered = false;
       }
       this.#fillPlayoutQueue(pendingPlayout);
@@ -1985,7 +1983,7 @@ export class ProductP1VoiceRouteOwner {
       ],
       'native_audio.audio',
     );
-    const frameCount = positiveSafeInteger(audio.frame_count, 'native_audio.audio.frame_count');
+    const streaming = audio.streaming === true && audio.frame_count === null;
     const maxPendingFrames = positiveSafeInteger(
       audio.max_pending_frames,
       'native_audio.audio.max_pending_frames',
@@ -2000,10 +1998,9 @@ export class ProductP1VoiceRouteOwner {
       || audio.endpoint_path !== '/ws/live-voice/media'
       || audio.format !== 'pcm_f32_mono_20ms'
       || audio.sample_rate_hz !== playout.sample_rate_hz
-      || audio.streaming !== false
+      || !streaming
       || audio.subprotocol !== 'live-voice.media.v1'
       || audio.degradation_reason !== null
-      || frameCount > NATIVE_AUDIO_MAX_FRAMES
       || maxPendingFrames > 256
       || maxPendingBytes > NATIVE_AUDIO_MAX_BYTES
     ) {
@@ -2020,8 +2017,8 @@ export class ProductP1VoiceRouteOwner {
         take_media_ticket: oneUsePrivateText(mediaTicket, 'native_audio.audio.media_ticket'),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: positiveSafeInteger(audio.ticket_ttl_ms, 'native_audio.audio.ticket_ttl_ms'),
-        frame_count: frameCount,
-        streaming: false,
+        frame_count: null,
+        streaming: true,
         degradation_reason: null,
         sample_rate_hz: playout.sample_rate_hz,
         binding: Object.freeze({ ...objectValue(audio.binding, 'native_audio.audio.binding') }),
@@ -2081,6 +2078,13 @@ export class ProductP1VoiceRouteOwner {
         // not about completed Agent text or an allocated TTS descriptor.
         if (this.#status !== 'playing') {
           this.#setStatus('playing', this.#successorCaptureReadinessReason ?? pending.degradationReason);
+          // Provider speech-start may arrive before the first Native frame.
+          // Deliver it at the exact transition that makes the response
+          // locally playable; retaining it earlier is not sufficient because
+          // the normal observer path intentionally ignores non-playing state.
+          this.#deliverBargeInSpeechStart(this.#operationGeneration, this.#route);
+          this.#deliverBargeInEndOfTurn(this.#operationGeneration, this.#route);
+          if (this.#pendingPlayout !== pending) return;
         }
         // Media ACK is the bounded transport-pressure signal. The separate
         // media.playout_receipt below remains the authoritative proof that the

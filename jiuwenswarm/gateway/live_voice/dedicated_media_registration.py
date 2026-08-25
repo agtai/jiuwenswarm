@@ -26,7 +26,7 @@ import time
 import wave
 from collections import OrderedDict
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
@@ -83,6 +83,10 @@ from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
     ProductStreamingSynthesisSource,
     start_product_streaming_synthesis,
 )
+from jiuwenswarm.gateway.live_voice.native_response_downlink import (
+    NativeDownlinkPresentationUnit,
+    NativeResponseDownlinkSource,
+)
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisOutcome,
     StreamingSynthesisRouteOwner,
@@ -116,6 +120,7 @@ from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
     NativeInputAudioFrame,
+    NativeProviderDone,
     OpenAIRealtimeNativeInteractionEngine,
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
@@ -753,12 +758,14 @@ class _MediaAuthority:
         default_factory=dict, repr=False
     )
     downlink_frames: tuple[MediaAudioFrame, ...] = field(default=(), repr=False)
-    downlink_stream_source: ProductStreamingSynthesisSource | None = field(
-        default=None, repr=False
-    )
+    downlink_stream_source: (
+        ProductStreamingSynthesisSource | NativeResponseDownlinkSource | None
+    ) = field(default=None, repr=False)
     downlink_response: ResponseRef | None = None
     downlink_unit_id: str | None = None
     downlink_unit_seq: int | None = None
+    native_final_unit_id: str | None = None
+    native_final_unit_seq: int | None = None
     downlink_content_sha256: str | None = field(default=None, repr=False)
     downlink_overlap_record_id: str | None = None
     downlink_overlap_observed: bool = False
@@ -817,6 +824,10 @@ class _NativeMediaSession:
     next_input_sequence: int = 0
     next_input_sample_cursor: int = 0
     request_ordinal: int = 0
+    downlink_record_ids: dict[ResponseRef, str] = field(
+        default_factory=dict, repr=False
+    )
+    close_task: asyncio.Task[bool] | None = field(default=None, repr=False)
     closed: bool = False
 
 
@@ -1035,7 +1046,7 @@ class DedicatedMediaProductRegistry:
         self._native_engine_factory = native_engine_factory
         self._native_session_lock = asyncio.Lock()
         self._native_playout_lock = asyncio.Lock()
-        self._native_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._native_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._native_sessions: dict[
             tuple[str, str, str, str, int], _NativeMediaSession
         ] = {}
@@ -1121,6 +1132,33 @@ class DedicatedMediaProductRegistry:
 
         return self._native_runtime_client
 
+    def abort_native_activation(self, activation: GatewayNativeActivation) -> bool:
+        """Remove one exact partially observed Native media authority."""
+
+        if not isinstance(activation, GatewayNativeActivation):
+            return False
+        binding = activation.binding
+        key = (
+            binding.scope.session_id or "",
+            activation.connection_id,
+            binding.interaction_id,
+        )
+        with self._lock:
+            authority = self._product_activations.get(key)
+            if authority is None or (
+                authority.correlation_id,
+                authority.activation_id,
+                authority.activation_generation,
+            ) != (
+                binding.correlation_id,
+                binding.activation_id,
+                binding.activation_generation,
+            ):
+                return False
+            self._product_activations.pop(key, None)
+            self._revoke_media_for_product_activation(authority)
+            return True
+
     async def begin_native_interaction(self, record: _MediaAuthority) -> bool:
         """Start the one Gateway-owned Provider session for an exact uplink."""
 
@@ -1160,6 +1198,7 @@ class DedicatedMediaProductRegistry:
                     "next_event",
                     "admit_response",
                     "cancel_response",
+                    "fence_response",
                     "send_delegate_result",
                     "close",
                 )
@@ -1168,17 +1207,6 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_NATIVE_PROVIDER_UNAVAILABLE",
                     "Native Provider factory returned no exact Engine",
                 )
-            try:
-                await engine.start()
-            except BaseException as error:
-                with suppress(BaseException):
-                    await engine.close()
-                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
-                    raise
-                raise MediaTransportViolation(
-                    "MEDIA_NATIVE_PROVIDER_START_FAILED",
-                    "Native Provider session did not start",
-                ) from error
             session = _NativeMediaSession(
                 key=key,
                 record_id=record.record_id,
@@ -1189,6 +1217,22 @@ class DedicatedMediaProductRegistry:
                     maxsize=_NATIVE_SPEECH_START_QUEUE_CAPACITY
                 ),
             )
+            try:
+                await engine.start()
+            except BaseException as error:
+                close_complete = False
+                with suppress(BaseException):
+                    close_complete = await engine.close() is True
+                if not close_complete:
+                    session.closed = True
+                    self._native_sessions[key] = session
+                    self._native_session_keys_by_record[record.record_id] = key
+                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                    raise
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_PROVIDER_START_FAILED",
+                    "Native Provider session did not start",
+                ) from error
             notification_key = (
                 record.binding.session_id,
                 record.binding.interaction_id,
@@ -1375,11 +1419,27 @@ class DedicatedMediaProductRegistry:
         if key is None:
             return False
         async with self._native_session_lock:
-            session = self._native_sessions.pop(key, None)
-            self._native_session_keys_by_record.pop(record.record_id, None)
-            if session is None or session.closed:
+            session = self._native_sessions.get(key)
+            if session is None:
                 return False
-            session.closed = True
+            task = session.close_task
+            if task is None or task.done():
+                session.closed = True
+                task = asyncio.create_task(
+                    self._run_native_session_close(record, session),
+                    name=f"live-voice-native-close:{record.record_id}",
+                )
+                session.close_task = task
+                self._native_cleanup_tasks.add(task)
+                task.add_done_callback(self._native_cleanup_tasks.discard)
+        return await asyncio.shield(task)
+
+    async def _run_native_session_close(
+        self,
+        record: _MediaAuthority,
+        session: _NativeMediaSession,
+    ) -> bool:
+        key = session.key
         notification_key = (
             session.activation.binding.scope.session_id or "",
             session.activation.binding.interaction_id,
@@ -1442,7 +1502,14 @@ class DedicatedMediaProductRegistry:
                     capability=session.activation.capability,
                     request_id=self._native_request_id(session, "close"),
                 )
-        await session.engine.close()
+        provider_close_complete = await session.engine.close()
+        if provider_close_complete is not True:
+            return False
+        async with self._native_session_lock:
+            if self._native_sessions.get(key) is session:
+                self._native_sessions.pop(key, None)
+            if self._native_session_keys_by_record.get(record.record_id) == key:
+                self._native_session_keys_by_record.pop(record.record_id, None)
         return True
 
     async def _run_native_input(self, session: _NativeMediaSession) -> None:
@@ -1494,7 +1561,9 @@ class DedicatedMediaProductRegistry:
                 elif event.action.operation == "LISTEN":
                     self._retain_native_speech_start(session, event, result)
             elif event.audio is not None:
-                self._allocate_native_downlink(session, event.audio, result)
+                await self._allocate_native_downlink(session, event.audio, result)
+            elif event.provider_done is not None:
+                await self._seal_native_downlink(session, event.provider_done, result)
 
     async def _return_native_delegate_result(
         self,
@@ -1629,7 +1698,7 @@ class DedicatedMediaProductRegistry:
             str(result["provider_response_id"]), response
         )
 
-    def _allocate_native_downlink(
+    async def _allocate_native_downlink(
         self,
         session: _NativeMediaSession,
         output: NativeAudioOutput,
@@ -1712,6 +1781,51 @@ class DedicatedMediaProductRegistry:
         frames = _native_downlink_frames(
             output.pcm16, sample_rate_hz=browser_sample_rate
         )
+        if len(frames) != 1:
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_AUDIO_FRAME_ALIGNMENT",
+                "Native response source requires one exact 20 ms Provider frame",
+            )
+        browser_frame = replace(
+            frames[0],
+            seq=output.sequence,
+            sample_cursor=output.sequence * (browser_sample_rate // 50),
+        )
+        presentation = NativeDownlinkPresentationUnit(
+            response=response,
+            unit_id=unit_id,
+            unit_seq=output.sequence,
+            provider_item_id=output.provider_item_id,
+            content_index=output.content_index,
+            source_start_sample=source_start_sample,
+            source_end_sample=source_end_sample,
+            content_sha256=digest,
+        )
+        retained_id = session.downlink_record_ids.get(response)
+        retained = self._records.get(retained_id or "")
+        if retained_id is not None:
+            source = (
+                retained.downlink_stream_source if retained is not None else None
+            )
+            if (
+                retained is None
+                or retained.route_completed
+                or retained.native_session_key != session.key
+                or not isinstance(source, NativeResponseDownlinkSource)
+            ):
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_AUDIO_FENCED",
+                    "Native response downlink is no longer authoritative",
+                )
+            await source.append(browser_frame, presentation, pcm16=output.pcm16)
+            retained.native_provider_item_id = output.provider_item_id
+            retained.native_content_index = output.content_index
+            retained.native_source_end_sample = source_end_sample
+            retained.downlink_content_sha256 = source.content_sha256
+            parent.synthesis_content_sha256[
+                (response, retained.downlink_unit_id or "")
+            ] = source.content_sha256
+            return
         notification_key = (
             parent.binding.session_id,
             parent.binding.interaction_id,
@@ -1757,6 +1871,12 @@ class DedicatedMediaProductRegistry:
                     unit_id,
                 ),
             )
+            source = NativeResponseDownlinkSource(
+                response=response,
+                sample_rate_hz=browser_sample_rate,
+                capacity=8,
+                max_frames=_MAX_DOWNLINK_FRAMES,
+            )
             downlink = _MediaAuthority(
                 record_id=record_id,
                 subject_id=parent.subject_id,
@@ -1775,7 +1895,7 @@ class DedicatedMediaProductRegistry:
                 native_content_index=output.content_index,
                 native_source_start_sample=source_start_sample,
                 native_source_end_sample=source_end_sample,
-                downlink_frames=frames,
+                downlink_stream_source=source,
                 downlink_response=response,
                 downlink_unit_id=unit_id,
                 downlink_unit_seq=output.sequence,
@@ -1784,11 +1904,22 @@ class DedicatedMediaProductRegistry:
             self._records[record_id] = downlink
             self._pending_tickets[ticket] = record_id
             parent.synthesis_content_sha256[(response, unit_id)] = digest
+            session.downlink_record_ids[response] = record_id
+        try:
+            await source.append(browser_frame, presentation, pcm16=output.pcm16)
+        except BaseException:
+            with self._lock:
+                self._records.pop(record_id, None)
+                self._pending_tickets.pop(ticket, None)
+                parent.synthesis_content_sha256.pop((response, unit_id), None)
+                session.downlink_record_ids.pop(response, None)
+            await source.aclose()
+            raise
         audio = {
             "format": "pcm_f32_mono_20ms",
             "sample_rate_hz": browser_sample_rate,
             "channel_count": 1,
-            "frame_count": len(frames),
+            "frame_count": None,
             "delivery": "dedicated_media_downlink",
             "endpoint_path": MEDIA_ROUTE_PATH,
             "media_ticket": ticket,
@@ -1797,7 +1928,7 @@ class DedicatedMediaProductRegistry:
             "binding": _binding_payload(binding),
             "max_pending_frames": 8,
             "max_pending_bytes": 131_072,
-            "streaming": False,
+            "streaming": True,
             "degradation_reason": None,
         }
         notification = {
@@ -1826,10 +1957,46 @@ class DedicatedMediaProductRegistry:
                 self._records.pop(record_id, None)
                 self._pending_tickets.pop(ticket, None)
                 parent.synthesis_content_sha256.pop((response, unit_id), None)
+                session.downlink_record_ids.pop(response, None)
+            await source.aclose()
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE",
                 "Native notification queue is saturated",
             ) from None
+
+    async def _seal_native_downlink(
+        self,
+        session: _NativeMediaSession,
+        done: NativeProviderDone,
+        result: Mapping[str, object],
+    ) -> None:
+        if (
+            result.get("kind") != "done"
+            or result.get("status") != "observed"
+            or type(result.get("accepted")) is not bool
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_DONE_ADMISSION_INVALID",
+                "Native Provider completion lacks exact Runtime admission",
+            )
+        record_id = session.downlink_record_ids.get(done.response)
+        record = self._records.get(record_id or "")
+        source = record.downlink_stream_source if record is not None else None
+        if record_id is None:
+            return
+        if (
+            record is None
+            or record.native_session_key != session.key
+            or not isinstance(source, NativeResponseDownlinkSource)
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_AUDIO_FENCED",
+                "Native response completion lost its downlink source",
+            )
+        if result.get("accepted") is False or not done.completed:
+            await source.aclose()
+            return
+        await source.seal(done.response)
 
     async def accept_native_playback_stop(
         self,
@@ -1857,38 +2024,32 @@ class DedicatedMediaProductRegistry:
             or parent.route_completed
             or parent.native_activation != session.activation
             or record.downlink_response is None
-            or record.native_provider_item_id is None
-            or record.native_content_index is None
-            or record.native_source_start_sample is None
-            or record.native_source_end_sample is None
+            or not isinstance(
+                record.downlink_stream_source, NativeResponseDownlinkSource
+            )
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_PLAYBACK_FENCED",
                 "Native playback stop is no longer bound to an active response",
             )
-        confirmed_frames = (
-            0
-            if exact.confirmed_through_seq is None
-            else exact.confirmed_through_seq + 1
-        )
-        if confirmed_frames > len(record.downlink_frames):
-            raise MediaTransportViolation(
-                "MEDIA_NATIVE_PLAYBACK_CURSOR_INVALID",
-                "Native played cursor exceeds the emitted media unit",
+        source = record.downlink_stream_source
+        assert isinstance(source, NativeResponseDownlinkSource)
+        cursor: NativePresentationCursor | None = None
+        if exact.confirmed_through_seq is not None:
+            played = source.unit_for_media_sequence(exact.confirmed_through_seq)
+            if played is None or played.response != record.downlink_response:
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_PLAYBACK_CURSOR_INVALID",
+                    "Native played cursor has no exact admitted Runtime unit",
+                )
+            cursor = NativePresentationCursor(
+                response=record.downlink_response,
+                provider_item_id=played.provider_item_id,
+                content_index=played.content_index,
+                audio_end_ms=(
+                    played.source_end_sample * 1_000 // NATIVE_PCM_SAMPLE_RATE
+                ),
             )
-        confirmed_samples = confirmed_frames * (NATIVE_PCM_SAMPLE_RATE // 50)
-        sample_cursor = record.native_source_start_sample + confirmed_samples
-        if sample_cursor > record.native_source_end_sample:
-            raise MediaTransportViolation(
-                "MEDIA_NATIVE_PLAYBACK_CURSOR_INVALID",
-                "Native played cursor exceeds admitted Provider audio",
-            )
-        cursor = NativePresentationCursor(
-            response=record.downlink_response,
-            provider_item_id=record.native_provider_item_id,
-            content_index=record.native_content_index,
-            audio_end_ms=sample_cursor * 1_000 // NATIVE_PCM_SAMPLE_RATE,
-        )
         action_id = self._native_barge_action_id(record, exact, cursor)
         client = self._native_runtime_client
         presentation_ack = getattr(client, "presentation_ack", None)
@@ -1902,11 +2063,13 @@ class DedicatedMediaProductRegistry:
             capability=session.activation.capability,
             request_id=self._native_request_id(session, "barge"),
             cursor=cursor,
+            fence_response=(record.downlink_response if cursor is None else None),
             action_id=action_id,
         )
+        expected_kind = "played_cursor" if cursor is not None else "response_fence"
         if (
             not isinstance(result, Mapping)
-            or result.get("kind") != "played_cursor"
+            or result.get("kind") != expected_kind
             or result.get("status") != "observed"
             or type(result.get("applied")) is not bool
             or result.get("cancel_command_id") != action_id
@@ -1917,25 +2080,39 @@ class DedicatedMediaProductRegistry:
             )
         if result.get("applied") is False:
             return False
-        await session.engine.cancel_response(cursor)
+        await source.aclose()
+        if cursor is None:
+            await session.engine.fence_response(record.downlink_response)
+        else:
+            await session.engine.cancel_response(cursor)
         return True
 
     @staticmethod
     def _native_barge_action_id(
         record: _MediaAuthority,
         receipt: MediaPlaybackStopReceipt,
-        cursor: NativePresentationCursor,
+        cursor: NativePresentationCursor | None,
     ) -> str:
         digest = hashlib.sha256(
             canonical_json_bytes(
                 {
                     "lease_id": record.binding.lease_id,
-                    "response": cursor.to_dict()["response"],
+                    "response": {
+                        "interaction_id": record.downlink_response.interaction_id,
+                        "response_id": record.downlink_response.response_id,
+                        "response_generation": (
+                            record.downlink_response.response_generation
+                        ),
+                    }
+                    if record.downlink_response is not None
+                    else None,
                     "unit_id": receipt.unit_id,
                     "confirmed_through_seq": receipt.confirmed_through_seq,
-                    "provider_item_id": cursor.provider_item_id,
-                    "content_index": cursor.content_index,
-                    "audio_end_ms": cursor.audio_end_ms,
+                    "provider_item_id": (
+                        None if cursor is None else cursor.provider_item_id
+                    ),
+                    "content_index": None if cursor is None else cursor.content_index,
+                    "audio_end_ms": None if cursor is None else cursor.audio_end_ms,
                 }
             )
         ).hexdigest()
@@ -4448,15 +4625,30 @@ class DedicatedMediaProductRegistry:
     ) -> bool:
         with self._lock:
             source = record.downlink_stream_source
+            native_source = (
+                source if isinstance(source, NativeResponseDownlinkSource) else None
+            )
             frame_count = (
                 source.emitted_frames
                 if source is not None
                 else len(record.downlink_frames)
             )
             source_completed = source.completed if source is not None else True
+            native_final_unit = (
+                native_source.unit_for_media_sequence(
+                    result.acknowledged_through_seq
+                )
+                if native_source is not None
+                and result.acknowledged_through_seq is not None
+                else None
+            )
+            if native_final_unit is not None:
+                record.native_final_unit_id = native_final_unit.unit_id
+                record.native_final_unit_seq = native_final_unit.unit_seq
+                record.downlink_content_sha256 = native_source.content_sha256
             record.route_completed = True
             record.downlink_frames = ()
-            record.downlink_stream_source = None
+            self._release_stream_source(record)
             response = record.downlink_response
             unit_id = record.downlink_unit_id
             content_sha256 = record.downlink_content_sha256
@@ -4477,6 +4669,14 @@ class DedicatedMediaProductRegistry:
                 and content_sha256 is not None
                 and frame_count > 0
                 and source_completed
+                and (
+                    native_source is None
+                    or (
+                        native_final_unit is not None
+                        and native_final_unit.response == response
+                        and native_final_unit.unit_seq == frame_count - 1
+                    )
+                )
                 and result.sent_frames == frame_count
                 and result.acknowledged_through_seq == frame_count - 1
                 and result.playback_stop_receipts == 0
@@ -4494,6 +4694,8 @@ class DedicatedMediaProductRegistry:
             if parent is None:
                 return False
             key = (response, unit_id)
+            if native_source is not None and content_sha256 is not None:
+                parent.synthesis_content_sha256[key] = content_sha256
             parent.downlink_results[key] = {
                 "complete": complete,
                 "sent_frames": result.sent_frames,
@@ -4793,14 +4995,15 @@ class DedicatedMediaProductRegistry:
                     or session.closed
                     or downlink is None
                     or downlink.route_completed is not True
-                    or downlink.downlink_unit_seq is None
+                    or downlink.native_final_unit_id is None
+                    or downlink.native_final_unit_seq is None
                 ):
                     return False
                 ack = PresentationAck(
                     ref=response,
                     surface=PresentationSurface.AUDIO,
-                    unit_id=unit_id,
-                    contiguous_cursor=downlink.downlink_unit_seq,
+                    unit_id=downlink.native_final_unit_id,
+                    contiguous_cursor=downlink.native_final_unit_seq,
                     presented_at=(
                         datetime.now(UTC)
                         .isoformat(timespec="milliseconds")
@@ -4858,6 +5061,7 @@ class DedicatedMediaProductRegistry:
                 )
                 self._records.pop(downlink.record_id, None)
                 self._drop_pending_for_record_id(downlink.record_id)
+                session.downlink_record_ids.pop(response, None)
                 parent.synthesis_content_sha256.pop(key, None)
                 parent.playout_receipts.pop(key, None)
                 parent.playout_receipt_content_sha256.pop(key, None)

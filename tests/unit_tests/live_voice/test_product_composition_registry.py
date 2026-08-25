@@ -383,6 +383,7 @@ class _HistoryWriter:
         self.native_assistants: list[object] = []
         self.native_attempts = 0
         self.fail_native_once = fail_native_once
+        self.native_written = asyncio.Event()
 
     async def persist_user(self, commit, *, channel_id: str) -> bool:
         self.users.append((commit, channel_id))
@@ -402,6 +403,7 @@ class _HistoryWriter:
             self.fail_native_once = False
             raise OSError("native history unavailable")
         self.native_assistants.append((admission, session_id, channel_id))
+        self.native_written.set()
         return True
 
 
@@ -1979,13 +1981,19 @@ async def _activate_native_delegate_source(
 
 
 def _native_close_params(
-    binding: NativeInteractionBinding, capability: str
+    binding: NativeInteractionBinding,
+    capability: str,
+    *,
+    disposition: str | None = None,
 ) -> dict[str, object]:
-    return {
+    params: dict[str, object] = {
         "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
         "binding": binding.to_dict(),
         "capability": capability,
     }
+    if disposition is not None:
+        params["disposition"] = disposition
+    return params
 
 
 def _p2_task_origin_params(*, stem: str, text: str) -> dict[str, object]:
@@ -2995,7 +3003,110 @@ async def test_native_speak_changed_replay_and_close_are_exactly_fenced(
 
 
 @pytest.mark.asyncio
-async def test_native_complete_audio_ack_persists_canonical_assistant_history(
+async def test_native_activation_aborted_close_compensates_exact_p2_route(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-abort-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    route_key = (SCOPE.session_id, binding.interaction_id)
+    route = registry._p2_routes[route_key]
+    params = _native_close_params(
+        binding,
+        capability,
+        disposition="activation_aborted",
+    )
+
+    closed = await registry.handle_native_close(
+        params=params,
+        request_id="request-native-activation-aborted",
+        session_id=SCOPE.session_id,
+    )
+    replay = await registry.handle_native_close(
+        params=params,
+        request_id="request-native-activation-aborted",
+        session_id=SCOPE.session_id,
+    )
+
+    assert closed.ok is replay.ok is True
+    assert closed.payload == replay.payload
+    assert route.activation_lease.snapshot().state.value == "closed"
+    assert route_key not in registry._p2_routes
+    assert registry._closed_p2_routes[route_key].binding == route.binding
+    assert route.native_runtime_owner is None
+    assert route.native_capability is None
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_presentation_ack_closed_fence_variant_cancels_runtime_only(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    binding, capability, response = await _activate_native_delegate_source(
+        registry,
+        stem="native-local-fence",
+    )
+    params = {
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "binding": binding.to_dict(),
+        "capability": capability,
+        "ack": None,
+        "cursor": {
+            "response": {
+                "interaction_id": response.interaction_id,
+                "response_id": response.response_id,
+                "response_generation": response.response_generation,
+            },
+            "fence_only": True,
+        },
+        "action_id": "native-local-fence-action-1",
+    }
+
+    fenced = await registry.handle_native_presentation_ack(
+        params=params,
+        request_id="request-native-local-fence",
+        session_id=SCOPE.session_id,
+    )
+    replay = await registry.handle_native_presentation_ack(
+        params=params,
+        request_id="request-native-local-fence",
+        session_id=SCOPE.session_id,
+    )
+
+    assert fenced.ok is replay.ok is True
+    assert fenced.payload == replay.payload
+    result = cast(dict, fenced.payload["result"])
+    assert result == {
+        "kind": "response_fence",
+        "status": "observed",
+        "applied": True,
+        "cancel_command_id": "native-local-fence-action-1",
+    }
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    assert route.native_runtime_owner is not None
+    assert route.native_runtime_owner.snapshot().barge_count == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_ack_before_done_reconciles_and_retries_history_without_ack_replay(
     tmp_path: Path,
 ) -> None:
     registry, _p3, _manager, _pushed = _registry(
@@ -3056,37 +3167,11 @@ async def test_native_complete_audio_ack_persists_canonical_assistant_history(
         request_id="request-native-history-audio",
         session_id=SCOPE.session_id,
     )
-    done = await registry.handle_native_propose(
-        params=_native_propose_params(
-            binding,
-            capability,
-            _native_done_proposal(binding, response_ref),
-        ),
-        request_id="request-native-history-done",
-        session_id=SCOPE.session_id,
-    )
-    assert audio.ok is done.ok is True
+    assert audio.ok is True
     unit = cast(
         dict[str, object],
         cast(dict[str, object], audio.payload["result"])["presentation_unit"],
     )
-
-    failed = await registry.handle_native_presentation_ack(
-        params=_native_ack_params(
-            binding,
-            capability,
-            response_ref,
-            unit_id=cast(str, unit["unit_id"]),
-        ),
-        request_id="request-native-history-ack",
-        session_id=SCOPE.session_id,
-    )
-    assert failed.ok is False
-    assert cast(dict, failed.payload["error"])["reason"] == (
-        "NATIVE_HISTORY_WRITE_FAILED"
-    )
-    assert "request-native-history-ack" not in registry._native_ack_operations
-    assert route.activation_lease._runtime.snapshot().pending_history_intents == 1
 
     acknowledgement = await registry.handle_native_presentation_ack(
         params=_native_ack_params(
@@ -3098,6 +3183,23 @@ async def test_native_complete_audio_ack_persists_canonical_assistant_history(
         request_id="request-native-history-ack",
         session_id=SCOPE.session_id,
     )
+    assert acknowledgement.ok is True
+    acknowledgement_result = cast(dict, acknowledgement.payload["result"])
+    assert acknowledgement_result["history_eligible"] is False
+    assert history.native_attempts == 0
+
+    done = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_done_proposal(binding, response_ref),
+        ),
+        request_id="request-native-history-done",
+        session_id=SCOPE.session_id,
+    )
+    assert done.ok is True
+    await asyncio.wait_for(history.native_written.wait(), timeout=1.0)
+
     replay = await registry.handle_native_presentation_ack(
         params=_native_ack_params(
             binding,
@@ -3109,7 +3211,7 @@ async def test_native_complete_audio_ack_persists_canonical_assistant_history(
         session_id=SCOPE.session_id,
     )
 
-    assert acknowledgement.ok is replay.ok is True
+    assert replay.ok is True
     assert acknowledgement.payload == replay.payload
     assert history.native_attempts == 2
     assert len(history.native_assistants) == 1

@@ -4720,6 +4720,15 @@ class AgentServerProductCompositionRegistry:
                             "Native completion must be a standalone observation",
                         )
                     accepted = await owner.accept_provider_done(proposal.provider_done)
+                    history = await owner.history_admission(
+                        proposal.provider_done.response
+                    )
+                    if history is not None:
+                        await route.activation_lease.persist_native_assistant_history(
+                            route.binding,
+                            history,
+                            channel_id="web",
+                        )
                     result_payload = {
                         "kind": "done",
                         "status": "observed",
@@ -5212,6 +5221,7 @@ class AgentServerProductCompositionRegistry:
                 )
             ack: PresentationAck | None = None
             cursor: NativePresentationCursor | None = None
+            fence_response: ResponseRef | None = None
             action_id: str | None = None
             if raw_ack is not None:
                 if raw_action_id is not None:
@@ -5274,9 +5284,52 @@ class AgentServerProductCompositionRegistry:
                     ),
                 )
             else:
-                cursor = NativePresentationCursor.from_dict(raw_cursor)
+                if isinstance(raw_cursor, Mapping) and set(raw_cursor) == {
+                    "response",
+                    "fence_only",
+                }:
+                    if raw_cursor.get("fence_only") is not True:
+                        raise FormalTaskViolation(
+                            "NATIVE_PRESENTATION_ACK_INVALID",
+                            "Native response fence marker is invalid",
+                            ErrorCode.INVALID_ARGUMENT,
+                        )
+                    raw_response = raw_cursor.get("response")
+                    if not isinstance(raw_response, Mapping) or set(raw_response) != {
+                        "interaction_id",
+                        "response_id",
+                        "response_generation",
+                    }:
+                        raise FormalTaskViolation(
+                            "NATIVE_RESPONSE_REF_FIELDS_NOT_CLOSED",
+                            "Native response fence fields are not closed",
+                            ErrorCode.INVALID_ARGUMENT,
+                        )
+                    generation = raw_response.get("response_generation")
+                    if type(generation) is not int or not 0 < generation <= MAX_SAFE_INTEGER:
+                        raise FormalTaskViolation(
+                            "NATIVE_PRESENTATION_ACK_INVALID",
+                            "Native response fence generation is invalid",
+                            ErrorCode.INVALID_ARGUMENT,
+                        )
+                    fence_response = ResponseRef(
+                        _required_text(
+                            raw_response.get("interaction_id"),
+                            "response.interaction_id",
+                        ),
+                        _required_text(
+                            raw_response.get("response_id"), "response.response_id"
+                        ),
+                        generation,
+                    )
+                else:
+                    cursor = NativePresentationCursor.from_dict(raw_cursor)
                 action_id = _required_text(raw_action_id, "action_id")
-            target_response = ack.ref if ack is not None else cursor.response
+            target_response = (
+                ack.ref
+                if ack is not None
+                else (cursor.response if cursor is not None else fence_response)
+            )
             assert target_response is not None
             if target_response.interaction_id != binding.interaction_id:
                 raise FormalTaskViolation(
@@ -5398,8 +5451,8 @@ class AgentServerProductCompositionRegistry:
                                     "transcript": history.transcript,
                                     "presented_at": history.presented_at,
                                 }
-                        else:
-                            assert cursor is not None and action_id is not None
+                        elif cursor is not None:
+                            assert action_id is not None
                             barge = await owner.barge_in(
                                 action_id=action_id,
                                 response=cursor.response,
@@ -5407,6 +5460,18 @@ class AgentServerProductCompositionRegistry:
                             )
                             result_payload = {
                                 "kind": "played_cursor",
+                                "status": "observed",
+                                "applied": barge.applied,
+                                "cancel_command_id": barge.cancel_command_id,
+                            }
+                        else:
+                            assert fence_response is not None and action_id is not None
+                            barge = await owner.fence_response(
+                                action_id=action_id,
+                                response=fence_response,
+                            )
+                            result_payload = {
+                                "kind": "response_fence",
                                 "status": "observed",
                                 "applied": barge.applied,
                                 "cancel_command_id": barge.cancel_command_id,
@@ -5456,10 +5521,10 @@ class AgentServerProductCompositionRegistry:
         """Invalidate one exact Native capability without closing the P2 route."""
 
         try:
-            _require_exact_params(
-                params,
-                frozenset({"contract_version", "binding", "capability"}),
-            )
+            close_fields = {"contract_version", "binding", "capability"}
+            if "disposition" in params:
+                close_fields.add("disposition")
+            _require_exact_params(params, frozenset(close_fields))
             if params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
                 raise FormalTaskViolation(
                     "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
@@ -5470,11 +5535,14 @@ class AgentServerProductCompositionRegistry:
             parsed_request_id = _required_text(request_id, "request_id")
             binding = NativeInteractionBinding.from_dict(params.get("binding"))
             capability = params.get("capability")
+            disposition = params.get("disposition", "closed")
             if (
                 type(capability) is not str
                 or len(capability) != 64
                 or any(character not in "0123456789abcdef" for character in capability)
                 or binding.scope.session_id != routed_session
+                or type(disposition) is not str
+                or disposition not in {"closed", "activation_aborted"}
             ):
                 raise FormalTaskViolation(
                     "NATIVE_RUNTIME_CAPABILITY_REJECTED",
@@ -5583,6 +5651,7 @@ class AgentServerProductCompositionRegistry:
                         parsed_request_id=parsed_request_id,
                         request_id=request_id,
                         retained_route=route,
+                        disposition=disposition,
                     ),
                     name=f"live-voice-native-close:{parsed_request_id}",
                 )
@@ -5602,6 +5671,7 @@ class AgentServerProductCompositionRegistry:
         parsed_request_id: str,
         request_id: str,
         retained_route: _P2Route,
+        disposition: str,
     ) -> P3RouteResult:
         delegate_tasks = tuple(
             entry.task
@@ -5616,6 +5686,12 @@ class AgentServerProductCompositionRegistry:
             await asyncio.gather(*delegate_tasks, return_exceptions=True)
         try:
             await owner.close()
+            if disposition == "activation_aborted":
+                self._close_task_presentations_for_p2_route(
+                    retained_route,
+                    reason="native_activation_aborted",
+                )
+                await retained_route.lease.close()
         except Exception as exc:
             result = _error_result(
                 request_id,
@@ -5644,6 +5720,22 @@ class AgentServerProductCompositionRegistry:
             if route is retained_route and route.native_runtime_owner is owner:
                 route.native_runtime_owner = None
                 route.native_capability = None
+                if result.ok and disposition == "activation_aborted":
+                    key = (
+                        retained_route.binding.session_id,
+                        retained_route.binding.interaction_id,
+                    )
+                    self._p2_routes.pop(key, None)
+                    self._drop_voice_task_origins_for_route_locked(key)
+                    self._retain_closed_p2_route(
+                        key,
+                        _ClosedP2Route(
+                            retained_route.binding,
+                            retained_route.manifest,
+                            retained_route.notification_replay_floor,
+                        ),
+                    )
+                    self._critical_token_gate.release_interaction(key[1])
             if len(self._native_close_operations) >= self._PRODUCT_OPERATION_CAPACITY:
                 expired_request_id = next(iter(self._native_close_operations))
                 self._native_close_operations.pop(expired_request_id)

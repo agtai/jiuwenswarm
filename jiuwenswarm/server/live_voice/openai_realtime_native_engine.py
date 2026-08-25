@@ -151,6 +151,7 @@ class NativeEngineSnapshot:
     next_input_sequence: int
     next_input_sample_cursor: int
     turn_count: int
+    response_count: int
     pending_audio_count: int
     released_audio_count: int
     emitted_event_count: int
@@ -554,10 +555,11 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._current_response_id: str | None = None
         self._delegates: dict[str, _DelegateWait] = {}
         self._delegate_results: dict[str, _DelegateResult] = {}
-        self._pending_delegate_response: ResponseRef | None = None
+        self._pending_delegate_response: tuple[str, ResponseRef] | None = None
         self._cancelled: dict[
             str, tuple[NativePresentationCursor, tuple[str, str]]
         ] = {}
+        self._locally_fenced: set[str] = set()
 
     async def start(self) -> None:
         if self._state is not NativeProviderState.NEW:
@@ -747,7 +749,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
         event_ids = (output_event_id, response_event_id)
         self._delegate_results[parsed_call_id] = _DelegateResult(ref, digest, event_ids)
-        self._pending_delegate_response = ref
+        self._pending_delegate_response = (wait.proposal.turn_id, ref)
         self._state = NativeProviderState.RESPONSE_PENDING
         return event_ids
 
@@ -814,6 +816,30 @@ class OpenAIRealtimeNativeInteractionEngine:
         response.cancelled = True
         response.audio_buffer.clear()
         response.audio_buffer_event_id = None
+        self._discard_response_output(response, ref)
+        self._state = NativeProviderState.LISTENING
+        return ids
+
+    async def fence_response(self, ref: ResponseRef) -> bool:
+        """Locally discard one fenced response without mutating Provider state."""
+
+        self._require_operational()
+        async with self._cancel_lock:
+            parsed = _response_ref(ref, self._binding)
+            response = self._find_response(parsed)
+            if response.provider_response_id in self._locally_fenced:
+                return False
+            response.cancelled = True
+            response.audio_buffer.clear()
+            response.audio_buffer_event_id = None
+            self._discard_response_output(response, parsed)
+            self._locally_fenced.add(response.provider_response_id)
+            self._state = NativeProviderState.LISTENING
+            return True
+
+    def _discard_response_output(
+        self, response: _ProviderResponse, ref: ResponseRef
+    ) -> None:
         self._pending_audio = deque(
             item
             for item in self._pending_audio
@@ -822,14 +848,17 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._pending_events = deque(
             item
             for item in self._pending_events
-            if item.audio is None or item.audio.response != ref
+            if (item.audio is None or item.audio.response != ref)
+            and (item.provider_done is None or item.provider_done.response != ref)
+            and (
+                item.delegate is None
+                or item.delegate.response_generation != ref.response_generation
+            )
         )
-        self._state = NativeProviderState.LISTENING
-        return ids
 
-    async def close(self) -> None:
+    async def close(self) -> bool:
         if self._state is NativeProviderState.CLOSED:
-            return
+            return True
         self._state = NativeProviderState.CLOSING
         try:
             snapshot = await self._session.close()
@@ -841,6 +870,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             if snapshot.close_complete
             else NativeProviderState.CLOSING
         )
+        return self._state is NativeProviderState.CLOSED
 
     def snapshot(self) -> NativeEngineSnapshot:
         return NativeEngineSnapshot(
@@ -848,6 +878,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             next_input_sequence=self._next_input_sequence,
             next_input_sample_cursor=self._next_input_sample_cursor,
             turn_count=self._turn_count,
+            response_count=len(self._responses),
             pending_audio_count=len(self._pending_audio)
             + sum(
                 bool(response.audio_buffer)
@@ -934,7 +965,12 @@ class OpenAIRealtimeNativeInteractionEngine:
         if self._input_item_id is not None and self._input_end_ms is not None:
             operations.append(("REVISE", (("provider_item_id", item_id),)))
         current = self._current_response()
-        if current is not None and current.runtime_ref is not None and not current.done:
+        if (
+            current is not None
+            and current.runtime_ref is not None
+            and not current.done
+            and not current.cancelled
+        ):
             operations.append(
                 (
                     "STOP",
@@ -1097,12 +1133,30 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_PROVIDER_RESPONSE_CONFLICT",
                 "Provider response id cannot be reused",
             )
+        prior_turn_response = any(
+            response.turn_id == self._current_turn_id
+            for response in self._responses.values()
+        )
+        pending_delegate = self._pending_delegate_response
+        if prior_turn_response and (
+            pending_delegate is None
+            or pending_delegate[0] != self._current_turn_id
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DIRECT_RESPONSE_ALREADY_CREATED",
+                "one Native turn permits only one direct Provider response",
+            )
+        if not prior_turn_response and pending_delegate is not None:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DELEGATE_RESPONSE_TURN_MISMATCH",
+                "delegate successor must bind the exact source Native turn",
+            )
         response = _ProviderResponse(
             provider_response_id=provider_id,
             turn_id=self._current_turn_id,
         )
-        if self._pending_delegate_response is not None:
-            response.runtime_ref = self._pending_delegate_response
+        if pending_delegate is not None:
+            response.runtime_ref = pending_delegate[1]
             self._pending_delegate_response = None
         self._responses[provider_id] = response
         self._current_response_id = provider_id
@@ -1133,7 +1187,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         self, event: OpenAIRealtimeEvent, data: dict[str, object]
     ) -> list[NativeEngineEvent]:
         response = self._require_response(data["response_id"])
-        if response.done or response.cancelled:
+        if response.cancelled:
+            return []
+        if response.done:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_STALE_PROVIDER_AUDIO",
                 "Provider audio cannot follow response completion or cancel",
@@ -1249,6 +1305,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         self, event: OpenAIRealtimeEvent, data: dict[str, object]
     ) -> list[NativeEngineEvent]:
         response = self._require_response(data["response_id"])
+        if response.cancelled:
+            return []
         self._require_live_response_event(response)
         item_id = _identity(
             data["item_id"],
@@ -1306,6 +1364,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         self, event: OpenAIRealtimeEvent, data: dict[str, object]
     ) -> list[NativeEngineEvent]:
         response = self._require_response(data["response_id"])
+        if response.cancelled:
+            return []
         self._require_live_response_event(response)
         if response.runtime_ref is None:
             raise OpenAIRealtimeNativeInteractionError(
@@ -1369,6 +1429,8 @@ class OpenAIRealtimeNativeInteractionEngine:
     ) -> list[NativeEngineEvent]:
         provider_id, status, _ = _response_envelope(data["response"], done=True)
         response = self._require_response(provider_id)
+        if response.cancelled:
+            return []
         self._require_live_response_event(response)
         if response.runtime_ref is None:
             raise OpenAIRealtimeNativeInteractionError(

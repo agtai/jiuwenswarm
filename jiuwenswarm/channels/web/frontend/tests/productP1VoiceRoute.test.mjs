@@ -6343,7 +6343,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       format: 'pcm_f32_mono_20ms',
       sample_rate_hz: 48_000,
       channel_count: 1,
-      frame_count: 1,
+      frame_count: null,
       delivery: 'dedicated_media_downlink',
       endpoint_path: '/ws/live-voice/media',
       media_ticket: 'D'.repeat(43),
@@ -6352,7 +6352,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       binding: downlinkBinding,
       max_pending_frames: 8,
       max_pending_bytes: 131_072,
-      streaming: false,
+      streaming: true,
       degradation_reason: null,
     },
   });
@@ -6368,7 +6368,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   assert.equal(receiptCalls.length, 1);
   assert.equal(receiptCalls[0][1].capture_frames_acked, 1);
 
-  environment.contexts[0].deferSourceEnds = true;
+  environment.contexts[0].deferSourceEnds = false;
   const secondResponse = Object.freeze({
     interaction_id: 'interaction-1',
     response_id: 'native-response-2',
@@ -6388,6 +6388,21 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     },
   };
   activeBargeResponse = secondResponse;
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 40,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
   const bargedPlayout = owner.playNativeAudio({
     response: secondResponse,
     presentation_unit: {
@@ -6403,7 +6418,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       format: 'pcm_f32_mono_20ms',
       sample_rate_hz: 48_000,
       channel_count: 1,
-      frame_count: 1,
+      frame_count: null,
       delivery: 'dedicated_media_downlink',
       endpoint_path: '/ws/live-voice/media',
       media_ticket: 'E'.repeat(43),
@@ -6412,28 +6427,9 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       binding: secondDownlinkBinding,
       max_pending_frames: 8,
       max_pending_bytes: 131_072,
-      streaming: false,
+      streaming: true,
       degradation_reason: null,
     },
-  });
-  for (let turn = 0; turn < 100 && owner.status().status !== 'playing'; turn += 1) {
-    await new Promise(resolve => setImmediate(resolve));
-  }
-  assert.equal(owner.status().status, 'playing');
-  uplink.onmessage?.({
-    data: serializeMediaControl({
-      type: 'media.speech_start',
-      capability_version: 'media.end_of_turn.v1',
-      lease_id: uplink.serverBinding.lease_id,
-      generation: uplink.serverBinding.generation.value,
-      detector: 'server_vad',
-      provider_start_ms: 40,
-      timing_basis: 'provider_time',
-      timing_provenance: 'adapter_derived',
-      create_response: false,
-      interrupt_response: false,
-      business_cancel_count_delta: 0,
-    }),
   });
   await bargedPlayout;
   assert.equal(bargeStopped, true);

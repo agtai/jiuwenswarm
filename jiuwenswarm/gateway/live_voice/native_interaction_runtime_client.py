@@ -13,7 +13,7 @@ from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.agent import AgentResponse
-from jiuwenswarm.common.schema.live_voice_contract_v2 import MAX_SAFE_INTEGER
+from jiuwenswarm.common.schema.live_voice_contract_v2 import MAX_SAFE_INTEGER, ResponseRef
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.live_voice.native_interaction_carrier import (
     NativeInteractionProposal,
@@ -327,6 +327,17 @@ def _validate_method_result(
                 and type(result.get("applied")) is bool
                 and (command_id is None or _canonical_result_identity(command_id))
             )
+        elif kind == "response_fence":
+            _closed_result(
+                result,
+                frozenset({"kind", "status", "applied", "cancel_command_id"}),
+            )
+            command_id = result.get("cancel_command_id")
+            valid = (
+                result.get("status") == "observed"
+                and type(result.get("applied")) is bool
+                and (command_id is None or _canonical_result_identity(command_id))
+            )
         else:
             valid = False
     elif method is ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE:
@@ -468,6 +479,11 @@ class GatewayNativeInteractionRuntimeClient:
             capability=retained.capability,
             request_id=request_id,
             extra={"proposal": proposal.to_dict()},
+            timeout_seconds=(
+                _MAX_REQUEST_SECONDS
+                if event.delegate is not None
+                else self._timeout_seconds
+            ),
         )
 
     async def presentation_ack(
@@ -478,24 +494,30 @@ class GatewayNativeInteractionRuntimeClient:
         request_id: str,
         ack: PresentationAck | None = None,
         cursor: NativePresentationCursor | None = None,
+        fence_response: ResponseRef | None = None,
         action_id: str | None = None,
     ) -> dict[str, object]:
         retained = self._authorize(binding, capability)
-        if (ack is None) == (cursor is None) or (
+        if sum(value is not None for value in (ack, cursor, fence_response)) != 1 or (
             ack is not None and action_id is not None
         ):
             raise NativeRuntimeClientError(
                 "NATIVE_PRESENTATION_ACK_INVALID",
-                "Native presentation requires one ACK or played cursor",
+                "Native presentation requires one ACK, played cursor, or response fence",
             )
-        if cursor is not None and (
+        if (cursor is not None or fence_response is not None) and (
             type(action_id) is not str
             or not action_id
             or action_id != action_id.strip()
         ):
             raise NativeRuntimeClientError(
                 "NATIVE_PRESENTATION_ACK_INVALID",
-                "played cursor requires a canonical action identity",
+                "played cursor or response fence requires a canonical action identity",
+            )
+        if fence_response is not None and not isinstance(fence_response, ResponseRef):
+            raise NativeRuntimeClientError(
+                "NATIVE_PRESENTATION_ACK_INVALID",
+                "response fence requires an exact ResponseRef",
             )
         encoded_ack = None
         if ack is not None:
@@ -517,7 +539,22 @@ class GatewayNativeInteractionRuntimeClient:
             request_id=request_id,
             extra={
                 "ack": encoded_ack,
-                "cursor": None if cursor is None else cursor.to_dict(),
+                "cursor": (
+                    cursor.to_dict()
+                    if cursor is not None
+                    else (
+                        None
+                        if fence_response is None
+                        else {
+                            "response": {
+                                "interaction_id": fence_response.interaction_id,
+                                "response_id": fence_response.response_id,
+                                "response_generation": fence_response.response_generation,
+                            },
+                            "fence_only": True,
+                        }
+                    )
+                ),
                 "action_id": action_id,
             },
         )
@@ -528,19 +565,75 @@ class GatewayNativeInteractionRuntimeClient:
         binding: NativeInteractionBinding,
         capability: str,
         request_id: str,
+        disposition: str = "closed",
     ) -> dict[str, object]:
         retained = self._authorize(binding, capability)
+        if type(disposition) is not str or disposition not in {
+            "closed",
+            "activation_aborted",
+        }:
+            raise NativeRuntimeClientError(
+                "NATIVE_CLOSE_DISPOSITION_INVALID",
+                "Native close disposition is outside the closed contract",
+            )
         result = await self._request(
             method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE,
             binding=binding,
             capability=retained.capability,
             request_id=request_id,
-            extra={},
+            extra=(
+                {}
+                if disposition == "closed"
+                else {"disposition": "activation_aborted"}
+            ),
         )
         key = (binding.scope.session_id or "", binding.interaction_id)
         if self._activations.get(key) == retained:
             self._activations.pop(key, None)
         return result
+
+    async def abort_activation_response(
+        self,
+        payload: dict[str, object],
+        *,
+        routed_session_id: str | None,
+        connection_id: str | None,
+        request_method: str | None,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Compensate one exact private activation that cannot reach Browser."""
+
+        sanitized = self.observe_activation_response(
+            payload,
+            routed_session_id=routed_session_id,
+            connection_id=connection_id,
+            request_method=request_method,
+        )
+        result = sanitized.get("result")
+        if not isinstance(result, dict):
+            raise NativeRuntimeClientError(
+                "NATIVE_RUNTIME_ACTIVATION_INVALID",
+                "Native activation compensation requires an exact result",
+            )
+        session_id = result.get("session_id")
+        interaction_id = result.get("interaction_id")
+        if type(session_id) is not str or type(interaction_id) is not str:
+            raise NativeRuntimeClientError(
+                "NATIVE_RUNTIME_ACTIVATION_INVALID",
+                "Native activation compensation lost its exact binding",
+            )
+        retained = self._activations.get((session_id, interaction_id))
+        if retained is None or retained.connection_id != connection_id:
+            raise NativeRuntimeClientError(
+                "NATIVE_RUNTIME_ACTIVATION_INVALID",
+                "Native activation compensation has no exact capability",
+            )
+        return await self.close(
+            binding=retained.binding,
+            capability=retained.capability,
+            request_id=request_id,
+            disposition="activation_aborted",
+        )
 
     def forget_connection(self, connection_id: str) -> int:
         """Drop process-private capabilities when one Gateway socket closes."""
@@ -634,6 +727,7 @@ class GatewayNativeInteractionRuntimeClient:
         capability: str,
         request_id: str,
         extra: dict[str, object],
+        timeout_seconds: float | None = None,
     ) -> dict[str, object]:
         request_id = _request_identity(request_id)
         params: dict[str, object] = {
@@ -652,7 +746,12 @@ class GatewayNativeInteractionRuntimeClient:
         )
         try:
             response = await asyncio.wait_for(
-                self._agent.send_request(envelope), timeout=self._timeout_seconds
+                self._agent.send_request(envelope),
+                timeout=(
+                    self._timeout_seconds
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
             )
         except TimeoutError:
             raise NativeRuntimeClientError(

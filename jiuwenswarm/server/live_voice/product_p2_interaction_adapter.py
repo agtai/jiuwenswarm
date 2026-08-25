@@ -777,7 +777,7 @@ class P2ActivationLease:
                 self._require_open_exact_binding(binding)
             persist = getattr(
                 self._runtime,
-                "persist_native_assistant_history",
+                "schedule_native_assistant_history",
                 None,
             )
             if not callable(persist):

@@ -492,7 +492,9 @@ async def test_partial_ack_and_missing_transcript_never_admit_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_ack_before_done_becomes_eligible_on_exact_ack_replay() -> None:
+async def test_final_ack_before_done_reconciles_when_done_arrives_without_ack_replay() -> (
+    None
+):
     owner, runtime = await active_owner()
     admission = await owner.accept_provider_response("provider-response-1", "native-r1")
     assert (
@@ -510,7 +512,7 @@ async def test_final_ack_before_done_becomes_eligible_on_exact_ack_replay() -> N
         )
         is True
     )
-    assert await owner.acknowledge_audio(ack) == NativeHistoryAdmission(
+    assert await owner.history_admission(admission.response) == NativeHistoryAdmission(
         admission.response,
         "Canonical answer.",
         "2026-08-25T10:00:01Z",
@@ -560,6 +562,41 @@ async def test_exact_barge_is_idempotent_and_changed_cursor_has_zero_new_effect(
         )
     assert changed.value.reason == "NATIVE_BARGE_ACTION_CONFLICT"
     assert len(runtime.snapshot().effects) == effect_count
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cursorless_fence_cancels_runtime_before_audio_and_rejects_late_output() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+
+    fenced = await owner.fence_response(
+        action_id="native-fence-before-audio",
+        response=admission.response,
+    )
+    replay = await owner.fence_response(
+        action_id="native-fence-before-audio",
+        response=admission.response,
+    )
+
+    assert fenced == replay
+    assert fenced.applied is True
+    assert fenced.response == admission.response
+    assert fenced.cursor is None
+    response_record = runtime.snapshot().conversation.responses[-1]
+    assert response_record.cancel_state is CancelState.REQUESTED
+    assert response_record.fenced is True
+    before_late = runtime.snapshot()
+    assert await owner.accept_audio(
+        audio(admission.response, admission.provider_response_id, 0)
+    ) is False
+    assert await owner.accept_provider_done(
+        done(admission.response, admission.provider_response_id)
+    ) is False
+    assert runtime.snapshot() == before_late
+    assert [record.effect.effect_type for record in runtime.snapshot().effects].count(
+        "response.cancel"
+    ) == 1
     await owner.close()
 
 

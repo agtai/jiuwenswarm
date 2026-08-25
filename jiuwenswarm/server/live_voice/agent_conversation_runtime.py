@@ -700,6 +700,9 @@ class AgentConversationRuntime:
         self._pending_native_history: dict[
             ResponseRef, tuple[NativeHistoryAdmission, str, str]
         ] = {}
+        self._native_history_write_tasks: dict[
+            ResponseRef, tuple[NativeHistoryAdmission, str, asyncio.Task[None]]
+        ] = {}
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
         self._task_presentation_reservations: dict[
             ResponseRef, _TaskPresentationReservation
@@ -3208,6 +3211,80 @@ class AgentConversationRuntime:
             self._native_history_results[key] = (admission, channel_id, written)
             return written
 
+    async def schedule_native_assistant_history(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> bool:
+        """Own one bounded automatic Native history write on AgentServer."""
+
+        self._require_started()
+        if not isinstance(admission, NativeHistoryAdmission):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_ADMISSION_INVALID",
+                "Native history requires one Runtime-issued admission",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            not isinstance(channel_id, str)
+            or not channel_id
+            or channel_id != channel_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_CHANNEL_INVALID",
+                "Native history requires one exact channel identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        async with self._ack_lock:
+            prior = self._native_history_write_tasks.get(admission.response)
+            if prior is not None:
+                if prior[0] != admission or prior[1] != channel_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_HISTORY_REPLAY_CONFLICT",
+                        "Native history writer replay cannot change its admission",
+                        ErrorCode.CONFLICT,
+                    )
+                return True
+            if len(self._native_history_write_tasks) >= self._max_requests:
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_LEDGER_FULL",
+                    "bounded Native history writer ledger is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            task = asyncio.create_task(
+                self._run_native_history_writer(admission, channel_id=channel_id),
+                name=(
+                    "live-voice-native-history:"
+                    f"{admission.response.response_generation}"
+                ),
+            )
+            self._native_history_write_tasks[admission.response] = (
+                admission,
+                channel_id,
+                task,
+            )
+            self._history_tasks.add(task)
+            task.add_done_callback(self._history_tasks.discard)
+            return True
+
+    async def _run_native_history_writer(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> None:
+        for _attempt in range(3):
+            try:
+                await self.persist_native_assistant_history(
+                    admission,
+                    channel_id=channel_id,
+                )
+                return
+            except AgentConversationRuntimeViolation as error:
+                if error.reason != "NATIVE_HISTORY_WRITE_FAILED":
+                    return
+
     async def request_response_cancel(
         self, command_id: str, ref: ResponseRef
     ) -> ResponseCancelResult:
@@ -3763,10 +3840,10 @@ class AgentConversationRuntime:
                 await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
             async with self._ack_lock:
                 history_tasks = tuple(self._history_tasks)
-                if history_tasks:
-                    await asyncio.shield(
-                        asyncio.gather(*history_tasks, return_exceptions=True)
-                    )
+            if history_tasks:
+                await asyncio.shield(
+                    asyncio.gather(*history_tasks, return_exceptions=True)
+                )
             shutdown_effects = await self._cr.close()
             async with self._effect_lock:
                 self._retain_effects(shutdown_effects)

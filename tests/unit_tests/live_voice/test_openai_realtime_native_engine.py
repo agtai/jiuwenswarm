@@ -622,6 +622,38 @@ async def test_two_turns_reuse_one_session_and_contiguous_audio_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unsolicited_second_direct_response_in_one_turn_has_zero_new_effect() -> (
+    None
+):
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        response_done("event-7", "provider-response-1"),
+        response_created("event-8", "provider-response-2"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert (await engine.next_event()).provider_done is not None
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_DIRECT_RESPONSE_ALREADY_CREATED"
+    after = engine.snapshot()
+    assert after.turn_count == before.turn_count
+    assert after.response_count == before.response_count
+    assert after.retained_action_count == before.retained_action_count
+    assert after.released_audio_count == before.released_audio_count
+    assert after.delegate_count == before.delegate_count
+    await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_audio_is_buffered_until_exact_runtime_admission() -> None:
     engine, _, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),
@@ -1150,7 +1182,7 @@ async def test_concurrent_exact_cancel_sends_one_provider_pair() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("late_kind", ["transcript", "function", "done"])
-async def test_cancelled_response_rejects_late_provider_authority_events(
+async def test_cancelled_response_discards_late_provider_authority_events(
     late_kind: str,
 ) -> None:
     late_events = {
@@ -1176,6 +1208,7 @@ async def test_cancelled_response_rejects_late_provider_authority_events(
             pcm16=b"\x00\x00" * 480,
         ),
         late_events[late_kind],
+        speech_started("event-9", "user-item-2", 40),
     )
     await engine.start()
     await accept_basic_turn(engine)
@@ -1193,14 +1226,60 @@ async def test_cancelled_response_rejects_late_provider_authority_events(
     )
     before = engine.snapshot()
 
-    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
-        await engine.next_event()
-
-    assert raised.value.reason == "NATIVE_STALE_PROVIDER_RESPONSE_EVENT"
+    assert await engine.next_event() == NativeEngineEvent()
+    listen = await engine.next_event()
+    assert listen.action is not None and listen.action.operation == "LISTEN"
     after = engine.snapshot()
     assert after.released_audio_count == before.released_audio_count
     assert after.delegate_count == before.delegate_count
-    assert after.retained_action_count == before.retained_action_count
+    assert after.retained_action_count == before.retained_action_count + 1
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_cursorless_engine_fence_discards_late_output_without_provider_send() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x00\x00" * 480,
+        ),
+        output_transcript_done(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            "Too late.",
+        ),
+        function_done("event-9", "provider-response-1"),
+        response_done("event-10", "provider-response-1"),
+        speech_started("event-11", "user-item-2", 40),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    ref = response_ref(1)
+    await engine.admit_response("provider-response-1", ref)
+    await engine.next_event()
+    sent_before_fence = tuple(socket.sent)
+
+    assert await engine.fence_response(ref) is True
+    assert await engine.fence_response(ref) is False
+    assert tuple(socket.sent) == sent_before_fence
+    assert [await engine.next_event() for _ in range(3)] == [
+        NativeEngineEvent(),
+        NativeEngineEvent(),
+        NativeEngineEvent(),
+    ]
+    listen = await engine.next_event()
+    assert listen.action is not None and listen.action.operation == "LISTEN"
+    assert engine.snapshot().delegate_count == 0
+    assert tuple(socket.sent) == sent_before_fence
     await engine.close()
 
 
