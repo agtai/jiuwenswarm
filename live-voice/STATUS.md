@@ -162,14 +162,16 @@ These rows are evidence-based planning judgements, now grounded in the
 audit is documentation, not product progress: it grants no new module-completion
 credit and does not repair defects.
 
-The current [OpenJiuwen reuse and Hermes Voice mirror audit](reviews/OPENJIUWEN_REUSE_AND_HERMES_VOICE_MIRROR_AUDIT_2026-08-23.md)
+The historical [OpenJiuwen reuse and Hermes Voice mirror audit](reviews/OPENJIUWEN_REUSE_AND_HERMES_VOICE_MIRROR_AUDIT_2026-08-23.md)
 finds reusable AgentCore/JiuwenSwarm foundations but no complete direct
 replacement for the frozen P3 outcome contracts. It proposes bounded generic
 AgentCore PRs plus a thin JiuwenSwarm Facade; current Live Voice authority stays
 canonical and no deletion is credited until the new composition passes isolated
 L2/L3/L4, a quiesced single-writer migration and post-cutover canary Gate.
 Hermes remains an architecture-only reference with no copied code or dependency.
-This audit does not change capability status, priority or acceptance.
+Its older grouping and source locators are superseded by the accepted 2026-08-25
+scope, capability map and convergence review. It does not change capability
+status, priority or acceptance.
 
 The follow-up [OJ-G0 module conformance packet](reviews/OPENJIUWEN_G0_CONFORMANCE_PACKET_2026-08-23.md)
 records `5 passed, 8 xfailed` on exact locked AgentCore source. Its initial
@@ -320,6 +322,11 @@ limits the current slimming work to direct-reuse, thin-Adapter, AgentCore PR
 candidate and LiveVoice module-disposition preparation. The accompanying
 [symbol migration map](reviews/OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md)
 is a design inventory rather than a migration or product-delivery claim.
+The [slimming convergence review](reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md)
+now closes the 152-path module/Hermes analysis and the future LiveVoice
+allowlist/exclusion decision. AgentCore PR design packets are complete, but PR
+01–03 packaging and PR 04–10 formal replay remain unfinished; no preparation
+implementation, migration or deletion receives product credit.
 
 EventEnvelope/order/cursor-ACK, D2 receipt/reconcile, real Agent/file-Tool crash
 injection, migration, canary and duplicate deletion remain later packets and

@@ -272,16 +272,17 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
   discard list that can be reviewed without reading the experimental ten
   thousand lines.
 
-- [ ] Summarize direct reuse, Adapter reuse, AgentCore PR and LiveVoice-owned
+- [x] Summarize direct reuse, Adapter reuse, AgentCore PR and LiveVoice-owned
   outcomes by capability, linking rather than duplicating detailed tables.
-- [ ] List the only LiveVoice documents and separately accepted minimal seams
+- [x] List the only LiveVoice documents and separately accepted minimal seams
   eligible for later feature-branch integration.
-- [ ] List every preparation file/commit excluded from wholesale integration.
-- [ ] Verify production-file manifest coverage is complete, dispositions are
+- [x] List every preparation file/commit excluded from wholesale integration.
+- [x] Verify production-file manifest coverage is complete, dispositions are
   exclusive, all local Markdown links resolve, `git diff --check` passes and
   `docs/zh/live-voice` has no tracked duplicate.
-- [ ] Run risk-proportional tests for any retained code candidate, record exact
-  source and distinguish passes, skips and unavailable physical evidence.
-- [ ] Perform scoped diff review, commit each coherent documentation or PR
-  candidate batch locally, and report hashes/status without updating a remote
-  ref.
+- [x] Assess and run risk-proportional tests for any retained code candidate.
+  Final convergence selects no code candidate, so only Tier 0 document checks
+  apply; exact historical code evidence remains attached to its source.
+- [x] Perform scoped diff review and commit this coherent convergence
+  documentation batch locally; report its hash/status without updating a
+  remote ref. AgentCore PR packaging remains separately tracked in Task 7.

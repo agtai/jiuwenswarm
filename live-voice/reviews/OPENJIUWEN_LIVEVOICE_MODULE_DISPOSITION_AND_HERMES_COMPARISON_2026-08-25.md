@@ -726,3 +726,7 @@ headline deletion number:
 No item in this inventory authorizes migration, deletion, default-on
 composition, canary, Store retirement or PR submission while the feature
 branch is still advancing.
+
+The cross-document result, minimal future seam allowlist and explicit
+preparation-code exclusions are indexed in the
+[slimming convergence review](OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md).

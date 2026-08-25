@@ -10,6 +10,10 @@ Execution follows the
 which closes inventory and classification before prototype adjudication or
 AgentCore PR preparation.
 
+The resulting classifications, integration allowlist, exclusions and honest
+PR-readiness boundary are indexed by the
+[convergence review](OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md).
+
 ## 1. Goal
 
 Reduce LiveVoice's long-term ownership and code volume by determining, without

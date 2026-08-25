@@ -1235,9 +1235,13 @@ Physical migration and upstream acceptance remain open.
    post-authorization orphan/stale data grants zero resume authority.
 8. `OJ-G1-CURSOR`: replay/review `ADD-03`; product text/voice presentation ACK
    adapters are later LiveVoice work.
-9. `OJ-G1-FACADE`: replay/review the bound Task/checkpoint/effect public seams.
-   Building the isolated JiuwenSwarm adapter is a later feature-branch packet.
-10. `OJ-G1-CUTOVER` (later, separately authorized): design and rehearse quiesced
+9. `OJ-G1-TASK-FACADE` / PR 09: replay/review the lifecycle-bound
+   Task/checkpoint reader, command, cursor and checkpoint capability grants.
+10. `OJ-G1-EFFECT-FACADE` / PR 10: compose accepted PR 07 internals through
+   PR 09's lease as a trusted-registered, token-free effect coordinator.
+   Building either isolated JiuwenSwarm Adapter is a later feature-branch
+   packet.
+11. `OJ-G1-CUTOVER` (later, separately authorized): design and rehearse quiesced
    import, verification, rollback and canary; only after acceptance retire
    `SqliteTaskStore` generic tables, `_DirectProjectAttemptJournal` execution
    truth and duplicate wrappers.

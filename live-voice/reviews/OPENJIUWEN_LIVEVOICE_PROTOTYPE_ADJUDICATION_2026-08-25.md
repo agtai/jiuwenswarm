@@ -128,8 +128,10 @@ branch is never merged as a unit.
 
 ## 7. Remaining preparation boundary
 
-This adjudication closes prototype selection only. Remaining work is to package
-the ten AgentCore capability groups as independent local PR candidates, prepare
-their per-PR plans/descriptions/evidence, and converge the final LiveVoice
-allowlist/discard list. Migration, dual write, default-on composition, canary,
-Store retirement and source deletion remain explicitly deferred.
+This adjudication closes prototype selection only. The ten dependency-ordered,
+separately reviewable AgentCore replay plans and the final LiveVoice
+allowlist/discard index are now prepared. Remaining work is technical PR
+packaging: finish the real-issue and reviewable-history package for PR 01–03,
+then formally replay and verify PR 04–10 on accepted dependency tips.
+Migration, dual write, default-on composition, canary, Store retirement and
+source deletion remain explicitly deferred.
