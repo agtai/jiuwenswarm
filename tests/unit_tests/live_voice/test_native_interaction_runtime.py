@@ -248,6 +248,33 @@ async def test_metadata_only_audio_observation_returns_runtime_presentation_unit
 
 
 @pytest.mark.asyncio
+async def test_one_provider_event_can_cause_multiple_sequential_audio_units() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response(
+        "provider-response-shared-event", "native-response-shared-event"
+    )
+    first = replace(
+        audio(admission.response, admission.provider_response_id, 0),
+        provider_event_id="provider-audio-shared-event",
+    )
+    second = replace(
+        audio(admission.response, admission.provider_response_id, 1),
+        provider_event_id="provider-audio-shared-event",
+    )
+
+    assert await owner.accept_audio(first) is True
+    assert await owner.accept_audio(second) is True
+
+    snapshot = owner.snapshot()
+    assert snapshot.audio_count == 2
+    assert [record.effect.effect_type for record in runtime.snapshot().effects] == [
+        "audio.enqueue",
+        "audio.enqueue",
+    ]
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_replacement_fences_stale_audio_done_ack_and_history() -> None:
     owner, runtime = await active_owner()
     old = await owner.accept_provider_response("provider-response-1", "native-r1")

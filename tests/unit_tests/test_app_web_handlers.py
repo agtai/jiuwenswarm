@@ -108,6 +108,8 @@ def test_web_handlers_select_native_runtime_client_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "private-test-key")
+    monkeypatch.setenv("LIVE_VOICE_SPEECH_API_BASE", "https://api.openai.com/v1")
     channel = FakeWebChannel()
     agent = FakeAgentClient()
 
@@ -119,6 +121,24 @@ def test_web_handlers_select_native_runtime_client_once(
         channel.live_voice_media_registry.native_runtime_client
         is channel.live_voice_native_runtime_client
     )
+    assert callable(channel.live_voice_media_registry._native_engine_factory)
+
+
+def test_native_engine_without_gateway_provider_secret_fails_before_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    monkeypatch.delenv("LIVE_VOICE_SPEECH_API_KEY", raising=False)
+    channel = FakeWebChannel()
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=FakeAgentClient())
+    )
+
+    assert channel.live_voice_interaction_engine == "unavailable"
+    assert channel.live_voice_native_runtime_client is None
+    assert channel.live_voice_media_registry.native_runtime_client is None
+    assert channel.live_voice_media_registry._native_engine_factory is None
 
 
 class FakeChannelManager:

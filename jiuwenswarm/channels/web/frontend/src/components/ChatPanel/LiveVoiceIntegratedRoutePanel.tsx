@@ -49,6 +49,7 @@ import {
   PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
   PRODUCT_P1_CAPTURE_MAX_DURATION_MS,
   ProductP1VoiceRouteOwner,
+  type ProductP1InteractionEngine,
   type ProductP1VoiceStatus,
 } from '../../features/live-voice/formal/productP1VoiceRoute';
 import {
@@ -635,6 +636,16 @@ export function productTextBlockedByP1Status(status: ProductP1VoiceStatus): bool
   return ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(status);
 }
 
+export function shouldBlockProductP2NotificationPoll(
+  status: ProductP1VoiceStatus,
+  interactionEngine: ProductP1InteractionEngine,
+): boolean {
+  return (
+    ['starting', 'recognizing', 'playing', 'cleanup_pending'].includes(status) ||
+    (status === 'capturing' && interactionEngine !== 'openai-realtime-native')
+  );
+}
+
 export function recognizedSpeechConfirmationMatches(
   pending: RecognizedSpeechConfirmation | null,
   recognized: ProductRecognizedVoice | null,
@@ -740,6 +751,18 @@ export type ProductP2NotificationDisposition =
       readonly replayed: boolean;
       readonly task_notification: boolean;
       readonly adjustment_notification: boolean;
+    }
+  | {
+      readonly kind: 'native_audio';
+      readonly response_id: string;
+      readonly response: Readonly<{
+        interaction_id: string;
+        response_id: string;
+        response_generation: number;
+      }>;
+      readonly unit_id: string;
+      readonly presentation_unit: Readonly<Record<string, unknown>>;
+      readonly audio: Readonly<Record<string, unknown>>;
     };
 
 type PendingForegroundPresentationFence = Readonly<{
@@ -868,6 +891,12 @@ export function rememberProductP3ProgressExhaustion(exhausted: Map<string, true>
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function hasExactFields(value: Readonly<Record<string, unknown>>, fields: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return actual.length === expected.length && actual.every((field, index) => field === expected[index]);
 }
 
 export function formalTaskIntentResultSummary(receipt: FormalTaskIntentReceipt | null | undefined): string | null {
@@ -1219,6 +1248,65 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
           response_generation: response.response_generation as number,
         })
       : null;
+  if (notification.kind === 'native.audio') {
+    const unitResponse = recordValue(unit?.response);
+    const audio = recordValue(notification.audio);
+    const valid =
+      hasExactFields(notification, [
+        'status', 'kind', 'request_id', 'round_id', 'response', 'agent_event',
+        'source_event', 'progress_event', 'presentation_unit', 'audio',
+        'error_reason', 'publish_seq', 'session_id', 'correlation_id',
+        'interaction_id', 'activation_id', 'activation_generation',
+      ]) &&
+      notification.status === 'notification' &&
+      typeof notification.request_id === 'string' && notification.request_id.trim().length > 0 &&
+      notification.round_id === null &&
+      notification.agent_event === null &&
+      notification.source_event === null &&
+      notification.progress_event === null &&
+      notification.error_reason === null &&
+      notification.publish_seq === null &&
+      typeof notification.session_id === 'string' && notification.session_id.trim().length > 0 &&
+      typeof notification.correlation_id === 'string' && notification.correlation_id.trim().length > 0 &&
+      typeof notification.interaction_id === 'string' &&
+      typeof notification.activation_id === 'string' && notification.activation_id.trim().length > 0 &&
+      Number.isSafeInteger(notification.activation_generation) &&
+      (notification.activation_generation as number) > 0 &&
+      responseBinding !== null &&
+      responseBinding.interaction_id === notification.interaction_id &&
+      responseBinding.response_generation > 0 &&
+      unit !== null &&
+      hasExactFields(unit, [
+        'response', 'surface', 'unit_id', 'seq', 'source_start_utf8',
+        'source_end_utf8', 'content_ref',
+      ]) &&
+      unitResponse !== null &&
+      hasExactFields(unitResponse, ['interaction_id', 'response_id', 'response_generation']) &&
+      unitResponse.interaction_id === responseBinding.interaction_id &&
+      unitResponse.response_id === responseBinding.response_id &&
+      unitResponse.response_generation === responseBinding.response_generation &&
+      unit.surface === 'audio' &&
+      typeof unit.unit_id === 'string' && unit.unit_id.trim().length > 0 &&
+      Number.isSafeInteger(unit.seq) && (unit.seq as number) >= 0 &&
+      Number.isSafeInteger(unit.source_start_utf8) && (unit.source_start_utf8 as number) >= 0 &&
+      Number.isSafeInteger(unit.source_end_utf8) &&
+      (unit.source_end_utf8 as number) >= (unit.source_start_utf8 as number) &&
+      typeof unit.content_ref === 'string' && /^sha256:[0-9a-f]{64}$/.test(unit.content_ref) &&
+      audio !== null;
+    if (!valid) {
+      return responseBinding === null
+        ? { kind: 'failed', reason: 'PRODUCT_NATIVE_AUDIO_NOTIFICATION_INVALID' }
+        : { kind: 'failed', reason: 'PRODUCT_NATIVE_AUDIO_NOTIFICATION_INVALID', response: responseBinding };
+    }
+    return {
+      kind: 'native_audio',
+      response_id: responseBinding.response_id,
+      response: responseBinding,
+      unit_id: unit.unit_id as string,
+      presentation_unit: Object.freeze({ ...unit, response: Object.freeze({ ...unitResponse }) }),
+      audio: Object.freeze({ ...audio }),
+    };
+  }
   if (
     notification.kind === 'agent.error' ||
     errorReason !== null ||
@@ -2299,6 +2387,86 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (!deferredTaskSettlementStarted && !continuePendingVoiceLoopP2Refresh()) {
         scheduleProductVoiceLoopCapture();
       }
+      return disposition;
+    }
+    if (disposition.kind === 'native_audio') {
+      const foregroundFence = pendingForegroundPresentationRef.current;
+      const ownsForegroundResponse = foregroundPresentationFenceMatchesResponse(
+        foregroundFence,
+        presentationBinding,
+        disposition.response,
+      );
+      const expectedForegroundResponse = admission?.foreground_presentation ?? null;
+      if (
+        (expectedForegroundResponse !== null || foregroundFence !== null) &&
+        (foregroundFence !== expectedForegroundResponse || !ownsForegroundResponse)
+      ) {
+        return disposition;
+      }
+      if (ownsForegroundResponse) pendingForegroundPresentationRef.current = null;
+      const voiceOwner = p1VoiceOwnerRef.current;
+      if (
+        voiceOwner === null ||
+        voiceOwner.interactionEngine() !== 'openai-realtime-native' ||
+        voiceOwner.status().status !== 'capturing'
+      ) {
+        const reason = 'PRODUCT_NATIVE_AUDIO_OWNER_UNAVAILABLE';
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'response_generation',
+          disposition: 'terminal',
+          reason,
+          binding: presentationBinding,
+          response: disposition.response,
+        });
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+        return disposition;
+      }
+      const playoutLoopGeneration = voiceLoopGenerationRef.current;
+      const isCurrentNativePlayout = () =>
+        mountedRef.current &&
+        activationOwnerRef.current === owner &&
+        presentationBinding !== null &&
+        activeSessionRef.current === presentationBinding.session_id &&
+        voiceLoopGenerationRef.current === playoutLoopGeneration &&
+        p1VoiceOwnerRef.current === voiceOwner;
+      activeVoiceResponseRef.current = disposition.response;
+      setProductTextReason(null);
+      setProductTextStatus('waiting');
+      void voiceOwner.playNativeAudio({
+        response: disposition.response,
+        presentation_unit: disposition.presentation_unit,
+        audio: disposition.audio,
+      }).then(() => {
+        if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+          activeVoiceResponseRef.current = null;
+        }
+        if (!isCurrentNativePlayout()) return;
+        setProductTextStatus('acknowledged');
+        clearProductRecoveryDiagnostic({
+          seam: 'response_generation',
+          binding: presentationBinding,
+          response: disposition.response,
+        });
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+      }).catch(error => {
+        if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+          activeVoiceResponseRef.current = null;
+        }
+        if (!isCurrentNativePlayout()) return;
+        const reason = stableProductTextReason(error, 'PRODUCT_NATIVE_AUDIO_PLAYOUT_FAILED');
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'response_generation',
+          disposition: 'terminal',
+          reason,
+          binding: presentationBinding,
+          response: disposition.response,
+        });
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+      });
       return disposition;
     }
     if (disposition.kind !== 'presentation') {
@@ -3813,7 +3981,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopP2RefreshAfterGenerationRef.current !== null ||
       (!['idle', 'fetching'].includes(terminalAnnouncementState) && !(terminalAnnouncementState === 'queued' && productTextStatus === 'waiting')) ||
       (terminalAnnouncementState === 'fetching' && !voiceLoopEnabledRef.current) ||
-      ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(p1VoiceStatus)
+      shouldBlockProductP2NotificationPoll(
+        p1VoiceStatus,
+        p1VoiceOwnerRef.current?.interactionEngine() ?? 'cascade',
+      )
     )
       return;
     const notificationAdmission: ProductP2NotificationAdmission = Object.freeze({
@@ -3826,7 +3997,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (
           readPendingUnifiedFinal() !== null ||
           activeVoiceResponseRef.current !== null ||
-          ['starting', 'capturing', 'recognizing', 'playing'].includes(p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus)
+          shouldBlockProductP2NotificationPoll(
+            p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus,
+            p1VoiceOwnerRef.current?.interactionEngine() ?? 'cascade',
+          )
         )
           return;
         try {
@@ -3932,13 +4106,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
           }
           const exactForegroundDelivery =
-            previewDisposition.kind === 'presentation' &&
-            !previewDisposition.task_notification &&
-            foregroundPresentationFenceMatchesResponse(
-              pendingForegroundPresentationRef.current,
-              owner.snapshot().binding,
-              previewDisposition.response,
-            );
+            (
+              previewDisposition.kind === 'presentation' &&
+              !previewDisposition.task_notification
+            ) || previewDisposition.kind === 'native_audio'
+              ? foregroundPresentationFenceMatchesResponse(
+                  pendingForegroundPresentationRef.current,
+                  owner.snapshot().binding,
+                  previewDisposition.response,
+                )
+              : false;
           if (pendingUnified !== null && !exactForegroundDelivery) return;
           if (cancelled && !exactForegroundDelivery) return;
           const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
@@ -3952,7 +4129,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           // A presentation owns the P2 lane until its TEXT ACK settles.  Do
           // not let an immediately rejected TTS attempt race a successor
           // notification long-poll and strand that ACK behind it.
-          if (disposition.kind === 'presentation' || pendingPresentationAttemptRef.current?.owner === owner) return;
+          if (
+            disposition.kind === 'presentation' ||
+            disposition.kind === 'native_audio' ||
+            pendingPresentationAttemptRef.current?.owner === owner
+          ) return;
           // A hands-free capture is admitted only after this exact poll has
           // settled. A committed foreground response keeps the P2 lane until
           // its presentation arrives; the queued Task terminal check cannot
@@ -5159,6 +5340,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const locallyStopped = p1Owner.stopAgentPlayout(response);
     if (!locallyStopped) return;
     activeVoiceResponseRef.current = null;
+    if (p1Owner.interactionEngine() === 'openai-realtime-native') return;
     let retained = pendingBargeInRef.current;
     if (retained !== null && retained.owner !== p2Owner) {
       setProductTextStatus('failed');

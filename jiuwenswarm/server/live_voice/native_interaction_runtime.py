@@ -203,7 +203,8 @@ class NativeInteractionRuntimeOwner:
         self._responses_by_ref: dict[ResponseRef, _RuntimeResponse] = {}
         self._response_ids: dict[str, str] = {}
         self._current_response: _RuntimeResponse | None = None
-        self._audio_event_ids: dict[str, NativeAudioObservation] = {}
+        self._audio_event_ids: dict[tuple[str, int], NativeAudioObservation] = {}
+        self._audio_event_responses: dict[str, str] = {}
         self._done_event_ids: dict[str, NativeProviderDone] = {}
         self._barges: dict[
             str, tuple[ResponseRef, NativePresentationCursor, NativeBargeAdmission]
@@ -396,7 +397,19 @@ class NativeInteractionRuntimeOwner:
     ) -> tuple[bool, PresentationUnit]:
         self._validate_audio_observation(observation, retained)
         prior_sequence = retained.audio_by_sequence.get(observation.sequence)
-        prior_event = self._audio_event_ids.get(observation.provider_event_id)
+        event_key = (observation.provider_event_id, observation.sequence)
+        prior_event = self._audio_event_ids.get(event_key)
+        prior_event_response = self._audio_event_responses.get(
+            observation.provider_event_id
+        )
+        if (
+            prior_event_response is not None
+            and prior_event_response != observation.provider_response_id
+        ):
+            raise NativeInteractionRuntimeError(
+                "NATIVE_AUDIO_REPLAY_CONFLICT",
+                "Native Provider audio event cannot cross responses",
+            )
         if prior_sequence is not None or prior_event is not None:
             if prior_sequence == observation and prior_event == observation:
                 return False, retained.audio_units_by_sequence[observation.sequence]
@@ -449,7 +462,10 @@ class NativeInteractionRuntimeOwner:
         retained.content_index = observation.content_index
         retained.audio_by_sequence[observation.sequence] = observation
         retained.audio_units_by_sequence[observation.sequence] = unit
-        self._audio_event_ids[observation.provider_event_id] = observation
+        self._audio_event_ids[event_key] = observation
+        self._audio_event_responses[observation.provider_event_id] = (
+            observation.provider_response_id
+        )
         retained.next_audio_sequence += 1
         retained.next_sample_cursor += observation.sample_count
         return True, unit

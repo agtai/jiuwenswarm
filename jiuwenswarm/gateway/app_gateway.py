@@ -258,6 +258,42 @@ def _inject_live_voice_interaction_engine(
     msg.params = params
 
 
+async def _serve_live_voice_native_notification(
+    msg: Message, web_channel: Any
+) -> bool:
+    """Serve one Gateway-owned Native audio projection before AgentServer poll."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if (
+        msg.channel_id != "web"
+        or method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT.value
+        or not isinstance(msg.params, dict)
+        or not isinstance(msg.metadata, dict)
+    ):
+        return False
+    ws_id = msg.metadata.get("ws_id")
+    interaction_id = msg.params.get("interaction_id")
+    if not isinstance(ws_id, str) or not ws_id or not isinstance(interaction_id, str):
+        return False
+    sockets = getattr(web_channel, "_ws_by_id", None)
+    ws = sockets.get(ws_id) if isinstance(sockets, dict) else None
+    registry = getattr(web_channel, "live_voice_media_registry", None)
+    take = getattr(registry, "take_native_notification_response", None)
+    send_response = getattr(web_channel, "send_response", None)
+    if ws is None or not callable(take) or not callable(send_response):
+        return False
+    payload = take(
+        request_id=msg.id,
+        session_id=msg.session_id,
+        interaction_id=interaction_id,
+        connection_id=ws_id,
+    )
+    if payload is None:
+        return False
+    await send_response(ws, msg.id, ok=True, payload=payload)
+    return True
+
+
 async def _normalize_and_forward_message(msg, channel_manager) -> bool:
     normalized = _normalize_gateway_message(msg)
     # ACP/直连转发路径(session.create 等)也需注入 work_mode 归一化,
@@ -2021,6 +2057,10 @@ async def _run(
             method_val = getattr(getattr(msg, "req_method", None), "value", None) or ""
             if method_val not in forward_methods:
                 return False
+            if source_label == "Web" and await _serve_live_voice_native_notification(
+                msg, web_channel
+            ):
+                return True
             normalized = _normalize_gateway_message(msg)
             _inject_live_voice_web_alpha_credential(normalized)
             if source_label == "Web":

@@ -31,6 +31,7 @@ from jiuwenswarm.server.live_voice.presentation_ledger import PresentationAck
 
 
 NATIVE_GATEWAY_DESCRIPTOR_KEY = "_native_gateway"
+NATIVE_BROWSER_DESCRIPTOR_KEY = "native_interaction"
 NATIVE_GATEWAY_CHANNEL = "live_voice_native_gateway"
 NATIVE_INTERNAL_REQ_METHODS = frozenset(
     {
@@ -57,7 +58,9 @@ class GatewayNativeRuntimeClientSnapshot:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
-class _Activation:
+class GatewayNativeActivation:
+    """Process-private handle for one exact Browser-owned Native activation."""
+
     binding: NativeInteractionBinding
     capability: str
     connection_id: str
@@ -303,7 +306,13 @@ def _validate_method_result(
 class GatewayNativeInteractionRuntimeClient:
     """Holds process-private activation capabilities and sends closed E2A."""
 
-    def __init__(self, agent_client: Any, *, timeout_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        agent_client: Any,
+        *,
+        native_model: str,
+        timeout_seconds: float = 5.0,
+    ) -> None:
         if not callable(getattr(agent_client, "send_request", None)):
             raise NativeRuntimeClientError(
                 "NATIVE_RUNTIME_AGENT_UNAVAILABLE",
@@ -318,9 +327,15 @@ class GatewayNativeInteractionRuntimeClient:
                 "NATIVE_RUNTIME_TIMEOUT_INVALID",
                 "Native Runtime timeout must be positive and bounded",
             )
+        if not _canonical_result_identity(native_model):
+            raise NativeRuntimeClientError(
+                "NATIVE_RUNTIME_MODEL_INVALID",
+                "Native Realtime model is not canonical",
+            )
         self._agent = agent_client
+        self._native_model = native_model
         self._timeout_seconds = float(timeout_seconds)
-        self._activations: dict[tuple[str, str], _Activation] = {}
+        self._activations: dict[tuple[str, str], GatewayNativeActivation] = {}
         self._completed_requests = 0
 
     def observe_activation_response(
@@ -383,10 +398,15 @@ class GatewayNativeInteractionRuntimeClient:
         capability = _capability(descriptor["capability"])
         key = (binding.scope.session_id or "", binding.interaction_id)
         prior = self._activations.get(key)
-        activation = _Activation(binding, capability, connection_id)
+        activation = GatewayNativeActivation(binding, capability, connection_id)
         if prior is not None and prior != activation:
             self._activations.pop(key, None)
         self._activations[key] = activation
+        result[NATIVE_BROWSER_DESCRIPTOR_KEY] = {
+            "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+            "engine": "openai-realtime-native",
+            "model": self._native_model,
+        }
         return sanitized
 
     async def propose(
@@ -493,6 +513,49 @@ class GatewayNativeInteractionRuntimeClient:
             self._activations.pop(key, None)
         return len(keys)
 
+    def activation_for(
+        self,
+        *,
+        session_id: str,
+        interaction_id: str,
+        connection_id: str,
+    ) -> GatewayNativeActivation | None:
+        """Resolve one exact retained capability without exposing it to Browser."""
+
+        if not all(
+            _canonical_result_identity(value)
+            for value in (session_id, interaction_id, connection_id)
+        ):
+            return None
+        retained = self._activations.get((session_id, interaction_id))
+        if retained is None or retained.connection_id != connection_id:
+            return None
+        return retained
+
+    def browser_descriptor_for(
+        self,
+        *,
+        session_id: str,
+        interaction_id: str,
+        connection_id: str,
+    ) -> dict[str, str] | None:
+        """Project the credential-free descriptor for one exact live activation."""
+
+        if (
+            self.activation_for(
+                session_id=session_id,
+                interaction_id=interaction_id,
+                connection_id=connection_id,
+            )
+            is None
+        ):
+            return None
+        return {
+            "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+            "engine": "openai-realtime-native",
+            "model": self._native_model,
+        }
+
     def snapshot(self) -> GatewayNativeRuntimeClientSnapshot:
         return GatewayNativeRuntimeClientSnapshot(
             activation_count=len(self._activations),
@@ -501,7 +564,7 @@ class GatewayNativeInteractionRuntimeClient:
 
     def _authorize(
         self, binding: NativeInteractionBinding, capability: str
-    ) -> _Activation:
+    ) -> GatewayNativeActivation:
         if not isinstance(binding, NativeInteractionBinding):
             raise NativeRuntimeClientError(
                 "NATIVE_RUNTIME_BINDING_INVALID", "binding is not canonical"
@@ -597,8 +660,10 @@ class GatewayNativeInteractionRuntimeClient:
 
 
 __all__ = [
+    "GatewayNativeActivation",
     "NATIVE_GATEWAY_CHANNEL",
     "NATIVE_GATEWAY_DESCRIPTOR_KEY",
+    "NATIVE_BROWSER_DESCRIPTOR_KEY",
     "NATIVE_INTERNAL_REQ_METHODS",
     "GatewayNativeInteractionRuntimeClient",
     "GatewayNativeRuntimeClientSnapshot",

@@ -15,6 +15,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
+    NATIVE_BROWSER_DESCRIPTOR_KEY,
     NATIVE_GATEWAY_DESCRIPTOR_KEY,
     NATIVE_INTERNAL_REQ_METHODS,
     GatewayNativeInteractionRuntimeClient,
@@ -142,7 +143,9 @@ class FakeAgentClient:
 def observed_client(*, timeout_seconds: float = 0.2):
     agent = FakeAgentClient()
     client = GatewayNativeInteractionRuntimeClient(
-        agent, timeout_seconds=timeout_seconds
+        agent,
+        native_model="gpt-realtime-2.1-mini",
+        timeout_seconds=timeout_seconds,
     )
     sanitized = client.observe_activation_response(
         activation_payload(),
@@ -169,10 +172,58 @@ def test_internal_native_methods_are_exact_and_absent_from_browser_allowlist() -
     } == NATIVE_INTERNAL_REQ_METHODS
 
 
+def test_gateway_native_activation_handle_is_exact_private_and_connection_bound() -> (
+    None
+):
+    client, _agent, _sanitized = observed_client()
+
+    activation = client.activation_for(
+        session_id=SCOPE.session_id,
+        interaction_id=BINDING.interaction_id,
+        connection_id="web-connection-1",
+    )
+
+    assert activation is not None
+    assert activation.binding == BINDING
+    assert activation.capability == CAPABILITY
+    assert CAPABILITY not in repr(activation)
+    assert client.browser_descriptor_for(
+        session_id=SCOPE.session_id,
+        interaction_id=BINDING.interaction_id,
+        connection_id="web-connection-1",
+    ) == {
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "engine": "openai-realtime-native",
+        "model": "gpt-realtime-2.1-mini",
+    }
+    assert (
+        client.activation_for(
+            session_id=SCOPE.session_id,
+            interaction_id=BINDING.interaction_id,
+            connection_id="web-connection-foreign",
+        )
+        is None
+    )
+    assert client.forget_connection("web-connection-1") == 1
+    assert (
+        client.activation_for(
+            session_id=SCOPE.session_id,
+            interaction_id=BINDING.interaction_id,
+            connection_id="web-connection-1",
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_gateway_native_proposal_requires_minted_activation_capability() -> None:
     client, agent, sanitized = observed_client()
     assert NATIVE_GATEWAY_DESCRIPTOR_KEY not in sanitized["result"]
+    assert sanitized["result"][NATIVE_BROWSER_DESCRIPTOR_KEY] == {
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "engine": "openai-realtime-native",
+        "model": "gpt-realtime-2.1-mini",
+    }
 
     with pytest.raises(NativeRuntimeClientError) as raised:
         await client.propose(

@@ -27,6 +27,7 @@ import {
   isStreamingSpeechDegradationReason,
   normalizeStreamingXObs,
   type FormalBatchRecognitionResult,
+  type FormalBatchSynthesisResult,
   type FormalStreamingRecognitionResult,
   type FormalSynthesisDownlink,
   type GatewaySpeechProvider,
@@ -74,6 +75,8 @@ const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
 const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
 const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
 const L0_WEBAUDIO_START_CONFIRMATION_RETRIES = 20;
+const NATIVE_AUDIO_MAX_FRAMES = 9_000;
+const NATIVE_AUDIO_MAX_BYTES = 8 * 1024 * 1024;
 
 type ProductP1SuccessorCaptureReadiness = 'not_started' | 'pending' | 'ready' | 'degraded';
 
@@ -90,6 +93,20 @@ export interface ProductP1Recognition {
   readonly voice_commit_receipt: string;
 }
 
+export type ProductP1InteractionEngine = 'cascade' | 'openai-realtime-native';
+
+export interface NativeInteractionActivation {
+  readonly contract_version: 'live-voice.native-interaction.v1';
+  readonly engine: 'openai-realtime-native';
+  readonly model: string;
+}
+
+export interface ProductP1NativeAudioInput {
+  readonly response: Readonly<AudioResponseRef>;
+  readonly presentation_unit: unknown;
+  readonly audio: unknown;
+}
+
 type ProductP1Request = (
   method: string,
   params: Record<string, unknown>,
@@ -104,7 +121,7 @@ interface PendingProductPlayout {
   readonly degradationReason: string | null;
   readonly downlinkRoute: ActiveBrowserDedicatedMediaRoute | null;
   readonly receiptAuthority: Readonly<ProductP1MediaCloseBinding>;
-  readonly captureFramesAcked: number;
+  captureFramesAcked: number;
   nextChunkIndex: number;
   renderedChunks: number;
   peakDepth: number;
@@ -152,6 +169,7 @@ function exactMediaActivation(value: unknown): Record<string, unknown> {
   const hasStreaming = Object.prototype.hasOwnProperty.call(record, 'streaming_recognition');
   const hasDegradation = Object.prototype.hasOwnProperty.call(record, 'streaming_degradation');
   const hasEndOfTurn = Object.prototype.hasOwnProperty.call(record, 'end_of_turn');
+  const hasNativeInteraction = Object.prototype.hasOwnProperty.call(record, 'native_interaction');
   if (hasStreaming !== hasDegradation) {
     throw new Error('media activation streaming fields are incomplete');
   }
@@ -169,9 +187,29 @@ function exactMediaActivation(value: unknown): Record<string, unknown> {
       'privacy',
       ...(hasStreaming ? ['streaming_recognition', 'streaming_degradation'] : []),
       ...(hasEndOfTurn ? ['end_of_turn'] : []),
+      ...(hasNativeInteraction ? ['native_interaction'] : []),
     ],
     'media_activation'
   );
+}
+
+export function parseProductP1NativeInteractionActivation(value: unknown): Readonly<NativeInteractionActivation> {
+  const descriptor = exactObject(
+    value,
+    ['contract_version', 'engine', 'model'],
+    'native_interaction',
+  );
+  if (
+    descriptor.contract_version !== 'live-voice.native-interaction.v1' ||
+    descriptor.engine !== 'openai-realtime-native'
+  ) {
+    throw new Error('native interaction activation is invalid');
+  }
+  return Object.freeze({
+    contract_version: 'live-voice.native-interaction.v1',
+    engine: 'openai-realtime-native',
+    model: requiredText(descriptor.model, 'native_interaction.model'),
+  });
 }
 
 function requiredText(value: unknown, field: string): string {
@@ -191,6 +229,22 @@ function consumePrivateText(record: Record<string, unknown>, key: string, field:
     throw new Error(`${field} could not be released from memory`);
   }
   return value;
+}
+
+function positiveSafeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(`${field} is invalid`);
+  }
+  return value as number;
+}
+
+function oneUsePrivateText(value: string, field: string): () => string {
+  let retained = requiredText(value, field);
+  return () => {
+    const current = requiredText(retained, field);
+    retained = '';
+    return current;
+  };
 }
 
 function stableFailureReason(error: unknown): string {
@@ -393,6 +447,9 @@ export class ProductP1VoiceRouteOwner {
   #streamingRecognitionAvailable = false;
   #streamingFallbackReason: string | null = null;
   #streamingFallbackTier: 'batch' | 'text' | null = null;
+  #nativeInteraction: Readonly<NativeInteractionActivation> | null = null;
+  #pendingNativeAudio: Readonly<FormalBatchSynthesisResult> | null = null;
+  #nativeCaptureSendPaused = false;
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
   #pendingSpeechStart: Readonly<MediaSpeechStart> | null = null;
@@ -559,6 +616,10 @@ export class ProductP1VoiceRouteOwner {
     return Object.freeze({ status: this.#status, reason: this.#reason });
   }
 
+  interactionEngine(): ProductP1InteractionEngine {
+    return this.#nativeInteraction === null ? 'cascade' : 'openai-realtime-native';
+  }
+
   async startCapture(
     input: Readonly<{
       session_id: string;
@@ -609,6 +670,9 @@ export class ProductP1VoiceRouteOwner {
     this.#streamingRecognitionAvailable = false;
     this.#streamingFallbackReason = null;
     this.#streamingFallbackTier = null;
+    this.#nativeInteraction = null;
+    this.#pendingNativeAudio = null;
+    this.#nativeCaptureSendPaused = false;
     this.#endOfTurnNegotiated = false;
     this.#pendingSpeechStart = null;
     this.#pendingEndOfTurn = null;
@@ -691,6 +755,9 @@ export class ProductP1VoiceRouteOwner {
           throw new Error('media activation did not prove its privacy boundary');
         this.#observeStreamingAvailability(activation);
         this.#observeEndOfTurnAvailability(activation);
+        this.#nativeInteraction = Object.prototype.hasOwnProperty.call(activation, 'native_interaction')
+          ? parseProductP1NativeInteractionActivation(activation.native_interaction)
+          : null;
         return activation;
       });
       this.#pendingMediaActivation = activationOperation;
@@ -744,13 +811,16 @@ export class ProductP1VoiceRouteOwner {
           on_terminal: event => {
             if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
           },
-          ...(this.#endOfTurnNegotiated
+          ...(this.#endOfTurnNegotiated || this.#nativeInteraction !== null
             ? {
                 end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
                 on_speech_start: (event: Readonly<MediaSpeechStart>) => {
                   this.#observeSpeechStartControl(operationGeneration, ownedRoute, event);
                 },
                 on_end_of_turn: (event: Readonly<MediaEndOfTurn>) => {
+                  if (this.#nativeInteraction !== null) {
+                    throw new Error('native interaction emitted an unexpected media end-of-turn');
+                  }
                   this.#observeEndOfTurnControl(operationGeneration, ownedRoute, event);
                 },
               }
@@ -1009,6 +1079,26 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
+  async playNativeAudio(input: Readonly<ProductP1NativeAudioInput>): Promise<void> {
+    if (this.#nativeInteraction === null) {
+      throw new Error('native audio requires a server-selected Native interaction');
+    }
+    if (this.#pendingNativeAudio !== null) {
+      throw new Error('a Native audio unit is already active');
+    }
+    const delivery = this.#parseNativeAudioDelivery(input);
+    this.#pendingNativeAudio = delivery;
+    try {
+      await this.playAgentText({
+        response: delivery.response,
+        unit_id: delivery.unit_id,
+        text: 'Native audio delivery',
+      });
+    } finally {
+      if (this.#pendingNativeAudio === delivery) this.#pendingNativeAudio = null;
+    }
+  }
+
   async playAgentText(
     input: Readonly<{
       response: Readonly<AudioResponseRef>;
@@ -1016,13 +1106,15 @@ export class ProductP1VoiceRouteOwner {
       text: string;
     }>
   ): Promise<void> {
+    const nativeDelivery = this.#pendingNativeAudio;
+    const native = nativeDelivery !== null;
     if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
       throw new Error('formal P1 synthesis authority is unavailable');
     }
-    if (['starting', 'capturing', 'recognizing'].includes(this.#status)) {
+    if ((!native && ['starting', 'capturing', 'recognizing'].includes(this.#status)) || (native && this.#status !== 'capturing')) {
       throw new Error('formal P1 capture must settle before Agent playout');
     }
-    const operationGeneration = ++this.#operationGeneration;
+    const operationGeneration = native ? this.#operationGeneration : ++this.#operationGeneration;
     const speech = this.#speech;
     let playoutResponse: Readonly<AudioResponseRef> | null = null;
     let capturePreparation: Promise<Readonly<{ ready: boolean; reason: string | null }>> | null = null;
@@ -1030,16 +1122,16 @@ export class ProductP1VoiceRouteOwner {
       const text = requiredText(input.text, 'agent_text');
       const measurementBinding = this.#l0Binding(input.response);
       if (measurementBinding !== null) registerBrowserL0Response(measurementBinding);
-      const result = await speech.synthesizeAuthoritative({
-        response: input.response,
-        unitId: requiredText(input.unit_id, 'unit_id'),
-        renderPlan: createAudioRenderPlan(text, text, []),
-        authoritativeAgentText: true,
-        locale: this.#locale,
-        voice: null,
-        requiredSampleRateHz: this.#playout.sample_rate_hz,
-        correlationId: requiredText(this.#correlationId, 'correlation_id'),
-      });
+      const result = nativeDelivery ?? await speech.synthesizeAuthoritative({
+          response: input.response,
+          unitId: requiredText(input.unit_id, 'unit_id'),
+          renderPlan: createAudioRenderPlan(text, text, []),
+          authoritativeAgentText: true,
+          locale: this.#locale,
+          voice: null,
+          requiredSampleRateHz: this.#playout.sample_rate_hz,
+          correlationId: requiredText(this.#correlationId, 'correlation_id'),
+        });
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal synthesis was fenced');
       if ((result.chunks.length === 0) === (result.downlink === null)) {
@@ -1047,7 +1139,7 @@ export class ProductP1VoiceRouteOwner {
       }
       const receiptAuthority = this.#mediaCloseBinding;
       const captureFramesAcked = this.#captureFramesAcked;
-      if (receiptAuthority === null || captureFramesAcked <= 0) {
+      if (receiptAuthority === null || (!native && captureFramesAcked <= 0)) {
         throw new Error('formal synthesis lost its capture authority');
       }
       let downlinkRoute: ActiveBrowserDedicatedMediaRoute | null = null;
@@ -1059,7 +1151,7 @@ export class ProductP1VoiceRouteOwner {
       // nullish coalescing here would turn a valid stream into a zero-frame
       // batch and reject its first media frame as stale.
       const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
-      const captureDuringPlayout = result.downlink !== null;
+      const captureDuringPlayout = result.downlink !== null && !native;
       if (result.downlink !== null) {
         if (captureDuringPlayout) {
           this.#successorCaptureReadiness = 'pending';
@@ -1140,6 +1232,10 @@ export class ProductP1VoiceRouteOwner {
         this.#l0FirstFrameResponseKey = null;
       }
       this.#audio.beginPlayout(result.response);
+      if (native) {
+        this.#pendingSpeechStart = null;
+        this.#bargeInSpeechStartDelivered = false;
+      }
       this.#fillPlayoutQueue(pendingPlayout);
       this.#deliverBargeInSpeechStart(operationGeneration, this.#route);
       this.#deliverBargeInEndOfTurn(operationGeneration, this.#route);
@@ -1161,7 +1257,17 @@ export class ProductP1VoiceRouteOwner {
       // synchronously changes the operation generation; fence it before minting
       // a render receipt in both the overlapping and deferred cases.
       this.#requireCurrent(operationGeneration);
-      await this.#acknowledgePlayout(pendingPlayout);
+      if (native) {
+        await this.#freezeNativeCaptureReceipt(pendingPlayout, operationGeneration);
+        try {
+          await this.#acknowledgePlayout(pendingPlayout);
+        } finally {
+          this.#nativeCaptureSendPaused = false;
+          this.#drainCaptureFrames();
+        }
+      } else {
+        await this.#acknowledgePlayout(pendingPlayout);
+      }
       this.#requireCurrent(operationGeneration);
       const completed = this.#currentL0PlayoutCompletion();
       if (
@@ -1179,7 +1285,11 @@ export class ProductP1VoiceRouteOwner {
       }
       if (downlinkRoute !== null) {
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
-        if (captureReadiness?.ready === true) {
+        if (native) {
+          this.#pendingSpeechStart = null;
+          this.#bargeInSpeechStartDelivered = false;
+          this.#setStatus('capturing', null);
+        } else if (captureReadiness?.ready === true) {
           await this.#revokeMediaAuthority(receiptAuthority);
           this.#requireCurrent(operationGeneration);
           this.#setStatus('capturing', pendingPlayout.degradationReason);
@@ -1192,6 +1302,8 @@ export class ProductP1VoiceRouteOwner {
         this.#setStatus('recognized', null);
       }
     } catch (error) {
+      this.#nativeCaptureSendPaused = false;
+      if (native) this.#drainCaptureFrames();
       if (error !== null && typeof error === 'object' && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED') {
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
@@ -1265,7 +1377,17 @@ export class ProductP1VoiceRouteOwner {
         confirmedClock,
       );
     }
-    pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    if (pending.downlinkRoute !== null && this.#nativeInteraction !== null) {
+      try {
+        pending.downlinkRoute.leaf.sendLocalPlaybackStop(stopReceipt);
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : new Error('Native playback stop was not delivered'));
+        void this.#fail(error);
+        return false;
+      }
+    } else {
+      pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    }
     pending.reject(
       Object.assign(new Error('formal playout was interrupted'), {
         reason: 'FORMAL_PLAYOUT_BARGED',
@@ -1804,6 +1926,140 @@ export class ProductP1VoiceRouteOwner {
       })
     );
     this.#fillPlayoutQueue(pending);
+  }
+
+  #parseNativeAudioDelivery(input: Readonly<ProductP1NativeAudioInput>): Readonly<FormalBatchSynthesisResult> {
+    const native = this.#nativeInteraction;
+    const playout = this.#playout;
+    if (native === null || playout === null) {
+      throw new Error('Native audio requires an active Native media authority');
+    }
+    const response = exactObject(
+      input.response,
+      ['interaction_id', 'response_id', 'response_generation'],
+      'native_audio.response',
+    );
+    const responseGeneration = positiveSafeInteger(
+      response.response_generation,
+      'native_audio.response.response_generation',
+    );
+    const responseRef = Object.freeze({
+      interaction_id: requiredText(response.interaction_id, 'native_audio.response.interaction_id'),
+      response_id: requiredText(response.response_id, 'native_audio.response.response_id'),
+      response_generation: responseGeneration,
+    });
+    const unit = exactObject(
+      input.presentation_unit,
+      ['response', 'surface', 'unit_id', 'seq', 'source_start_utf8', 'source_end_utf8', 'content_ref'],
+      'native_audio.presentation_unit',
+    );
+    const unitResponse = exactObject(
+      unit.response,
+      ['interaction_id', 'response_id', 'response_generation'],
+      'native_audio.presentation_unit.response',
+    );
+    if (
+      unit.surface !== 'audio'
+      || unitResponse.interaction_id !== responseRef.interaction_id
+      || unitResponse.response_id !== responseRef.response_id
+      || unitResponse.response_generation !== responseRef.response_generation
+      || !Number.isSafeInteger(unit.seq)
+      || (unit.seq as number) < 0
+      || !Number.isSafeInteger(unit.source_start_utf8)
+      || !Number.isSafeInteger(unit.source_end_utf8)
+      || (unit.source_start_utf8 as number) < 0
+      || (unit.source_end_utf8 as number) < (unit.source_start_utf8 as number)
+      || typeof unit.content_ref !== 'string'
+      || !/^sha256:[0-9a-f]{64}$/.test(unit.content_ref)
+    ) {
+      throw new Error('Native audio presentation unit is invalid');
+    }
+    const unitId = requiredText(unit.unit_id, 'native_audio.presentation_unit.unit_id');
+    const audio = exactObject(
+      input.audio,
+      [
+        'binding', 'channel_count', 'delivery', 'endpoint_path', 'format',
+        'frame_count', 'max_pending_bytes', 'max_pending_frames',
+        'media_ticket', 'sample_rate_hz', 'streaming', 'subprotocol',
+        'ticket_ttl_ms', 'degradation_reason',
+      ],
+      'native_audio.audio',
+    );
+    const frameCount = positiveSafeInteger(audio.frame_count, 'native_audio.audio.frame_count');
+    const maxPendingFrames = positiveSafeInteger(
+      audio.max_pending_frames,
+      'native_audio.audio.max_pending_frames',
+    );
+    const maxPendingBytes = positiveSafeInteger(
+      audio.max_pending_bytes,
+      'native_audio.audio.max_pending_bytes',
+    );
+    if (
+      audio.channel_count !== 1
+      || audio.delivery !== 'dedicated_media_downlink'
+      || audio.endpoint_path !== '/ws/live-voice/media'
+      || audio.format !== 'pcm_f32_mono_20ms'
+      || audio.sample_rate_hz !== playout.sample_rate_hz
+      || audio.streaming !== false
+      || audio.subprotocol !== 'live-voice.media.v1'
+      || audio.degradation_reason !== null
+      || frameCount > NATIVE_AUDIO_MAX_FRAMES
+      || maxPendingFrames > 256
+      || maxPendingBytes > NATIVE_AUDIO_MAX_BYTES
+    ) {
+      throw new Error('Native audio descriptor is invalid');
+    }
+    const mediaTicket = consumePrivateText(audio, 'media_ticket', 'native_audio.audio.media_ticket');
+    return Object.freeze({
+      operation: 'speech.synthesize.batch',
+      response: responseRef,
+      unit_id: unitId,
+      chunks: Object.freeze([]),
+      downlink: Object.freeze({
+        endpoint_path: '/ws/live-voice/media',
+        take_media_ticket: oneUsePrivateText(mediaTicket, 'native_audio.audio.media_ticket'),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: positiveSafeInteger(audio.ticket_ttl_ms, 'native_audio.audio.ticket_ttl_ms'),
+        frame_count: frameCount,
+        streaming: false,
+        degradation_reason: null,
+        sample_rate_hz: playout.sample_rate_hz,
+        binding: Object.freeze({ ...objectValue(audio.binding, 'native_audio.audio.binding') }),
+        max_pending_frames: maxPendingFrames,
+        max_pending_bytes: maxPendingBytes,
+      }),
+      provider: Object.freeze({
+        provider_id: 'openai-realtime-native',
+        implementation_class: 'formal',
+        fallback_from: null,
+        model: native.model,
+      }),
+      presented: false,
+    });
+  }
+
+  async #freezeNativeCaptureReceipt(
+    pending: PendingProductPlayout,
+    operationGeneration: number,
+  ): Promise<void> {
+    const route = this.#route;
+    if (route === null || route.leaf.closed || !route.leaf.attached) {
+      throw new Error('Native capture authority is unavailable for playout receipt');
+    }
+    this.#drainCaptureFrames();
+    this.#nativeCaptureSendPaused = true;
+    const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
+    let state = route.leaf.flush();
+    while (state.pending_frames !== 0 && !route.leaf.closed && Date.now() < deadline) {
+      await waitTurn();
+      this.#requireCurrent(operationGeneration);
+      state = route.leaf.flush();
+    }
+    this.#requireCurrent(operationGeneration);
+    if (route !== this.#route || route.leaf.closed || state.pending_frames !== 0 || this.#mediaSentFrames <= 0) {
+      throw new Error('Native capture frames did not settle for playout receipt');
+    }
+    pending.captureFramesAcked = this.#mediaSentFrames;
   }
 
   #fillPlayoutQueue(pending: PendingProductPlayout): void {
@@ -2367,6 +2623,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #drainCaptureFrames(): void {
+    if (this.#nativeCaptureSendPaused) return;
     const route = this.#route;
     if (route === null || !route.leaf.attached || route.leaf.closed) return;
     while (this.#mediaSentFrames < this.#frames.length) {

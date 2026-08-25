@@ -33,6 +33,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaSpeechStart,
     MediaPlayoutBinding,
     MediaPlaybackStopOutcome,
+    MediaPlaybackStopReceipt,
     MediaTransportViolation,
     create_playback_stop_receipt,
     decode_audio_frame,
@@ -992,6 +993,80 @@ async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach(
 
 
 @pytest.mark.asyncio
+async def test_socket_leaf_rearms_native_speech_start_without_eot() -> None:
+    binding = _binding()
+    release_audio = asyncio.Event()
+    release_detach = asyncio.Event()
+
+    class _ContinuousSocket(_FakeDedicatedSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.recv_count = 0
+
+        async def recv(self) -> str | bytes:
+            self.recv_count += 1
+            if self.recv_count == 1:
+                await release_audio.wait()
+                return encode_audio_frame(binding, _frame())
+            await release_detach.wait()
+            return serialize_media_control(
+                MediaDetach(
+                    lease_id=binding.lease_id,
+                    generation=binding.generation.value,
+                    reason_id=MediaDetachReason.PEER_CLOSE,
+                )
+            )
+
+    socket = _ContinuousSocket()
+    starts = iter((100, 640))
+    third_start = asyncio.Event()
+
+    async def next_speech_start() -> MediaSpeechStart:
+        try:
+            provider_start_ms = next(starts)
+        except StopIteration:
+            await third_start.wait()
+            raise AssertionError("unexpected third speech start")
+        return MediaSpeechStart(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=provider_start_ms,
+        )
+
+    route = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_speech_start=next_speech_start,
+            repeat_speech_start=True,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+        )
+    )
+    for _ in range(40):
+        controls = [deserialize_media_control(item) for item in socket.sent]
+        if any(isinstance(item, MediaSpeechStart) for item in controls):
+            break
+        await asyncio.sleep(0)
+    release_audio.set()
+    for _ in range(40):
+        controls = [deserialize_media_control(item) for item in socket.sent]
+        if sum(isinstance(item, MediaSpeechStart) for item in controls) == 2:
+            break
+        await asyncio.sleep(0)
+    release_detach.set()
+    result = await asyncio.wait_for(route, timeout=1.0)
+
+    controls = [deserialize_media_control(item) for item in socket.sent]
+    assert [
+        item.provider_start_ms
+        for item in controls
+        if isinstance(item, MediaSpeechStart)
+    ] == [100, 640]
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+
+
+@pytest.mark.asyncio
 async def test_same_ready_peer_detach_wins_and_suppresses_eot() -> None:
     binding = _binding()
     peer_detach = MediaDetach(
@@ -1828,6 +1903,41 @@ async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exac
         "history": 0,
         "persistence": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_downlink_socket_leaf_awaits_playback_stop_authority_fence() -> None:
+    binding = _downlink_binding()
+    socket = _FakeDedicatedSocket(
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            ),
+            serialize_media_control(
+                create_playback_stop_receipt(
+                    binding,
+                    outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+                    confirmed_through_seq=0,
+                )
+            ),
+        ]
+    )
+    retained: list[MediaPlaybackStopReceipt] = []
+
+    async def retain_stop(receipt: MediaPlaybackStopReceipt) -> None:
+        await asyncio.sleep(0)
+        retained.append(receipt)
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame(), _frame(1, 160)],
+        on_playback_stop=retain_stop,
+    )
+
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert len(retained) == 1
+    assert retained[0].confirmed_through_seq == 0
 
 
 @pytest.mark.asyncio

@@ -158,7 +158,7 @@ def output_audio_delta(
     item_id: str,
     sequence: int,
     *,
-    pcm16: bytes = b"\x01\x00",
+    pcm16: bytes = b"\x01\x00" * 480,
 ) -> dict[str, object]:
     return provider_event(
         "response.output_audio.delta",
@@ -310,7 +310,13 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
         speech_stopped("event-4", "user-item-1", 640),
         input_committed("event-5", "user-item-1"),
         response_created("event-6", "provider-response-1"),
-        output_audio_delta("event-7", "provider-response-1", "assistant-item-1", 0),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00",
+        ),
         response_done("event-8", "provider-response-1"),
     )
     await engine.start()
@@ -321,6 +327,7 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
 
     runtime_ref = response_ref(1)
     assert await engine.admit_response("provider-response-1", runtime_ref) is True
+    assert await engine.next_event() == NativeEngineEvent()
     audio = await engine.next_event()
     done = await engine.next_event()
 
@@ -330,10 +337,15 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
         commit.action.operation,
         speak.action.operation,
     ] == ["LISTEN", "SILENCE", "TURN_COMMIT", "SPEAK"]
+    assert action_payload(listen) == {
+        "provider_item_id": "user-item-1",
+        "provider_start_ms": "0",
+    }
     assert commit.turn_commit is not None
     assert commit.turn_commit.audit_transcript is None
     assert commit.turn_commit.committed_audio_ms == 640
-    assert audio.audio is not None and audio.audio.pcm16 == b"\x01\x00"
+    assert audio.audio is not None
+    assert audio.audio.pcm16 == b"\x01\x00" + b"\x00\x00" * 479
     assert audio.audio.response == runtime_ref
     assert done.provider_done is not None and done.provider_done.completed is True
     assert done.provider_done.transcript is None
@@ -358,6 +370,204 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
             },
         }
     ]
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_native_audio_delta_crosses_provider_events_into_one_exact_20ms_frame() -> (
+    None
+):
+    first = b"\x01\x00" * 200
+    second = b"\x02\x00" * 280
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=first,
+        ),
+        output_audio_delta(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=second,
+        ),
+        response_done("event-9", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+
+    assert await engine.next_event() == NativeEngineEvent()
+    audio = await engine.next_event()
+    done = await engine.next_event()
+
+    assert audio.audio is not None
+    assert audio.audio.sequence == 0
+    assert audio.audio.pcm16 == first + second
+    assert done.provider_done is not None and done.provider_done.completed is True
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_event_delta_keeps_exact_causation_for_each_emitted_frame() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00" * 200,
+        ),
+        output_audio_delta(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x02\x00" * 760,
+        ),
+        response_done("event-9", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+
+    assert await engine.next_event() == NativeEngineEvent()
+    first = await engine.next_event()
+    second = await engine.next_event()
+
+    assert first.audio is not None and second.audio is not None
+    assert (first.audio.provider_event_id, second.audio.provider_event_id) == (
+        "event-7",
+        "event-8",
+    )
+    assert first.audio.pcm16 == b"\x01\x00" * 200 + b"\x02\x00" * 280
+    assert second.audio.pcm16 == b"\x02\x00" * 480
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_one_provider_delta_emits_multiple_exact_frames_with_one_causation_id() -> (
+    None
+):
+    pcm16 = b"\x01\x00" * 960
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=pcm16,
+        ),
+        response_done("event-8", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+
+    first = await engine.next_event()
+    second = await engine.next_event()
+    terminal = await engine.next_event()
+
+    assert first.audio is not None and second.audio is not None
+    assert (first.audio.provider_event_id, second.audio.provider_event_id) == (
+        "event-7",
+        "event-7",
+    )
+    assert (first.audio.sequence, second.audio.sequence) == (0, 1)
+    assert first.audio.pcm16 == second.audio.pcm16 == b"\x01\x00" * 480
+    assert terminal.provider_done is not None
+    await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["cancelled", "failed"])
+async def test_non_presentable_terminal_status_discards_partial_audio_tail(
+    status: str,
+) -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00" * 200,
+        ),
+        response_done("event-8", "provider-response-1", status=status),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+
+    assert await engine.next_event() == NativeEngineEvent()
+    terminal = await engine.next_event()
+
+    assert terminal.audio is None
+    assert terminal.provider_done is not None
+    assert terminal.provider_done.completed is False
+    assert engine.snapshot().released_audio_count == 0
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_unadmitted_partial_audio_consumes_bounded_pending_capacity() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00",
+        ),
+        output_audio_delta(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x02\x00" * 480,
+        ),
+        pending_audio_capacity=1,
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+
+    assert await engine.next_event() == NativeEngineEvent()
+    before = engine.snapshot()
+    assert before.pending_audio_count == 1
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_PENDING_AUDIO_FULL"
+    after = engine.snapshot()
+    assert after.pending_audio_count == 1
+    assert after.released_audio_count == 0
     await engine.close()
 
 

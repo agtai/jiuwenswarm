@@ -14,6 +14,7 @@ from jiuwenswarm.gateway.app_gateway import (
     _inject_live_voice_interaction_engine,
     _inject_live_voice_web_alpha_credential,
     _normalize_gateway_message,
+    _serve_live_voice_native_notification,
 )
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 
@@ -227,6 +228,65 @@ def test_gateway_overwrites_browser_interaction_engine_selection() -> None:
     _inject_live_voice_interaction_engine(msg, "openai-realtime-native")
 
     assert msg.params["interaction_engine"] == "openai-realtime-native"
+
+
+@pytest.mark.asyncio
+async def test_gateway_native_notification_short_circuits_only_exact_socket_queue() -> (
+    None
+):
+    projected = {
+        "request_id": "req-native-audio",
+        "ok": True,
+        "result": {"status": "notification", "kind": "native.audio"},
+        "error": None,
+        "product_composition": {"enabled": True},
+    }
+
+    class Registry:
+        def take_native_notification_response(self, **kwargs):
+            assert kwargs == {
+                "request_id": "req-native-audio",
+                "session_id": "session-1",
+                "interaction_id": "interaction-1",
+                "connection_id": "web-socket-1",
+            }
+            return projected
+
+    class Channel:
+        def __init__(self) -> None:
+            self.ws = object()
+            self._ws_by_id = {"web-socket-1": self.ws}
+            self.live_voice_media_registry = Registry()
+            self.responses = []
+
+        async def send_response(self, ws, req_id, **kwargs):
+            self.responses.append((ws, req_id, kwargs))
+
+    channel = Channel()
+    msg = Message(
+        id="req-native-audio",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "interaction_id": "interaction-1"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
+        metadata={"ws_id": "web-socket-1"},
+    )
+
+    assert await _serve_live_voice_native_notification(msg, channel) is True
+    assert channel.responses == [
+        (
+            channel.ws,
+            "req-native-audio",
+            {"ok": True, "payload": projected},
+        )
+    ]
+
+    msg.metadata = {"ws_id": "web-socket-foreign"}
+    assert await _serve_live_voice_native_notification(msg, channel) is False
+    assert len(channel.responses) == 1
 
 
 @pytest.mark.parametrize(
