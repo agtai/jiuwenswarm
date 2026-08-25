@@ -617,6 +617,7 @@ class P2ActivationLease:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
+        latency_probe_hooks: object | None = None,
     ) -> AgentConversationHandle:
         """Forward one exact committed turn through the retained runtime owner."""
 
@@ -640,6 +641,7 @@ class P2ActivationLease:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
+                latency_probe_hooks=latency_probe_hooks,
             )
             if not isinstance(outcome, AgentConversationHandle):
                 raise _violation(

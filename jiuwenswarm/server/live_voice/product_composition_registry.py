@@ -4524,6 +4524,7 @@ class AgentServerProductCompositionRegistry:
         | None = None,
         after_agent_dispatch: Callable[[Any], None] | None = None,
         allow_agent_tools: bool = True,
+        latency_probe_hooks: object | None = None,
     ) -> P3RouteResult:
         result_unknown = False
         try:
@@ -4619,6 +4620,7 @@ class AgentServerProductCompositionRegistry:
                 before_dispatch=before_agent_dispatch,
                 after_dispatch=after_agent_dispatch,
                 allow_tools=allow_agent_tools,
+                latency_probe_hooks=latency_probe_hooks,
             )
             return _success_result(
                 request_id,
@@ -5900,6 +5902,7 @@ class AgentServerProductCompositionRegistry:
         context: FormalContextSnapshot,
         channel_id: str,
         allow_tools: bool,
+        latency_probe_hooks: object | None,
     ) -> P3RouteResult:
         request_id = f"unified-agent-{voice_identity[:40]}"
         journal = self._unified_journal
@@ -5976,6 +5979,7 @@ class AgentServerProductCompositionRegistry:
                 before_agent_dispatch=checkpoint,
                 after_agent_dispatch=checkpoint_accepted,
                 allow_agent_tools=allow_tools,
+                latency_probe_hooks=latency_probe_hooks,
             )
 
         return await self._run_unified_foreground_effect(
@@ -6003,6 +6007,7 @@ class AgentServerProductCompositionRegistry:
         background_authority_unavailable: bool,
         auth_token: object,
         channel_id: str,
+        latency_probe_hooks: object | None,
     ) -> P3RouteResult:
         journal = self._unified_journal
         if journal is None:
@@ -6048,6 +6053,7 @@ class AgentServerProductCompositionRegistry:
                 context=context,
                 channel_id=channel_id,
                 allow_tools=True,
+                latency_probe_hooks=latency_probe_hooks,
             )
 
         chinese = self._is_chinese_voice_text(commit.text)
@@ -6672,6 +6678,7 @@ class AgentServerProductCompositionRegistry:
             context=agent_context,
             channel_id=channel_id,
             allow_tools=False,
+            latency_probe_hooks=latency_probe_hooks,
         )
 
     async def handle_unified_submit(
@@ -6682,6 +6689,7 @@ class AgentServerProductCompositionRegistry:
         session_id: str | None,
         channel_id: str,
         latency_probe: object | None = None,
+        latency_probe_hooks: object | None = None,
     ) -> P3RouteResult:
         """Admit exactly one Gateway-claimed ASR final into semantic routing."""
 
@@ -6966,6 +6974,7 @@ class AgentServerProductCompositionRegistry:
                                 ),
                                 auth_token=params.get("auth_token"),
                                 channel_id=channel_id,
+                                latency_probe_hooks=latency_probe_hooks,
                             ),
                             name=f"live-voice-unified-submit:{voice_identity[:16]}",
                         )

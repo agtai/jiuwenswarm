@@ -9218,6 +9218,7 @@ class AgentWebSocketServer:
             }
             method = request.req_method
             latency_probe = None
+            latency_probe_hooks = None
             if method is ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT:
                 raw_latency_context = params.pop("latency_probe_context", None)
                 runtime = getattr(
@@ -9257,6 +9258,7 @@ class AgentWebSocketServer:
                         )
                         if latency_probe is not None:
                             latency_probe.mark("agent.commit_submit_received")
+                            latency_probe_hooks = latency_probe.stream_hooks()
             if method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE:
                 result = await registry.handle_p2_activate(
                     params=params,
@@ -9286,6 +9288,8 @@ class AgentWebSocketServer:
                 }
                 if latency_probe is not None:
                     unified_kwargs["latency_probe"] = latency_probe
+                if latency_probe_hooks is not None:
+                    unified_kwargs["latency_probe_hooks"] = latency_probe_hooks
                 result = await registry.handle_unified_submit(**unified_kwargs)
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT:
                 result = await registry.handle_p2_notification_next(

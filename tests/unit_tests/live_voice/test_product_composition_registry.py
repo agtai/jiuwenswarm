@@ -60,6 +60,9 @@ from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
 )
+from jiuwenswarm.server.live_voice.agent_latency_probe import (
+    AgentForegroundStreamProbeHooks,
+)
 from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
@@ -1859,12 +1862,18 @@ async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_ident
     )
     assert activated.ok
     params = _unified_final_params(stem="dialogue-once", text="你好。")
+    marks: list[str] = []
+    hooks = AgentForegroundStreamProbeHooks(
+        mark_started=lambda: marks.append("started"),
+        mark_first_visible_delta=lambda: marks.append("delta"),
+    )
 
     first = await registry.handle_unified_submit(
         params=params,
         request_id="request-unified-first",
         session_id="session-product",
         channel_id="web",
+        latency_probe_hooks=hooks,
     )
     replay = await registry.handle_unified_submit(
         params=params,
@@ -1882,6 +1891,7 @@ async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_ident
     assert manager.agent.calls == 1
     assert manager.agent.executions[0].commit.text == "你好。"
     assert manager.agent.executions[0].allow_tools is True
+    assert marks == ["started"]
     await _close_unified_route(registry, stem="p3-off-create")
 
 

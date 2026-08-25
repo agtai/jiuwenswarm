@@ -29,6 +29,9 @@ from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
 )
+from jiuwenswarm.server.live_voice.agent_latency_probe import (
+    AgentForegroundStreamProbeHooks,
+)
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentBridgeRuntime,
     AgentBridgeRuntimeViolation,
@@ -977,6 +980,7 @@ async def submit(
     *,
     request_id: str = "request-1",
     response_id: str = "response-1",
+    latency_probe_hooks: AgentForegroundStreamProbeHooks | None = None,
 ):
     return await current.submit_committed_turn(
         request_id=request_id,
@@ -984,7 +988,74 @@ async def submit(
         correlation_id=f"correlation-{request_id}",
         commit=selected,
         context=FormalContextSnapshot(selected.scope),
+        latency_probe_hooks=latency_probe_hooks,
     )
+
+
+@pytest.mark.asyncio
+async def test_product_submit_marks_started_and_first_visible_delta_once() -> None:
+    class DeltaFormalAdapter(LowerFormalAdapter):
+        async def process_formal_live_voice_stream_impl(
+            self, request, inputs
+        ) -> AsyncIterator[AgentResponseChunk]:
+            self.calls += 1
+            self.requests.append(request)
+            self.inputs.append(inputs)
+            self.started.set()
+            for event_type, content in (
+                ("chat.delta", "  "),
+                ("chat.reasoning", "private reasoning"),
+                ("a2ui.pending", "control payload"),
+                ("chat.delta", "first visible text"),
+                ("chat.delta", "second visible text"),
+                ("chat.final", "formal answer"),
+            ):
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={"event_type": event_type, "content": content},
+                    is_complete=event_type == "chat.final",
+                )
+
+    lower = DeltaFormalAdapter()
+    current = runtime(lower, RecordingHistoryWriter())
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    marks: list[tuple[str, int]] = []
+    hooks = AgentForegroundStreamProbeHooks(
+        mark_started=lambda: marks.append(("started", lower.calls)),
+        mark_first_visible_delta=lambda: marks.append(("delta", lower.calls)),
+    )
+
+    handle = await submit(current, selected, latency_probe_hooks=hooks)
+    assert (await asyncio.wait_for(handle.completion, timeout=1)).terminal_outcome is (
+        TerminalOutcome.COMPLETED
+    )
+    assert marks == [("started", 0), ("delta", 1)]
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_product_submit_contains_hook_failures() -> None:
+    def fail() -> None:
+        raise OSError("private probe path")
+
+    lower = LowerFormalAdapter()
+    current = runtime(lower, RecordingHistoryWriter())
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+
+    handle = await submit(
+        current,
+        selected,
+        latency_probe_hooks=AgentForegroundStreamProbeHooks(fail, fail),
+    )
+    assert (await asyncio.wait_for(handle.completion, timeout=1)).terminal_outcome is (
+        TerminalOutcome.COMPLETED
+    )
+    await current.close(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
@@ -1001,6 +1072,12 @@ async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_tur
     class DurableCheckpointFailure(OSError):
         pass
 
+    marks: list[str] = []
+    hooks = AgentForegroundStreamProbeHooks(
+        mark_started=lambda: marks.append("started"),
+        mark_first_visible_delta=lambda: marks.append("delta"),
+    )
+
     def fail_checkpoint(_handle) -> None:
         raise DurableCheckpointFailure("durable checkpoint unavailable")
 
@@ -1012,6 +1089,7 @@ async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_tur
             commit=selected,
             context=FormalContextSnapshot(selected.scope),
             after_dispatch=fail_checkpoint,
+            latency_probe_hooks=hooks,
         )
 
     for _ in range(20):
@@ -1020,6 +1098,7 @@ async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_tur
     assert lower.calls == 0
     assert history.users == []
     assert history.assistant_intents == []
+    assert marks == []
     assert snapshot.published_notifications == 0
     assert snapshot.harness.active_rounds == ()
     assert snapshot.bridge.active_requests == ()

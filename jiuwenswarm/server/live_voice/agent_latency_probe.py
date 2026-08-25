@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.server.live_voice.latency_probe import (
@@ -14,6 +14,12 @@ from jiuwenswarm.server.live_voice.latency_probe import (
     LatencyProbeRuntime,
     try_parse_latency_probe_context,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentForegroundStreamProbeHooks:
+    mark_started: Callable[[], None]
+    mark_first_visible_delta: Callable[[], None]
 
 
 @dataclass(slots=True)
@@ -102,6 +108,18 @@ class AgentForegroundLatencyProbeOperation:
         except Exception:
             return False
 
+    def stream_hooks(self) -> AgentForegroundStreamProbeHooks:
+        def callback(point: str) -> Callable[[], None]:
+            def invoke() -> None:
+                try:
+                    self.mark(point)
+                except BaseException:
+                    return
+            return invoke
+        return AgentForegroundStreamProbeHooks(
+            callback("agent.agent_started"), callback("agent.agent_first_delta")
+        )
+
     def finish(self, terminal_outcome: str) -> None:
         if self._finished:
             return
@@ -135,5 +153,6 @@ def parse_agent_latency_probe_context(
 
 __all__ = [
     "AgentForegroundLatencyProbeOperation",
+    "AgentForegroundStreamProbeHooks",
     "parse_agent_latency_probe_context",
 ]

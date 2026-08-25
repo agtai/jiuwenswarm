@@ -31,6 +31,8 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
 
+from .agent_latency_probe import AgentForegroundStreamProbeHooks
+
 
 _STREAM_CLOSE_WAIT_SLICE_SECONDS = 5.0
 _ROUND_CONTROL_QUEUE_RESERVE = 4
@@ -477,6 +479,7 @@ class JiuWenSwarmRoundHarness:
         facade: FormalAgentFacade,
         channel_id: str = "web",
         allow_tools: bool = True,
+        latency_probe_hooks: AgentForegroundStreamProbeHooks | None = None,
     ) -> HarnessRoundHandle:
         running = self._require_owner()
         record = self._require_reservation(reservation)
@@ -554,7 +557,7 @@ class JiuWenSwarmRoundHarness:
         started = asyncio.Event()
         cancel_safe = asyncio.Event()
         task = running.create_task(
-            self._run_round(handle, execution, facade),
+            self._run_round(handle, execution, facade, latency_probe_hooks),
             name=f"live-voice-harness-round:{reservation.round_id}",
         )
         self._rounds[reservation.round_id] = _RoundRecord(
@@ -778,12 +781,14 @@ class JiuWenSwarmRoundHarness:
         handle: HarnessRoundHandle,
         execution: FormalAgentExecution,
         facade: FormalAgentFacade,
+        latency_probe_hooks: AgentForegroundStreamProbeHooks | None = None,
     ) -> None:
         record = self._require_handle_record(handle)
         seq = 0
         prior_event_id: str | None = None
         usable_final = False
         execution_reported_error = False
+        first_visible_delta_marked = False
         outcome = TerminalOutcome.UNKNOWN
         source_stream: AsyncIterator[AgentResponseChunk] | None = None
         record.started.set()
@@ -807,10 +812,28 @@ class JiuWenSwarmRoundHarness:
             if record.cancel_requested:
                 record.cancel_observed = True
                 raise asyncio.CancelledError
+            if latency_probe_hooks is not None:
+                try:
+                    latency_probe_hooks.mark_started()
+                except BaseException:
+                    pass
             source_stream = facade.process_formal_live_voice_stream(execution)
             async for chunk in source_stream:
                 self._validate_chunk(chunk, execution)
                 payload = chunk.payload if isinstance(chunk.payload, dict) else {}
+                if (
+                    not first_visible_delta_marked
+                    and not record.cancel_requested
+                    and payload.get("event_type") == "chat.delta"
+                    and isinstance(payload.get("content"), str)
+                    and bool(payload["content"].strip())
+                ):
+                    first_visible_delta_marked = True
+                    if latency_probe_hooks is not None:
+                        try:
+                            latency_probe_hooks.mark_first_visible_delta()
+                        except BaseException:
+                            pass
                 if payload.get("event_type") == "chat.final":
                     content = payload.get("content")
                     is_usable = isinstance(content, str) and bool(content.strip())

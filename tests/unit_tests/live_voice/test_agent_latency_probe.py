@@ -47,6 +47,25 @@ def _runtime(recorder: _Recorder, writer: _Writer) -> object:
     )
 
 
+def test_agent_probe_operation_creates_fixed_content_free_stream_hooks() -> None:
+    recorder = _Recorder()
+    probe = AgentForegroundLatencyProbeOperation.create(
+        _runtime(recorder, _Writer()), object(), correlation_id="c", interaction_id="i",
+        activation_id="a", activation_generation=0, turn_id="t",
+    )
+    assert probe is not None
+    hooks = probe.stream_hooks()
+    hooks.mark_started()
+    hooks.mark_first_visible_delta()
+    assert [mark[0] for mark in recorder.marks] == [
+        "agent.agent_started", "agent.agent_first_delta"
+    ]
+
+    recorder.mark = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("probe"))
+    hooks.mark_started()
+    hooks.mark_first_visible_delta()
+
+
 def test_agent_probe_binds_response_and_task_identity_then_writes_once() -> None:
     recorder = _Recorder()
     writer = _Writer()

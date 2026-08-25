@@ -37,6 +37,9 @@ from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentEventDelivery,
     WorkProgressDelivery,
 )
+from jiuwenswarm.server.live_voice.agent_latency_probe import (
+    AgentForegroundStreamProbeHooks,
+)
 from jiuwenswarm.server.live_voice.conversation_runtime import (
     ConversationRuntimeViolation,
     InteractionState,
@@ -1053,6 +1056,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
+        latency_probe_hooks: AgentForegroundStreamProbeHooks | None = None,
     ) -> AgentConversationHandle:
         """Own one retained product submission from TurnCommit through dispatch.
 
@@ -1141,6 +1145,7 @@ class AgentConversationRuntime:
                         before_dispatch=before_dispatch,
                         after_dispatch=after_dispatch,
                         allow_tools=allow_tools,
+                        latency_probe_hooks=latency_probe_hooks,
                     )
                 else:
                     turn_key = (commit.interaction_id, commit.turn_id)
@@ -1167,6 +1172,7 @@ class AgentConversationRuntime:
                             before_dispatch=before_dispatch,
                             after_dispatch=after_dispatch,
                             allow_tools=allow_tools,
+                            latency_probe_hooks=latency_probe_hooks,
                         )
                     except BaseException:
                         self._release_product_identity(claim)
@@ -2007,6 +2013,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
+        latency_probe_hooks: AgentForegroundStreamProbeHooks | None,
     ) -> asyncio.Future[_AdmissionOutcome]:
         """Register one preflighted submission while admission fence is held."""
 
@@ -2117,6 +2124,7 @@ class AgentConversationRuntime:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
+                latency_probe_hooks=latency_probe_hooks,
             ),
             name=f"live-voice-product-turn:{request_id}",
         )
@@ -2973,6 +2981,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
+        latency_probe_hooks: AgentForegroundStreamProbeHooks | None = None,
     ) -> None:
         reservation = entry.harness_reservation
         bridge_reservation = entry.bridge_reservation
@@ -2994,6 +3003,7 @@ class AgentConversationRuntime:
                 facade=facade,
                 channel_id=channel_id,
                 allow_tools=allow_tools,
+                latency_probe_hooks=latency_probe_hooks,
             )
             adapter = JiuWenSwarmAgentAdapter(round_handle)
             submission = self._bridge.commit_dispatch(
@@ -3081,6 +3091,7 @@ class AgentConversationRuntime:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
+        latency_probe_hooks: AgentForegroundStreamProbeHooks | None,
     ) -> None:
         try:
             await self._commit_admitted_turn(
@@ -3094,6 +3105,7 @@ class AgentConversationRuntime:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
+                latency_probe_hooks=latency_probe_hooks,
             )
         except BaseException as error:  # noqa: BLE001 - retained outcome truth
             try:
