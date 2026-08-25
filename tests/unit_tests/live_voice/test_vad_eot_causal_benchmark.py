@@ -726,6 +726,15 @@ async def test_real_factory_rejects_nonstreaming_selection(monkeypatch) -> None:
         )
 
 
+def test_semantic_experiments_are_separate_three_arm_blocks_and_report_mode_fields(tmp_path: Path) -> None:
+    common = dict(run_id="semantic-auto", mode="pilot", manifest_path=tmp_path / "manifest.json", output_path=tmp_path / "report.json", git_commit="a" * 40, source_clean=True)
+    auto = runner.VadBenchmarkConfig(**common, experiment="semantic-auto")
+    high = runner.VadBenchmarkConfig(**{**common, "run_id": "semantic-high", "output_path": tmp_path / "high.json"}, experiment="semantic-high")
+    assert auto.configuration_sequence == (("A1_1200", 1200), ("B_AUTO", None), ("A2_1200", 1200))
+    assert high.configuration_sequence == (("A1_1200", 1200), ("B_HIGH", None), ("A2_1200", 1200))
+    assert runner.REPORT_SCHEMA_VERSION.endswith("v1")
+
+
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = support.load_vad_corpus_manifest(config.manifest_path)

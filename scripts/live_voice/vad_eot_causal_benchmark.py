@@ -53,8 +53,9 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 )
 
 
-REPORT_SCHEMA_VERSION = "live-voice.vad-eot-causal-report.v0"
+REPORT_SCHEMA_VERSION = "live-voice.vad-eot-causal-report.v1"
 CONFIGURATION_SEQUENCE = (("A1", 1200), ("E1", 900), ("E2", 800), ("A2", 1200))
+SEMANTIC_CONFIGURATION_SEQUENCES = {"semantic-auto": (("A1_1200", 1200), ("B_AUTO", None), ("A2_1200", 1200)), "semantic-high": (("A1_1200", 1200), ("B_HIGH", None), ("A2_1200", 1200))}
 FRAME_SAMPLES = 960
 FRAME_SECONDS = 0.020
 EVENT_TIMEOUT_SECONDS = 20.0
@@ -98,12 +99,14 @@ class VadBenchmarkConfig:
     output_path: Path = field(repr=False)
     git_commit: str
     source_clean: bool
+    experiment: str = "fixed-threshold"
 
     def __post_init__(self) -> None:
         if (
             type(self.run_id) is not str
             or not _RUN_ID.fullmatch(self.run_id)
             or self.mode not in {"pilot", "run"}
+            or self.experiment not in {"fixed-threshold", "semantic-auto", "semantic-high"}
             or not isinstance(self.manifest_path, Path)
             or not self.manifest_path.is_absolute()
             or _has_control(str(self.manifest_path))
@@ -118,8 +121,8 @@ class VadBenchmarkConfig:
             raise ValueError("VAD_BENCHMARK_CONFIG_INVALID")
 
     @property
-    def configuration_sequence(self) -> tuple[tuple[str, int], ...]:
-        return CONFIGURATION_SEQUENCE
+    def configuration_sequence(self) -> tuple[tuple[str, int | None], ...]:
+        return SEMANTIC_CONFIGURATION_SEQUENCES.get(self.experiment, CONFIGURATION_SEQUENCE)
 
     @property
     def attempts_per_case(self) -> int:
