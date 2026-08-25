@@ -677,3 +677,41 @@ No generation-interruption run has occurred on a real device, so audibility,
 false-trigger behaviour, full-utterance recognition, replacement accuracy,
 Task concurrency, latency, rollout and product-readiness credit remain open.
 The next Gate is the flag-on physical journey in handoff §5.
+
+## 13. 2026-08-25 scoped physical acceptance and final validation repairs
+
+The user selected the core interrupt-and-replace journey as the minimum physical
+coverage for this feature. On deployed source `2c04da226d`, they asked for a
+detailed introduction to the eight planets and, while the Agent was still
+thinking/generating, said “算了，换个问题，天空是什么颜色？”. The replacement
+question appeared as text and its answer was audibly spoken; the user reported
+PASS after the final repair. This is scoped functional credit only: the original
+idle-window and background-Task scenarios were not rerun, and no fixed-corpus
+latency, echo/double-talk, rollout, default-on or product-readiness claim is
+made.
+
+Two acceptance-period defects were repaired without changing the protocol,
+schema, cancellation scope or product policy:
+
+- `e8f55ded` treats `STREAMING_SPEECH_ROUTE_ABORTED` from an already retiring
+  P2 owner as cleanup truth instead of a transient product error. The same
+  reason from the current owner remains a real failure.
+- `2c04da22` adds the omitted generation-interrupt method to AgentServer's
+  top-level product dispatch. A received response that deterministically fails
+  the durable schema/binding now releases only its exact retained frontend
+  operation; ambiguous transport loss still retains and replays the exact
+  request identity.
+
+The candidate-equivalent frontend suite passed `499/499`; the affected
+AgentServer/Registry/Gateway selection passed `66/66`; `build:live-voice` and
+`git diff --check` passed. The controlled `formal-web-validation` launcher
+verified a clean `2c04da22` source, the flag-on bundle, all four fixed ports,
+P2/P3 product routes and the real Speech/security probe.
+
+The final acceptance log contains one normalized
+`live_voice.composition.p2.interrupt_generation` request. AgentServer returned
+the same request ID as `e2a.complete` in about 0.15 seconds and cancelled the
+old round. There is no second normalized request, no retained-operation poll
+loop and no user-visible product error. A later old-owner close logged one
+expected `STREAMING_SPEECH_ROUTE_ABORTED`; `e8f55ded` normalized it to cleanup
+state instead of publishing a transient failure.

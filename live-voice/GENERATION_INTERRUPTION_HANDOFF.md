@@ -1,6 +1,12 @@
 # Agent generation-time interruption — handoff
 
 **Branch:** `hx/0823_generation_interruption`
+
+**Closure update (2026-08-25):** the user-approved minimum
+interrupt-and-replace physical journey passed on `2c04da22`; D-097 closes the
+core feature packet. This handoff retains the original broader matrix only as
+uncredited follow-up context. Current truth is in [STATUS](STATUS.md).
+
 **Base (merge-base, not a ref):** `9a3a65fd0fa1d5ef4f680a9eda61d0482dd1f789`
 
 The original implementation was verified by automation, but a 2026-08-24
@@ -17,8 +23,8 @@ remaining pending-activation race (`C0/I1/M0`): a late successor could re-add an
 already revoked predecessor. `6559c38e` transfers that predecessor only while
 the owner still holds the exact object, so Exit closes A and B exactly once.
 The final targeted follow-up found no actionable defect and returned
-**PASS — C0/I0/M0**. **Nothing has run on a real device; the flag-on physical
-journey in §5 is now the next Gate.**
+**PASS — C0/I0/M0**. The later D-097 minimum flag-on physical journey passed on
+`2c04da22`; §5 preserves the broader, not-yet-credited scenarios.
 
 ---
 
@@ -166,9 +172,12 @@ Two invariants are worth stating in words, because both were defects first:
 The source review Gate is closed on `6559c38e`. Its automated
 full-utterance/EOT oracle retains the predecessor prefix and successor tail
 under separate exact capture authorities, Gateway validates both, and one
-combined Batch final is returned. Run the physical journey next; it needs a
-person with headphones. Headphones remove the echo/double-talk risk entirely,
-so what is being judged is timing and accuracy, not acoustics.
+combined Batch final is returned. D-097 later accepted one minimum physical
+journey on `2c04da22`: during Agent generation the user said “算了，换个问题，天空
+是什么颜色？”, then observed the replacement text and heard its answer without
+the transient Live Voice error. The log showed one direct interrupt receipt and
+no replay loop. The following original three-scenario matrix remains useful only
+for broader credit; scenarios 1 and 3 were not rerun for D-097.
 
 Turn on `VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` and run three
 scenarios:
@@ -189,18 +198,20 @@ While these run, the logs to watch are the `action_id` of each interruption, the
 `response_id` it names, and the `round_id` in the cancel command — they have to
 line up with the answer the user actually meant to stop.
 
-**Acceptance is complete only when:** all three scenarios behave, the affected
-suites still pass, and the flag can be turned back off with no residue.
+**The original broader matrix is complete only when:** all three scenarios
+behave, the affected suites still pass, and the flag can be turned back off with
+no residue. D-097 deliberately closes only the minimum core functional packet
+and does not claim the two unrun scenarios.
 
 ## 6. What is knowingly not covered
 
-* **No physical run of any kind has happened yet.** No latency number is
-  claimed, including for the listening window itself.
-* **The source review is accepted, but no physical observation exists.**
-  `6559c38e` passed its final targeted follow-up at `C0/I0/M0`; this grants
-  source-review credit only and does not establish audibility, latency,
-  false-trigger behaviour, replacement accuracy or Task concurrency on a real
-  device.
+* **Only the minimum interrupt-and-replace physical run has passed.** No latency
+  number is claimed, including for the listening window itself; idle false
+  triggering and Task concurrency retain no new physical credit.
+* **The source review and scoped core observation are accepted.** `6559c38e`
+  passed its final targeted follow-up at `C0/I0/M0`; `2c04da22` passed the D-097
+  replacement text/audio journey. This does not establish fixed-corpus latency,
+  echo/double-talk, broader false-trigger behaviour or Task concurrency.
 * Seven mutants survive, in two groups — two halves of one Exit repair that are
   redundant against each other (the combined mutant *is* killed), and five state
   hygiene guards whose external effect another guard already provides. Evidence
@@ -223,8 +234,8 @@ re-scoped D-096 candidate `35537a9a`. That candidate's bounded review returned
 `C0/I5/M0`; `4c1c7d68` repairs its five findings. The first fix-only follow-up
 returned `C0/I1/M0`, and `dab64023` repairs that final Exit/cancel finding. Only
 its follow-up's pending-activation race remained; `6559c38e` repairs that race.
-The bounded one-finding follow-up then passed `C0/I0/M0`; physical acceptance
-is the next Gate.
+The bounded one-finding follow-up then passed `C0/I0/M0`; the D-097 minimum
+physical core journey later passed on `2c04da22`.
 Full narrative in
 [evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md), decision record
 in [D-095](decisions/DECISIONS.md).
