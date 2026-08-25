@@ -27,6 +27,9 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnBoundaryEvent,
     RecognitionTurnBoundaryKind,
     RecognitionTurnDetection,
+    RecognitionTurnDetectionMode,
+    SemanticVadConfig,
+    SemanticVadEagerness,
     StreamingProviderCapability,
     StreamingRecognitionEvent,
     StreamingSpeechConformance,
@@ -40,6 +43,19 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 
 
 PROVIDER = ProviderRef("native-stream-provider", "formal")
+
+
+def test_semantic_vad_is_closed_one_of_and_cannot_gain_business_authority() -> None:
+    detection = RecognitionTurnDetection.semantic_vad_configured(SemanticVadEagerness.AUTO)
+    assert detection.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD
+    assert detection.semantic_vad == SemanticVadConfig(SemanticVadEagerness.AUTO)
+    assert detection.server_vad is None
+    with pytest.raises(StreamingSpeechViolation) as forbidden:
+        SemanticVadConfig(SemanticVadEagerness.HIGH, create_response=True)
+    assert forbidden.value.reason == "SEMANTIC_VAD_BUSINESS_AUTHORITY_FORBIDDEN"
+    with pytest.raises(StreamingSpeechViolation) as missing:
+        RecognitionTurnDetection(RecognitionTurnDetectionMode.SEMANTIC_VAD)
+    assert missing.value.reason == "INVALID_TURN_DETECTION"
 
 
 def native_capability(*, available: bool = True) -> StreamingProviderCapability:
