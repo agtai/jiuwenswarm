@@ -363,7 +363,7 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | Ref | Candidate | Status | Expected headroom | Area / likely code | Current evidence and rationale |
 |---:|---|---|---:|---|---|
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
-| 2 | Provider-native Semantic VAD with 1200 ms fallback | **CONTROL PRECONDITION BLOCKED; SEMANTIC UNTESTED** on `latency/semantic-vad-experiment` at `5038c41c4` | **250–400 ms hypothesis**, still unmeasured | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, Gateway and no-Browser validation runner | After setup/corpus reconciliation, the first real `A1_1200` control processed audio then failed `STREAMING_SPEECH_PROVIDER_PROTOCOL` with unknown cleanup before report writing. No AUTO/HIGH attempt or timing exists. Preserve 1200 ms and repair sanitized failure retention/control compatibility before another Provider run. See the [blocker evidence](../evidence/LVL08_SEMANTIC_VAD_PILOT_BLOCKER_2026-08-25.md). |
+| 2 | Provider-native Semantic VAD with 1200 ms fallback | **CONTROL PASS; SEMANTIC AUTO PROVIDER-PROTOCOL BLOCKED; HIGH UNTESTED** on `latency/semantic-vad-experiment` at `5811aeb7f` | **250–400 ms hypothesis**, still unmeasured | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, Gateway and no-Browser validation runner | Repaired failure retention passed 44/44 plus Tier-2 `C0/I0/M0`. A clean real pilot completed all four A1_1200 cases, then B_AUTO/no-pause retained `UNKNOWN / PROVIDER_PROTOCOL`, zero events/timing and clean cleanup; decision `SEMANTIC_VAD_INTEGRITY_REJECTED`. Preserve 1200 ms, diagnose the native semantic protocol path, and do not run HIGH. See the [AUTO result](../evidence/LVL08_SEMANTIC_VAD_AUTO_PILOT_RESULT_2026-08-25.md). |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
 | 4 | Adaptive WebAudio startup lead | **TARGET MATERIALITY PASS; PHYSICAL ACCEPTANCE INCOMPLETE; DEFAULT REMAINS 1000 MS** on `latency/adaptive-playout-lead-experiment` at `5b37103a2` | Same-workload target headroom **670.117–672.874 ms / 93.26–93.29%**; A1/A2 target drift **2.757 ms / 0.383%** | `browserAudioIOAdapter.ts`; bounded hook plus private source-bound A1/B/A2 driver | A1/B completed at 718.549/48.432 ms; A2 recorded 721.306 ms then cancelled on barge-in before playout completion. Provider/Agent drift consumed the target gain in total first-audio, so no total-gain or default claim follows. See the [pilot result](../evidence/LVL09_ADAPTIVE_PLAYOUT_LEAD_PILOT_RESULT_2026-08-25.md). |
 | 5 | Separate retained receipt settlement from successor readiness | **DONE — SCOPED LIFECYCLE SOURCE/AUTOMATION** | Earlier controlled waits exposed approximately **254/754/1007 ms**; no new physical gain is credited | P2 activation journal, retained presentation ACK and next-turn ownership | Hongxing commit `1fec48027` decouples retained predecessor settlement from the successor generation and passed its scoped review. This is lifecycle closure, not a p50/p95 latency population. |
@@ -420,11 +420,11 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
    near-zero A1/A2 target drift. The A2 cancellation leaves physical acceptance
    incomplete; keep 1000 ms as default until a completed population closes
    playout, audible-output and underrun/rebuffer gates.
-4. Repair LVL-08 sanitized failure retention and make the current Server-VAD
-   control complete cleanly before another Provider run. Semantic AUTO/HIGH
-   remain untested; preserve the 1200 ms fallback.
-5. In an isolated packet, connect the already-declared Agent start and first
-   text-delta producers. First measure the combined Agent interval; queue,
+4. Diagnose the LVL-08 Semantic AUTO Provider-protocol failure now that all
+   four Server-VAD controls pass. Preserve the 1200 ms fallback and do not run
+   HIGH before a bounded AUTO retry is justified.
+5. Measure the isolated, Tier-2-reviewed Agent start and first text-delta
+   producers. Queue,
    connection, Provider and model subcomponents remain unclaimed until directly
    correlated evidence exists.
 6. Keep stable-sentence stopped for the tested short/medium workloads while a
@@ -510,7 +510,9 @@ Hongxing's direction. This is repeatable directional headroom, not formal or
 product credit. Adaptive WebAudio now has approximately 670–673 ms of measured
 same-workload target headroom with 2.757 ms A1/A2 target drift. A2 cancelled
 after first-start, so physical acceptance remains incomplete and the default
-stays 1000 ms. Provider-native Semantic VAD is blocked by its first Server-VAD
-control and retains no timing. Agent first-delta decomposition and long-form
+stays 1000 ms. Provider-native Semantic VAD now passes all four Server-VAD
+controls but its first AUTO case is Provider-protocol blocked and retains no
+timing. The isolated Agent first-delta producer packet passes Tier-2 review but
+remains unmeasured; long-form
 pre-final exact-prefix materiality are separate implementation packets; neither
 currently carries latency or product credit.
