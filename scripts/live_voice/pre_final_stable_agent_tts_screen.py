@@ -72,6 +72,12 @@ ZERO_FORBIDDEN_EFFECTS = dict(prefix_screen.ZERO_FORBIDDEN_EFFECTS)
 
 
 @dataclass(frozen=True, slots=True)
+class TtsTiming:
+    dispatch_to_request_ms: float
+    request_to_first_pcm_ms: float
+
+
+@dataclass(frozen=True, slots=True)
 class Attempt:
     arm: str
     workload_id: str
@@ -81,6 +87,7 @@ class Attempt:
     agent_to_candidate_ms: float | None
     candidate_to_final_ms: float | None
     agent_to_final_ms: float | None
+    tts_dispatch_to_request_ms: float | None
     tts_request_to_first_pcm_ms: float | None
     agent_to_first_pcm_ms: float | None
     prefix_exact: bool
@@ -99,6 +106,7 @@ class Attempt:
         agent_to_candidate_ms: float,
         candidate_to_final_ms: float,
         agent_to_final_ms: float,
+        tts_dispatch_to_request_ms: float,
         tts_request_to_first_pcm_ms: float,
         agent_to_first_pcm_ms: float,
     ) -> Attempt:
@@ -111,6 +119,7 @@ class Attempt:
             agent_to_candidate_ms,
             candidate_to_final_ms,
             agent_to_final_ms,
+            tts_dispatch_to_request_ms,
             tts_request_to_first_pcm_ms,
             agent_to_first_pcm_ms,
             True,
@@ -143,6 +152,7 @@ class Attempt:
             None,
             None,
             None,
+            None,
             False,
             terminal_outcome,
             agent_calls,
@@ -160,6 +170,7 @@ class Attempt:
             "agent_to_candidate_ms": self.agent_to_candidate_ms,
             "candidate_to_final_ms": self.candidate_to_final_ms,
             "agent_to_final_ms": self.agent_to_final_ms,
+            "tts_dispatch_to_request_ms": self.tts_dispatch_to_request_ms,
             "tts_request_to_first_pcm_ms": self.tts_request_to_first_pcm_ms,
             "agent_to_first_pcm_ms": self.agent_to_first_pcm_ms,
             "prefix_exact": self.prefix_exact,
@@ -175,13 +186,14 @@ class StreamingTtsClient:
         self._provider = provider
         self._monotonic = monotonic
 
-    async def first_pcm_delay_ms(
+    async def measure_first_pcm(
         self,
         *,
         response_ref: ResponseRef,
         unit_id: str,
         text_utf8: bytes,
-    ) -> float:
+        dispatched_at: float,
+    ) -> TtsTiming:
         text = text_utf8.decode("utf-8")
         request = SynthesisStreamRequest(
             ref=SynthesisStreamRef(
@@ -198,6 +210,8 @@ class StreamingTtsClient:
             event_timeout_seconds=30.0,
         )
         started_at = self._monotonic()
+        if started_at < dispatched_at:
+            raise ValueError("TTS_REQUEST_STARTED_BEFORE_DISPATCH")
         first_pcm_at: float | None = None
         expected_seq = 0
         started = False
@@ -238,7 +252,10 @@ class StreamingTtsClient:
         cleanup = getattr(self._provider, "cleanup_snapshot", None)
         if first_pcm_at is None or getattr(cleanup, "clean", False) is not True:
             raise ValueError("TTS_CLEANUP_INCOMPLETE")
-        return (first_pcm_at - started_at) * 1000.0
+        return TtsTiming(
+            (started_at - dispatched_at) * 1000.0,
+            (first_pcm_at - started_at) * 1000.0,
+        )
 
 
 def create_real_tts_client(environ: dict[str, str]) -> StreamingTtsClient:
@@ -294,7 +311,8 @@ async def measure_attempt(
     failure_reason: str | None = None
     policy_seq = 0
     final_seen = False
-    tts_task: asyncio.Task[float] | None = None
+    tts_task: asyncio.Task[TtsTiming] | None = None
+    tts_timing: TtsTiming | None = None
     tts_calls = 0
     handle = None
 
@@ -350,10 +368,11 @@ async def measure_attempt(
                             if arm == "B":
                                 tts_calls = 1
                                 tts_task = asyncio.create_task(
-                                    tts.first_pcm_delay_ms(
+                                    tts.measure_first_pcm(
                                         response_ref=response_ref,
                                         unit_id=candidate.candidate_id,
                                         text_utf8=candidate_bytes,
+                                        dispatched_at=candidate_at,
                                     )
                                 )
                     elif event_type == "chat.final":
@@ -369,13 +388,14 @@ async def measure_attempt(
                                 or reconciliation.correction_required
                             ):
                                 failure_reason = "PREFIX_RECONCILIATION_FAILED"
-                            if arm in {"A1", "A2"} and candidate_at is not None:
+                            if arm in {"A1", "A2"}:
                                 tts_calls = 1
                                 tts_task = asyncio.create_task(
-                                    tts.first_pcm_delay_ms(
+                                    tts.measure_first_pcm(
                                         response_ref=response_ref,
                                         unit_id=f"final-{arm.lower()}-{attempt_index}",
                                         text_utf8=content.encode("utf-8"),
+                                        dispatched_at=final_at,
                                     )
                                 )
                 elif isinstance(item, EventEnvelope):
@@ -384,12 +404,12 @@ async def measure_attempt(
                         terminal_outcome = str(payload.get("outcome", "unknown"))
             if tts_task is None:
                 failure_reason = failure_reason or "TTS_REQUEST_MISSING"
-                tts_delay_ms = None
+                tts_timing = None
             else:
-                tts_delay_ms = await asyncio.wait_for(tts_task, timeout=120)
+                tts_timing = await asyncio.wait_for(tts_task, timeout=120)
     except TimeoutError:
         failure_reason = failure_reason or "AGENT_OR_TTS_TIMED_OUT"
-        tts_delay_ms = None
+        tts_timing = None
         if handle is not None and handle.terminal_event is None:
             try:
                 terminal_outcome = await prefix_screen._cancel_and_wait_terminal(
@@ -409,7 +429,7 @@ async def measure_attempt(
         raise
     except StableSentenceViolation as error:
         failure_reason = error.reason
-        tts_delay_ms = None
+        tts_timing = None
         if handle is not None and handle.terminal_event is None:
             try:
                 terminal_outcome = await prefix_screen._cancel_and_wait_terminal(
@@ -426,7 +446,7 @@ async def measure_attempt(
         raise
     except Exception:
         failure_reason = failure_reason or "AGENT_OR_TTS_FAILED"
-        tts_delay_ms = None
+        tts_timing = None
         if handle is not None and handle.terminal_event is None:
             try:
                 terminal_outcome = await prefix_screen._cancel_and_wait_terminal(
@@ -447,7 +467,13 @@ async def measure_attempt(
         failure_reason = failure_reason or "TERMINAL_NOT_COMPLETED"
     if started_at is None or candidate_at is None or final_at is None:
         failure_reason = failure_reason or "AGENT_TIMING_INCOMPLETE"
-    if tts_delay_ms is None or not math.isfinite(tts_delay_ms) or tts_delay_ms < 0:
+    if (
+        tts_timing is None
+        or not math.isfinite(tts_timing.dispatch_to_request_ms)
+        or tts_timing.dispatch_to_request_ms < 0
+        or not math.isfinite(tts_timing.request_to_first_pcm_ms)
+        or tts_timing.request_to_first_pcm_ms < 0
+    ):
         failure_reason = failure_reason or "TTS_TIMING_INVALID"
     if (
         failure_reason is None
@@ -467,7 +493,7 @@ async def measure_attempt(
             tts_calls=tts_calls,
         )
     assert started_at is not None and candidate_at is not None and final_at is not None
-    assert tts_delay_ms is not None
+    assert tts_timing is not None
     candidate_offset_ms = (candidate_at - started_at) * 1000.0
     final_offset_ms = (final_at - started_at) * 1000.0
     trigger_offset_ms = candidate_offset_ms if arm == "B" else final_offset_ms
@@ -478,8 +504,13 @@ async def measure_attempt(
         agent_to_candidate_ms=candidate_offset_ms,
         candidate_to_final_ms=(final_at - candidate_at) * 1000.0,
         agent_to_final_ms=final_offset_ms,
-        tts_request_to_first_pcm_ms=tts_delay_ms,
-        agent_to_first_pcm_ms=trigger_offset_ms + tts_delay_ms,
+        tts_dispatch_to_request_ms=tts_timing.dispatch_to_request_ms,
+        tts_request_to_first_pcm_ms=tts_timing.request_to_first_pcm_ms,
+        agent_to_first_pcm_ms=(
+            trigger_offset_ms
+            + tts_timing.dispatch_to_request_ms
+            + tts_timing.request_to_first_pcm_ms
+        ),
     )
 
 
@@ -529,7 +560,42 @@ def build_report(
             ]
             first_pcm = [attempt.agent_to_first_pcm_ms for attempt in selected if attempt.agent_to_first_pcm_ms is not None]
             arm_values[arm] = {
-                "completed": float(len(selected)),
+                "completed": len(selected),
+                "agent_to_candidate_p50_ms": _p50(
+                    attempt.agent_to_candidate_ms
+                    for attempt in selected
+                    if attempt.agent_to_candidate_ms is not None
+                ),
+                "agent_to_candidate_p95_nearest_rank_ms": _p95(
+                    attempt.agent_to_candidate_ms
+                    for attempt in selected
+                    if attempt.agent_to_candidate_ms is not None
+                ),
+                "candidate_to_final_p50_ms": _p50(
+                    attempt.candidate_to_final_ms
+                    for attempt in selected
+                    if attempt.candidate_to_final_ms is not None
+                ),
+                "candidate_to_final_p95_nearest_rank_ms": _p95(
+                    attempt.candidate_to_final_ms
+                    for attempt in selected
+                    if attempt.candidate_to_final_ms is not None
+                ),
+                "agent_to_final_p50_ms": _p50(
+                    attempt.agent_to_final_ms
+                    for attempt in selected
+                    if attempt.agent_to_final_ms is not None
+                ),
+                "agent_to_final_p95_nearest_rank_ms": _p95(
+                    attempt.agent_to_final_ms
+                    for attempt in selected
+                    if attempt.agent_to_final_ms is not None
+                ),
+                "tts_dispatch_to_request_p50_ms": _p50(
+                    attempt.tts_dispatch_to_request_ms
+                    for attempt in selected
+                    if attempt.tts_dispatch_to_request_ms is not None
+                ),
                 "agent_to_first_pcm_p50_ms": _p50(first_pcm),
                 "agent_to_first_pcm_p95_nearest_rank_ms": _p95(first_pcm),
                 "tts_request_to_first_pcm_p50_ms": _p50(

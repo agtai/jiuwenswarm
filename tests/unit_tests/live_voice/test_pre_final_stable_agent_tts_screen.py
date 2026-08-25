@@ -39,9 +39,11 @@ class _Tts:
         self.delay_ms = delay_ms
         self.requests: list[bytes] = []
 
-    async def first_pcm_delay_ms(self, *, response_ref, unit_id, text_utf8):
+    async def measure_first_pcm(
+        self, *, response_ref, unit_id, text_utf8, dispatched_at
+    ):
         self.requests.append(text_utf8)
-        return self.delay_ms
+        return screen.TtsTiming(0.0, self.delay_ms)
 
 
 EVENTS = (
@@ -75,6 +77,7 @@ async def test_arm_starts_one_tts_at_candidate_or_final(
     assert attempt.agent_to_first_pcm_ms == pytest.approx(expected_first_pcm_ms)
     assert attempt.candidate_to_final_ms == pytest.approx(1000.0)
     assert attempt.tts_request_to_first_pcm_ms == pytest.approx(800.0)
+    assert attempt.tts_dispatch_to_request_ms == pytest.approx(0.0)
     assert attempt.prefix_exact is True
     assert attempt.authorized_agent_calls == 1
     assert attempt.authorized_tts_calls == 1
@@ -95,6 +98,7 @@ def test_reducer_accepts_material_a_b_a_gain_with_stable_controls() -> None:
                         agent_to_candidate_ms=700.0,
                         candidate_to_final_ms=1600.0,
                         agent_to_final_ms=2300.0,
+                        tts_dispatch_to_request_ms=0.0,
                         tts_request_to_first_pcm_ms=700.0,
                         agent_to_first_pcm_ms=first_pcm,
                     )
@@ -138,6 +142,42 @@ async def test_prefix_rewrite_after_candidate_tts_fails_without_timings() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arm", "expected_tts_calls", "expected_reason"),
+    (
+        ("A1", 1, "AGENT_TIMING_INCOMPLETE"),
+        ("B", 0, "TTS_REQUEST_MISSING"),
+        ("A2", 1, "AGENT_TIMING_INCOMPLETE"),
+    ),
+)
+async def test_no_candidate_preserves_arm_specific_tts_budget(
+    arm: str,
+    expected_tts_calls: int,
+    expected_reason: str,
+) -> None:
+    tts = _Tts(800.0)
+    attempt = await screen.measure_attempt(
+        _Facade(
+            (
+                ("chat.delta", "Paris is the capital."),
+                ("chat.final", "Paris is the capital."),
+            )
+        ),
+        WORKLOAD,
+        arm,
+        0,
+        tts=tts,
+        monotonic=_Clock((10.0, 11.0)),
+    )
+
+    assert attempt.outcome == "failed"
+    assert attempt.reason == expected_reason
+    assert attempt.authorized_tts_calls == expected_tts_calls
+    assert len(tts.requests) == expected_tts_calls
+    assert attempt.agent_to_first_pcm_ms is None
+
+
+@pytest.mark.asyncio
 async def test_pilot_retains_all_six_slots_after_failure() -> None:
     seen: list[tuple[str, str, int]] = []
 
@@ -157,6 +197,7 @@ async def test_pilot_retains_all_six_slots_after_failure() -> None:
             agent_to_candidate_ms=700.0,
             candidate_to_final_ms=1600.0,
             agent_to_final_ms=2300.0,
+            tts_dispatch_to_request_ms=0.0,
             tts_request_to_first_pcm_ms=700.0,
             agent_to_first_pcm_ms=3000.0 if arm != "B" else 1500.0,
         )
@@ -185,6 +226,7 @@ def test_report_is_private_exclusive_and_mode_600(tmp_path: Path) -> None:
                     agent_to_candidate_ms=700.0,
                     candidate_to_final_ms=1600.0,
                     agent_to_final_ms=2300.0,
+                    tts_dispatch_to_request_ms=0.0,
                     tts_request_to_first_pcm_ms=700.0,
                     agent_to_first_pcm_ms=first_pcm,
                 )
@@ -202,6 +244,8 @@ def test_report_is_private_exclusive_and_mode_600(tmp_path: Path) -> None:
 
     assert report["status"] == "PASS"
     assert report["decision"] == "PILOT_PASS"
+    assert report["summaries"]["medium"]["arms"]["A1"]["agent_to_candidate_p50_ms"] == pytest.approx(700.0)
+    assert report["summaries"]["long"]["arms"]["A2"]["candidate_to_final_p95_nearest_rank_ms"] == pytest.approx(1600.0)
     assert output.stat().st_mode & 0o777 == 0o600
     assert "private" not in serialized
     assert "prompt" not in serialized
