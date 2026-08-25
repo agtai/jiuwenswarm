@@ -446,8 +446,9 @@ Current latency work should be packetized in this dependency order:
 2. preserve the LVL-09 target materiality result of approximately 670–673 ms.
    A2 cancelled after first-start, so keep 1000 ms as default until completed
    physical playout and reliability evidence close the Browser Gate;
-3. execute LVL-08 Provider-native Semantic VAD with the 1200 ms fallback and
-   natural-pause/false-EOT gates;
+3. repair LVL-08 sanitized failure retention and make its Server-VAD control
+   complete cleanly before attempting Semantic AUTO/HIGH again; retain the
+   1200 ms fallback;
 4. connect the existing Agent start/first-delta probe points, measure the
    combined interval, and only then specify connection, warm-up or prompt-size
    candidates where the measured local boundary is material;
