@@ -403,6 +403,7 @@ class VadBenchmarkReport:
     source_clean: bool
     corpus_id: str
     corpus_manifest_sha256: str
+    case_ids: tuple[str, ...]
     provider_id: str
     provider_class: str
     stt_model: str
@@ -514,10 +515,17 @@ def build_report(
     stt_model: str,
     attempts: tuple[VadAttemptResult, ...],
     decision: str,
+    case_ids: tuple[str, ...] | None = None,
 ) -> VadBenchmarkReport:
+    declared_case_ids = case_ids or tuple(
+        sorted({attempt.case_id for attempt in attempts})
+    )
     if (
         not _RUN_ID.fullmatch(corpus_id)
         or not re.fullmatch(r"[0-9a-f]{64}", corpus_manifest_sha256)
+        or not declared_case_ids
+        or len(set(declared_case_ids)) != len(declared_case_ids)
+        or any(not _RUN_ID.fullmatch(case_id) for case_id in declared_case_ids)
         or not all(_SAFE_LABEL.fullmatch(value) for value in (provider_id, provider_class, stt_model))
         or decision
         not in {
@@ -538,6 +546,7 @@ def build_report(
         True,
         corpus_id,
         corpus_manifest_sha256,
+        declared_case_ids,
         provider_id,
         provider_class,
         stt_model,
@@ -601,6 +610,9 @@ def _validate_report_semantics(report: VadBenchmarkReport) -> None:
         report.schema_version != REPORT_SCHEMA_VERSION
         or report.source_clean is not True
         or dict(report.forbidden_effects) != FORBIDDEN_EFFECTS
+        or not report.case_ids
+        or len(set(report.case_ids)) != len(report.case_ids)
+        or any(not _RUN_ID.fullmatch(case_id) for case_id in report.case_ids)
         or report.summaries != _safe_summary(report.attempts)
     ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
@@ -623,12 +635,7 @@ def _validate_report_semantics(report: VadBenchmarkReport) -> None:
     expected_slots = {
         (configuration_id, threshold, case_id, attempt_index)
         for configuration_id, threshold in config.configuration_sequence
-        for case_id in (
-            "no-internal-pause",
-            "internal-pause-300",
-            "internal-pause-600",
-            "internal-pause-1000",
-        )
+        for case_id in report.case_ids
         for attempt_index in range(1 if report.mode == "pilot" else 5)
     }
     actual_slots = {
@@ -650,7 +657,11 @@ def _validate_report_semantics(report: VadBenchmarkReport) -> None:
         )
     ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
-    if report.decision != _decision(config, report.attempts):
+    if report.decision != _decision(
+        config,
+        report.attempts,
+        expected_case_ids=report.case_ids,
+    ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
 
 
@@ -1022,6 +1033,7 @@ async def create_real_streaming_provider(environ: Mapping[str, str]) -> OpenAISt
 def _semantic_decision(
     config: VadBenchmarkConfig,
     attempts: tuple[VadAttemptResult, ...],
+    expected_case_ids: tuple[str, ...],
 ) -> str:
     candidate_id = "B_AUTO" if config.experiment == "semantic-auto" else "B_HIGH"
     eligible_decision = (
@@ -1043,12 +1055,7 @@ def _semantic_decision(
     expected_slots = {
         (configuration_id, case_id, attempt_index)
         for configuration_id, _ in config.configuration_sequence
-        for case_id in (
-            "no-internal-pause",
-            "internal-pause-300",
-            "internal-pause-600",
-            "internal-pause-1000",
-        )
+        for case_id in expected_case_ids
         for attempt_index in range(config.attempts_per_case)
     }
     if {
@@ -1056,12 +1063,14 @@ def _semantic_decision(
         for attempt in attempts
     } != expected_slots:
         return "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
+    if config.mode == "pilot":
+        return "READY_FOR_SCREENING"
 
     summaries = {
         (summary.configuration_id, summary.case_id): summary
         for summary in _safe_summary(attempts)
     }
-    for case_id in sorted({attempt.case_id for attempt in attempts}):
+    for case_id in expected_case_ids:
         try:
             a1 = summaries[("A1_1200", case_id)]
             candidate = summaries[(candidate_id, case_id)]
@@ -1100,11 +1109,19 @@ def _semantic_decision(
     return eligible_decision
 
 
-def _decision(config: VadBenchmarkConfig, attempts: tuple[VadAttemptResult, ...]) -> str:
+def _decision(
+    config: VadBenchmarkConfig,
+    attempts: tuple[VadAttemptResult, ...],
+    *,
+    expected_case_ids: tuple[str, ...] | None = None,
+) -> str:
+    if config.experiment in {"semantic-auto", "semantic-high"}:
+        case_ids = expected_case_ids or tuple(
+            sorted({attempt.case_id for attempt in attempts})
+        )
+        return _semantic_decision(config, attempts, case_ids)
     if config.mode == "pilot":
         return "READY_FOR_SCREENING"
-    if config.experiment in {"semantic-auto", "semantic-high"}:
-        return _semantic_decision(config, attempts)
     summaries = {(row.configuration_id, row.case_id): row for row in _safe_summary(attempts)}
     cases = sorted({row.case_id for row in attempts})
     for case_id in cases:
@@ -1188,7 +1205,12 @@ async def run_screening(
         provider_class=provider_class,
         stt_model=stt_model,
         attempts=frozen,
-        decision=_decision(config, frozen),
+        decision=_decision(
+            config,
+            frozen,
+            expected_case_ids=tuple(case.case_id for case in manifest.cases),
+        ),
+        case_ids=tuple(case.case_id for case in manifest.cases),
     )
 
 

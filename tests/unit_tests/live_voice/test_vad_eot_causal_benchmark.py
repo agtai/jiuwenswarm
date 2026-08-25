@@ -136,13 +136,20 @@ def _semantic_formal_attempts(
     candidate_finalization_ms: float = 100.0,
     a2_eot_ms: float = 1200.0,
     failed_reason=None,
+    attempts_per_case: int = 5,
+    case_ids=None,
 ):
     attempts = []
     sequence = ("A1_1200", candidate_id, "A2_1200")
+    cases = (
+        tuple(SimpleNamespace(case_id=case_id) for case_id in case_ids)
+        if case_ids is not None
+        else manifest.cases
+    )
     for configuration_id in sequence:
         configuration = runner.parse_configuration(configuration_id)
-        for case in manifest.cases:
-            for attempt_index in range(5):
+        for case in cases:
+            for attempt_index in range(attempts_per_case):
                 labels = {
                     "turn_detection_mode": configuration.mode.value,
                     "semantic_eagerness": (
@@ -850,6 +857,8 @@ def test_semantic_attempt_fields_are_closed_and_failed_timings_are_null() -> Non
     assert completed.semantic_eagerness == "auto"
     failed = runner.VadAttemptResult.failed("B_HIGH", None, "case-a", 0, runner.VadAttemptReason.TIMEOUT, turn_detection_mode="semantic_vad", semantic_eagerness="high")
     assert failed.final_voiced_frame_to_eot_ms is None
+    with pytest.raises(ValueError, match="VAD_ATTEMPT_RESULT_INVALID"):
+        replace(completed, turn_detection_mode="server_vad", semantic_eagerness=None)
 
 
 @pytest.mark.asyncio
@@ -1114,6 +1123,74 @@ def test_semantic_formal_decision_requires_integrity_and_per_case_total_gain(
     ) == "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
 
 
+def test_semantic_pilot_fails_closed_before_ready_and_formal_accepts_expanded_cases(
+    tmp_path: Path,
+) -> None:
+    pilot_base = _config(tmp_path)
+    pilot = replace(pilot_base, experiment="semantic-auto")
+    manifest = support.load_vad_corpus_manifest(pilot.manifest_path)
+    complete = _semantic_formal_attempts(
+        manifest,
+        attempts_per_case=1,
+    )
+    expected_fast_cases = tuple(case.case_id for case in manifest.cases)
+
+    assert runner._decision(
+        pilot,
+        complete,
+        expected_case_ids=expected_fast_cases,
+    ) == "READY_FOR_SCREENING"
+    failed = list(complete)
+    candidate = next(
+        index for index, attempt in enumerate(failed)
+        if attempt.configuration_id == "B_AUTO"
+    )
+    failed[candidate] = runner.VadAttemptResult.failed(
+        "B_AUTO",
+        None,
+        failed[candidate].case_id,
+        0,
+        runner.VadAttemptReason.EARLY_EOT,
+        speech_started_count=1,
+        speech_stopped_count=1,
+        committed_count=1,
+        final_count=0,
+        exact_identity=True,
+        transcript_complete=False,
+        cleanup_complete=True,
+        pacing_valid=True,
+        turn_detection_mode="semantic_vad",
+        semantic_eagerness="auto",
+    )
+    assert runner._decision(
+        pilot,
+        tuple(failed),
+        expected_case_ids=expected_fast_cases,
+    ) == "SEMANTIC_VAD_INTEGRITY_REJECTED"
+    assert runner._decision(
+        pilot,
+        complete[:-1],
+        expected_case_ids=expected_fast_cases,
+    ) == "SEMANTIC_VAD_EVIDENCE_INCOMPLETE"
+
+    expanded_cases = (
+        "complete-declarative",
+        "direct-question",
+        "complete-command",
+        "hesitation-continuation",
+        "trailing-conjunction",
+        "multi-clause-pause",
+        "complete-short-answer",
+        "final-silence-control",
+    )
+    formal = replace(pilot, mode="run")
+    assert runner._decision(
+        formal,
+        _semantic_formal_attempts(manifest, case_ids=expanded_cases),
+        expected_case_ids=expanded_cases,
+    ) == "SEMANTIC_VAD_AUTO_ELIGIBLE"
+
+
 @pytest.mark.asyncio
 async def test_injected_semantic_main_writes_exact_three_arm_private_report(
     tmp_path: Path,
@@ -1249,6 +1326,7 @@ def test_report_rejects_semantically_impossible_population_before_write(tmp_path
         stt_model="gpt-4o-mini-transcribe-2025-12-15",
         attempts=(),
         decision="INCONCLUSIVE",
+        case_ids=tuple(support.CASE_IDS),
     )
     with pytest.raises(ValueError, match="VAD_BENCHMARK_REPORT_INVALID"):
         runner.write_vad_benchmark_report(config.output_path, report)
