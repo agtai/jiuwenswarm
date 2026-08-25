@@ -82,13 +82,14 @@
 > total-latency or physical/default acceptance result. Upstream Agent/TTS drift
 > consumed the target gain in the single-run end-to-end totals.
 
-> **2026-08-25 LVL-08/Agent result:** runner repair `5811aeb7f` passed 44/44
-> and independent Tier-2 review. A clean real AUTO pilot completed all four
-> Server-VAD controls, then retained the first Semantic AUTO case as `UNKNOWN /
-> PROVIDER_PROTOCOL` with clean cleanup, zero events and no timing. HIGH was not
-> run and 1200 ms remains unchanged. Separately, Agent first-visible-delta
-> commits `3b85425ac` and `4efd2b6c0` pass Tier-2 re-review but remain isolated
-> and unmeasured.
+> **2026-08-25 LVL-08/Agent result:** runner repair `5811aeb7f` and Semantic
+> protocol/fault commits `3817aaaea`/`222582618` pass their scoped Tier-2/Tier-3
+> reviews. A clean real AUTO retry completed the full 12-slot A1/B/A2 pilot.
+> AUTO saved 684–734 ms of EOT on no-pause/300 ms cases but ended the 600/1000
+> ms pause cases early, so it is integrity-rejected. HIGH was not run and 1200
+> ms remains unchanged. Separately, Agent first-visible-delta commits
+> `3b85425ac` and `4efd2b6c0` pass Tier-2 re-review but remain isolated and
+> unmeasured.
 
 ## 1. Outcome and judgement
 
@@ -454,8 +455,8 @@ Current latency work should be packetized in this dependency order:
 2. preserve the LVL-09 target materiality result of approximately 670–673 ms.
    A2 cancelled after first-start, so keep 1000 ms as default until completed
    physical playout and reliability evidence close the Browser Gate;
-3. diagnose the LVL-08 Semantic AUTO Provider-protocol failure now that all
-   Server-VAD controls complete cleanly; retain 1200 ms and do not run HIGH;
+3. preserve the LVL-08 protocol repair but reject AUTO after its 600/1000 ms
+   continuation failures; retain 1200 ms and do not run HIGH;
 4. measure the isolated, Tier-2-reviewed Agent start/first-delta probe points, then
    combined interval, and only then specify connection, warm-up or prompt-size
    candidates where the measured local boundary is material;
