@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-24. This is the only mutable source for current product
+> Updated: 2026-08-25. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -350,6 +350,16 @@ SessionFileStore pre-transaction file-write gap while retaining current DDL
 behaviour.
 Exact requirements are in the
 [PR 05 packet](reviews/agentcore-pr-preparation/2026-08-25-pr05-event-dispatch.md).
+PR 06 checkpoint preflight is now complete as well. The historical payload-first
+candidate permits initially invalid callers to write an external store, loses
+checkpoint history through ordinary cascades, does not bind runtime launch,
+review phase or Task incarnation, and does not verify its canonical source event
+before payload reads. Its independent preflight reports `4 Critical / 2
+Important`. Formal replay must first freeze a one-use preauthorization -> scoped
+payload write -> atomic finalize topology, durable/reapable post-authorization
+orphans, PR 07 overlap, tombstone identity and the PR 09 public boundary. Exact
+requirements are in the
+[PR 06 packet](reviews/agentcore-pr-preparation/2026-08-25-pr06-checkpoint.md).
 No result changes Live Voice authority, performs composition/migration, or
 grants deletion credit.
 

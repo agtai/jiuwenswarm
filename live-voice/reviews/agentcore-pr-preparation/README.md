@@ -6,8 +6,10 @@ technical candidates. PR 03 is Tier-3 technical-ready (`573` affected tests,
 `130` race repeats, independent `Critical 0 / Important 0`) but none of these
 packages is submission-ready: the required real issue reference is still
 missing, local history must be packaged/reworded accordingly, and nothing has
-been pushed or submitted. PR 04 and PR 05 have completed read-only preflight
-only.
+been pushed or submitted. PR 04 through PR 06 have completed read-only preflight
+only. PR 06's independent preflight found `4 Critical / 2 Important` in the
+historical checkpoint candidate; those findings are replay requirements, not an
+implemented or reviewed formal branch.
 
 ## Refreshed upstream drift
 
@@ -45,7 +47,7 @@ run its affected evidence and obtain a new Tier-3 review.
 | 3 | Durable execution ownership | PR 01, PR 02 | [PR 03](2026-08-25-pr03-execution-owner.md) | technical Ready; issue metadata and three-commit package pending |
 | 4 | Command replay and immutable result | PR 01, PR 03 | [PR 04](2026-08-25-pr04-command-result.md) | preflight blockers recorded; formal replay blocked on packaged PR 03 base |
 | 5 | Canonical Task events and dispatch | PR 03, PR 04 | [PR 05](2026-08-25-pr05-event-dispatch.md) | preflight blockers recorded; formal replay blocked on accepted PR 04 base |
-| 6 | Execution-checkpoint publication | PR 03, PR 05 | [PR 06](2026-08-25-pr06-checkpoint.md) | plan ready; replay pending |
+| 6 | Execution-checkpoint publication | PR 03, PR 05 | [PR 06](2026-08-25-pr06-checkpoint.md) | preflight blockers recorded; formal replay blocked on accepted PR 05 and safe payload-effect topology/dependency freeze |
 | 7 | External-effect journal | PR 03, PR 05 | [PR 07](2026-08-25-pr07-effect-journal.md) | plan ready; replay pending |
 | 8 | Task-event consumer cursor | PR 05 | [PR 08](2026-08-25-pr08-event-cursor.md) | plan ready; replay pending |
 | 9 | Bound TeamTask/checkpoint authority | PR 01, 03, 04, 05, 06, 08 | [PR 09](2026-08-25-pr09-bound-task.md) | plan ready; replay pending |

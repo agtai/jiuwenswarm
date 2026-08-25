@@ -205,7 +205,7 @@ changing its base. Replay must preserve upstream session-file hydration and
 write-lock DDL behavior, allocate collision-free docs identifiers, and rerun
 the affected upstream tests.
 
-Read-only replay preflight is now complete through PR 05. PR 04 must preserve
+Read-only replay preflight is now complete through PR 06. PR 04 must preserve
 the accepted execution-quiescence, review-round, Team-tombstone, terminal and
 SessionFileStore contracts. PR 05 additionally requires non-cascading
 session-domain event/dispatch history, an explicit retired-Task/incarnation
@@ -213,8 +213,18 @@ policy, complete Team-clean writer coverage, a declared legacy-stream baseline
 and truthful permanent-rejection, accepted-receipt and authorization-expiry
 semantics. Its complete atomicity claim also requires an explicit solution or
 scope reduction for SessionFileStore writes that currently occur before the SQL
-transaction. Neither packet has started formal implementation; both remain
-blocked on accepted, reviewable dependency tips.
+transaction. PR 06 must reject the historical payload-first publication order:
+initially invalid callers may not reach the external store. A valid publication
+requires exact runtime/phase/incarnation preauthorization, a server-derived
+scoped storage key, one-use finalization into reference/event/head truth and a
+durable reaper for only post-authorization orphans. Ordinary clean must preserve
+checkpoint/source-event tombstones, reads must validate the exact source event
+before payload `get`, and raw mutation authority must not escape ahead of the
+bound PR 09 facade. The independent PR 06 preflight reports `4 Critical / 2
+Important`; its remaining scope freeze must decide whether to reuse PR 07's
+accepted effect continuation or own a strictly checkpoint-only reservation.
+None of PR 04–06 has started formal implementation; all remain blocked on
+accepted, reviewable dependency tips.
 
 For every PR:
 
