@@ -45,6 +45,8 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     _default_socket_factory,
     _degradation_fact,
     _reason_for_exception,
+    _turn_detection_echo_accepted,
+    _turn_detection_value,
     select_environment_streaming_speech,
 )
 from jiuwenswarm.server.live_voice.speech_ports import (
@@ -61,11 +63,22 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnBoundaryEvent,
     RecognitionTurnBoundaryKind,
     RecognitionTurnDetection,
+    SemanticVadEagerness,
     StreamingSpeechViolation,
     SynthesisStreamRef,
     SynthesisStreamRequest,
     TextSpan,
 )
+
+
+def test_semantic_vad_wire_and_echo_are_exact_and_fail_closed() -> None:
+    for eagerness in (SemanticVadEagerness.AUTO, SemanticVadEagerness.HIGH):
+        detection = RecognitionTurnDetection.semantic_vad_configured(eagerness)
+        expected = {"type": "semantic_vad", "eagerness": eagerness.value, "create_response": False, "interrupt_response": False}
+        assert _turn_detection_value(detection) == expected
+        assert _turn_detection_echo_accepted({"type": "semantic_vad", "eagerness": eagerness.value}, detection)
+        for echo in ({"type": "server_vad", "eagerness": eagerness.value}, {"type": "semantic_vad", "eagerness": "wrong"}, {"type": "semantic_vad", "eagerness": eagerness.value, "create_response": True}, {"type": "semantic_vad", "eagerness": eagerness.value, "unknown": False}):
+            assert not _turn_detection_echo_accepted(echo, detection)
 
 
 class FakeSocket:
