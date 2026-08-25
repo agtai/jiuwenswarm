@@ -106,7 +106,7 @@ a frozen-corpus off/on waterfall.
 | `LVL-05` | Combined P2 + TTS checkpoint | Deterministic Gate A; controlled round total | W1 **8,000→6,985**, W2 **14,900→10,240**, W3 **17,150→8,580 ms**, `CONTROLLED` + `DERIVED` | Controlled checkpoint improved; raw product observer was not covered |
 | `LVL-06` | EOT/STT early-result waiter materiality | Deterministic Gate A; component total | Largest removable-gap p50 **0.885 ms**, fraction **0.015**, `MEASURED` + `DERIVED` | Stop: no material serial tail; no candidate B |
 | `LVL-07` | Stable-sentence Agent→TTS overlap | Real Agent + real Provider screen; projected perceived latency | Projected gain p50 **177.2 ms**, p95 **425.3 ms**, `DERIVED`; final-gated baseline `ESTIMATED` | Stop for tested workloads; failed all three latency materiality gates |
-| `LVL-08` | Provider-native Semantic VAD | Implemented no-Browser Provider screen; control precondition blocked | First real Server-VAD control failed Provider protocol/unknown cleanup before report; AUTO/HIGH untested | No timing/default credit; repair control failure retention before another Provider run |
+| `LVL-08` | Provider-native Semantic VAD | Real-Provider no-Browser A1/B/A2 pilot | Protocol repaired; AUTO saved **684–734 ms** EOT on no-pause/300 ms but produced `EARLY_EOT` at 600/1000 ms | AUTO integrity-rejected; HIGH not run; keep Server-VAD 1200 ms |
 | `LVL-09` | Adaptive WebAudio startup lead 1000→250 ms | Physical Browser target diagnostic; estimated schedule boundary | Same-workload target **718.549/48.432/721.306 ms**, B gain **670.117–672.874 ms**; A2 later cancelled | Target materiality only; default remains 1000 ms and physical acceptance is incomplete |
 | `LVL-10` | Authoritative-final chunked TTS | Real-Provider no-Browser `A1/B/A2`; two formal 45/45 populations | **INCONCLUSIVE:** medium A1/A2 drift 426.8 ms in run 1; long drift 321.7 ms in run 2. Long completion B repeated **20–24%** improvement, while medium regressed | Stop before Browser/product wiring; a completion-primary long-form follow-up requires a new prospective hypothesis/spec |
 | `LVL-10L` | Completion-primary long-form chunked TTS | Real-Provider no-Browser A1/B2/B4/A2 pilots; formal stopped | **DIRECTIONAL:** clean v2 pilot 12/12, B2/B4 2100-character completion gain **6.93 s / 36.85%** and **7.75 s / 41.27%**; five-round formal has no attempt artifacts | Stop long-duration testing per Hongxing; no arm selection, Browser or product wiring |
@@ -572,22 +572,30 @@ Detailed evidence is branch-bound at
 
 ## 12. LVL-08 — Provider-native Semantic VAD
 
-This candidate is specified but has not run. It asks whether Provider-native
-semantic turn detection can recover part of the 285–412 ms fixed-VAD headroom
-while a 1200 ms fallback preserves natural pauses, without an extra model RPC.
+This candidate asked whether Provider-native semantic turn detection could
+recover part of the fixed-VAD headroom while a 1200 ms control preserved
+continuation pauses, without an extra model RPC. The initial real attempt was
+blocked by Adapter/conformance protocol defects. Commits `3817aaaea` and
+`222582618` repaired the Semantic Provider boundary and passed 189 affected
+tests plus two Tier-3 `C0/I0/M0` re-reviews.
 
 | Field | Current value |
 |---|---|
-| Owner | P1 Interaction Intelligence / streaming speech Provider adapter |
-| Planned comparison | Separate `auto` and `high` A/B/A blocks |
+| Owner branch | `latency/semantic-vad-experiment` |
+| Tested source | `222582618f7d7a680e55dbcef66bb8f96419f32c` |
+| Comparison | `A1_1200 → B_AUTO → A2_1200`, one attempt per four pause cases |
 | Browser requirement | None for the causal screen; Gate C remains later |
 | Product default | Retains 1200 ms fallback |
-| Numeric result | `UNKNOWN`; no attempt has executed |
-| Credit | None |
+| Numeric result | B_AUTO EOT gain **684–734 ms** on no-pause/300 ms; 600/1000 ms `EARLY_EOT` |
+| Decision | `SEMANTIC_VAD_INTEGRITY_REJECTED`; HIGH not run |
+| Private report SHA-256 | `64bfcbd8d5601ae4e924b715e7833188bdf4ae26a4ec8e78f3b51bd85c94981c` |
+| Credit | Protocol repair and real component diagnostics only; no candidate/default/product credit |
 
-The specification and plan remain branch-bound at
-`latency_checkpoint_accepted_optimizations:live-voice/roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md`
-and its adjacent implementation plan.
+The exact audio-construction, pacing, ground-truth and no-Browser method is in
+the canonical inventory's
+[LVL-08 method section](../roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md#lvl-08-controlled-audio-and-no-browser-method).
+The sanitized source-bound result is
+[LVL08 Semantic VAD AUTO retry result](LVL08_SEMANTIC_VAD_AUTO_RETRY_RESULT_2026-08-25.md).
 
 ## 13. LVL-09 — Adaptive WebAudio startup-lead diagnostic
 
