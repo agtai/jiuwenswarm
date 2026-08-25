@@ -1,7 +1,14 @@
 # 把 strict-review 修复合入 hx/0812_live_voice_w3 — 作业书
 
-> 本文件是给执行合并的会话的完整交接。读完这一份即可开工，不需要原始会话的上下文。
-> **文中所有数字都有时效性** —— w3 在持续推进，开工第一步必须重新测量，见 §2。
+> **状态：已执行。** 合并成果是分支 `codex/lv-w3-merge-37` 上的单个提交
+> `0a82fe52e`，父提交为 w3 当时的 HEAD `4c6af2f74`，实测 cherry-pick 零冲突。
+> 55 个文件、源码净 +4821 行、测试净 +17535 行，不含任何 `live-voice/` 文档。
+> 验证结果：4028 passed（w3 基线 3674），12 项既有失败逐条不变；8 个变异体
+> 7 杀 1 存活（存活那个已证明在源分支上同样无杀手测试）；Ruff 每条规则的增量
+> 精确等于这批修复自身带来的增量。冲突处置与适配的理由写在该提交的信息里。
+>
+> 本文件保留为方法记录：若 w3 大幅推进后 `0a82fe52e` 不再能干净应用，按这里的
+> 流程重做一遍即可。**文中所有数字都有时效性**，重做时第一步是重新测量，见 §2。
 
 ---
 
@@ -240,9 +247,18 @@ unknown = [s for s in added if s not in w3源码文本]
 ## 7. 环境
 
 ```
-PYTHONPATH=<scratchpad>/deps2;<scratchpad>/deps;D:/XGG AI/openjiuwen/jiuwenswarm/.venv/Lib/site-packages
+PYTHONPATH=D:/XGG AI/openjiuwen/jiuwenswarm/.venv/Lib/site-packages
 ```
-隔离依赖已装在 scratchpad 的 `deps` / `deps2` 下，不要污染 conda base。
+
+主仓库的 `.venv` 已包含跑这批测试所需的全部依赖 —— httpx、websockets、aiohttp、
+loguru、pyyaml、portalocker、opentelemetry、pytest-asyncio、ruff、mcp，以及
+`openjiuwen`（pyproject 指定的是 gitcode 上的 git 版本，不是 PyPI 版本）。
+**实测：只用这一项，三个代表性套件 412 项全过。**
+
+不要用 conda base，它缺上述多数包，症状是一堆 collect error 看起来像代码坏了。
+早期会话曾用 `pip install --target <scratchpad>/deps` 装过一份隔离依赖，那份是
+`.venv` 就绪前的临时手段，**已确认冗余**；scratchpad 路径还含会话 id，换个会话
+就失效，不要沿用。
 
 ### 本机陷阱（都踩过）
 

@@ -98,10 +98,40 @@ At the start of every new Session:
    coherent closure record. Remote refs, `develop` and product acceptance
    remain excluded.
 
-The last integrated defect-closure record before this documentation sync is
-`b5e6dd6e7` (`fix(live-voice): settle terminal retirement failures`). A later
-documentation-only HEAD is expected after this synchronization and does not
-change implementation credit.
+### Test environment
+
+```
+PYTHONPATH=D:/XGG AI/openjiuwen/jiuwenswarm/.venv/Lib/site-packages
+python -m pytest <path> --no-cov -q
+```
+
+The main checkout's `.venv` already carries every dependency these suites need,
+including `openjiuwen` from the gitcode URL that `pyproject.toml` pins rather
+than the PyPI package. Measured: that one entry alone runs 412 cases green
+across three representative suites. Do not use conda base — it lacks most of
+them and the symptom is a wall of collect errors that reads like broken code.
+Never pass `-o addopts=''`; it drops `--asyncio-mode=auto` and manufactures
+dozens of false failures. There is no per-test timeout plugin, so a mutant that
+deadlocks hangs the session instead of failing — wrap mutation runs in an outer
+timeout.
+
+Two local hazards apply to every edit. PowerShell 5.1 writes a BOM into repo
+files and misreads UTF-8 as CP936, so all text editing goes through Python or
+the editor tool, never a PowerShell redirect. `core.autocrlf` is true and the
+worktree is CRLF, so anchor-based edits read and write bytes and normalise
+`
+` themselves; `read_text`/`write_text` silently rewrite every line ending
+and `newline=""` makes every anchor miss. Ruff is not on PATH — use
+`python -m ruff` — and `jiuwenswarm/` carries no `[tool.ruff]` config, so only
+deltas against a baseline mean anything, measured on real files rather than
+through `--stdin-filename`, whose config discovery differs.
+
+### Implementation credit
+
+The most recent integrated defect-closure record is `deb805e0d`
+(`test(live-voice): pin the teardown guards a narrowed except still escapes`,
+SRR-28/A7). Documentation-only commits after it do not change implementation
+credit.
 
 ## 2.2 Review verdict boundary
 
