@@ -62,6 +62,19 @@
 > own the current evidence interpretation. This dated note supersedes older
 > queue language below where they conflict.
 
+> **2026-08-25 execution update:** the immediate unverified working target is
+> the externally reported approximately 5.6-second first-audio P95, reduced
+> toward 3 seconds or decomposed honestly when the residual is outside
+> JiuwenSwarm control. It is not repository evidence until a compatible
+> source-bound run records it. Run
+> LVL-09 WebAudio first as a physical pilot, then LVL-08 Semantic VAD; timed
+> Provider populations remain sequential. In parallel, connect the missing
+> Agent start/first-delta probe producers before attempting connection, warm-up
+> or prompt-diet changes. The prior stable-sentence STOP remains valid only for
+> its tested short/medium workloads. A separate long-form pre-final exact-prefix
+> materiality screen may reopen that hypothesis, while LVL-10/LVL-10L remain
+> stopped post-final chunking work.
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -423,17 +436,18 @@ Current latency work should be packetized in this dependency order:
 1. preserve the accepted D-094 P2 default and retained ACK/receipt lifecycle;
    the missing fixed-corpus off/on population is an evidence gap, not an open
    repair;
-2. execute LVL-08 Provider-native Semantic VAD with the 1200 ms fallback and
+2. execute LVL-09 Browser A1=1000/B=250/A2=1000 first using the same source,
+   workload and manifest. Treat the initial three-arm run as a physical pilot
+   and keep 1000 ms as default until the broader Browser Gate passes;
+3. execute LVL-08 Provider-native Semantic VAD with the 1200 ms fallback and
    natural-pause/false-EOT gates;
-3. execute a clean LVL-09 Browser A1=1000/B=250/A2=1000 using the same source,
-   workload and manifest; keep 1000 ms as default until it passes;
-4. specify and execute the no-Browser real-Provider `LVL-10-A1/B/A2`
-   materiality screen, keeping optional Batch/fallback R0 non-causal; enter
-   Browser Lane C only after Provider PASS;
-5. consider authoritative acknowledgements for genuinely long Task operations
+4. connect the existing Agent start/first-delta probe points, measure the
+   combined interval, and only then specify connection, warm-up or prompt-size
+   candidates where the measured local boundary is material;
+5. run a separate long-form pre-final stable-prefix materiality screen. Keep
+   short/medium LVL-07 stopped and keep post-final LVL-10/LVL-10L independent;
+6. consider authoritative acknowledgements for genuinely long Task operations
    only when perceived latency is the product priority;
-6. change Agent/model/tool paths only where compatible measurements still show
-   material delay;
 7. treat native speech-to-speech as a separate strategic architecture study,
    not a latency packet under the current Registry/Task authority model.
 

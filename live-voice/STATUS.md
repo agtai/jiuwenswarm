@@ -150,7 +150,7 @@ risks, dependencies, acceptance and integration order.
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | P3-9 cumulative acceptance; any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review and exact Wave-2/Wave-3 Direct/Store/Core evidence; no generic Executor or host-crash claim |
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is evaluated only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` remain stable unsupported or terminal conflict with zero protected effect | Broader language/policy generalization and P3-9 cumulative acceptance; positive provide-input/pause/resume remain outside the current Direct profile unless a later real primitive is accepted | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus and D-093 zero-effect decision |
 | Integrated Web product experience | **PARTIAL overall; the four P1/P2 lifecycle repair module Gates and the bounded decoupling review PASS `C0/I0/M0`.** Same-tab recovery, exact Speech timeout/signal forwarding, browser-global capture ownership, retained predecessor ACK settlement and playout/capture decoupling are closed at their scoped source/automation boundaries. The exact consolidated product/test tree passed same-tab A -> B -> A, Exit/immediate re-enable, ordinary forward/reverse two-tab takeover and the cumulative microphone/Agent/playout journey. Production P2 notification pulls now use batch size `16`, with the validation-branch feature-on prompts audibly accepted | Real Provider degradation/fallback longer than 15 seconds remains a physical non-claim; continue generation-time interruption, fixed-corpus latency/generalization, P3-9 and complete product acceptance | [lifecycle closure](#p1p2-lifecycle-repair-closure), [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md), scoped decoupling review and remaining P1/P2/P3-9 completion; no controlled-candidate credit |
-| Observability, benchmark and latency | **PARTIAL overall; scheduled P3 observability producer boundary closed.** Validated configuration, trusted public correlation, bounded exporter/backend and exact producers remain integrated. The diagnosed one-RPC-per-notification tail is removed from production Web. LVL-10 remains `INCONCLUSIVE` after two 45/45 real-Provider populations failed A1/A2 drift, while long completion repeatedly improved 20–24%. LVL-10L then passed a clean 12/12, 24-request v2 pilot: at 2,150 characters B2/B4 completion improved by derived **6.93 s / 36.85%** and **7.75 s / 41.27%** with zero Provider errors. A prior 2,938-character pilot exposed the 8 MiB one-request safety boundary. Hongxing then requested that long-duration testing stop; the five-round formal ended before any attempt report and has zero timing credit | Stop LVL-10/LVL-10L long-duration testing, preserve the one-request product path and treat chunking only as repeatable directional long-form headroom. LVL-08 Semantic VAD is the next already-specified no-Browser screen. Repair the manual-driver Gate before LVL-09 or another credited Browser population. See the [LVL-10 result](evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md), [LVL-10L result](evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md), [inventory](roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md) and [catalog](evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md) | D-093 observability evidence, [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) and D-094 |
+| Observability, benchmark and latency | **PARTIAL overall; scheduled P3 observability producer boundary closed.** Validated configuration, trusted public correlation, bounded exporter/backend and exact producers remain integrated. The diagnosed one-RPC-per-notification tail is removed from production Web. LVL-10 remains `INCONCLUSIVE` after two 45/45 real-Provider populations failed A1/A2 drift, while long completion repeatedly improved 20–24%. LVL-10L then passed a clean 12/12, 24-request v2 pilot: at 2,150 characters B2/B4 completion improved by derived **6.93 s / 36.85%** and **7.75 s / 41.27%** with zero Provider errors. A prior 2,938-character pilot exposed the 8 MiB one-request safety boundary. Hongxing then requested that long-duration testing stop; the five-round formal ended before any attempt report and has zero timing credit | Run LVL-09 WebAudio first as a source-bound physical pilot, retaining the 1000 ms default and no acceptance credit until its Browser/manual-driver Gate closes. Run the already-implemented LVL-08 Provider pilot next. In parallel, implement only the missing Agent first-delta producers and prepare a distinct long-form pre-final stable-prefix materiality screen; do not infer either result from LVL-10/LVL-10L. See the [LVL-10 result](evidence/LVL10_AUTHORITATIVE_FINAL_CHUNKED_TTS_RESULT_2026-08-24.md), [LVL-10L result](evidence/LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md), [inventory](roadmap/LATENCY_OPTIMIZATION_INVENTORY_2026-08-21.md) and [catalog](evidence/LATENCY_EXPERIMENT_CATALOG_2026-08-22.md) | D-093 observability evidence, [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) and D-094 |
 | Automated verification and product acceptance | **PARTIAL overall; four lifecycle module Gates, the older playout/capture decoupling seam and the bounded P2 notification integration follow-up PASS independent Tier-3 review.** The current integrated tree passes Formal Web `472/472`, frontend A/B `2/2`, backend batch focus `7/7`, Browser Audio `103/103`, Dedicated Media `47/47`, build profiles `2/2`, typecheck, production build and Ruff. The affected five-file Python cumulative run is truthfully `352 passed / 6` inherited P3 fixture/projection failures | P3-9 cumulative verification and controlled product-candidate journey remain open; real Provider long degradation and fixed-corpus latency retain no physical credit | [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md); scoped evidence grants no P3-9 or product-readiness credit |
 | Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off and the controlled launcher owns the complete non-secret contract. D-092 keeps its three-item P3 retirement boundary. D-094 separately retires only the two validation-only P2 notification switches: production Web is fixed at `16`, A/B injects `1` or `16`, and omitted server input remains legacy single-pull compatibility. The Exit packet retains only exact fences/barriers/timers/cleanup | Each retained manifest row still requires its own Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-092/D-093 evidence, [D-094](decisions/DECISIONS.md) and the [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
@@ -200,7 +200,45 @@ exact-source Alpha result.
 
 ## Current execution packet
 
+### 2026-08-25 latency execution split
+
+Hongxing reported a current first-audio P95 of approximately 5.6 seconds and
+an Agent-request-to-`chat.final` long-tail observation of approximately 2.122
+seconds, with first delta only approximately 51 ms before final. These are
+working targets supplied outside the retained source-bound artifacts; they are
+not promoted to repository evidence until a compatible run records them. Under
+the current product contract, the first speakable authoritative text is the
+complete `chat.final`, not an early streaming sentence. The Browser total ends
+at `browser.playout_first_frame_started_estimate`, not physical first audible.
+
+Execution now has two coordinated fronts:
+
+1. **Run implemented experiments.** LVL-09 WebAudio runs first as
+   A1=1000/B=250/A2=1000 from the clean setup branch. Its first three-arm run is
+   a physical pilot because the broader Browser/manual-driver population Gate
+   remains open; it cannot change the 1000 ms default. LVL-08 Semantic VAD
+   `auto` and `high` Provider pilots follow, sequentially rather than alongside
+   any other timed Provider population.
+2. **Prepare missing measurement packets.** The Agent lane first connects the
+   already-catalogued `agent.agent_started` and `agent.agent_first_delta`
+   producers without changing request or model behaviour. Queue, connection,
+   Provider and model splits remain unknown unless a later correlated packet
+   can observe them. Separately, the stopped short/medium stable-sentence result
+   is not generalized to long-form: a validation-only long-form screen must
+   measure the pre-final exact-prefix window before any provisional
+   `PresentationUnit` or product TTS wiring is designed.
+
+Task acknowledgement remains outside the present first-audio target, and
+LVL-10/LVL-10L remain stopped. Preparatory code/review may run in isolated
+worktrees, but real timed Provider populations run one at a time. Main remains
+the sole integration and shared-document owner.
+
 ### 2026-08-23 evening recomposition on the accepted P2 default-on source
+
+This subsection records the 2026-08-23 route as historical context. The
+2026-08-25 latency execution split above supersedes its LVL-08/LVL-09 ordering
+and records the repaired driver mechanics while retaining the broader Browser
+credit Gate.
 
 Hongxing force-updated `agtai/hx/0812_live_voice_w3` to `c31e85ade`, which
 contains the repaired atomic `notification_batch` Media observation, the
@@ -228,7 +266,7 @@ LVL-09 playout screen. Completed LVL-10/LVL-10L receive no product/Browser
 credit; long-duration chunking work is stopped. The local
 [Semantic VAD spec](roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md)
 and [plan](roadmap/SEMANTIC_VAD_CAUSAL_BENCHMARK_IMPLEMENTATION_PLAN_2026-08-21.md)
-own the next no-Browser packet. Native
+owned the next no-Browser packet under that dated route. Native
 speech-to-speech remains a strategic architecture study requiring a separate
 authority decision, not a current packet.
 

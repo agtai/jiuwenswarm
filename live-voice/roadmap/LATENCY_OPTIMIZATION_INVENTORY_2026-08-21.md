@@ -365,9 +365,9 @@ dependencies, risk, evidence gates and whether Chrome is required.
 | 1 | EOT/STT early result waiter with authoritative join | **REJECTED — NO MATERIAL SERIAL GAP** | No qualifying removable tail | `productP1VoiceRoute.ts`, `gatewayBatchSpeechClient.ts`, `dedicated_media_registration.py` | Complete A1 at `8e5dab8b8` retained ten marks/eight segments in 20/20 exact cleanup-complete attempts with zero forbidden effects. The largest respective removable-gap/fraction p50 values were 0.885 ms and 0.015; the 450.782 ms route-to-return diagnostic is legitimate Provider wait and does not authorize B. |
 | 2 | Provider-native Semantic VAD with 1200 ms fallback | **FAST-SCREEN IMPLEMENTED — REAL PROVIDER PILOT NEXT** on `latency/semantic-vad-experiment` at `5038c41c4` | **250–400 ms hypothesis**, not accepted gain | P1 Interaction Intelligence; `streaming_speech.py`, `openai_streaming_speech.py`, Gateway and no-Browser validation runner | Typed Provider/Gateway support plus separate `auto` and `high` A1/B/A blocks pass 333 affected tests and independent Tier-3 review. No Provider timing exists; product activation, expanded-corpus acceptance and Gate C remain excluded. See the local [spec](SEMANTIC_VAD_CAUSAL_BENCHMARK_SPEC_2026-08-21.md) and [implementation plan](SEMANTIC_VAD_CAUSAL_BENCHMARK_IMPLEMENTATION_PLAN_2026-08-21.md). |
 | 3 | Hybrid local + Provider VAD arbitration | **PROPOSED, HIGHER COMPLEXITY** | **300–500 ms** | Browser capture/VAD plus Gateway speech owner | Potentially larger endpointing gain, but requires one exact commit authority and conflict arbitration between endpoint detectors. |
-| 4 | Adaptive WebAudio startup lead | **SETUP READY — PHYSICAL SCREEN NOT RUN; DEFAULT REMAINS 1000 MS** on `latency/adaptive-playout-lead-experiment` at `5b37103a2` | One unmatched-round segment delta **-532.295 ms**; population headroom `UNKNOWN` | `browserAudioIOAdapter.ts`; bounded hook plus private source-bound A1/B/A2 driver | Driver/preparer tests now enforce exact clean source, manifest/run binding, terminal/profile/case/round identity, Vite lead restart and process-group cleanup. No new Browser sample exists. Require the same-source/workload physical A1=1000/B=250/A2=1000 before any default decision. |
+| 4 | Adaptive WebAudio startup lead | **SETUP VERIFIED — FIRST PHYSICAL PILOT NEXT; DEFAULT REMAINS 1000 MS** on `latency/adaptive-playout-lead-experiment` at `5b37103a2` | One unmatched-round segment delta **-532.295 ms**; population headroom `UNKNOWN` | `browserAudioIOAdapter.ts`; bounded hook plus private source-bound A1/B/A2 driver | Driver/preparer deterministic checks pass and the affected Browser Audio suite passes 111/111 on the clean worktree. Run A1=1000/B=250/A2=1000 first, but treat the initial three-arm result as a pilot until the broader Browser/manual-driver Gate closes. No default decision follows from pilot-only evidence. |
 | 5 | Separate retained receipt settlement from successor readiness | **DONE — SCOPED LIFECYCLE SOURCE/AUTOMATION** | Earlier controlled waits exposed approximately **254/754/1007 ms**; no new physical gain is credited | P2 activation journal, retained presentation ACK and next-turn ownership | Hongxing commit `1fec48027` decouples retained predecessor settlement from the successor generation and passed its scoped review. This is lifecycle closure, not a p50/p95 latency population. |
-| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SCREENED OUT — MATERIALITY `STOP` FOR TESTED WORKLOADS** | Real three-case pilot: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%** | Pure policy and no-Chrome runner only; no Runtime/P2/Browser product wiring | Three of three real formal-Agent/real-TTS attempts completed with exact prefixes and zero forbidden effects, but failed the 500 ms headroom, 400 ms gain and 10% gates. The earlier 1.5–2.5 s ordinary estimate is not credited; any long-form retry requires a new reviewed hypothesis. |
+| 6 | Runtime-owned stable-sentence Agent→TTS overlap | **SHORT/MEDIUM `STOP`; LONG-FORM MATERIALITY PACKET PREPARED, NOT IMPLEMENTED** | Tested short/medium pilot: **177.2 ms p50 / 425.3 ms p95**, relative p50 **7.43%**; long-form headroom `UNKNOWN` | Existing validation-only stable-sentence policy/runner; prospective isolated long-form screen; no Runtime/P2/Browser product wiring | Three short/medium attempts failed the original materiality gates and remain stopped. That result does not cover long responses. A separate three-workload/five-attempt exact-prefix screen must measure candidate→final before any pre-final authoritative PresentationUnit or TTS wiring. LVL-10/LVL-10L post-final completion gains cannot answer this question. |
 | 7 | Bounded next-sentence TTS prefetch | **PROPOSED** | **100–800 ms between sentences** | Conversation Runtime, streaming synthesis route, bounded semantic queue | Primarily improves continuity, not first-sentence latency. It must discard prefetched speech on replacement/barge-in. |
 | 8 | Fixed authoritative phrase cache | **PROPOSED** | **800–1400 ms per cache hit** | Conversation Runtime and TTS cache keyed by text hash, locale, model, voice and render version | Suitable only for stable non-private acknowledgements. It must not cache arbitrary Agent or user content. |
 | 9 | Authoritative accepted/queued acknowledgement | **OPPORTUNITY SCREEN READY — CANDIDATE NOT IMPLEMENTED** on `latency/task-ack-latency-experiment` at `e38cb7b38` | **2–7 s perceived hypothesis**; actual candidate gain `UNMEASURED` | Existing Task acceptance→presentation probe plus offline strict reducer; later Conversation Runtime/Task Core/PresentationUnit candidate | The 12-test screen reads only canonical `task_command_to_presentation` and reports a maximum causal opportunity. It does not shorten or relabel Task completion and cannot claim audible/perceived gain. A valid Task population must pass before a separate Tier-3 early-unit packet. |
@@ -416,21 +416,28 @@ On 2026-08-23 the P2 candidate was composed onto Hongxing lifecycle tip
 2. Preserve LVL-10 as `INCONCLUSIVE` and LVL-10L as directionally positive but
    formally uncompleted. Stop long-duration chunking tests; do not select an
    arm or wire either experiment into product or Browser.
-3. Run the separately specified Provider-native Semantic VAD
-   `auto` and `high` causal screens with the 1200 ms fallback. Treat this as
-   Tier-3 Provider/commit/fence work, not a low-risk constant change.
-4. Run the clean Adaptive WebAudio A1=1000/B=250/A2=1000 screen with the same
-   source, workload and manifest. Keep 1000 ms as the production default until
-   physical completion, underrun/rebuffer and audible-output gates pass.
-5. Keep stable-sentence stopped for the tested workloads. Reopen only after
-   Hongxing reviews a new long-form workload/materiality solution. Keep
-   LVL-10 independent because it starts only after authoritative final.
-6. Consider authoritative P3 acknowledgements and fixed non-private phrase
+3. Run the clean Adaptive WebAudio A1=1000/B=250/A2=1000 physical pilot first
+   with the same source, workload and manifest. Preserve complete outcomes and
+   keep 1000 ms as default; pilot-only evidence cannot close the broader
+   Browser/manual-driver Gate or authorize a default change.
+4. Run the separately specified Provider-native Semantic VAD `auto` and `high`
+   causal pilots with the 1200 ms fallback. Treat this as Tier-3
+   Provider/commit/fence work and do not overlap it with another timed Provider
+   population.
+5. In an isolated packet, connect the already-declared Agent start and first
+   text-delta producers. First measure the combined Agent interval; queue,
+   connection, Provider and model subcomponents remain unclaimed until directly
+   correlated evidence exists.
+6. Keep stable-sentence stopped for the tested short/medium workloads while a
+   separate validation-only long-form exact-prefix screen is prepared. Product
+   pre-final speech remains excluded; keep LVL-10 independent because it starts
+   only after authoritative final.
+7. Consider authoritative P3 acknowledgements and fixed non-private phrase
    caching only when perceived Task latency is a product priority; neither
    shortens Task completion, and both retain Task/Presentation authority risk.
-7. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
+8. Revisit batch-32, push or coalescing only if the repaired Gate C waterfall
    demonstrates real P2 backlog.
-8. Treat native speech-to-speech as a strategic architecture study only; it
+9. Treat native speech-to-speech as a strategic architecture study only; it
    requires a separate decision on Registry, Tool/Task and presentation truth.
 
 ## 10. Documentation evidence
@@ -501,6 +508,9 @@ both runs while medium completion regressed. LVL-10L then passed a clean
 12/12, 24-request v2 pilot and derived 6.93–7.75 seconds of 2100-character
 completion gain, but its five-round formal stopped before attempt artifacts on
 Hongxing's direction. This is repeatable directional headroom, not formal or
-product credit. Provider-native Semantic VAD is the next existing no-Browser
-screen. Adaptive WebAudio 250 ms has one unmatched diagnostic signal and the
-default stays 1000 ms.
+product credit. Adaptive WebAudio is now the first prepared physical pilot,
+while its 250 ms value retains only one unmatched diagnostic signal and the
+default stays 1000 ms. Provider-native Semantic VAD remains the next prepared
+no-Browser Provider pilot. Agent first-delta decomposition and long-form
+pre-final exact-prefix materiality are separate implementation packets; neither
+currently carries latency or product credit.

@@ -6,6 +6,13 @@
 > credit by itself. The formal baseline procedure remains §7.6 of
 > [E2E_RUNBOOK](E2E_RUNBOOK.md); this driver automates its mechanics.
 
+As of 2026-08-25, the next use is the LVL-09 physical
+A1=1000/B=250/A2=1000 pilot. The setup is bound to the clean experiment
+worktree, but the initial three-arm run is still pilot evidence: it does not
+close the broader Browser/manual-driver Gate or authorize changing the 1000 ms
+production default. Scoped verification belongs in the optimization inventory
+and retained run artifacts rather than this operator procedure.
+
 ## 1. What the driver does
 
 `<archive-root>/lv-driver.sh` (archive root:
