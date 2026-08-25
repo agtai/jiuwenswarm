@@ -100,6 +100,7 @@ from .latency_measurement import (
 )
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
+    NativeP3ActivationAuthority,
     P3_MUTATIONS,
     P3_PRODUCTION_MUTATIONS,
     P3_PRODUCTION_OPERATIONS,
@@ -453,6 +454,9 @@ class _P2Route:
     notification_replay_floor: int = 0
     notification_admitted_sequence: int = 0
     native_runtime_owner: NativeInteractionRuntimeOwner | None = None
+    native_p3_authority: NativeP3ActivationAuthority | None = field(
+        default=None, repr=False
+    )
     native_capability: str | None = field(default=None, repr=False)
     native_closed: bool = False
 
@@ -980,9 +984,7 @@ class AgentServerProductCompositionRegistry:
         self._pending_p2_agents: dict[tuple[str, str, str, int], Any] = {}
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
-        self._root_cleanup_tasks: dict[
-            ProductCompositionLease, asyncio.Task[None]
-        ] = {}
+        self._root_cleanup_tasks: dict[ProductCompositionLease, asyncio.Task[None]] = {}
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_settlement_tasks: set[asyncio.Task[None]] = set()
@@ -1543,9 +1545,7 @@ class AgentServerProductCompositionRegistry:
                 **common,
                 segment_name="task.queue",
                 seam_name="outbox",
-                seam_id=(
-                    f"{item.outbox_id}:{item.state.value}:{item.delivery_count}"
-                ),
+                seam_id=(f"{item.outbox_id}:{item.state.value}:{item.delivery_count}"),
                 source_record_id=item.outbox_id,
                 command_id=item.command_id,
                 outbox_id=item.outbox_id,
@@ -4225,6 +4225,21 @@ class AgentServerProductCompositionRegistry:
                     activation_id=activation_id,
                     activation_generation=generation,
                 )
+                native_p3_authority: NativeP3ActivationAuthority | None = None
+                if (
+                    self._settings.interaction_engine
+                    is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                ):
+                    native_p3_authority = await asyncio.to_thread(
+                        self._p3_composition.prepare_native_activation_authority,
+                        bearer_token=params.get("auth_token"),
+                        session_id=routed_session,
+                        correlation_id=correlation_id,
+                    )
+                    if not isinstance(native_p3_authority, NativeP3ActivationAuthority):
+                        raise ProductSegmentActivationError(
+                            "NATIVE_P3_ACTIVATION_AUTHORITY_UNAVAILABLE"
+                        )
                 prepared = self._p2_adapter.prepare_activation(
                     P2AuthenticatedContext(canonical, canonical.scope),
                     request,
@@ -4338,6 +4353,7 @@ class AgentServerProductCompositionRegistry:
                     holder["activation_lease"] = result.lease
                     holder["native_runtime_owner"] = native_owner
                     holder["native_capability"] = native_capability
+                    holder["native_p3_authority"] = native_p3_authority
                     return ProductSegmentActivation(
                         _formal_fact(ProductSegment.P2_AGENT_INTERACTION),
                         wrapper,
@@ -4415,6 +4431,7 @@ class AgentServerProductCompositionRegistry:
             observability_adapter = observability_holder.get("adapter")
             native_runtime_owner = holder.get("native_runtime_owner")
             native_capability = holder.get("native_capability")
+            native_p3_authority = holder.get("native_p3_authority")
             if (
                 not isinstance(binding, P2InteractionBinding)
                 or not isinstance(activation_lease, P2ActivationLease)
@@ -4428,6 +4445,9 @@ class AgentServerProductCompositionRegistry:
                         )
                         or type(native_capability) is not str
                         or len(native_capability) != 64
+                        or not isinstance(
+                            native_p3_authority, NativeP3ActivationAuthority
+                        )
                     )
                 )
                 or (
@@ -4477,6 +4497,11 @@ class AgentServerProductCompositionRegistry:
                 ),
                 native_capability=(
                     native_capability if type(native_capability) is str else None
+                ),
+                native_p3_authority=(
+                    native_p3_authority
+                    if isinstance(native_p3_authority, NativeP3ActivationAuthority)
+                    else None
                 ),
             )
             self._p2_routes[key] = retained_route
@@ -4602,6 +4627,7 @@ class AgentServerProductCompositionRegistry:
             if (
                 route is None
                 or route.native_runtime_owner is None
+                or route.native_p3_authority is None
                 or route.native_capability is None
                 or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
                 or route.binding.scope != binding.scope
@@ -4718,10 +4744,186 @@ class AgentServerProductCompositionRegistry:
                         },
                     }
                 elif proposal.delegate is not None:
-                    raise NativeInteractionRuntimeError(
-                        "NATIVE_DELEGATE_UNAVAILABLE",
-                        "Native delegate admission is not available",
+                    if (
+                        proposal.action is None
+                        or proposal.action.operation != "DELEGATE"
+                        or proposal.turn_commit is not None
+                        or proposal.audio_observation is not None
+                        or proposal.provider_done is not None
+                        or dict(proposal.action.payload)
+                        != {
+                            "provider_call_id": proposal.delegate.provider_call_id,
+                            "turn_id": proposal.delegate.turn_id,
+                        }
+                    ):
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_DELEGATE_PROPOSAL_INVALID",
+                            "Native delegate must be one exact DELEGATE proposal",
+                        )
+                    context = await route.activation_lease.select_formal_context(
+                        route.binding
                     )
+                    accepted, delegate_admission = await owner.admit_delegate(
+                        proposal.delegate,
+                        committed_at=datetime.now(UTC)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z"),
+                        context_refs=tuple(entry.ref for entry in context.entries),
+                    )
+                    bridge = self._task_intent_bridge
+                    if bridge is None:
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_DELEGATE_RESOLVER_UNAVAILABLE",
+                            "Native delegate has no unified committed-input resolver",
+                        )
+                    current: PersistentTaskRecord | None = None
+                    background_authority_unavailable = False
+                    if self._settings.p3_text_enabled:
+                        try:
+                            current = await self._p3_composition.read_current_background_task_native(
+                                route.native_p3_authority,
+                                session_id=routed_session,
+                            )
+                        except FormalTaskViolation as exc:
+                            if exc.code not in {
+                                ErrorCode.UNAUTHENTICATED,
+                                ErrorCode.PERMISSION_DENIED,
+                            }:
+                                raise
+                            background_authority_unavailable = True
+                    current_context = self._current_background_context(current)
+                    resolution = bridge.resolve_unified(
+                        delegate_admission.turn_commit,
+                        delegate_admission.turn_commit.scope,
+                        current_context,
+                    )
+                    resolution = self._bind_frozen_one_current_task_status(
+                        resolution,
+                        commit=delegate_admission.turn_commit,
+                        current_task=current_context,
+                    )
+                    delegate_request_id = (
+                        "native-delegate-"
+                        + hashlib.sha256(
+                            canonical_json_bytes(
+                                {
+                                    "provider_call_id": (
+                                        proposal.delegate.provider_call_id
+                                    ),
+                                    "turn_commit_id": (
+                                        delegate_admission.turn_commit.commit_id
+                                    ),
+                                    "source_response": {
+                                        "response_id": (
+                                            delegate_admission.source_response.response_id
+                                        ),
+                                        "response_generation": (
+                                            delegate_admission.source_response.response_generation
+                                        ),
+                                    },
+                                }
+                            )
+                        ).hexdigest()
+                    )
+                    native_business_task_id: str | None = None
+                    if resolution.route is UnifiedCommittedInputRoute.DIALOGUE:
+                        canonical_text = (
+                            await route.activation_lease.execute_native_delegate(
+                                route.binding,
+                                request_id=f"native-agent-{delegate_request_id}",
+                                source_response=delegate_admission.source_response,
+                                correlation_id=binding.correlation_id,
+                                commit=delegate_admission.turn_commit,
+                                context=context,
+                                channel_id="web",
+                                allow_tools=True,
+                            )
+                        )
+                    else:
+                        admitted_at = time.monotonic()
+                        task_outcome = await self._run_unified_submit(
+                            retained=route,
+                            request_id=f"native-task-{delegate_request_id}",
+                            voice_identity=delegate_request_id.removeprefix(
+                                "native-delegate-"
+                            ),
+                            fingerprint=bytes.fromhex(fingerprint),
+                            commit=delegate_admission.turn_commit,
+                            context=context,
+                            resolution=resolution,
+                            current=current,
+                            background_authority_unavailable=(
+                                background_authority_unavailable
+                            ),
+                            auth_token=None,
+                            channel_id="web",
+                            l0_commit_admission=_L0CommitAdmissionClock(
+                                observed_at=datetime.now(UTC)
+                                .isoformat(timespec="microseconds")
+                                .replace("+00:00", "Z"),
+                                monotonic_ms=admitted_at * 1_000.0,
+                                duration_ms=0.0,
+                            ),
+                            native_result_only=True,
+                            native_p3_authority=route.native_p3_authority,
+                        )
+                        task_result_payload = task_outcome.payload.get("result")
+                        canonical_text = (
+                            task_result_payload.get("canonical_text")
+                            if task_outcome.ok
+                            and isinstance(task_result_payload, Mapping)
+                            else None
+                        )
+                        candidate_task_id = (
+                            task_result_payload.get("task_id")
+                            if isinstance(task_result_payload, Mapping)
+                            else None
+                        )
+                        if type(candidate_task_id) is str:
+                            native_business_task_id = candidate_task_id
+                        if type(canonical_text) is not str:
+                            raise NativeInteractionRuntimeError(
+                                "NATIVE_TASK_DELEGATE_RESULT_INVALID",
+                                "Native Task delegate produced no canonical result",
+                            )
+                    delegate_result = await owner.accept_delegate_result(
+                        delegate_admission,
+                        canonical_text=canonical_text,
+                        route=resolution.route,
+                    )
+                    if native_business_task_id is not None and (
+                        native_business_task_id in self._voice_task_origins
+                        or len(self._voice_task_origins)
+                        < self._PRODUCT_OPERATION_CAPACITY
+                    ):
+                        self._voice_task_origins[native_business_task_id] = (
+                            _VoiceTaskOrigin(
+                                session_id=route.binding.session_id,
+                                interaction_id=route.binding.interaction_id,
+                                activation_id=route.binding.activation_id,
+                                activation_generation=(
+                                    route.binding.activation_generation
+                                ),
+                                correlation_id=route.binding.correlation_id,
+                                response_ref=delegate_result.response,
+                            )
+                        )
+                    result_payload = {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "accepted": accepted,
+                        "provider_call_id": proposal.delegate.provider_call_id,
+                        "route": resolution.route.value,
+                        "turn_commit_id": delegate_result.turn_commit.commit_id,
+                        "canonical_text": delegate_result.canonical_text,
+                        "response": {
+                            "interaction_id": (delegate_result.response.interaction_id),
+                            "response_id": delegate_result.response.response_id,
+                            "response_generation": (
+                                delegate_result.response.response_generation
+                            ),
+                        },
+                    }
                 elif (
                     proposal.action is not None and proposal.action.operation == "SPEAK"
                 ):
@@ -4730,15 +4932,41 @@ class AgentServerProductCompositionRegistry:
                         payload.get("provider_response_id"),
                         "provider_response_id",
                     )
-                    response_id = (
-                        "native-response-"
-                        + hashlib.sha256(
-                            proposal.action.action_id.encode("utf-8")
-                        ).hexdigest()
-                    )
-                    admission = await owner.accept_provider_response(
-                        provider_response_id, response_id
-                    )
+                    runtime_response_id = payload.get("runtime_response_id")
+                    runtime_generation = payload.get("response_generation")
+                    if runtime_response_id is None and runtime_generation is None:
+                        response_id = (
+                            "native-response-"
+                            + hashlib.sha256(
+                                proposal.action.action_id.encode("utf-8")
+                            ).hexdigest()
+                        )
+                        admission = await owner.accept_provider_response(
+                            provider_response_id, response_id
+                        )
+                    elif (
+                        type(runtime_response_id) is str
+                        and type(runtime_generation) is str
+                        and runtime_generation.isascii()
+                        and runtime_generation.isdecimal()
+                        and (
+                            len(runtime_generation) == 1
+                            or not runtime_generation.startswith("0")
+                        )
+                    ):
+                        admission = await owner.bind_delegate_provider_response(
+                            provider_response_id,
+                            ResponseRef(
+                                binding.interaction_id,
+                                runtime_response_id,
+                                int(runtime_generation),
+                            ),
+                        )
+                    else:
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_PROVIDER_RESPONSE_BINDING_INVALID",
+                            "Provider response carried an incomplete Runtime binding",
+                        )
                     result_payload = {
                         "kind": "response",
                         "status": "observed",
@@ -6853,42 +7081,87 @@ class AgentServerProductCompositionRegistry:
         auth_token: object,
         channel_id: str,
         l0_commit_admission: _L0CommitAdmissionClock,
+        native_result_only: bool = False,
+        native_p3_authority: NativeP3ActivationAuthority | None = None,
     ) -> P3RouteResult:
-        journal = self._unified_journal
-        if journal is None:
+        if native_result_only != (native_p3_authority is not None):
             raise FormalTaskViolation(
-                "UNIFIED_INPUT_UNAVAILABLE",
-                "unified committed-input journal is unavailable",
-                ErrorCode.UNAVAILABLE,
+                "NATIVE_DELEGATE_AUTHORITY_INCOMPLETE",
+                "Native delegate result mode requires exact P3 activation authority",
+                ErrorCode.PERMISSION_DENIED,
             )
-        recovered_effect = await asyncio.to_thread(
-            journal.read_foreground_effect,
-            voice_identity_sha256=voice_identity,
-            fingerprint=fingerprint,
-        )
-        if recovered_effect is not None:
-            if (
-                recovered_effect.effect_kind == "authoritative_presentation"
-                and recovered_effect.recovery is not None
-            ):
-                return await self._recover_unified_authoritative_presentation(
-                    retained=retained,
-                    voice_identity=voice_identity,
-                    fingerprint=fingerprint,
-                    commit=commit,
-                    channel_id=channel_id,
+
+        async def finish_text(**presentation: Any) -> P3RouteResult:
+            if native_result_only:
+                text = presentation.get("text")
+                result_request_id = presentation.get("request_id")
+                if type(text) is not str or type(result_request_id) is not str:
+                    raise FormalTaskViolation(
+                        "NATIVE_DELEGATE_RESULT_INVALID",
+                        "Native Task route produced no canonical result",
+                        ErrorCode.RESULT_UNKNOWN,
+                    )
+                result: dict[str, object] = {"canonical_text": text}
+                business_task_id = presentation.get("business_task_id")
+                if type(business_task_id) is str:
+                    result["task_id"] = business_task_id
+                return _success_result(
+                    result_request_id,
+                    result,
+                    retained.manifest,
                 )
-            if recovered_effect.replay_result is not None:
-                payload = recovered_effect.replay_result
-                return P3RouteResult(bool(payload.get("ok")), payload)
-            raise FormalTaskViolation(
-                "UNIFIED_FOREGROUND_EFFECT_RESULT_UNKNOWN",
-                "a prior foreground effect may already have been published",
-                ErrorCode.RESULT_UNKNOWN,
+            return await self._present_unified_text(**presentation)
+
+        async def handle_task(**invocation: Any) -> P3RouteResult:
+            if native_p3_authority is None:
+                return await self._p3_composition.handle(**invocation)
+            return await self._p3_composition.handle_native(
+                native_p3_authority,
+                **invocation,
             )
+
+        if not native_result_only:
+            journal = self._unified_journal
+            if journal is None:
+                raise FormalTaskViolation(
+                    "UNIFIED_INPUT_UNAVAILABLE",
+                    "unified committed-input journal is unavailable",
+                    ErrorCode.UNAVAILABLE,
+                )
+            recovered_effect = await asyncio.to_thread(
+                journal.read_foreground_effect,
+                voice_identity_sha256=voice_identity,
+                fingerprint=fingerprint,
+            )
+            if recovered_effect is not None:
+                if (
+                    recovered_effect.effect_kind == "authoritative_presentation"
+                    and recovered_effect.recovery is not None
+                ):
+                    return await self._recover_unified_authoritative_presentation(
+                        retained=retained,
+                        voice_identity=voice_identity,
+                        fingerprint=fingerprint,
+                        commit=commit,
+                        channel_id=channel_id,
+                    )
+                if recovered_effect.replay_result is not None:
+                    payload = recovered_effect.replay_result
+                    return P3RouteResult(bool(payload.get("ok")), payload)
+                raise FormalTaskViolation(
+                    "UNIFIED_FOREGROUND_EFFECT_RESULT_UNKNOWN",
+                    "a prior foreground effect may already have been published",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
         response_id = f"response-unified-{voice_identity[:32]}"
         route = resolution.route
         if route is UnifiedCommittedInputRoute.DIALOGUE:
+            if native_result_only:
+                raise FormalTaskViolation(
+                    "NATIVE_DELEGATE_ROUTE_MISMATCH",
+                    "Native dialogue must use the Agent Bridge result seam",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
             return await self._run_unified_agent_submit(
                 retained=retained,
                 voice_identity=voice_identity,
@@ -6907,7 +7180,7 @@ class AgentServerProductCompositionRegistry:
             else "Background tasks are unavailable."
         )
         if background_authority_unavailable:
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -6919,7 +7192,7 @@ class AgentServerProductCompositionRegistry:
                 l0_commit_admission=l0_commit_admission,
             )
         if not self._settings.p3_text_enabled:
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -6939,7 +7212,7 @@ class AgentServerProductCompositionRegistry:
             }
             and not self._settings.p3_mutation_enabled
         ):
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -6961,7 +7234,7 @@ class AgentServerProductCompositionRegistry:
                     ErrorCode.CONFLICT,
                 )
             try:
-                result = await self._p3_composition.handle(
+                result = await handle_task(
                     operation="task.create",
                     params={
                         "auth_token": auth_token,
@@ -7060,7 +7333,7 @@ class AgentServerProductCompositionRegistry:
                     }
                     else unavailable_text
                 )
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -7076,7 +7349,7 @@ class AgentServerProductCompositionRegistry:
             )
 
         if current is None:
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -7099,7 +7372,7 @@ class AgentServerProductCompositionRegistry:
         }
         if route is UnifiedCommittedInputRoute.BACKGROUND_UPDATE:
             if current.state is FormalTaskState.TERMINAL:
-                return await self._present_unified_text(
+                return await finish_text(
                     retained=retained,
                     voice_identity=voice_identity,
                     fingerprint=fingerprint,
@@ -7125,7 +7398,7 @@ class AgentServerProductCompositionRegistry:
                     ErrorCode.CONFLICT,
                 )
             try:
-                adjusted = await self._p3_composition.handle(
+                adjusted = await handle_task(
                     operation="task.adjust",
                     params={
                         **common_params,
@@ -7218,7 +7491,7 @@ class AgentServerProductCompositionRegistry:
                     }
                     else unavailable_text
                 )
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -7234,7 +7507,7 @@ class AgentServerProductCompositionRegistry:
             )
         if route is UnifiedCommittedInputRoute.BACKGROUND_STATUS:
             if resolution.reason == "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED":
-                events_response = await self._p3_composition.handle(
+                events_response = await handle_task(
                     operation="task.events",
                     params={**common_params, "after_seq": -1},
                     request_id=f"unified-adjust-status-{voice_identity[:40]}",
@@ -7309,7 +7582,7 @@ class AgentServerProductCompositionRegistry:
                     if chinese
                     else "The current task has no authoritative adjustment record."
                 )
-                return await self._present_unified_text(
+                return await finish_text(
                     retained=retained,
                     voice_identity=voice_identity,
                     fingerprint=fingerprint,
@@ -7323,7 +7596,7 @@ class AgentServerProductCompositionRegistry:
                     l0_attempt_id=current.attempt_id,
                     l0_commit_admission=l0_commit_admission,
                 )
-            status = await self._p3_composition.handle(
+            status = await handle_task(
                 operation="task.status",
                 params=common_params,
                 request_id=f"unified-status-{voice_identity[:48]}",
@@ -7341,9 +7614,7 @@ class AgentServerProductCompositionRegistry:
                 else None
             )
             returned_task_id = (
-                task_status.get("task_id")
-                if isinstance(task_status, Mapping)
-                else None
+                task_status.get("task_id") if isinstance(task_status, Mapping) else None
             )
             returned_task_attempt_id = (
                 task_status.get("attempt_id")
@@ -7429,7 +7700,7 @@ class AgentServerProductCompositionRegistry:
                 )
             else:
                 speech = unavailable_text
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -7455,7 +7726,7 @@ class AgentServerProductCompositionRegistry:
                     ErrorCode.CONFLICT,
                 )
             try:
-                cancelled = await self._p3_composition.handle(
+                cancelled = await handle_task(
                     operation="task.cancel",
                     params={
                         **common_params,
@@ -7562,7 +7833,7 @@ class AgentServerProductCompositionRegistry:
                 if cancelled.ok
                 else unavailable_text
             )
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -7577,7 +7848,7 @@ class AgentServerProductCompositionRegistry:
             )
 
         assert route is UnifiedCommittedInputRoute.BACKGROUND_QUERY
-        task_result = await self._p3_composition.handle(
+        task_result = await handle_task(
             operation="task.result",
             params=common_params,
             request_id=f"unified-result-{voice_identity[:48]}",
@@ -7619,7 +7890,7 @@ class AgentServerProductCompositionRegistry:
                     if chinese
                     else "The current task result is unavailable."
                 )
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -7634,7 +7905,7 @@ class AgentServerProductCompositionRegistry:
             )
         task_result_record = result_payload.get("task_result")
         if not isinstance(task_result_record, Mapping):
-            return await self._present_unified_text(
+            return await finish_text(
                 retained=retained,
                 voice_identity=voice_identity,
                 fingerprint=fingerprint,
@@ -13063,7 +13334,10 @@ class AgentServerProductCompositionRegistry:
                             session_id=routed_session,
                             task_id=str(task_id or ""),
                         )
-                        if type(candidate_diagnostics) is TaskDurabilityDiagnosticSnapshot:
+                        if (
+                            type(candidate_diagnostics)
+                            is TaskDurabilityDiagnosticSnapshot
+                        ):
                             durability_diagnostics = candidate_diagnostics
                     except Exception:  # noqa: BLE001 -- diagnostics are effect-free
                         logger.warning(

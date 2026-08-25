@@ -15,9 +15,13 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CONTRACT_VERSION,
+    ContextRef,
     MAX_SAFE_INTEGER,
     ResponseRef,
     TerminalOutcome,
+    TurnCommit,
+    canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.conversation_runtime import (
     InteractionState,
@@ -29,15 +33,20 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     MAX_NATIVE_TRANSCRIPT_UTF8_BYTES,
     NativeAudioObservation,
+    NativeDelegateProposal,
     NativeInteractionBinding,
     NativePresentationCursor,
     NativeTurnCommit,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_AUDIO_DELTA_BYTES,
+    MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES,
     NATIVE_PCM_SAMPLE_RATE,
     NativeAudioOutput,
     NativeProviderDone,
+)
+from jiuwenswarm.server.live_voice.voice_task_bridge import (
+    UnifiedCommittedInputRoute,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
@@ -84,6 +93,21 @@ class NativeHistoryAdmission:
     response: ResponseRef
     transcript: str
     presented_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeDelegateAdmission:
+    proposal: NativeDelegateProposal
+    turn_commit: TurnCommit
+    source_response: ResponseRef
+
+
+@dataclass(frozen=True, slots=True)
+class NativeDelegateResult:
+    turn_commit: TurnCommit
+    canonical_text: str
+    route: UnifiedCommittedInputRoute
+    response: ResponseRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +233,9 @@ class NativeInteractionRuntimeOwner:
         self._barges: dict[
             str, tuple[ResponseRef, NativePresentationCursor, NativeBargeAdmission]
         ] = {}
+        self._delegates_by_call: dict[str, NativeDelegateAdmission] = {}
+        self._delegate_event_calls: dict[str, str] = {}
+        self._delegate_results: dict[str, NativeDelegateResult] = {}
 
     async def start(self) -> bool:
         async with self._lock:
@@ -286,6 +313,191 @@ class NativeInteractionRuntimeOwner:
             self._current_turn_id = commit.turn_id
             return True
 
+    async def admit_delegate(
+        self,
+        proposal: NativeDelegateProposal,
+        *,
+        committed_at: str,
+        context_refs: tuple[ContextRef, ...] = (),
+    ) -> tuple[bool, NativeDelegateAdmission]:
+        """Convert one exact Runtime-admitted proposal into standard input."""
+
+        async with self._lock:
+            self._require_open()
+            if not isinstance(proposal, NativeDelegateProposal):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_INVALID",
+                    "delegate must use NativeDelegateProposal",
+                )
+            if proposal.binding != self._binding:
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_BINDING_MISMATCH",
+                    "delegate must match the exact Native activation binding",
+                )
+            if type(context_refs) is not tuple or any(
+                not isinstance(ref, ContextRef) for ref in context_refs
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_CONTEXT_INVALID",
+                    "delegate context must contain canonical ContextRef values",
+                )
+            retained_response = self._current_response
+            if (
+                retained_response is None
+                or retained_response.cancelled
+                or retained_response.done is not None
+                or proposal.turn_id != self._current_turn_id
+                or proposal.turn_id not in self._turns_by_id
+                or proposal.response_generation
+                != retained_response.admission.response.response_generation
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_RESPONSE_STALE",
+                    "delegate requires the exact current Native response generation",
+                )
+            prior = self._delegates_by_call.get(proposal.provider_call_id)
+            prior_event_call = self._delegate_event_calls.get(
+                proposal.provider_event_id
+            )
+            if prior is not None or prior_event_call is not None:
+                if (
+                    prior is not None
+                    and prior.proposal == proposal
+                    and prior_event_call == proposal.provider_call_id
+                    and prior.turn_commit.context_refs == context_refs
+                ):
+                    return False, prior
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_CALL_CONFLICT",
+                    "Provider delegate call or event cannot change meaning",
+                )
+            self._require_record_capacity(
+                len(self._delegates_by_call), "NATIVE_DELEGATE_LEDGER_FULL"
+            )
+            identity = {
+                "binding": proposal.binding.to_dict(),
+                "native_turn_id": proposal.turn_id,
+                "response_generation": proposal.response_generation,
+                "provider_event_id": proposal.provider_event_id,
+                "provider_call_id": proposal.provider_call_id,
+                "provider_item_id": proposal.provider_item_id,
+                "context_refs": [ref.to_dict() for ref in context_refs],
+                "request_sha256": hashlib.sha256(
+                    proposal.request_text.encode("utf-8")
+                ).hexdigest(),
+            }
+            digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+            provenance = {
+                "source": "openai_realtime_native_delegate",
+                "contract_version": proposal.contract_version,
+                "activation_id": self._binding.activation_id,
+                "activation_generation": self._binding.activation_generation,
+                "correlation_id": self._binding.correlation_id,
+                "native_turn_id": proposal.turn_id,
+                "provider_event_id": proposal.provider_event_id,
+                "provider_call_id": proposal.provider_call_id,
+                "provider_item_id": proposal.provider_item_id,
+                "source_response_generation": proposal.response_generation,
+            }
+            try:
+                turn_commit = TurnCommit.from_dict(
+                    {
+                        "contract_version": CONTRACT_VERSION,
+                        "commit_id": f"native-delegate-commit-{digest}",
+                        "turn_id": f"native-delegate-turn-{digest}",
+                        "interaction_id": self._binding.interaction_id,
+                        "text": proposal.request_text,
+                        "hypothesis_provenance": provenance,
+                        "scope": self._binding.scope.to_dict(),
+                        "context_refs": [ref.to_dict() for ref in context_refs],
+                        "committed_at": committed_at,
+                    }
+                )
+            except Exception as exc:
+                raise NativeInteractionRuntimeError(
+                    getattr(exc, "reason", "NATIVE_DELEGATE_COMMIT_INVALID"),
+                    "delegate could not form a standard TurnCommit",
+                ) from exc
+            admission = NativeDelegateAdmission(
+                proposal=proposal,
+                turn_commit=turn_commit,
+                source_response=retained_response.admission.response,
+            )
+            self._delegates_by_call[proposal.provider_call_id] = admission
+            self._delegate_event_calls[proposal.provider_event_id] = (
+                proposal.provider_call_id
+            )
+            return True, admission
+
+    async def accept_delegate_result(
+        self,
+        admission: NativeDelegateAdmission,
+        *,
+        canonical_text: str,
+        route: UnifiedCommittedInputRoute,
+    ) -> NativeDelegateResult:
+        """Pre-admit the response generation used for a Jiuwen result."""
+
+        async with self._lock:
+            self._require_open()
+            if not isinstance(admission, NativeDelegateAdmission):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_ADMISSION_INVALID",
+                    "delegate result requires one retained Runtime admission",
+                )
+            retained = self._delegates_by_call.get(admission.proposal.provider_call_id)
+            if retained != admission:
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_ADMISSION_STALE",
+                    "delegate result does not match retained Runtime authority",
+                )
+            text = self._delegate_result_text(canonical_text)
+            if not isinstance(route, UnifiedCommittedInputRoute):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_ROUTE_INVALID",
+                    "delegate result must retain the unified committed-input route",
+                )
+            prior = self._delegate_results.get(admission.proposal.provider_call_id)
+            if prior is not None:
+                if (
+                    prior.turn_commit == admission.turn_commit
+                    and prior.canonical_text == text
+                    and prior.route is route
+                ):
+                    return prior
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_RESULT_CONFLICT",
+                    "delegate result cannot change its route or canonical text",
+                )
+            response_digest = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "provider_call_id": admission.proposal.provider_call_id,
+                        "turn_commit_id": admission.turn_commit.commit_id,
+                        "route": route.value,
+                        "result_sha256": hashlib.sha256(
+                            text.encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
+            ).hexdigest()
+            response_id = f"native-delegate-response-{response_digest}"
+            response, _event = await self._runtime.accept_response(
+                admission.proposal.turn_id,
+                response_id,
+                history_policy=HistorySurfacePolicy.NATIVE_AUDIO,
+                minimum_generation=admission.source_response.response_generation + 1,
+            )
+            await self._runtime.transition_response(response, ResponseState.GENERATING)
+            result = NativeDelegateResult(
+                turn_commit=admission.turn_commit,
+                canonical_text=text,
+                route=route,
+                response=response,
+            )
+            self._delegate_results[admission.proposal.provider_call_id] = result
+            return result
+
     async def accept_provider_response(
         self, provider_response_id: str, response_id: str
     ) -> NativeResponseAdmission:
@@ -328,6 +540,60 @@ class NativeInteractionRuntimeOwner:
             self._responses_by_ref[ref] = retained
             self._response_ids[runtime_response_id] = provider_id
             self._current_response = retained
+            return admission
+
+    async def bind_delegate_provider_response(
+        self,
+        provider_response_id: str,
+        response: ResponseRef,
+    ) -> NativeResponseAdmission:
+        """Bind Provider's post-function response to its pre-admitted Runtime ref."""
+
+        async with self._lock:
+            self._require_open()
+            provider_id = _identity(provider_response_id, "provider_response_id")
+            if not isinstance(response, ResponseRef):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_RESPONSE_INVALID",
+                    "delegate Provider response requires a canonical ResponseRef",
+                )
+            result = next(
+                (
+                    retained
+                    for retained in self._delegate_results.values()
+                    if retained.response == response
+                ),
+                None,
+            )
+            if result is None:
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_DELEGATE_RESPONSE_UNKNOWN",
+                    "delegate Provider response was not pre-admitted by Runtime",
+                )
+            prior = self._responses_by_provider.get(provider_id)
+            if prior is not None:
+                if prior.admission.response == response:
+                    return prior.admission
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_PROVIDER_RESPONSE_CONFLICT",
+                    "Provider response cannot change its Runtime response binding",
+                )
+            prior_provider = self._response_ids.get(response.response_id)
+            if prior_provider is not None:
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_RUNTIME_RESPONSE_ID_CONFLICT",
+                    "Runtime response identity cannot bind another Provider response",
+                )
+            native_turn_id = _identity(
+                result.turn_commit.hypothesis_provenance.get("native_turn_id"),
+                "native_turn_id",
+            )
+            admission = NativeResponseAdmission(provider_id, response)
+            retained_response = _RuntimeResponse(admission, native_turn_id)
+            self._responses_by_provider[provider_id] = retained_response
+            self._responses_by_ref[response] = retained_response
+            self._response_ids[response.response_id] = provider_id
+            self._current_response = retained_response
             return admission
 
     async def accept_audio(self, output: NativeAudioOutput) -> bool:
@@ -374,9 +640,7 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_AUDIO_INVALID",
                     "audio observation must use NativeAudioObservation",
                 )
-            retained = self._responses_by_provider.get(
-                observation.provider_response_id
-            )
+            retained = self._responses_by_provider.get(observation.provider_response_id)
             if (
                 retained is None
                 or retained is not self._current_response
@@ -744,6 +1008,32 @@ class NativeInteractionRuntimeOwner:
             )
         if provenance is not None:
             _identity(provenance, "transcript_event_id")
+
+    @staticmethod
+    def _delegate_result_text(value: object) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or any(
+                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+                for character in value
+            )
+        ):
+            raise NativeInteractionRuntimeError(
+                "NATIVE_DELEGATE_RESULT_INVALID",
+                "delegate result must be canonical bounded text",
+            )
+        try:
+            length = len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            length = MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES + 1
+        if length > MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES:
+            raise NativeInteractionRuntimeError(
+                "NATIVE_DELEGATE_RESULT_INVALID",
+                "delegate result is oversized",
+            )
+        return value
 
     @staticmethod
     def _audio_unit_id(output: NativeAudioOutput | NativeAudioObservation) -> str:

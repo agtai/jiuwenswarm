@@ -84,6 +84,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeDelegateProposal,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
@@ -99,6 +100,8 @@ from jiuwenswarm.server.live_voice.batch_speech import (
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
+    NativeP3ActivationAuthority,
+    P3_OPERATIONS,
     P3_PRODUCTION_OPERATIONS,
     P3AuthenticatedComposition,
     P3RouteResult,
@@ -734,6 +737,43 @@ class _P3Composition(P3AuthenticatedComposition):
             context,
         )
 
+    def prepare_native_activation_authority(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        correlation_id: str,
+    ) -> NativeP3ActivationAuthority:
+        if bearer_token != "trusted-token" or session_id != SCOPE.session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        context = ResolvedTaskContext(
+            source="test.server.project",
+            stable_id=SCOPE.project_id or "",
+            uri=self.project_dir.as_uri(),
+            revision_kind="version",
+            revision_value="revision-1",
+            scope=SCOPE,
+            permissions=("project.write", "task.execute"),
+            expires_at=EXPIRY,
+            redaction_policy_id="test-policy",
+        )
+        return NativeP3ActivationAuthority(
+            principal=AuthenticatedPrincipal(
+                principal_id=SCOPE.subject_id,
+                allowed_project_ids=frozenset({SCOPE.project_id or ""}),
+                allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+                expires_at=EXPIRY,
+            ),
+            session_id=session_id,
+            correlation_id=correlation_id,
+            scope=SCOPE,
+            context=context,
+        )
+
     def query(
         self,
         query: ProductP3AuthorizedQuery,
@@ -1005,6 +1045,24 @@ class _UnifiedP3Composition(_P3Composition):
             )
         return self.current
 
+    async def read_current_background_task_native(
+        self,
+        authority: NativeP3ActivationAuthority,
+        *,
+        session_id: str,
+    ) -> PersistentTaskRecord | None:
+        if (
+            not isinstance(authority, NativeP3ActivationAuthority)
+            or authority.session_id != session_id
+        ):
+            raise FormalTaskViolation(
+                "NATIVE_P3_ACTIVATION_AUTHORITY_MISMATCH",
+                "Native task authority is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        self.read_current_calls += 1
+        return self.current
+
     async def read_background_task(
         self,
         *,
@@ -1083,10 +1141,11 @@ class _UnifiedP3Composition(_P3Composition):
         **policy: object,
     ) -> P3RouteResult:
         self.handle_calls.append((operation, dict(params), dict(policy)))
+        native_authority = policy.get("_native_authority")
         if (
-            params.get("auth_token") != "trusted-token"
-            or session_id != SCOPE.session_id
-        ):
+            not isinstance(native_authority, NativeP3ActivationAuthority)
+            and params.get("auth_token") != "trusted-token"
+        ) or session_id != SCOPE.session_id:
             return P3RouteResult(
                 False,
                 {
@@ -1654,6 +1713,7 @@ def _unified_registry(
     demo_policy_bypass: bool = False,
     critical_input: bool = False,
     composition: _UnifiedP3Composition | None = None,
+    interaction_engine: InteractionEngineKind = InteractionEngineKind.CASCADE,
 ) -> tuple[AgentServerProductCompositionRegistry, _UnifiedP3Composition, _AgentManager]:
     composition = composition or _UnifiedP3Composition(tmp_path)
     manager = _AgentManager()
@@ -1668,6 +1728,7 @@ def _unified_registry(
             p3_mutation_enabled=mutation_enabled,
             demo_policy_bypass_enabled=demo_policy_bypass,
             critical_input_enabled=critical_input,
+            interaction_engine=interaction_engine,
         ),
         p3_composition=composition,
         agent_manager=manager,
@@ -1769,6 +1830,90 @@ def _native_audio_proposal(
                 pcm16=b"\x12\x34" * 480,
                 response=response,
             )
+        ),
+    )
+
+
+def _native_delegate_proposal(
+    binding: NativeInteractionBinding,
+    response: ResponseRef,
+    *,
+    request_text: str,
+) -> NativeInteractionProposal:
+    delegate = NativeDelegateProposal(
+        binding=binding,
+        turn_id="native-turn-1",
+        response_generation=response.response_generation,
+        provider_event_id="provider-function-event-1",
+        provider_call_id="provider-call-1",
+        provider_item_id="provider-function-item-1",
+        request_text=request_text,
+    )
+    return NativeInteractionProposal.from_engine_event(
+        binding,
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-action-delegate-1",
+                operation="DELEGATE",
+                interaction_id=binding.interaction_id,
+                scope=binding.scope,
+                payload=(
+                    ("provider_call_id", delegate.provider_call_id),
+                    ("turn_id", delegate.turn_id),
+                ),
+            ),
+            delegate=delegate,
+        ),
+    )
+
+
+async def _activate_native_delegate_source(
+    registry: AgentServerProductCompositionRegistry,
+    *,
+    stem: str,
+) -> tuple[NativeInteractionBinding, str, ResponseRef]:
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id=f"request-{stem}-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert activated.ok is True
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    assert (
+        await registry.handle_native_propose(
+            params=_native_propose_params(
+                binding, capability, _native_turn_proposal(binding)
+            ),
+            request_id=f"request-{stem}-turn",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    source = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id=f"request-{stem}-source-response",
+        session_id=SCOPE.session_id,
+    )
+    assert source.ok is True
+    source_response_payload = cast(
+        dict[str, object], cast(dict[str, object], source.payload["result"])["response"]
+    )
+    return (
+        binding,
+        capability,
+        ResponseRef(
+            interaction_id=cast(str, source_response_payload["interaction_id"]),
+            response_id=cast(str, source_response_payload["response_id"]),
+            response_generation=cast(
+                int, source_response_payload["response_generation"]
+            ),
         ),
     )
 
@@ -2181,6 +2326,401 @@ async def test_native_activation_replays_capability_and_admits_exact_turn(
 
 
 @pytest.mark.asyncio
+async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-delegate-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert activated.ok is True
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    assert (
+        await registry.handle_native_propose(
+            params=_native_propose_params(
+                binding, capability, _native_turn_proposal(binding)
+            ),
+            request_id="request-native-delegate-turn",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    source = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id="request-native-delegate-source-response",
+        session_id=SCOPE.session_id,
+    )
+    assert source.ok
+    source_payload = cast(dict[str, object], source.payload["result"])
+    source_response_payload = cast(dict[str, object], source_payload["response"])
+    source_response = ResponseRef(
+        interaction_id=cast(str, source_response_payload["interaction_id"]),
+        response_id=cast(str, source_response_payload["response_id"]),
+        response_generation=cast(int, source_response_payload["response_generation"]),
+    )
+
+    delegated = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_delegate_proposal(
+                binding,
+                source_response,
+                request_text="Tell me one short fact about Paris.",
+            ),
+        ),
+        request_id="request-native-delegate-dialogue",
+        session_id=SCOPE.session_id,
+    )
+
+    assert delegated.ok is True
+    result = cast(dict[str, object], delegated.payload["result"])
+    assert result == {
+        "kind": "delegate",
+        "status": "completed",
+        "accepted": True,
+        "provider_call_id": "provider-call-1",
+        "route": "dialogue",
+        "turn_commit_id": result["turn_commit_id"],
+        "canonical_text": "formal result",
+        "response": result["response"],
+    }
+    assert cast(dict, result["response"])["response_generation"] > (
+        source_response.response_generation
+    )
+    assert manager.agent.calls == 1
+    assert composition.handle_calls == []
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    runtime_snapshot = route.activation_lease._runtime.snapshot()
+    assert runtime_snapshot.queued_notifications == 0
+    assert runtime_snapshot.conversation.presentation.records == ()
+    delegated_response = cast(dict[str, object], result["response"])
+    response_count = len(runtime_snapshot.conversation.conversation.responses)
+    provider_response_id = "provider-response-after-delegate"
+    rebound = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            NativeInteractionProposal.from_engine_event(
+                binding,
+                NativeEngineEvent(
+                    action=InteractionAction(
+                        action_id="native-speak-after-delegate",
+                        operation="SPEAK",
+                        interaction_id=binding.interaction_id,
+                        scope=binding.scope,
+                        payload=(
+                            ("provider_response_id", provider_response_id),
+                            ("turn_id", "native-turn-1"),
+                            (
+                                "runtime_response_id",
+                                cast(str, delegated_response["response_id"]),
+                            ),
+                            (
+                                "response_generation",
+                                str(delegated_response["response_generation"]),
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        ),
+        request_id="request-native-delegate-provider-response",
+        session_id=SCOPE.session_id,
+    )
+    assert rebound.ok is True
+    assert rebound.payload["result"] == {
+        "kind": "response",
+        "status": "observed",
+        "accepted": True,
+        "provider_response_id": provider_response_id,
+        "response": delegated_response,
+    }
+    assert (
+        len(
+            route.activation_lease._runtime.snapshot().conversation.conversation.responses
+        )
+        == response_count
+    )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_dialogue_delegate_is_drained_before_registry_close(
+    tmp_path: Path,
+) -> None:
+    registry, _composition, manager = _unified_registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-drain-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    assert (
+        await registry.handle_native_propose(
+            params=_native_propose_params(
+                binding, capability, _native_turn_proposal(binding)
+            ),
+            request_id="request-native-drain-turn",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    source = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id="request-native-drain-source-response",
+        session_id=SCOPE.session_id,
+    )
+    source_response_payload = cast(
+        dict[str, object], cast(dict[str, object], source.payload["result"])["response"]
+    )
+    source_response = ResponseRef(
+        interaction_id=cast(str, source_response_payload["interaction_id"]),
+        response_id=cast(str, source_response_payload["response_id"]),
+        response_generation=cast(int, source_response_payload["response_generation"]),
+    )
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    delegate_params = _native_propose_params(
+        binding,
+        capability,
+        _native_delegate_proposal(
+            binding,
+            source_response,
+            request_text="Tell me one short fact about Paris.",
+        ),
+    )
+    delegated = asyncio.create_task(
+        registry.handle_native_propose(
+            params=delegate_params,
+            request_id="request-native-drain-delegate",
+            session_id=SCOPE.session_id,
+        )
+    )
+    await asyncio.wait_for(blocking.started.wait(), timeout=1.0)
+    delegated.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await delegated
+    replay = asyncio.create_task(
+        registry.handle_native_propose(
+            params=delegate_params,
+            request_id="request-native-drain-delegate",
+            session_id=SCOPE.session_id,
+        )
+    )
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(registry.stop())
+    await asyncio.sleep(0)
+    assert closing.done() is False
+
+    blocking.release.set()
+    result = await asyncio.wait_for(replay, timeout=1.0)
+    await asyncio.wait_for(closing, timeout=1.0)
+
+    assert result.ok is True
+    assert manager.agent.calls == 1
+    snapshot = route.activation_lease._runtime.snapshot()
+    assert snapshot.queued_notifications == 0
+    assert snapshot.conversation.presentation.records == ()
+
+
+@pytest.mark.asyncio
+async def test_native_background_delegate_uses_only_voice_task_p3(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    composition.create_state = FormalTaskState.ACCEPTED
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-task-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    assert (
+        await registry.handle_native_propose(
+            params=_native_propose_params(
+                binding, capability, _native_turn_proposal(binding)
+            ),
+            request_id="request-native-task-turn",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    source = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id="request-native-task-source-response",
+        session_id=SCOPE.session_id,
+    )
+    source_payload = cast(dict[str, object], source.payload["result"])
+    source_response_payload = cast(dict[str, object], source_payload["response"])
+    source_response = ResponseRef(
+        interaction_id=cast(str, source_response_payload["interaction_id"]),
+        response_id=cast(str, source_response_payload["response_id"]),
+        response_generation=cast(int, source_response_payload["response_generation"]),
+    )
+
+    delegate_params = _native_propose_params(
+        binding,
+        capability,
+        _native_delegate_proposal(
+            binding,
+            source_response,
+            request_text="后台帮我检查这些资料并整理报告。",
+        ),
+    )
+    delegated = await registry.handle_native_propose(
+        params=delegate_params,
+        request_id="request-native-task-delegate",
+        session_id=SCOPE.session_id,
+    )
+
+    assert delegated.ok is True
+    result = cast(dict[str, object], delegated.payload["result"])
+    assert result["kind"] == "delegate"
+    assert result["route"] == "background.create"
+    assert result["canonical_text"] == (
+        "后台任务已受理，正在等待执行。开始执行后会显示正在执行。"
+    )
+    assert manager.agent.calls == 0
+    assert [call[0] for call in composition.handle_calls] == ["task.create"]
+    assert composition.create_effects == 1
+    assert composition.current is not None
+    origin = registry._voice_task_origins[composition.current.task_id]
+    result_response = cast(dict[str, object], result["response"])
+    assert origin.response_ref == ResponseRef(
+        binding.interaction_id,
+        cast(str, result_response["response_id"]),
+        cast(int, result_response["response_generation"]),
+    )
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    runtime_snapshot = route.activation_lease._runtime.snapshot()
+    assert runtime_snapshot.queued_notifications == 0
+    assert runtime_snapshot.conversation.presentation.records == ()
+    replay = await registry.handle_native_propose(
+        params=delegate_params,
+        request_id="request-native-task-delegate",
+        session_id=SCOPE.session_id,
+    )
+    assert replay.payload == delegated.payload
+    changed = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_delegate_proposal(
+                binding,
+                source_response,
+                request_text="后台帮我执行另一项工作。",
+            ),
+        ),
+        request_id="request-native-task-delegate-changed",
+        session_id=SCOPE.session_id,
+    )
+    assert changed.ok is False
+    assert changed.payload["error"]["reason"] == "NATIVE_DELEGATE_CALL_CONFLICT"
+    assert composition.create_effects == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("p3_enabled", "expected_text", "expected_operations"),
+    [
+        (
+            True,
+            "需要明确确认后才能开始后台处理。",
+            ["task.create"],
+        ),
+        (
+            False,
+            "后台任务功能当前不可用。",
+            [],
+        ),
+    ],
+    ids=["confirmation-required", "task-unsupported"],
+)
+async def test_native_background_delegate_clarifies_or_rejects_without_task_effect(
+    tmp_path: Path,
+    p3_enabled: bool,
+    expected_text: str,
+    expected_operations: list[str],
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        p3_enabled=p3_enabled,
+        demo_policy_bypass=False,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    binding, capability, source_response = await _activate_native_delegate_source(
+        registry,
+        stem=f"native-task-negative-{p3_enabled}",
+    )
+
+    delegated = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_delegate_proposal(
+                binding,
+                source_response,
+                request_text="后台帮我检查这些资料并整理报告。",
+            ),
+        ),
+        request_id=f"request-native-task-negative-{p3_enabled}",
+        session_id=SCOPE.session_id,
+    )
+
+    assert delegated.ok is True
+    result = cast(dict[str, object], delegated.payload["result"])
+    assert result["kind"] == "delegate"
+    assert result["route"] == "background.create"
+    assert result["canonical_text"] == expected_text
+    assert manager.agent.calls == 0
+    assert [call[0] for call in composition.handle_calls] == expected_operations
+    assert composition.create_effects == 0
+    assert composition.current is None
+    assert registry._voice_task_origins == {}
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    runtime_snapshot = route.activation_lease._runtime.snapshot()
+    assert runtime_snapshot.queued_notifications == 0
+    assert runtime_snapshot.conversation.presentation.records == ()
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_wrong_capability_has_zero_runtime_and_replay_effect(
     tmp_path: Path,
 ) -> None:
@@ -2317,8 +2857,7 @@ async def test_native_speak_changed_replay_and_close_are_exactly_fenced(
         "source_start_utf8": 0,
         "source_end_utf8": 480,
         "content_ref": (
-            "sha256:"
-            + hashlib.sha256(bytes.fromhex("1234") * 480).hexdigest()
+            "sha256:" + hashlib.sha256(bytes.fromhex("1234") * 480).hexdigest()
         ),
     }
     assert route.native_runtime_owner.snapshot().audio_count == 1
@@ -4553,7 +5092,9 @@ async def test_unified_adjust_l0_binding_uses_only_canonical_returned_attempt(
         channel_id="web",
     )
     assert adjusted.ok
-    assert adjustment_receipts[-1].payload["result"] == composition.adjust_receipt_override
+    assert (
+        adjustment_receipts[-1].payload["result"] == composition.adjust_receipt_override
+    )
     sequence = await _ack_unified_presentation(
         registry, sequence=0, stem="adjust-l0-returned"
     )
@@ -11552,9 +12093,7 @@ async def test_p2_notification_batch_bounds_and_legacy_single_pull(
     await legacy_manager.agent.wait_for_calls(1)
     await _wait_for_p2_notifications(legacy_route, 4)
 
-    bounded_registry, _p3, bounded_manager, _pushed = _registry(
-        tmp_path / "bounded"
-    )
+    bounded_registry, _p3, bounded_manager, _pushed = _registry(tmp_path / "bounded")
     assert (
         await bounded_registry.handle_p2_activate(
             params=_p2_params(),

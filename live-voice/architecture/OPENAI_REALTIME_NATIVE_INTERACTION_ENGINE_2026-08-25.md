@@ -228,6 +228,7 @@ Provider 只暴露一个 application function：
 - Engine 只解析并提出 `DELEGATE`；它不执行 function。
 - Runtime 验证 exact call/item/turn/generation、closed JSON、长度、Unicode/控制字符和 replay；失败为零 Agent/Tool/Task/history/audio side effect。
 - 通过验证后才生成标准 `TurnCommit`，交给现有统一 committed-input resolver。
+- Native carrier 不携带或保存 bearer。Native activation 仅在服务端内存保留现有认证器已经验证的非秘密 immutable principal；每次 Task delegate 仍重新校验该 principal 的 operation scope/expiry，重新解析当前 Session/Project/context，并执行既有 exact-Task 检查。`agent.chat` 的窄 product authority 不得被提升为 Task authority。
 - Agent/Task Bridge 返回 canonical result 后，Runtime 先接受一个新的 native response generation，再由 Engine 把 sanitized canonical result 作为 `function_call_output` 发回 Provider。
 - Provider 基于该 result 生成的 audio 仍经过新的 response/generation/presentation fence。
 

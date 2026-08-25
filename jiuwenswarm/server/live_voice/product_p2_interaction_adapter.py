@@ -721,6 +721,47 @@ class P2ActivationLease:
                 )
             return outcome
 
+    async def execute_native_delegate(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        source_response: ResponseRef,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+        allow_tools: bool = True,
+    ) -> str:
+        """Execute one Native delegate without a second presentation path."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            execute = getattr(self._runtime, "execute_native_delegate", None)
+            if not callable(execute):
+                raise _violation(
+                    "NATIVE_DELEGATE_RUNTIME_UNAVAILABLE",
+                    "retained runtime has no Native Agent delegate owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await execute(
+                request_id=request_id,
+                source_response=source_response,
+                correlation_id=correlation_id,
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+                allow_tools=allow_tools,
+            )
+            if type(outcome) is not str or not outcome.strip():
+                raise _violation(
+                    "NATIVE_DELEGATE_RUNTIME_UNAVAILABLE",
+                    "retained runtime returned no canonical Agent final",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
     async def accept_task_origin(
         self,
         binding: P2InteractionBinding,

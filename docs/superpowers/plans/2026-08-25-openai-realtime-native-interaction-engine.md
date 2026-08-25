@@ -643,7 +643,7 @@ git commit -m "feat(live-voice): bind native Gateway Runtime authority"
 - Consumes: Engine audio events, Runtime admissions, existing uplink/downlink media v1, existing Product P1 audio owner.
 - Produces: Native activation descriptor and per-response ordinary dedicated-media downlink tickets; no new browser media wire type.
 
-- [ ] **Step 1: Write failing Gateway direct-audio journey test**
+- [x] **Step 1: Write failing Gateway direct-audio journey test**
 
 ```python
 @pytest.mark.asyncio
@@ -661,11 +661,11 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
     assert runtime.agent_calls == runtime.task_calls == []
 ```
 
-- [ ] **Step 2: Implement Native media ownership in Gateway registry**
+- [x] **Step 2: Implement Native media ownership in Gateway registry**
 
 For a Native activation, consuming the existing uplink ticket starts one Engine session and feeds each accepted PCM frame to `offer_audio()` after exact media binding/sequence validation. Engine actions are sent through `GatewayNativeInteractionRuntimeClient`. On Runtime response admission, allocate an existing response-bound dedicated-media downlink record and expose its ordinary descriptor through the existing P2 notification pull. Audio delta is framed as existing media PCM frames only after response/generation admission. Queue capacity and downlink backpressure close that response, not the whole process.
 
-- [ ] **Step 3: Extend Product P1 route without changing Cascade orchestration**
+- [x] **Step 3: Extend Product P1 route without changing Cascade orchestration**
 
 Activation response accepts an optional exact native descriptor:
 
@@ -687,15 +687,15 @@ Add this exact package script so the focused TypeScript owner and both route tes
 
 Cascade continues `stopAndRecognize()` → product submit → `playAgentText()`. Native keeps the capture route open across turns, does not call recognition final or batch/streaming TTS for direct answers, polls existing P2 notifications for response-bound downlink descriptors, and feeds those frames to the existing Audio I/O playout/ACK path. Engine choice is read from server activation, not browser local storage or query input.
 
-- [ ] **Step 4: Implement exact played-cursor barge-in**
+- [x] **Step 4: Implement exact played-cursor barge-in**
 
 When Native speech-start arrives during playout, Product P1 stops the exact current Audio I/O response, obtains its confirmed contiguous frame cursor, sends the existing downlink playback-stop receipt, and includes the derived `NativePresentationCursor` in the internal presentation/cancel call. Gateway sends `response.cancel` and then `conversation.item.truncate` only after Runtime admission. Stale or missing cursor closes/fences output without an invented truncate position.
 
-- [ ] **Step 5: Test stale PCM, replay, backpressure, close, and frontend branch isolation**
+- [x] **Step 5: Test stale PCM, replay, backpressure, close, and frontend branch isolation**
 
 Cover old generation delta after replacement, delta after cancel, response done before last ACK, zero/last cursor, duplicate truncate, uplink reconnect attempt, remote Provider close, browser Exit, downlink attach failure, backpressure, Native descriptor malformed, Cascade descriptor absent, and Native path proving zero recognition-final/synthesis calls. Use fake socket callbacks/manual schedulers in Node; no timed sleep.
 
-- [ ] **Step 6: Run Python/Node GREEN and commit**
+- [x] **Step 6: Run Python/Node GREEN and commit**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m pytest -q tests/unit_tests/gateway/test_dedicated_media_registration.py tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py
@@ -711,18 +711,51 @@ git commit -m "feat(live-voice): connect native audio media path"
 **Files:**
 
 - Modify: `jiuwenswarm/server/live_voice/native_interaction_runtime.py`
+- Modify: `jiuwenswarm/server/live_voice/agent_conversation_runtime.py`
+- Modify: `jiuwenswarm/server/live_voice/product_p2_interaction_adapter.py`
 - Modify: `jiuwenswarm/server/live_voice/product_composition_registry.py`
+- Modify: `jiuwenswarm/server/live_voice/p3_authenticated_composition.py`
+- Modify: `jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py`
+- Modify: `jiuwenswarm/gateway/live_voice/dedicated_media_registration.py`
 - Modify: `tests/unit_tests/live_voice/test_native_interaction_runtime.py`
 - Modify: `tests/unit_tests/live_voice/test_agent_bridge_runtime.py`
+- Modify: `tests/unit_tests/live_voice/test_agent_conversation_runtime.py`
+- Modify: `tests/unit_tests/live_voice/test_product_p2_interaction_adapter.py`
 - Modify: `tests/unit_tests/live_voice/test_voice_task_bridge.py`
 - Modify: `tests/unit_tests/live_voice/test_product_composition_registry.py`
+- Modify: `tests/unit_tests/live_voice/test_p3_authenticated_composition.py`
+- Modify: `tests/unit_tests/gateway/test_native_interaction_runtime_client.py`
+- Modify: `tests/unit_tests/gateway/test_dedicated_media_registration.py`
 
 **Interfaces:**
 
 - Consumes: validated `NativeDelegateProposal`, existing unified committed-input resolver, Agent Bridge, Voice–Task Bridge/P3, canonical results.
 - Produces: `NativeDelegateResult` returned through Task 5 carrier and expressed in a new Runtime-admitted Provider response.
 
-- [ ] **Step 1: Write failing Agent/Tool and Task delegate tests**
+Implementation-source review found that the original four production files were
+not sufficient to express the already-approved result path: ordinary P2 Agent
+submission also publishes a TEXT presentation/history entry, while the Native
+contract requires the canonical Agent result to return only through the
+Provider.  Reuse the retained P2 runtime's existing Agent Bridge/Harness through
+a Native-result seam that creates no second TEXT presentation/history, validate
+the new closed carrier result in Gateway, and let Gateway invoke the Engine's
+existing `send_delegate_result()` method.  This is a Tier-3 file-surface
+correction, not a new wire, schema, classifier, authority, Browser method, or
+Provider function.
+
+Implementation-source review also found that the frozen `native.propose`
+carrier correctly contains no bearer credential, while the ordinary Web P3
+entrypoint authenticates a bearer on every operation.  Native activation must
+therefore retain the existing authenticator's non-secret, immutable principal
+projection on the server and re-run its operation-scope, expiry, current
+Session/Project, context and exact-Task checks for every delegated P3 call.  It
+must never retain or add the bearer to the Native carrier, and it must not treat
+the narrower `agent.chat` product authority as Task authority.  This adds a
+credential-free internal invocation seam to the existing P3 owner, with no new
+grant format, persistence, protocol, policy bypass, command contract or Task
+authority owner; risk remains Tier 3.
+
+- [x] **Step 1: Write failing Agent/Tool and Task delegate tests**
 
 ```python
 @pytest.mark.asyncio
@@ -747,25 +780,37 @@ async def test_background_task_uses_only_voice_task_bridge_p3() -> None:
     assert provider.function_outputs == [(proposal.provider_call_id, result.canonical_text)]
 ```
 
-- [ ] **Step 2: Convert only validated delegate text to standard TurnCommit**
+- [x] **Step 2: Convert only validated delegate text to standard TurnCommit**
 
 Define `NativeDelegateResult(turn_commit: TurnCommit, canonical_text: str, route: UnifiedCommittedInputRoute, response: ResponseRef)`. Use a deterministic commit ID derived from scope/interaction/turn/provider call/request digest. Add extensions/provenance using existing supported fields only; do not change v2 wire. Invoke the existing unified committed-input resolver once. Dialogue route uses the existing Agent Bridge runtime; background route uses existing Voice–Task Bridge/P3. No second keyword classifier is added.
 
-- [ ] **Step 3: Return Jiuwen result to Provider under a new response generation**
+- [x] **Step 3: Return Jiuwen result to Provider under a new response generation**
 
 The Agent/Task canonical result is bounded and sanitized, then Task 4 Runtime owner accepts a new Native response before Task 3 sends `function_call_output` and `response.create`. Provider audio from this response remains fenced. Result production does not imply presentation; only final audio ACK settles presented history.
 
-- [ ] **Step 4: Test forbidden proposals and zero side effects**
+- [x] **Step 4: Test forbidden proposals and zero side effects**
 
 Cover unknown function, duplicate/changed call ID, invalid JSON, unknown args, empty/oversized/control-character request, stale turn/generation, closed route, Agent failure, Tool confirmation requirement, Task clarification/unsupported/conflict, bridge timeout, result overflow, function output send failure, and cancel during bridge work. Snapshot Agent calls, Tool effects, Task Store/Event/outbox, Runtime responses, Provider sends, media, and history before each rejected path.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m pytest -q tests/unit_tests/live_voice/test_native_interaction_runtime.py tests/unit_tests/live_voice/test_agent_bridge_runtime.py tests/unit_tests/live_voice/test_voice_task_bridge.py tests/unit_tests/live_voice/test_product_composition_registry.py
 git add jiuwenswarm/server/live_voice/native_interaction_runtime.py jiuwenswarm/server/live_voice/product_composition_registry.py tests/unit_tests/live_voice/test_native_interaction_runtime.py tests/unit_tests/live_voice/test_agent_bridge_runtime.py tests/unit_tests/live_voice/test_voice_task_bridge.py tests/unit_tests/live_voice/test_product_composition_registry.py
 git commit -m "feat(live-voice): route native delegates through Jiuwen bridges"
 ```
+
+Task 7 verification on 2026-08-25 recorded the prescribed coverage-enabled
+gate as `316 passed in 232.87s`, the complete P3/product-composition files as
+`333 passed in 110.31s`, and the remaining Agent-conversation/P2/Gateway/Engine
+files as `242 passed in 14.61s`.  The negative evidence spans the closed
+function parser, unknown function/arguments, stale and changed Runtime
+authority, bounded result validation, P3 scope denial, retained cancellation
+replay, close-time drain, closed Gateway result parsing, and partial Provider
+send failure.  Subsequent Agent failure/no-final and Task confirmation/
+unsupported additions passed in the complete Agent-conversation/product files
+as `271 passed in 40.02s`.  Static evidence was also green for Ruff
+check/format, the six planned mypy targets, compileall, and `git diff --check`.
 
 ---
 

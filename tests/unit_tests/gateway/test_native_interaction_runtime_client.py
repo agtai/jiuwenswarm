@@ -361,6 +361,75 @@ async def test_gateway_accepts_closed_runtime_audio_admission_without_pcm() -> N
 
 
 @pytest.mark.asyncio
+async def test_gateway_accepts_closed_native_delegate_result() -> None:
+    client, agent, _sanitized = observed_client()
+    agent.result_override = {
+        "kind": "delegate",
+        "status": "completed",
+        "accepted": True,
+        "provider_call_id": "provider-call-1",
+        "route": "dialogue",
+        "turn_commit_id": "native-delegate-commit-1",
+        "canonical_text": "Canonical Jiuwen result.",
+        "response": {
+            "interaction_id": BINDING.interaction_id,
+            "response_id": "native-delegate-response-1",
+            "response_generation": 2,
+        },
+    }
+
+    result = await client.propose(
+        binding=BINDING,
+        capability=CAPABILITY,
+        event=listen_event(),
+        request_id="native-delegate-result-1",
+    )
+
+    assert result == agent.result_override
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"route": "provider-selected-route"},
+        {"canonical_text": "changed\ncontrol"},
+        {"response": {"interaction_id": BINDING.interaction_id}},
+    ],
+)
+async def test_gateway_rejects_malformed_native_delegate_result(
+    change: dict[str, object],
+) -> None:
+    client, agent, _sanitized = observed_client()
+    result: dict[str, object] = {
+        "kind": "delegate",
+        "status": "completed",
+        "accepted": True,
+        "provider_call_id": "provider-call-1",
+        "route": "dialogue",
+        "turn_commit_id": "native-delegate-commit-1",
+        "canonical_text": "Canonical Jiuwen result.",
+        "response": {
+            "interaction_id": BINDING.interaction_id,
+            "response_id": "native-delegate-response-1",
+            "response_generation": 2,
+        },
+    }
+    result.update(change)
+    agent.result_override = result
+
+    with pytest.raises(NativeRuntimeClientError) as raised:
+        await client.propose(
+            binding=BINDING,
+            capability=CAPABILITY,
+            event=listen_event(),
+            request_id="native-delegate-invalid-1",
+        )
+
+    assert raised.value.reason == "NATIVE_RUNTIME_RESPONSE_INVALID"
+
+
+@pytest.mark.asyncio
 async def test_gateway_rejects_audio_admission_with_recoverable_audio_field() -> None:
     client, agent, _sanitized = observed_client()
     agent.result_override = {

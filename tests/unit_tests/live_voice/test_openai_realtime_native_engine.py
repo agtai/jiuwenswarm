@@ -42,6 +42,8 @@ class ScriptedSocket:
     ) -> None:
         self.incoming: asyncio.Queue[str | bytes | BaseException] = asyncio.Queue()
         self.sent: list[dict[str, object]] = []
+        self.send_calls = 0
+        self.fail_send_at: int | None = None
         self.close_calls = 0
         for value in initial:
             self.push(value)
@@ -53,6 +55,9 @@ class ScriptedSocket:
             self.incoming.put_nowait(value)
 
     async def send(self, message: str) -> None:
+        self.send_calls += 1
+        if self.send_calls == self.fail_send_at:
+            raise OSError("injected Provider send failure")
         self.sent.append(json.loads(message))
 
     async def recv(self) -> str | bytes:
@@ -984,6 +989,37 @@ async def test_concurrent_exact_delegate_result_sends_one_provider_pair() -> Non
         "conversation.item.create",
         "response.create",
     ]
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_delegate_response_create_send_failure_fails_closed() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    await engine.next_event()
+    before = len(socket.sent)
+    socket.fail_send_at = socket.send_calls + 2
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.send_delegate_result("call-1", response_ref(2), "canonical result")
+
+    assert raised.value.reason == "REALTIME_TRANSPORT_SEND_FAILED"
+    assert [event["type"] for event in socket.sent[before:]] == [
+        "conversation.item.create"
+    ]
+    snapshot = engine.snapshot()
+    assert snapshot.state is NativeProviderState.FAILED
+    assert snapshot.primary_error_reason == "REALTIME_TRANSPORT_SEND_FAILED"
+    assert engine._delegate_results == {}
     await engine.close()
 
 

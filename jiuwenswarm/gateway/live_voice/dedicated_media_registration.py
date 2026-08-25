@@ -611,12 +611,8 @@ def _native_downlink_frames(
     frames: list[MediaAudioFrame] = []
     for seq in range(frame_count):
         provider_offset = seq * provider_samples_per_frame
-        values = signed[
-            provider_offset : provider_offset + provider_samples_per_frame
-        ]
-        normalized = tuple(
-            value / (32768 if value < 0 else 32767) for value in values
-        )
+        values = signed[provider_offset : provider_offset + provider_samples_per_frame]
+        normalized = tuple(value / (32768 if value < 0 else 32767) for value in values)
         frames.append(
             MediaAudioFrame(
                 seq=seq,
@@ -706,9 +702,7 @@ class _MediaAuthority:
     issued_at: float
     ticket_expires_at: float
     authority_expires_at: float
-    native_activation: GatewayNativeActivation | None = field(
-        default=None, repr=False
-    )
+    native_activation: GatewayNativeActivation | None = field(default=None, repr=False)
     native_session_key: tuple[str, str, str, str, int] | None = field(
         default=None, repr=False
     )
@@ -1491,13 +1485,73 @@ class DedicatedMediaProductRegistry:
                 event=event,
                 request_id=self._native_request_id(session, "propose"),
             )
-            if event.action is not None:
+            if event.delegate is not None:
+                await self._return_native_delegate_result(session, event, result)
+            elif event.action is not None:
                 if event.action.operation == "SPEAK":
                     await self._admit_native_response(session, event, result)
                 elif event.action.operation == "LISTEN":
                     self._retain_native_speech_start(session, event, result)
             elif event.audio is not None:
                 self._allocate_native_downlink(session, event.audio, result)
+
+    async def _return_native_delegate_result(
+        self,
+        session: _NativeMediaSession,
+        event: NativeEngineEvent,
+        result: Mapping[str, object],
+    ) -> None:
+        delegate = event.delegate
+        assert delegate is not None
+        response_payload = result.get("response")
+        if (
+            result.get("kind") != "delegate"
+            or result.get("status") != "completed"
+            or type(result.get("accepted")) is not bool
+            or result.get("provider_call_id") != delegate.provider_call_id
+            or not isinstance(response_payload, Mapping)
+            or set(response_payload)
+            != {"interaction_id", "response_id", "response_generation"}
+            or type(result.get("canonical_text")) is not str
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_DELEGATE_RESULT_INVALID",
+                "Native delegate result does not match the Provider call",
+            )
+        response = ResponseRef(
+            interaction_id=_required_id(
+                response_payload.get("interaction_id"), "response.interaction_id"
+            ),
+            response_id=_required_id(
+                response_payload.get("response_id"), "response.response_id"
+            ),
+            response_generation=_safe_uint(
+                response_payload.get("response_generation"),
+                "response.response_generation",
+            ),
+        )
+        if (
+            response.interaction_id != session.activation.binding.interaction_id
+            or response.response_generation <= delegate.response_generation
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_DELEGATE_RESULT_INVALID",
+                "Native delegate result response is not a newer exact generation",
+            )
+        event_ids = await session.engine.send_delegate_result(
+            delegate.provider_call_id,
+            response,
+            str(result["canonical_text"]),
+        )
+        if (
+            type(event_ids) is not tuple
+            or len(event_ids) != 2
+            or any(type(event_id) is not str or not event_id for event_id in event_ids)
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_DELEGATE_PROVIDER_SEND_INVALID",
+                "Native Engine returned no exact Provider delegate receipts",
+            )
 
     def _retain_native_speech_start(
         self,
@@ -1547,8 +1601,7 @@ class DedicatedMediaProductRegistry:
             or not isinstance(response_payload, Mapping)
             or set(response_payload)
             != {"interaction_id", "response_id", "response_generation"}
-            or result.get("provider_response_id")
-            != payload.get("provider_response_id")
+            or result.get("provider_response_id") != payload.get("provider_response_id")
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_RESPONSE_ADMISSION_INVALID",
@@ -2848,9 +2901,7 @@ class DedicatedMediaProductRegistry:
             and outcome.final_text is not None
             and record.streaming_started_at is not None
         ):
-            elapsed_ms = (
-                self._monotonic() - record.streaming_started_at
-            ) * 1000.0
+            elapsed_ms = (self._monotonic() - record.streaming_started_at) * 1000.0
             emit_runtime_l0_milestone(
                 component="gateway",
                 milestone=L0Milestone.STT_FINAL_AVAILABLE,
@@ -3345,9 +3396,7 @@ class DedicatedMediaProductRegistry:
 
         observed_monotonic = self._monotonic()
         observed_at = (
-            datetime.now(UTC)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z")
+            datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         )
         with self._lock:
             if (
@@ -3360,8 +3409,7 @@ class DedicatedMediaProductRegistry:
                 or acknowledgement.through_seq >= record.accepted_frames
                 or (
                     record.last_uplink_ack_through_seq is not None
-                    and acknowledgement.through_seq
-                    < record.last_uplink_ack_through_seq
+                    and acknowledgement.through_seq < record.last_uplink_ack_through_seq
                 )
             ):
                 return
@@ -3715,8 +3763,7 @@ class DedicatedMediaProductRegistry:
                 event = notification.get("agent_event")
                 if (
                     not isinstance(event, Mapping)
-                    or event.get("event_type")
-                    not in {"chat.delta", "chat.reasoning"}
+                    or event.get("event_type") not in {"chat.delta", "chat.reasoning"}
                     or event.get("error_reason") is not None
                     or notification.get("source_event") is not None
                     or notification.get("progress_event") is not None
@@ -5220,7 +5267,11 @@ async def handle_registered_media_socket(
                     else record.downlink_frames
                 ),
                 on_playback_stop=(
-                    (lambda receipt: registry.accept_native_playback_stop(record, receipt))
+                    (
+                        lambda receipt: registry.accept_native_playback_stop(
+                            record, receipt
+                        )
+                    )
                     if record.native_session_key is not None
                     else (lambda _receipt: None)
                 ),
@@ -5281,8 +5332,7 @@ async def handle_registered_media_socket(
                     if native_media
                     else (
                         (lambda: registry.wait_streaming_speech_start(record))
-                        if record.end_of_turn_capability
-                        == MEDIA_END_OF_TURN_CAPABILITY
+                        if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
                         else None
                     )
                 ),

@@ -58,6 +58,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
 )
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NativeDelegateProposal,
     NativeInteractionBinding,
     NativePresentationCursor,
 )
@@ -324,6 +325,21 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
             }
             self.audio_proposed.set()
             return result
+        if event.delegate is not None:
+            return {
+                "kind": "delegate",
+                "status": "completed",
+                "accepted": True,
+                "provider_call_id": event.delegate.provider_call_id,
+                "route": "dialogue",
+                "turn_commit_id": "native-delegate-commit-1",
+                "canonical_text": "Canonical Jiuwen result.",
+                "response": {
+                    "interaction_id": binding.interaction_id,
+                    "response_id": "native-delegate-response-1",
+                    "response_generation": event.delegate.response_generation + 1,
+                },
+            }
         return {"kind": "action", "status": "observed", "accepted": True}
 
     async def presentation_ack(
@@ -382,6 +398,8 @@ class _FakeNativeEngine:
         self.response_admitted = asyncio.Event()
         self.admissions: list[tuple[str, ResponseRef]] = []
         self.playback_actions: list[tuple[str, object]] = []
+        self.delegate_results: list[tuple[str, ResponseRef, str]] = []
+        self.delegate_result_sent = asyncio.Event()
 
     async def start(self) -> None:
         self.started = True
@@ -413,6 +431,13 @@ class _FakeNativeEngine:
         self.playback_actions.append(("provider", cursor))
         return ("provider-cancel-1", "provider-truncate-1")
 
+    async def send_delegate_result(
+        self, call_id: str, response: ResponseRef, output: str
+    ) -> tuple[str, str]:
+        self.delegate_results.append((call_id, response, output))
+        self.delegate_result_sent.set()
+        return ("provider-output-event-1", "provider-response-create-1")
+
 
 def _native_activation() -> GatewayNativeActivation:
     return GatewayNativeActivation(
@@ -440,9 +465,7 @@ async def _present_native_test_audio_unit(
     sequence: int,
 ) -> tuple[dict[str, object], dict[str, object]]:
     client.audio_proposed.clear()
-    response = ResponseRef(
-        "interaction-1", f"native-response-{sequence}", sequence + 1
-    )
+    response = ResponseRef("interaction-1", f"native-response-{sequence}", sequence + 1)
     await engine.events.put(
         NativeEngineEvent(
             audio=NativeAudioOutput(
@@ -551,9 +574,7 @@ def test_native_media_activation_skips_cascade_speech_and_binds_private_handle()
     ]
 
 
-def test_native_media_activation_without_exact_private_handle_has_zero_route() -> (
-    None
-):
+def test_native_media_activation_without_exact_private_handle_has_zero_route() -> None:
     registry = DedicatedMediaProductRegistry(
         enabled=True,
         native_runtime_client=_NativeActivationClient(None),
@@ -661,10 +682,13 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
     downlink = registry.consume_ticket(_media_ticket(audio), request_origin=ORIGIN)
     assert downlink is not None
     assert downlink.binding.direction.value == "downlink"
-    assert b"".join(
-        dedicated_media_registration._pcm16(frame.samples)
-        for frame in downlink.downlink_frames
-    ) == pcm16
+    assert (
+        b"".join(
+            dedicated_media_registration._pcm16(frame.samples)
+            for frame in downlink.downlink_frames
+        )
+        == pcm16
+    )
     assert all(
         proposal.delegate is None and proposal.provider_done is None
         for proposal in client.proposals
@@ -674,7 +698,69 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
 
 
 @pytest.mark.asyncio
-async def test_native_media_resamples_browser_48khz_to_provider_24khz_and_back() -> None:
+async def test_native_delegate_result_is_returned_to_provider_once() -> None:
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    delegate = NativeDelegateProposal(
+        binding=activation_handle.binding,
+        turn_id="native-turn-1",
+        response_generation=1,
+        provider_event_id="provider-function-event-1",
+        provider_call_id="provider-call-1",
+        provider_item_id="provider-function-item-1",
+        request_text="Use Jiuwen safely.",
+    )
+    await engine.events.put(
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-delegate-action-1",
+                operation="DELEGATE",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("provider_call_id", delegate.provider_call_id),
+                    ("turn_id", delegate.turn_id),
+                ),
+            ),
+            delegate=delegate,
+        )
+    )
+
+    await asyncio.wait_for(engine.delegate_result_sent.wait(), timeout=1.0)
+
+    assert engine.delegate_results == [
+        (
+            "provider-call-1",
+            ResponseRef(
+                activation_handle.binding.interaction_id,
+                "native-delegate-response-1",
+                2,
+            ),
+            "Canonical Jiuwen result.",
+        )
+    ]
+    await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_media_resamples_browser_48khz_to_provider_24khz_and_back() -> (
+    None
+):
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
     engine = _FakeNativeEngine()
@@ -2753,7 +2839,11 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
 
 @pytest.mark.parametrize(
     ("successor_frame_timing", "expected_duplex"),
-    (("none", False), ("before_downlink_complete", True), ("after_downlink_complete", False)),
+    (
+        ("none", False),
+        ("before_downlink_complete", True),
+        ("after_downlink_complete", False),
+    ),
 )
 def test_synthesis_downlink_receipt_reports_early_duplex_without_rejecting_playout(
     successor_frame_timing: str, expected_duplex: bool

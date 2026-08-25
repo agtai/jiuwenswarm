@@ -64,6 +64,7 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
     AuthenticatedPrincipal,
+    NativeP3ActivationAuthority,
     P3AuthenticatedComposition,
     PreparedProductionIntentAuthority,
     P3_MUTATIONS,
@@ -789,6 +790,71 @@ def _production_registry_text_params(
     if continuation_id is not None:
         params["continuation_id"] = continuation_id
     return params
+
+
+@pytest.mark.asyncio
+async def test_native_activation_authority_reuses_principal_without_bearer(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native",
+    )
+
+    assert isinstance(authority, NativeP3ActivationAuthority)
+    assert TOKEN not in repr(authority)
+    try:
+        assert (
+            await harness.composition.read_current_background_task_native(
+                authority,
+                session_id="session-1",
+            )
+            is None
+        )
+        listed = await harness.composition.handle_native(
+            authority,
+            operation="task.list",
+            params={"session_id": "session-1"},
+            request_id="request-native-task-list",
+            session_id="session-1",
+        )
+        assert listed.ok is True
+        assert listed.payload["result"]["tasks"] == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_authority_never_elevates_agent_chat_scope(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native-denied",
+    )
+    before = _store_counts(harness.database)
+    try:
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.read_current_background_task_native(
+                authority,
+                session_id="session-1",
+            )
+        assert rejected.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+        assert _store_counts(harness.database) == before
+    finally:
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio
@@ -5529,9 +5595,7 @@ def test_enabled_factory_fails_closed_without_one_available_exact_profile(
 ) -> None:
     _configure_enabled_factory(monkeypatch, 3600)
     if configured_profile is None:
-        monkeypatch.delenv(
-            "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", raising=False
-        )
+        monkeypatch.delenv("JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", raising=False)
     else:
         monkeypatch.setenv(
             "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", configured_profile

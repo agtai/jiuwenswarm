@@ -29,6 +29,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
+    AgentBridgeCompletionStatus,
     AgentBridgeCompletionHandle,
     AgentBridgeDispatchReservation,
     AgentBridgeRuntime,
@@ -642,6 +643,10 @@ class AgentConversationRuntime:
         self._turn_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._commit_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._committed_turn_submissions: dict[str, _CommittedTurnSubmissionEntry] = {}
+        self._native_delegate_executions: dict[
+            str, tuple[bytes, asyncio.Task[str]]
+        ] = {}
+        self._native_delegate_turns: dict[tuple[str, str], str] = {}
         self._submitted_turn_bindings: dict[tuple[str, str], str] = {}
         self._admissions: dict[str, _AdmissionEntry] = {}
         self._handles: dict[str, AgentConversationHandle] = {}
@@ -717,6 +722,220 @@ class AgentConversationRuntime:
             runtime=self._cr,
             owns_runtime=False,
         )
+
+    async def execute_native_delegate(
+        self,
+        *,
+        request_id: str,
+        source_response: ResponseRef,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+        allow_tools: bool = True,
+    ) -> str:
+        """Run one Native delegate through the retained Harness/Agent Bridge.
+
+        The source Native response supplies only the Bridge correlation fence.
+        This path deliberately creates no second CR turn/response, TEXT
+        presentation, notification, or history write.
+        """
+
+        self._require_admission()
+        if not isinstance(commit, TurnCommit) or commit.scope != self._scope:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NATIVE_DELEGATE_COMMIT",
+                "Native delegate must use a standard commit in the exact scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if (
+            not isinstance(source_response, ResponseRef)
+            or source_response.interaction_id != commit.interaction_id
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NATIVE_DELEGATE_RESPONSE",
+                "Native delegate must bind the exact source response",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if self._facade is None:
+            raise AgentConversationRuntimeViolation(
+                "FORMAL_AGENT_FACADE_UNAVAILABLE",
+                "formal Agent facade is not configured",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        context.validate_for(commit)
+        self._validate_dispatch_channel(channel_id)
+        if type(allow_tools) is not bool:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AGENT_TOOL_POLICY",
+                "formal Agent tool policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        source_record = next(
+            (
+                item
+                for item in self._cr.snapshot().conversation.responses
+                if item.ref == source_response
+            ),
+            None,
+        )
+        if source_record is None or source_record.state is ResponseState.TERMINAL:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_DELEGATE_RESPONSE_STALE",
+                "Native Agent execution requires the live source response",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        fingerprint = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "request_id": request_id,
+                    "source_response": {
+                        "interaction_id": source_response.interaction_id,
+                        "response_id": source_response.response_id,
+                        "response_generation": source_response.response_generation,
+                    },
+                    "correlation_id": correlation_id,
+                    "commit": commit.to_dict(),
+                    "context": {
+                        "scope": context.scope.to_dict(),
+                        "entries": [
+                            {
+                                "ref": entry.ref.to_dict(),
+                                "content_sha256": hashlib.sha256(
+                                    entry.content.encode("utf-8")
+                                ).hexdigest(),
+                            }
+                            for entry in context.entries
+                        ],
+                    },
+                    "channel_id": channel_id,
+                    "allow_tools": allow_tools,
+                }
+            )
+        ).digest()
+        async with self._identity_claim_lock:
+            prior = self._native_delegate_executions.get(request_id)
+            if prior is not None:
+                if prior[0] != fingerprint:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_DELEGATE_REQUEST_CONFLICT",
+                        "Native delegate request cannot change its binding",
+                        ErrorCode.CONFLICT,
+                    )
+                operation = prior[1]
+            else:
+                turn_key = (commit.interaction_id, commit.turn_id)
+                prior_request = self._native_delegate_turns.get(turn_key)
+                if prior_request is not None and prior_request != request_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_DELEGATE_COMMIT_CONFLICT",
+                        "Native delegate commit cannot execute under another request",
+                        ErrorCode.CONFLICT,
+                    )
+                if len(self._native_delegate_executions) >= self._max_requests:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_DELEGATE_LEDGER_FULL",
+                        "bounded Native Agent delegate ledger is full",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                operation = asyncio.create_task(
+                    self._run_native_delegate(
+                        request_id=request_id,
+                        source_response=source_response,
+                        correlation_id=correlation_id,
+                        commit=commit,
+                        context=context,
+                        channel_id=channel_id,
+                        allow_tools=allow_tools,
+                    ),
+                    name=f"live-voice-native-delegate:{request_id}",
+                )
+                self._native_delegate_executions[request_id] = (
+                    fingerprint,
+                    operation,
+                )
+                self._native_delegate_turns[turn_key] = request_id
+        return await asyncio.shield(operation)
+
+    async def _run_native_delegate(
+        self,
+        *,
+        request_id: str,
+        source_response: ResponseRef,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+        allow_tools: bool,
+    ) -> str:
+        harness_reservation: HarnessRoundReservation | None = None
+        bridge_reservation: AgentBridgeDispatchReservation | None = None
+        round_handle: HarnessRoundHandle | None = None
+        try:
+            assert self._facade is not None
+            harness_reservation = self._harness.reserve_round(
+                HarnessRoundBinding(
+                    request_id=request_id,
+                    response_id=source_response.response_id,
+                    correlation_id=correlation_id,
+                    commit=commit,
+                ),
+                facade=self._facade,
+            )
+            bridge_reservation = self._bridge.reserve_dispatch(
+                request_id=request_id,
+                round_id=harness_reservation.round_id,
+                response_id=source_response.response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
+            )
+            self._harness.begin_round_commit(harness_reservation)
+            self._bridge.begin_dispatch_commit(bridge_reservation)
+            round_handle = self._harness.commit_round(
+                harness_reservation,
+                response_ref=source_response,
+                context=context,
+                facade=self._facade,
+                channel_id=channel_id,
+                allow_tools=allow_tools,
+            )
+            submission = self._bridge.commit_dispatch(
+                bridge_reservation,
+                response_ref=source_response,
+                adapter=JiuWenSwarmAgentAdapter(round_handle),
+            )
+            completion = await submission.completion
+            if (
+                completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED
+                or completion.terminal_outcome is not TerminalOutcome.COMPLETED
+                or completion.canonical_final_count != 1
+                or completion.canonical_text is None
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_DELEGATE_AGENT_RESULT_INVALID",
+                    "Agent Bridge did not return one completed canonical final",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            return completion.canonical_text
+        except BaseException:
+            if bridge_reservation is not None:
+                try:
+                    self._bridge.rollback_undelivered_dispatch(
+                        bridge_reservation,
+                        reason="native_delegate_failed",
+                    )
+                except (AgentBridgeRuntimeViolation, RuntimeError):
+                    pass
+            if harness_reservation is not None:
+                try:
+                    self._harness.rollback_unstarted_round(
+                        harness_reservation,
+                        reason="native_delegate_failed",
+                    )
+                except (HarnessRoundViolation, RuntimeError):
+                    pass
+            raise
 
     async def start(self) -> bool:
         async with self._start_lock:
@@ -3331,6 +3550,15 @@ class AgentConversationRuntime:
             if admission_tasks:
                 await asyncio.shield(
                     asyncio.gather(*admission_tasks, return_exceptions=True)
+                )
+            native_delegate_tasks = tuple(
+                operation
+                for _fingerprint, operation in self._native_delegate_executions.values()
+                if not operation.done()
+            )
+            if native_delegate_tasks:
+                await asyncio.shield(
+                    asyncio.gather(*native_delegate_tasks, return_exceptions=True)
                 )
             await self._bridge.close()
             if self._consumer is not None:

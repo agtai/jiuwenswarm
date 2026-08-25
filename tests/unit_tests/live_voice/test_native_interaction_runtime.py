@@ -12,6 +12,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,
     ScopeRef,
+    TurnCommit,
 )
 from jiuwenswarm.server.live_voice import (
     native_interaction_runtime as native_runtime_module,
@@ -24,6 +25,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeAudioObservation,
+    NativeDelegateProposal,
     NativeInteractionBinding,
     NativePresentationCursor,
     NativeTurnCommit,
@@ -42,6 +44,9 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
     PresentationSurface,
+)
+from jiuwenswarm.server.live_voice.voice_task_bridge import (
+    UnifiedCommittedInputRoute,
 )
 
 
@@ -123,6 +128,150 @@ async def active_owner() -> tuple[
     assert await owner.start() is True
     assert await owner.accept_turn(turn_commit()) is True
     return owner, runtime
+
+
+def delegate_proposal(response: ResponseRef) -> NativeDelegateProposal:
+    return NativeDelegateProposal(
+        binding=binding(),
+        turn_id="native-turn-1",
+        response_generation=response.response_generation,
+        provider_event_id="provider-function-event-1",
+        provider_call_id="provider-call-1",
+        provider_item_id="provider-function-item-1",
+        request_text="Use the weather tool for Paris",
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegate_converts_to_standard_commit_then_admits_new_response() -> None:
+    owner, runtime = await active_owner()
+    source = await owner.accept_provider_response(
+        "provider-response-function", "native-response-function"
+    )
+    proposal = delegate_proposal(source.response)
+
+    accepted, admission = await owner.admit_delegate(
+        proposal, committed_at="2026-08-25T10:00:00Z"
+    )
+
+    assert accepted is True
+    assert isinstance(admission.turn_commit, TurnCommit)
+    assert admission.source_response == source.response
+    assert admission.turn_commit.scope == binding().scope
+    assert admission.turn_commit.interaction_id == binding().interaction_id
+    assert admission.turn_commit.text == "Use the weather tool for Paris"
+    assert admission.turn_commit.turn_id != proposal.turn_id
+    assert admission.turn_commit.context_refs == ()
+    assert admission.turn_commit.committed_at == "2026-08-25T10:00:00Z"
+    assert admission.turn_commit.hypothesis_provenance == {
+        "source": "openai_realtime_native_delegate",
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "activation_id": binding().activation_id,
+        "activation_generation": binding().activation_generation,
+        "correlation_id": binding().correlation_id,
+        "native_turn_id": proposal.turn_id,
+        "provider_event_id": proposal.provider_event_id,
+        "provider_call_id": proposal.provider_call_id,
+        "provider_item_id": proposal.provider_item_id,
+        "source_response_generation": proposal.response_generation,
+    }
+    replay_accepted, replay = await owner.admit_delegate(
+        proposal, committed_at="2026-08-25T10:00:00Z"
+    )
+    assert replay_accepted is False
+    assert replay == admission
+
+    result = await owner.accept_delegate_result(
+        admission,
+        canonical_text="The weather tool returned a canonical result.",
+        route=UnifiedCommittedInputRoute.DIALOGUE,
+    )
+
+    assert result.turn_commit == admission.turn_commit
+    assert result.canonical_text == "The weather tool returned a canonical result."
+    assert result.route is UnifiedCommittedInputRoute.DIALOGUE
+    assert result.response.interaction_id == binding().interaction_id
+    assert result.response.response_generation > source.response.response_generation
+    assert runtime.snapshot().presentation.records == ()
+    assert [record.effect.effect_type for record in runtime.snapshot().effects] == [
+        "playback.stop"
+    ]
+    assert (
+        await owner.accept_delegate_result(
+            admission,
+            canonical_text="The weather tool returned a canonical result.",
+            route=UnifiedCommittedInputRoute.DIALOGUE,
+        )
+        == result
+    )
+    bound = await owner.bind_delegate_provider_response(
+        "provider-response-delegate-result",
+        result.response,
+    )
+    assert bound.response == result.response
+    assert (
+        await owner.accept_audio(
+            audio(
+                result.response,
+                "provider-response-delegate-result",
+                0,
+            )
+        )
+        is True
+    )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_or_changed_delegate_has_zero_runtime_effect() -> None:
+    owner, runtime = await active_owner()
+    source = await owner.accept_provider_response(
+        "provider-response-function", "native-response-function"
+    )
+    proposal = delegate_proposal(source.response)
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as stale:
+        await owner.admit_delegate(
+            replace(
+                proposal, response_generation=source.response.response_generation + 1
+            ),
+            committed_at="2026-08-25T10:00:00Z",
+        )
+    assert stale.value.reason == "NATIVE_DELEGATE_RESPONSE_STALE"
+    assert runtime.snapshot() == before
+
+    accepted, admission = await owner.admit_delegate(
+        proposal, committed_at="2026-08-25T10:00:00Z"
+    )
+    assert accepted is True
+    after_admission = runtime.snapshot()
+    with pytest.raises(NativeInteractionRuntimeError) as changed:
+        await owner.admit_delegate(
+            replace(proposal, request_text="Changed request"),
+            committed_at="2026-08-25T10:00:00Z",
+        )
+    assert changed.value.reason == "NATIVE_DELEGATE_CALL_CONFLICT"
+    assert runtime.snapshot() == after_admission
+
+    with pytest.raises(NativeInteractionRuntimeError) as unsafe_result:
+        await owner.accept_delegate_result(
+            admission,
+            canonical_text="unsafe\nresult",
+            route=UnifiedCommittedInputRoute.DIALOGUE,
+        )
+    assert unsafe_result.value.reason == "NATIVE_DELEGATE_RESULT_INVALID"
+    assert runtime.snapshot() == after_admission
+
+    with pytest.raises(NativeInteractionRuntimeError) as oversized_result:
+        await owner.accept_delegate_result(
+            admission,
+            canonical_text="x" * 65_537,
+            route=UnifiedCommittedInputRoute.DIALOGUE,
+        )
+    assert oversized_result.value.reason == "NATIVE_DELEGATE_RESULT_INVALID"
+    assert runtime.snapshot() == after_admission
+    await owner.close()
 
 
 @pytest.mark.asyncio

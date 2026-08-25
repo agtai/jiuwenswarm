@@ -25,9 +25,13 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativePresentationCursor,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES,
     NativeEngineEvent,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import PresentationAck
+from jiuwenswarm.server.live_voice.voice_task_bridge import (
+    UnifiedCommittedInputRoute,
+)
 
 
 NATIVE_GATEWAY_DESCRIPTOR_KEY = "_native_gateway"
@@ -198,6 +202,23 @@ def _canonical_transcript(value: object) -> bool:
         return False
 
 
+def _canonical_delegate_result(value: object) -> bool:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in value
+        )
+    ):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
 def _validate_method_result(
     method: ReqMethod, result: dict[str, object]
 ) -> dict[str, object]:
@@ -232,16 +253,38 @@ def _validate_method_result(
         elif kind == "audio":
             _closed_result(
                 result,
-                frozenset(
-                    {"kind", "status", "accepted", "presentation_unit"}
-                ),
+                frozenset({"kind", "status", "accepted", "presentation_unit"}),
             )
             valid = (
                 result.get("status") == "observed"
                 and type(result.get("accepted")) is bool
-                and _canonical_audio_presentation_unit(
-                    result.get("presentation_unit")
-                )
+                and _canonical_audio_presentation_unit(result.get("presentation_unit"))
+            )
+        elif kind == "delegate":
+            _closed_result(
+                result,
+                frozenset(
+                    {
+                        "kind",
+                        "status",
+                        "accepted",
+                        "provider_call_id",
+                        "route",
+                        "turn_commit_id",
+                        "canonical_text",
+                        "response",
+                    }
+                ),
+            )
+            valid = (
+                result.get("status") == "completed"
+                and type(result.get("accepted")) is bool
+                and _canonical_result_identity(result.get("provider_call_id"))
+                and result.get("route")
+                in {route.value for route in UnifiedCommittedInputRoute}
+                and _canonical_result_identity(result.get("turn_commit_id"))
+                and _canonical_delegate_result(result.get("canonical_text"))
+                and _canonical_response_ref(result.get("response"))
             )
         else:
             valid = False

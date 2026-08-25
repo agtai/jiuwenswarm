@@ -349,6 +349,41 @@ async def test_slow_adapter_never_blocks_submit_and_preserves_two_sequence_domai
 
 
 @pytest.mark.asyncio
+async def test_terminal_completion_retains_one_canonical_agent_final() -> None:
+    def script(request: AgentRoundRequest):
+        return (
+            AgentEvent(
+                request_id=request.request_id,
+                interaction_id=request.commit.interaction_id,
+                turn_id=request.commit.turn_id,
+                commit_id=request.commit.commit_id,
+                seq=0,
+                event_type="chat.final",
+                source_provenance=request.source_provenance,
+                text="Canonical Jiuwen result.",
+                capability="agent.chat",
+            ),
+            round_event(request, seq=0, state="accepted"),
+            round_event(request, seq=1, state="terminal", outcome="completed"),
+        )
+
+    runtime = AgentBridgeRuntime(instance_id="bridge-canonical-result")
+    assert await runtime.start() is True
+    submission = submit(runtime, ScriptedAdapter(script))
+    deliveries = [
+        await asyncio.wait_for(runtime.next_delivery(), timeout=1) for _ in range(3)
+    ]
+    completion = await asyncio.wait_for(submission.completion, timeout=1)
+
+    assert isinstance(deliveries[0], AgentEventDelivery)
+    assert completion.status is AgentBridgeCompletionStatus.TERMINAL_OBSERVED
+    assert completion.terminal_outcome is TerminalOutcome.COMPLETED
+    assert completion.canonical_text == "Canonical Jiuwen result."
+    assert completion.canonical_final_count == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_production_agent_bridge_emits_only_exact_bound_l0_milestones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,7 +457,9 @@ async def test_production_agent_bridge_emits_only_exact_bound_l0_milestones(
     ]
     completion = await asyncio.wait_for(submission.completion, timeout=1)
     assert all(isinstance(item, AgentEventDelivery) for item in deliveries)
-    assert completion.status is AgentBridgeCompletionStatus.STREAM_ENDED_WITHOUT_TERMINAL
+    assert (
+        completion.status is AgentBridgeCompletionStatus.STREAM_ENDED_WITHOUT_TERMINAL
+    )
     assert resolved == [
         {
             "correlation_id": "correlation-round-1",
@@ -447,18 +484,26 @@ async def test_production_agent_bridge_emits_only_exact_bound_l0_milestones(
 
 
 def test_formal_agent_tool_result_status_is_content_free_and_fail_closed() -> None:
-    assert _tool_result_succeeded(
-        {"event_type": "chat.tool_result", "success": True, "result": "private"}
-    ) is True
-    assert _tool_result_succeeded(
-        {"event_type": "chat.tool_result", "is_error": True, "result": "private"}
-    ) is False
-    assert _tool_result_succeeded(
-        {"event_type": "chat.tool_result", "result": "private"}
-    ) is False
-    assert _tool_result_succeeded(
-        {"event_type": "chat.final", "content": "private"}
-    ) is None
+    assert (
+        _tool_result_succeeded(
+            {"event_type": "chat.tool_result", "success": True, "result": "private"}
+        )
+        is True
+    )
+    assert (
+        _tool_result_succeeded(
+            {"event_type": "chat.tool_result", "is_error": True, "result": "private"}
+        )
+        is False
+    )
+    assert (
+        _tool_result_succeeded({"event_type": "chat.tool_result", "result": "private"})
+        is False
+    )
+    assert (
+        _tool_result_succeeded({"event_type": "chat.final", "content": "private"})
+        is None
+    )
 
 
 @pytest.mark.asyncio
