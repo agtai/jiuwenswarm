@@ -110,6 +110,15 @@
 > component screen; it grants no `PresentationUnit`, speech, Browser or product
 > authority. See the [LVL-12 result](../evidence/LVL12_PRE_FINAL_STABLE_SEGMENTATION_RESULT_2026-08-25.md).
 
+> **2026-08-25 LVL-13 result:** source `9600adbcf` completed the separate
+> no-Browser real-Agent/real-TTS A1/B/A2 population 30/30. Synthesizing the
+> first retrospectively exact prefix reduced Agent→first-PCM p50 by
+> 1723.166 ms / 52.510% medium and 3422.345 ms / 67.377% long versus
+> interpolated controls, with valid control drift and zero forbidden effects.
+> This accepts only the component candidate. Product presentation authority,
+> Runtime/P2/Browser wiring and physical first-audible Gate C remain open. See
+> the [LVL-13 result](../evidence/LVL13_PRE_FINAL_STABLE_AGENT_TTS_RESULT_2026-08-25.md).
+
 ## 1. Outcome and judgement
 
 The useful target is not a headline “two seconds”. It is a conversation that
@@ -479,9 +488,11 @@ Current latency work should be packetized in this dependency order:
 4. preserve the 15/15 real-Agent first-delta baseline, then decompose queue,
    request preparation, connection/network and model first-token latency before
    specifying connection, warm-up or prompt-size candidates;
-5. preserve the LVL-12 medium/long exact-prefix materiality PASS and short
-   STOP. Run a separate no-Browser real Agent→TTS component screen while
-   keeping post-final LVL-10/LVL-10L independent;
+5. preserve the LVL-12 medium/long exact-prefix materiality PASS, LVL-13
+   no-Browser real-Agent/real-TTS component acceptance and short STOP. Before
+   product wiring, define and review immutable presentation authority,
+   reconciliation and cancellation; then run deployed physical Gate C. Keep
+   post-final LVL-10/LVL-10L independent;
 6. consider authoritative acknowledgements for genuinely long Task operations
    only when perceived latency is the product priority;
 7. treat native speech-to-speech as a separate strategic architecture study,

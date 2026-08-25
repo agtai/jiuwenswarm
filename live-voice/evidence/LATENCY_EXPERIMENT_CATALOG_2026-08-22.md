@@ -72,6 +72,7 @@ measurement boundary.
 | `latency/stable-sentence-agent-tts` | `0c92b26264076d875a1247a0585dd8334898904f` | Stable-sentence screen/result owner |
 | `latency/agent-first-delta-probe` | `f71a5d8300f621616030c4dafa608edaec6e46b0` | Real-Agent first-visible-delta diagnostic owner |
 | `latency/pre-final-stable-segmentation-screen` | `ea64751200f725103b757430cde195d0050e6b5c` | Pre-final exact-prefix materiality owner |
+| `latency/pre-final-stable-agent-tts-screen` | `9600adbcf214a6bbc9dd6e08db4a8c59697854d3` | Pre-final real-Agent/real-TTS component candidate owner |
 
 The construction-time heads and later dated additions above are exact evidence
 inputs. A/reference commits, detached benchmark worktrees and remote-tracking
@@ -114,7 +115,8 @@ a frozen-corpus off/on waterfall.
 | `LVL-10` | Authoritative-final chunked TTS | Real-Provider no-Browser `A1/B/A2`; two formal 45/45 populations | **INCONCLUSIVE:** medium A1/A2 drift 426.8 ms in run 1; long drift 321.7 ms in run 2. Long completion B repeated **20–24%** improvement, while medium regressed | Stop before Browser/product wiring; a completion-primary long-form follow-up requires a new prospective hypothesis/spec |
 | `LVL-10L` | Completion-primary long-form chunked TTS | Real-Provider no-Browser A1/B2/B4/A2 pilots; formal stopped | **DIRECTIONAL:** clean v2 pilot 12/12, B2/B4 2100-character completion gain **6.93 s / 36.85%** and **7.75 s / 41.27%**; five-round formal has no attempt artifacts | Stop long-duration testing per Hongxing; no arm selection, Browser or product wiring |
 | `LVL-11` | Agent first-visible-delta baseline | Real-Agent no-Browser/no-Speech diagnostic; 5 sequential attempts per short/medium/long workload | 15/15 complete; first-delta p50 **522.856 / 543.185 / 591.914 ms** and delta→final p50 **8.779 / 1676.287 / 3518.228 ms** | Diagnostic materiality only. Short stops; medium/long exact-prefix follow-up is now LVL-12 |
-| `LVL-12` | Pre-final stable segmentation | Real-Agent no-Browser/no-Speech exact-prefix screen; 5 medium + 5 long | 10/10 exact-prefix; candidate→final p50 **1587.308 / 3573.381 ms** medium/long | Exact-prefix materiality passes; next gate is separate no-Browser Agent→TTS, with no product/speech authority |
+| `LVL-12` | Pre-final stable segmentation | Real-Agent no-Browser/no-Speech exact-prefix screen; 5 medium + 5 long | 10/10 exact-prefix; candidate→final p50 **1587.308 / 3573.381 ms** medium/long | Exact-prefix materiality passes; its separate no-Browser Agent→TTS follow-up is LVL-13 |
+| `LVL-13` | Pre-final exact-prefix Agent→TTS overlap | Real-Agent + real-TTS no-Browser A1/B/A2; 5 attempts per arm/workload plus one excluded warm-up | 30/30 complete; Agent→first-PCM p50 gain **1723.166 ms / 52.510% medium** and **3422.345 ms / 67.377% long** | Component candidate accepted; product-authority design and deployed physical Gate C remain required |
 
 ## 4. LVL-00 — physical Windows Chrome/WSL diagnostic
 
@@ -757,9 +759,31 @@ reconciliation remain active. See the
 [source-bound result](LVL12_PRE_FINAL_STABLE_SEGMENTATION_RESULT_2026-08-25.md).
 
 This is not a TTS experiment and grants no pre-final speech or product
-authority. It authorizes only the next no-Browser Agent→TTS component screen.
+authority. It authorized the separate LVL-13 no-Browser Agent→TTS component
+screen; it did not authorize product wiring.
 
-## 18. What has and has not been measured end to end
+## 18. LVL-13 — pre-final stable Agent-to-TTS component screen
+
+LVL-13 follows the LVL-12 exact-prefix materiality result with real TTS. A1 and
+A2 wait for `chat.final` and synthesize the complete response. B sends the first
+conservative exact-prefix candidate to TTS while the Agent continues, then
+requires exact-prefix reconciliation with the final response. One declared
+Agent/full-final-TTS warm-up is excluded from the 30-slot formal population.
+
+| Workload | A1/B/A2 Agent→first-PCM p50 | Gain vs interpolated control | A1/A2 drift | Result |
+|---|---:|---:|---:|---|
+| Medium | 3140.796 / 1558.399 / 3422.333 ms | **1723.166 ms / 52.510%** | 281.537 ms / 8.964% | PASS |
+| Long | 4981.692 / 1657.019 / 5177.037 ms | **3422.345 ms / 67.377%** | 195.345 ms / 3.921% | PASS |
+
+All slots completed with exact-prefix integrity and zero forbidden effects.
+This is a digital real-Agent/real-Provider component result ending at first
+PCM. It excludes STT, Runtime/P2 authority, Browser, WebAudio, physical
+audibility and product acceptance. Its delta combines Agent/TTS overlap with a
+shorter first-prefix request and does not measure remaining-response
+completion; response realizations may differ across arms. See the
+[source-bound LVL-13 result](LVL13_PRE_FINAL_STABLE_AGENT_TTS_RESULT_2026-08-25.md).
+
+## 19. What has and has not been measured end to end
 
 | Question | Current answer |
 |---|---|
@@ -769,10 +793,11 @@ authority. It authorizes only the next no-Browser Agent→TTS component screen.
 | Do we have full-round causal composition timings? | Yes, `LVL-05`, but they are controlled 6.985–10.240 s B totals, not physical E2E. |
 | Do we have accepted real-Provider component timings? | Yes for the VAD rejection, connection-reuse rejection and stable-sentence materiality stop; each excludes Browser/full E2E. |
 | Do we have real-Agent first-delta timing? | Yes: LVL-11 completed 15/15 and measures the aggregate Agent-start→delta→final boundary. It does not decompose queue/network/model time or prove stable-prefix authority. |
-| Do we have pre-final exact-prefix materiality? | Yes: LVL-12 completed 10/10 for medium/long and exposes 1.587/3.573 s p50 candidate→final windows. TTS/product gain remains unmeasured. |
+| Do we have pre-final exact-prefix materiality? | Yes: LVL-12 completed 10/10 for medium/long and exposes 1.587/3.573 s p50 candidate→final windows. LVL-13 separately measures the TTS component; product gain remains unmeasured. |
+| Do we have pre-final exact-prefix TTS timing? | Yes: LVL-13 completed 30/30 and measures real Agent→real Provider first PCM, saving 1.723 s medium and 3.422 s long at p50 versus interpolated controls. Browser, physical first-audible and product authority remain unmeasured. |
 | Is approximately 46% a locally verified product gain? | No. It remains `REPORTED_EXTERNAL`. LVL-01D later closed the workflow defect for one accepted human run but did not reproduce the feature-off/on percentage. |
 
-## 19. Artifact retention summary
+## 20. Artifact retention summary
 
 The private archive is
 `/home/renan/openJiuwen-ai/live-voice-latency-runs/`. Its README is the full
@@ -797,8 +822,9 @@ artifact ledger. The repository stores only sanitized evidence.
 | LVL-10L | Quota-rejected v1 pilot, cap-boundary v1 pilot and passing v2 pilot survive under `latency-runs/lvl10l`; the stopped v2 formal retains only run/manifest. Hashes are bound in the [LVL-10L result](LVL10L_LONG_FORM_CHUNKED_TTS_RESULT_2026-08-24.md) |
 | LVL-11 | Content-free smoke and 15-attempt population reports survive under `latency-runs/agent-first-delta-20260825/`; population SHA-256 `c81fd7fcbcdc593d26f8ca30dd169164bc1c43c7f3998c59f944e19775fc16a4` |
 | LVL-12 | Accepted content-free v2 population survives under `latency-runs/pre-final-stable-segmentation-20260825/`; SHA-256 `a78295c33043f02c906e6c343506d42d367a2e43246c9530acbab5477150a7a9`. The prior population remains rejected diagnostic evidence. |
+| LVL-13 | Accepted content-free formal report survives under `latency-runs/pre-final-stable-agent-tts-20260825/`; SHA-256 `712eab619ece2e59f14c7b87d154cb2f4b8e46a5b232c971c5606ede31c271e9`. The cold pilot remains rejected drift diagnostic evidence. |
 
-## 20. Current decision route
+## 21. Current decision route
 
 1. Preserve the D-094 P2 batch-16 default and atomic ordered Media observation.
    LVL-01D closes the earlier functional defect; fixed-corpus off/on p50/p95
@@ -816,8 +842,10 @@ artifact ledger. The repository stores only sanitized evidence.
 5. Preserve the LVL-11 aggregate Agent baseline. Decompose queue, request,
    connection/network and model first-token timing separately.
 6. Preserve the LVL-12 exact-prefix materiality PASS for medium/long and short
-   STOP. Run a separate no-Browser real Agent→TTS component screen before any
-   product or Browser wiring.
+   STOP. LVL-13 accepts the separate no-Browser real Agent→TTS component
+   candidate. Define and review product authority, reconciliation and
+   cancellation before Runtime/P2/Browser wiring; only then run deployed
+   physical Gate C.
 7. Treat native speech-to-speech as a strategic architecture study requiring a
    separate authority decision, not as the next optimization packet.
 8. Keep connection reuse, fixed-threshold VAD, EOT early-wait and the tested
