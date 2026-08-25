@@ -56,7 +56,20 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 
 REPORT_SCHEMA_VERSION = "live-voice.vad-eot-causal-report.v1"
 CONFIGURATION_SEQUENCE = (("A1", 1200), ("E1", 900), ("E2", 800), ("A2", 1200))
-SEMANTIC_CONFIGURATION_SEQUENCES = {"semantic-auto": (("A1_1200", 1200), ("B_AUTO", None), ("A2_1200", 1200)), "semantic-high": (("A1_1200", 1200), ("B_HIGH", None), ("A2_1200", 1200))}
+SEMANTIC_CONFIGURATION_SEQUENCES = {
+    "semantic-auto": (("A1_1200", 1200), ("B_AUTO", None), ("A2_1200", 1200)),
+    "semantic-high": (("A1_1200", 1200), ("B_HIGH", None), ("A2_1200", 1200)),
+}
+CONFIGURATION_ORDER = {
+    "A1": 0,
+    "A1_1200": 0,
+    "E1": 1,
+    "B_AUTO": 1,
+    "B_HIGH": 1,
+    "E2": 2,
+    "A2_1200": 2,
+    "A2": 3,
+}
 FRAME_SAMPLES = 960
 FRAME_SECONDS = 0.020
 EVENT_TIMEOUT_SECONDS = 20.0
@@ -106,6 +119,28 @@ def turn_detection_for(configuration: VadConfiguration) -> RecognitionTurnDetect
     if configuration.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD:
         return RecognitionTurnDetection.semantic_vad_configured(configuration.semantic_eagerness)
     return RecognitionTurnDetection(RecognitionTurnDetectionMode.SERVER_VAD, ServerVadConfig(silence_duration_ms=configuration.silence_duration_ms))
+
+
+def _configuration_fields_match(
+    configuration_id: str,
+    turn_detection_mode: str,
+    silence_duration_ms: int | None,
+    semantic_eagerness: str | None,
+) -> bool:
+    try:
+        configuration = parse_configuration(configuration_id)
+    except ValueError:
+        return False
+    expected_eagerness = (
+        configuration.semantic_eagerness.value
+        if configuration.semantic_eagerness is not None
+        else None
+    )
+    return (
+        turn_detection_mode == configuration.mode.value
+        and silence_duration_ms == configuration.silence_duration_ms
+        and semantic_eagerness == expected_eagerness
+    )
 
 
 class VadAttemptOutcome(StrEnum):
@@ -210,10 +245,12 @@ class VadAttemptResult:
         )
         completed = self.outcome is VadAttemptOutcome.COMPLETED
         if (
-            self.configuration_id not in {"A1", "E1", "E2", "A2", "A1_1200", "A2_1200", "B_AUTO", "B_HIGH"}
-            or (self.silence_duration_ms is not None and (type(self.silence_duration_ms) is not int or self.silence_duration_ms not in {800, 900, 1200}))
-            or (self.configuration_id in {"B_AUTO", "B_HIGH"} and self.silence_duration_ms is not None)
-            or (self.turn_detection_mode == "semantic_vad") != (self.semantic_eagerness is not None)
+            not _configuration_fields_match(
+                self.configuration_id,
+                self.turn_detection_mode,
+                self.silence_duration_ms,
+                self.semantic_eagerness,
+            )
             or type(self.case_id) is not str
             or not _RUN_ID.fullmatch(self.case_id)
             or type(self.attempt_index) is not int
@@ -331,7 +368,9 @@ class VadAttemptResult:
 @dataclass(frozen=True, slots=True)
 class VadConfigurationSummary:
     configuration_id: str
-    silence_duration_ms: int
+    turn_detection_mode: str
+    silence_duration_ms: int | None
+    semantic_eagerness: str | None
     case_id: str
     attempts: int
     completed: int
@@ -393,11 +432,25 @@ def _nearest_rank(values: Sequence[float], percentile: float) -> float | None:
 
 
 def _safe_summary(attempts: Sequence[VadAttemptResult]) -> tuple[VadConfigurationSummary, ...]:
-    grouped: dict[tuple[str, int, str], list[VadAttemptResult]] = defaultdict(list)
+    grouped: dict[
+        tuple[str, str, int | None, str | None, str],
+        list[VadAttemptResult],
+    ] = defaultdict(list)
     for attempt in attempts:
-        grouped[(attempt.configuration_id, attempt.silence_duration_ms, attempt.case_id)].append(attempt)
+        grouped[
+            (
+                attempt.configuration_id,
+                attempt.turn_detection_mode,
+                attempt.silence_duration_ms,
+                attempt.semantic_eagerness,
+                attempt.case_id,
+            )
+        ].append(attempt)
     summaries = []
-    for key in sorted(grouped, key=lambda value: ("A1E1E2A2".index(value[0]), value[2])):
+    for key in sorted(
+        grouped,
+        key=lambda value: (CONFIGURATION_ORDER[value[0]], value[4]),
+    ):
         rows = grouped[key]
         values = [
             row.final_voiced_frame_to_eot_ms

@@ -835,6 +835,47 @@ async def test_semantic_attempt_uses_native_detection_and_mode_specific_commit_t
         assert result.final_voiced_frame_to_final_ms is None
 
 
+def test_semantic_summaries_preserve_mode_eagerness_and_explicit_arm_order() -> None:
+    metrics = {
+        "final_voiced_frame_to_eot_ms": 300.0,
+        "eot_to_final_ms": 100.0,
+        "final_voiced_frame_to_final_ms": 400.0,
+        "provider_reported_speech_end_ms": 1000.0,
+        "pacing_p50_ms": 0.0,
+        "pacing_p95_ms": 0.0,
+        "pacing_max_ms": 0.0,
+    }
+    attempts = (
+        runner.VadAttemptResult.completed(
+            "A2_1200", 1200, "case-a", 0, **metrics
+        ),
+        runner.VadAttemptResult.completed(
+            "B_AUTO",
+            None,
+            "case-a",
+            0,
+            turn_detection_mode="semantic_vad",
+            semantic_eagerness="auto",
+            **metrics,
+        ),
+        runner.VadAttemptResult.completed(
+            "A1_1200", 1200, "case-a", 0, **metrics
+        ),
+    )
+
+    summaries = runner._safe_summary(attempts)
+
+    assert [summary.configuration_id for summary in summaries] == [
+        "A1_1200",
+        "B_AUTO",
+        "A2_1200",
+    ]
+    semantic = summaries[1]
+    assert semantic.turn_detection_mode == "semantic_vad"
+    assert semantic.silence_duration_ms is None
+    assert semantic.semantic_eagerness == "auto"
+
+
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = support.load_vad_corpus_manifest(config.manifest_path)
