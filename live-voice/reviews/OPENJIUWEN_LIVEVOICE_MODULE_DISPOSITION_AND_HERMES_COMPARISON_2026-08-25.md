@@ -1,8 +1,8 @@
 # OpenJiuwen LiveVoice module disposition and Hermes comparison — 2026-08-25
 
-Status: Task 1 machine inventory complete; 138 of 152 production paths now have
-completed semantic disposition, Hermes relation and AgentCore classification.
-The remaining classifications are in progress under the accepted
+Status: Task 1 machine inventory and semantic classification complete; all 152
+of 152 production paths have a disposition, Hermes relation and AgentCore
+classification under the accepted
 [scope](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md) and
 [execution plan](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_EXECUTION_PLAN_2026-08-25.md).
 This is a preparation review, not product progress or migration approval.
@@ -275,9 +275,9 @@ The union contains 152 unique paths, with zero cross-group duplicates. A
 mechanical set-equality check between this table and a fresh projection is
 required whenever the moving feature-branch HEAD changes and at final review.
 
-Semantic completion is deliberately not claimed here. Tasks 2–5 must populate
-all disposition fields for every path before this document can become the final
-module explanation.
+Semantic completion is recorded in §§7–24. The completed-path set is checked
+mechanically against this 152-path manifest; it does not grant implementation,
+migration or retirement approval.
 
 ## 7. Completed semantic dispositions
 
@@ -664,3 +664,57 @@ shared WebSocket hook retain only bounded host integration. The existing
 supplement-output quarantine is a positive direct-reuse finding in
 JiuwenSwarm, so LiveVoice should consume it rather than duplicate or move it to
 AgentCore.
+
+## 23. Shared Schema, compatibility carrier and host-composition dispositions
+
+The last batch applies the shared-host rule strictly: each conclusion covers
+only the named LiveVoice segment, never the entire JiuwenSwarm host module.
+Current formal P3 construction selects `DirectProjectCodeExecutorAdapter` with
+`service=None`; the AutoHarness project pipeline remains a compatibility or
+rollback carrier. AgentCore already exposes `Runner.run_agent` and
+`Runner.run_agent_streaming` for both current and legacy Agent bases, so a new
+generic Agent-launch lease is not justified by the observed LiveVoice code.
+
+| Module / representative public symbols | Capability domain; responsibility and necessity | State authority | AgentCore relation | Hermes comparison | Size driver and proposed disposition | Dependencies, evidence, confidence |
+|---|---|---|---|---|---|---|
+| `jiuwenswarm/agents/harness/common/auto_harness/project_execution.py`<br>`resolve_project_execution_contract`, project pipeline/effect constants | **Legacy project-execution compatibility contract.** Binds selected Web project, Code Agent root and Git root and rejects unsupported shell/test requirements for the old scheduled carrier. | Compatibility validation only; scheduler/Agent owns execution. | **REPLACE/REMOVE**, not an AgentCore PR. The direct LiveVoice executor already owns the current product profile; generic command/result/effect truth maps to existing candidates, while project/Git policy remains Jiuwen Executor policy. | No Hermes voice analogue. | The same project-code constants/policy now also exist in the direct executor. **CONSOLIDATE UNIQUE POLICY ORACLES INTO THE DIRECT EXECUTOR PROFILE**, then remove this module with the legacy carrier. | Imported only by AutoHarness service/scheduler. High confidence. |
+| `jiuwenswarm/agents/harness/common/auto_harness/scheduler.py`<br>LiveVoice origin skip and project-code execution branches | **Shared AutoHarness host / legacy executor carrier.** Prevents background pickup of authenticated LiveVoice rows and runs the compatibility project-code pipeline only through explicit trigger. | AutoHarness schedule/execution lifecycle; LiveVoice owns no new authority here. | **REMOVE LIVEVOICE SEGMENTS AFTER DIRECT-EXECUTOR GATE**. AgentCore Task/command/effect candidates replace generic truth; Jiuwen direct Executor replaces the carrier. | No Hermes analogue. | Preserve unrelated 843-line scheduler. Delete only LiveVoice/project-pipeline branches after legacy recovery/rollback acceptance and caller audit. | Current formal environment path selects the direct executor; compatibility adapter/tests still gate retirement. High confidence. |
+| `jiuwenswarm/agents/harness/common/auto_harness/service.py`<br>LiveVoice origin reconciliation and project-code scheduling segments | **Shared AutoHarness service / legacy Task RPC carrier.** Creates scoped legacy scheduled rows, resolves project execution contract and reconciles LiveVoice-origin records. | AutoHarness Task/store/request lifecycle for compatibility only. | **REPLACE LIVEVOICE SEGMENTS** with Scope/`ADD-01..05` AgentCore facade plus direct Jiuwen Executor. Do not move the 4,209-line service or its product/project policy upstream. | No Hermes analogue. | The LiveVoice branch is embedded in a large general service and duplicates formal P3. **REMOVE AFTER LEGACY ADAPTER/ROLLBACK GATE**, leaving AutoHarness behavior unchanged. | `ProjectCodeExecutorAdapter` is explicitly compatibility-only; formal construction passes no service. High confidence. |
+| `jiuwenswarm/agents/harness/common/auto_harness/task_store.py`<br>LiveVoice orphaned-running reconciliation branch | **Shared AutoHarness store / legacy recovery.** Converts orphaned LiveVoice carrier rows to interrupted instead of generic failed. | Legacy AutoHarness row/reconciliation truth. | **REPLACE** with AgentCore terminal outcome/checkpoint/effect recovery candidates for formal Tasks; remove only the LiveVoice branch after carrier retirement. | No Hermes analogue. | One bounded semantic branch in a 773-line shared store; **RETAIN HOST, REMOVE COMPATIBILITY SPECIAL CASE AFTER GATE**. | Caller evidence is the AutoHarness compatibility path. High confidence. |
+| `jiuwenswarm/channels/web/app_web.py`<br>LiveVoice media/log redaction segment | **Shared Web channel security.** Redacts audio, transcript, credentials, media/session identities and commit receipts from WebSocket diagnostics. | Log projection only; no product authority. | **DIRECT JIUWENSWARM REUSE**; not AgentCore. | Hermes observer hooks also require sanitized payloads, supporting a host-level redaction boundary. | The LiveVoice-specific redaction rules are a necessary shared security segment. **RETAIN**, derive sensitive key vocabulary from one privacy contract if this can stay fail-closed. | Web logging path consumes it directly. High confidence. |
+| `jiuwenswarm/common/schema/live_voice_contract_v2.py`<br>`ScopeRef`, command/query/result/event envelopes, turn/response/cancel/sequence primitives | **Shared LiveVoice v2 kernel.** Supplies the canonical Python identity, immutable JSON, Task protocol, committed-turn, response fence, cancellation and sequence contracts used across backend/gateway. | Versioned contract/schema truth only; concrete owners hold state. | **MIXED SPLIT**: Scope and generic command/query/result/event/cursor portions map to `SCOPE-01` and `ADD-01..03` (plus checkpoint/effect candidates); committed turn, response fence, voice cancellation/media identities and product extensions remain LiveVoice. Prepare adapters and generated mappings—do not copy the 4,000-line file into AgentCore. | Hermes has smaller per-subsystem contracts and no comparable monolithic voice-plus-durable-Task kernel. The comparison supports splitting by authority, not deleting Jiuwen safety invariants. | Major size comes from multiple capability families, strict validation and in-memory reference implementations. **SPLIT BY TARGET CONTRACT** after AgentCore schemas stabilize; retire Task portions only after mapping/compatibility tests. | Dozens of production modules import v2, so this is a migration map, not a removal candidate. High confidence. |
+| `jiuwenswarm/common/schema/live_voice_contract.py`<br>v1 cancel/commit/work-progress contract | **Obsolete v1 shared contract.** Minimal predecessor to v2. | Contract only. | `REPLACE/REMOVE`; generic progress maps to AgentCore event/result contracts and retained voice types already exist in v2. | No Hermes relevance. | No production import exists. **PORT THE ONE UNIT ORACLE TO V2/AGENTCORE MAPPING, THEN REMOVE** after a repository-wide dynamic-import check. | Caller scan found only its unit test. High confidence. |
+| `jiuwenswarm/common/schema/message.py`<br>LiveVoice request/event enum members | **Shared Jiuwen wire vocabulary.** Declares P2/P3 product requests and Task-progress events so Web/Gateway/AgentServer use typed methods. | Protocol-name declaration only. | `LIVEVOICE_KEEP WIRE ADAPTER`: P3 methods terminate in the scoped AgentCore facade; P2/product methods remain Jiuwen. AgentCore need not adopt Jiuwen Web RPC names. | Hermes channel request names are unrelated. | The same method sets are repeated in Gateway allowlists and frontend constants. **DERIVE ONE CANONICAL PRODUCT METHOD CATALOG** while preserving the shared message enum. | Used across stock E2A routing. High confidence. |
+| `jiuwenswarm/gateway/app_gateway.py`<br>Alpha credential injection and gateway voice-claim segments | **Gateway product trust Adapter.** Keeps the static Alpha bearer server-side and issues/replaces the authenticated voice claim immediately before forwarding committed input. | Gateway credential/claim projection; AgentServer remains product authority. | `LIVEVOICE_KEEP`; map authenticated scope/commands to AgentCore downstream. The static Alpha-token mechanism is temporary product auth, not an AgentCore feature. | Hermes local voice does not have this Web/Gateway trust boundary. | **RETAIN VOICE CLAIM IN A THIN GATEWAY ADAPTER**; replace/remove Alpha static-bearer injection when production authentication exists; derive allowed method sets from the canonical catalog. | Called in the normalized Web forwarding path. High confidence. |
+| `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py`<br>LiveVoice forward allowlists and gateway speech/media composition segment | **Shared Web handler host / gateway composition.** Registers batch/streaming speech, dedicated media, observability and opaque product forwarding. | Gateway speech/media registration and owned-service lifecycle; no Agent/Task authority. | `LIVEVOICE_KEEP HOST LEAF`; P3 forwarding reaches the AgentCore-backed server facade, while speech/media stay local. | Hermes concentrates provider registration near voice composition, but does not supply Jiuwen's Web handler/trust boundary. | LiveVoice composition is embedded inside a 6,632-line general handler registrar. **EXTRACT ONE GATEWAY LIVEVOICE COMPOSITION FUNCTION/OWNER** under `gateway/live_voice`, leaving a single host call; consolidate duplicate method allowlists. | Current imports/configuration block and handler tables are explicit. High confidence. |
+| `jiuwenswarm/gateway/channel_manager/web/web_connect.py`<br>dedicated-media route, LiveVoice owner fields, cleanup and event forwarding segments | **Shared WebSocket host / media lifecycle leaf.** Routes the dedicated media subprotocol, stores injected speech/media owners, forwards progress and closes owned resources. | WebChannel connection/server shutdown lifecycle; dedicated registry owns media sessions. | `LIVEVOICE_KEEP HOST LEAF`; no AgentCore relation. | Hermes audio transport cleanup is a loose analogue, but the WebSocket subprotocol is Jiuwen-specific. | Several separate fields and close branches duplicate registry ownership. **DELEGATE LIVEVOICE CLOSE TO ONE GATEWAY REGISTRY/LEASE**, retaining only route dispatch and one host reference; preserve injected-vs-owned semantics. | Real route and shutdown paths use these segments. High confidence. |
+| `jiuwenswarm/gateway/live_voice/__init__.py` | **Gateway package surface.** Minimal package marker for dedicated LiveVoice gateway adapters. | None. | `LIVEVOICE_KEEP`; no AgentCore relation. | No analogue is needed. | Three lines; **RETAIN MINIMAL**. | Tracked package surface. High confidence. |
+| `jiuwenswarm/server/agent_ws_server.py`<br>LiveVoice P3/product start/stop, request dispatch, text push and diagnostic segments | **Shared AgentServer host / product entry root.** Builds formal P3 and product composition, routes Task/P2/P3 requests, pushes product text events and projects diagnostics. | AgentServer host lifecycle and transport dispatch; injected product owners retain auth/Task/presentation truth. | **MIXED LIVEVOICE KEEP + ADAPTER REUSE**: extract a dedicated AgentServer LiveVoice entry Adapter whose P3 datasource is the scoped AgentCore facade; keep product auth/routing/text/diagnostics local. | Hermes also has a central agent/voice entrypoint, but Jiuwen additionally needs Web auth, durable Task and product presentation boundaries. | LiveVoice logic is dispersed through a 9,000-plus-line shared server. **EXTRACT START/STOP/ROUTE/OBSERVATION INTO ONE DEDICATED HOST ADAPTER** and leave narrow registration/forwarding calls. Do not move the full host or product registry upstream. | Current functions and request-enum branches provide exact extraction seams. High confidence. |
+| `jiuwenswarm/server/runtime/agent_manager.py`<br>formal Task Agent acquire/release/cleanup segment | **Jiuwen Code Agent factory and attempt lease.** Creates a project-bound Code Agent, pins exact attempt ownership, prevents transport disconnect cancellation and strictly quiesces/releases cached instances. | Jiuwen Agent factory/cache/lease and cleanup authority; Executor owns worktree/attempt, AgentCore Runner owns invocation lifecycle. | **DIRECT/ADAPTER REUSE; NO `EXE-05` PR**: invoke the constructed compatible Agent through AgentCore `Runner.run_agent`/`run_agent_streaming`. Keep project binding, cache CAS and strict quiescence in JiuwenSwarm because they are application/Executor policy, not missing generic AgentCore truth. | Hermes session/agent construction is only a pattern; it does not replace Jiuwen's project-bound Code Agent factory. | **SPLIT A THIN FORMAL-ATTEMPT FACTORY/LEASE ADAPTER** from the general manager if useful, but do not copy manager code into AgentCore. | AgentCore public Runner accepts current and legacy Agent bases; observed gap is composition, not a missing launch API. High confidence. |
+
+## 24. Inventory closure and complete module-level conclusion
+
+The semantic set now equals the machine manifest: **152/152 production paths,
+0 missing, 0 extra**. This closes the explanation/classification task at the
+module-path level for observed feature HEAD `acd873d0`; moving-branch changes
+still require incremental reconciliation by path/symbol/capability.
+
+The complete inventory supports four distinct outcomes rather than one
+headline deletion number:
+
+1. **Direct or thin-Adapter reuse:** Agent/Runner invocation, scoped Task
+   facade, Task events/cursors/results, generic trace/OTel, and shared Jiuwen
+   Web interrupt quarantine.
+2. **AgentCore PR candidates already identified:** `SCOPE-01`, `A1/A2`, and
+   `ADD-01..05`; this last host batch adds no new candidate, and specifically
+   rejects a new `EXE-05` launch-lease PR on current evidence.
+3. **LiveVoice product code that remains:** browser/media/speech, committed
+   input, Jiuwen authority/confirmation, voice/Task presentation, recovery,
+   privacy and composition roots—usually with internal coordinator splits.
+4. **Re-home/remove-after-gate material:** legacy browser/AutoHarness lanes,
+   unused v1/TypeScript contract replicas, fake verticals and Alpha/L0/fault
+   validation support currently counted under production paths.
+
+No item in this inventory authorizes migration, deletion, default-on
+composition, canary, Store retirement or PR submission while the feature
+branch is still advancing.
