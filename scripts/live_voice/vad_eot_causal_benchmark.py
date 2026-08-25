@@ -189,6 +189,8 @@ class VadAttemptResult:
     pacing_p50_ms: float | None
     pacing_p95_ms: float | None
     pacing_max_ms: float | None
+    turn_detection_mode: str = "server_vad"
+    semantic_eagerness: str | None = None
 
     def __post_init__(self) -> None:
         metrics = (
@@ -208,9 +210,10 @@ class VadAttemptResult:
         )
         completed = self.outcome is VadAttemptOutcome.COMPLETED
         if (
-            self.configuration_id not in {"A1", "E1", "E2", "A2"}
-            or type(self.silence_duration_ms) is not int
-            or self.silence_duration_ms not in {800, 900, 1200}
+            self.configuration_id not in {"A1", "E1", "E2", "A2", "A1_1200", "A2_1200", "B_AUTO", "B_HIGH"}
+            or (self.silence_duration_ms is not None and (type(self.silence_duration_ms) is not int or self.silence_duration_ms not in {800, 900, 1200}))
+            or (self.configuration_id in {"B_AUTO", "B_HIGH"} and self.silence_duration_ms is not None)
+            or (self.turn_detection_mode == "semantic_vad") != (self.semantic_eagerness is not None)
             or type(self.case_id) is not str
             or not _RUN_ID.fullmatch(self.case_id)
             or type(self.attempt_index) is not int
@@ -249,6 +252,8 @@ class VadAttemptResult:
         attempt_index: int,
         **metrics: float | None,
     ) -> "VadAttemptResult":
+        turn_detection_mode = metrics.pop("turn_detection_mode", "server_vad")
+        semantic_eagerness = metrics.pop("semantic_eagerness", None)
         return cls(
             configuration_id,
             silence_duration_ms,
@@ -271,6 +276,8 @@ class VadAttemptResult:
             metrics.get("pacing_p50_ms"),
             metrics.get("pacing_p95_ms"),
             metrics.get("pacing_max_ms"),
+            turn_detection_mode,
+            semantic_eagerness,
         )
 
     @classmethod
@@ -291,6 +298,8 @@ class VadAttemptResult:
         transcript_complete: bool = False,
         cleanup_complete: bool = False,
         pacing_valid: bool = False,
+        turn_detection_mode: str = "server_vad",
+        semantic_eagerness: str | None = None,
     ) -> "VadAttemptResult":
         return cls(
             configuration_id,
@@ -314,6 +323,8 @@ class VadAttemptResult:
             None,
             None,
             None,
+            turn_detection_mode,
+            semantic_eagerness,
         )
 
 

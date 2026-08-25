@@ -750,6 +750,15 @@ def test_semantic_experiments_are_separate_three_arm_blocks_and_report_mode_fiel
     assert runner.REPORT_SCHEMA_VERSION.endswith("v1")
 
 
+def test_semantic_attempt_fields_are_closed_and_failed_timings_are_null() -> None:
+    completed = runner.VadAttemptResult.completed("B_AUTO", None, "case-a", 0, final_voiced_frame_to_eot_ms=1.0, eot_to_final_ms=1.0, final_voiced_frame_to_final_ms=2.0, turn_detection_mode="semantic_vad", semantic_eagerness="auto")
+    assert completed.turn_detection_mode == "semantic_vad"
+    assert completed.silence_duration_ms is None
+    assert completed.semantic_eagerness == "auto"
+    failed = runner.VadAttemptResult.failed("B_HIGH", None, "case-a", 0, runner.VadAttemptReason.TIMEOUT, turn_detection_mode="semantic_vad", semantic_eagerness="high")
+    assert failed.final_voiced_frame_to_eot_ms is None
+
+
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = support.load_vad_corpus_manifest(config.manifest_path)
