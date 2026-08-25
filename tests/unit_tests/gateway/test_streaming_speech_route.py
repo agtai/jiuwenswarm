@@ -69,6 +69,7 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnBoundaryEvent,
     RecognitionTurnBoundaryKind,
     RecognitionTurnDetection,
+    SemanticVadEagerness,
     StreamingProviderCapability,
     StreamingRecognitionEvent,
     SynthesisProviderSupport,
@@ -103,6 +104,7 @@ def _capability() -> StreamingProviderCapability:
             provider_cancel_ack=CapabilityProvenance.UNAVAILABLE,
             native_partials=CapabilityProvenance.PROVIDER_NATIVE,
             server_vad=CapabilityProvenance.PROVIDER_NATIVE,
+            semantic_vad=CapabilityProvenance.PROVIDER_NATIVE,
         ),
         synthesis=SynthesisProviderSupport(
             modes=frozenset({SpeechMode.STREAM}),
@@ -535,6 +537,16 @@ async def test_pre_speech_begin_exception_abandons_probe_without_batch(
     assert runtime.recorders[0].abandoned is True
     assert runtime.recorders[0].terminal is None
     assert runtime.writes == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_vad_requires_native_capability_before_provider_allocation() -> None:
+    provider = _ServerVadProvider()
+    provider.capability = replace(provider.capability, recognition=replace(provider.capability.recognition, semantic_vad=CapabilityProvenance.UNAVAILABLE))
+    owner = StreamingRecognitionRouteOwner(lambda: asyncio.sleep(0, result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)))
+    handle, fallback = await owner.begin(_binding(), turn_detection=RecognitionTurnDetection.semantic_vad_configured(SemanticVadEagerness.AUTO))
+    assert handle is None and fallback is not None
+    assert provider.open_count == 0
 
 
 @pytest.mark.asyncio
