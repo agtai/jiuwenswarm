@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ResponseRef,
+    ScopeRef,
+)
 from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
 from jiuwenswarm.server.live_voice.native_interaction_carrier import (
     NativeCarrierViolation,
@@ -16,6 +23,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeTurnCommit,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    NativeAudioOutput,
     NativeEngineEvent,
 )
 
@@ -69,17 +77,52 @@ def test_native_proposal_round_trips_one_closed_engine_event() -> None:
     assert proposal.provider_done is None
 
 
-def test_native_proposal_rejects_unknown_fields_and_raw_audio() -> None:
+def test_native_proposal_rejects_unknown_fields() -> None:
     payload = NativeInteractionProposal.from_engine_event(BINDING, event()).to_dict()
     payload["unknown"] = True
     with pytest.raises(NativeCarrierViolation) as unknown:
         NativeInteractionProposal.from_dict(payload)
     assert unknown.value.reason == "NATIVE_PROPOSAL_FIELDS_NOT_CLOSED"
 
-    audio_event = NativeEngineEvent(audio=object())  # type: ignore[arg-type]
-    with pytest.raises(NativeCarrierViolation) as audio:
-        NativeInteractionProposal.from_engine_event(BINDING, audio_event)
-    assert audio.value.reason == "NATIVE_RAW_AUDIO_FORBIDDEN"
+
+def test_native_proposal_carries_only_audio_metadata_and_never_pcm() -> None:
+    pcm16 = b"\x12\x34" * 480
+    response = ResponseRef(BINDING.interaction_id, "native-response-1", 1)
+    engine_event = NativeEngineEvent(
+        audio=NativeAudioOutput(
+            provider_event_id="provider-audio-event-1",
+            provider_response_id="provider-response-1",
+            provider_item_id="provider-assistant-item-1",
+            content_index=0,
+            sequence=0,
+            pcm16=pcm16,
+            response=response,
+        )
+    )
+
+    proposal = NativeInteractionProposal.from_engine_event(BINDING, engine_event)
+    payload = proposal.to_dict()
+    encoded = json.dumps(payload, sort_keys=True)
+
+    assert NativeInteractionProposal.from_dict(payload) == proposal
+    assert proposal.audio_observation is not None
+    assert proposal.audio_observation.sample_count == 480
+    assert proposal.audio_observation.content_sha256 == hashlib.sha256(
+        pcm16
+    ).hexdigest()
+    assert set(payload["audio_observation"]) == {
+        "provider_event_id",
+        "provider_response_id",
+        "provider_item_id",
+        "content_index",
+        "sequence",
+        "sample_count",
+        "content_sha256",
+        "response",
+    }
+    assert "pcm16" not in encoded
+    assert "EjQ=" not in encoded
+    assert pcm16.hex() not in encoded
 
 
 def test_native_proposal_rejects_cross_binding_action_before_runtime() -> None:

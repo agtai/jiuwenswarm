@@ -15,6 +15,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeAudioObservation,
     NativeContractLedger,
     NativeDelegateProposal,
     NativeInteractionBinding,
@@ -69,6 +70,56 @@ def _delegate_payload() -> dict[str, object]:
         "provider_item_id": "provider-item-9",
         "request_text": "Create a background task",
     }
+
+
+def _audio_observation_payload() -> dict[str, object]:
+    return {
+        "provider_event_id": "provider-audio-event-1",
+        "provider_response_id": "provider-response-1",
+        "provider_item_id": "provider-assistant-item-1",
+        "content_index": 0,
+        "sequence": 3,
+        "sample_count": 480,
+        "content_sha256": "a" * 64,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "native-response-1",
+            "response_generation": 7,
+        },
+    }
+
+
+def test_native_audio_observation_is_closed_metadata_only() -> None:
+    observation = NativeAudioObservation.from_dict(_audio_observation_payload())
+
+    assert observation.to_dict() == _audio_observation_payload()
+    assert observation.sample_count == 480
+    assert observation.content_sha256 == "a" * 64
+    assert not any(
+        name in observation.to_dict()
+        for name in ("pcm16", "audio", "bytes", "base64")
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("sample_count", 0, "NATIVE_AUDIO_SAMPLE_COUNT_INVALID"),
+        ("sample_count", 48_001, "NATIVE_AUDIO_SAMPLE_COUNT_INVALID"),
+        ("content_sha256", "A" * 64, "NATIVE_AUDIO_DIGEST_INVALID"),
+        ("content_sha256", "a" * 63, "NATIVE_AUDIO_DIGEST_INVALID"),
+    ],
+)
+def test_native_audio_observation_rejects_noncanonical_metadata(
+    field: str, value: object, reason: str
+) -> None:
+    payload = _audio_observation_payload()
+    payload[field] = value
+
+    with pytest.raises(NativeInteractionContractViolation) as raised:
+        NativeAudioObservation.from_dict(payload)
+
+    assert raised.value.reason == reason
 
 
 def test_native_turn_commit_allows_audio_authority_without_transcript() -> None:

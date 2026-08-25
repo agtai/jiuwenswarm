@@ -26,6 +26,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 
 
 NATIVE_INTERACTION_CONTRACT_VERSION = "live-voice.native-interaction.v1"
+MAX_NATIVE_AUDIO_SAMPLE_COUNT = 48_000
 MAX_NATIVE_DELEGATE_UTF8_BYTES = 16_384
 MAX_NATIVE_TRANSCRIPT_UTF8_BYTES = 65_536
 _MAX_IDENTITY_CHARS = 256
@@ -231,6 +232,131 @@ class NativeInteractionBinding:
             "activation_id": self.activation_id,
             "activation_generation": self.activation_generation,
             "correlation_id": self.correlation_id,
+        }
+
+
+_AUDIO_OBSERVATION_KEYS = frozenset(
+    {
+        "provider_event_id",
+        "provider_response_id",
+        "provider_item_id",
+        "content_index",
+        "sequence",
+        "sample_count",
+        "content_sha256",
+        "response",
+    }
+)
+_RESPONSE_REF_KEYS = frozenset(
+    {"interaction_id", "response_id", "response_generation"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeAudioObservation:
+    """Provider audio identity and digest without recoverable audio content."""
+
+    provider_event_id: str
+    provider_response_id: str
+    provider_item_id: str
+    content_index: int
+    sequence: int
+    sample_count: int
+    content_sha256: str
+    response: ResponseRef
+
+    def __post_init__(self) -> None:
+        _identity(self.provider_event_id, "provider_event_id")
+        _identity(self.provider_response_id, "provider_response_id")
+        _identity(self.provider_item_id, "provider_item_id")
+        _cursor(self.content_index, "content_index")
+        _cursor(self.sequence, "sequence")
+        if (
+            type(self.sample_count) is not int
+            or not 0 < self.sample_count <= MAX_NATIVE_AUDIO_SAMPLE_COUNT
+        ):
+            raise NativeInteractionContractViolation(
+                "NATIVE_AUDIO_SAMPLE_COUNT_INVALID",
+                "sample_count must describe bounded non-empty PCM16",
+            )
+        if (
+            type(self.content_sha256) is not str
+            or len(self.content_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.content_sha256)
+        ):
+            raise NativeInteractionContractViolation(
+                "NATIVE_AUDIO_DIGEST_INVALID",
+                "content_sha256 must be one lowercase SHA-256 digest",
+            )
+        if not isinstance(self.response, ResponseRef):
+            raise NativeInteractionContractViolation(
+                "NATIVE_RESPONSE_REF_INVALID",
+                "audio observation requires a canonical ResponseRef",
+            )
+        _identity(self.response.interaction_id, "response.interaction_id")
+        _identity(self.response.response_id, "response.response_id")
+        _positive_generation(
+            self.response.response_generation, "response.response_generation"
+        )
+
+    @classmethod
+    def from_dict(cls, value: object) -> NativeAudioObservation:
+        data = _closed_mapping(
+            value,
+            keys=_AUDIO_OBSERVATION_KEYS,
+            reason="NATIVE_AUDIO_OBSERVATION_FIELDS_NOT_CLOSED",
+            field="native audio observation",
+        )
+        response = _closed_mapping(
+            data["response"],
+            keys=_RESPONSE_REF_KEYS,
+            reason="NATIVE_RESPONSE_REF_FIELDS_NOT_CLOSED",
+            field="native response ref",
+        )
+        try:
+            ref = ResponseRef(
+                interaction_id=_identity(
+                    response["interaction_id"], "response.interaction_id"
+                ),
+                response_id=_identity(
+                    response["response_id"], "response.response_id"
+                ),
+                response_generation=_positive_generation(
+                    response["response_generation"], "response.response_generation"
+                ),
+            )
+        except NativeInteractionContractViolation:
+            raise
+        except Exception:
+            raise NativeInteractionContractViolation(
+                "NATIVE_RESPONSE_REF_INVALID",
+                "response must be a canonical ResponseRef",
+            ) from None
+        return cls(
+            provider_event_id=data["provider_event_id"],  # type: ignore[arg-type]
+            provider_response_id=data["provider_response_id"],  # type: ignore[arg-type]
+            provider_item_id=data["provider_item_id"],  # type: ignore[arg-type]
+            content_index=data["content_index"],  # type: ignore[arg-type]
+            sequence=data["sequence"],  # type: ignore[arg-type]
+            sample_count=data["sample_count"],  # type: ignore[arg-type]
+            content_sha256=data["content_sha256"],  # type: ignore[arg-type]
+            response=ref,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "provider_event_id": self.provider_event_id,
+            "provider_response_id": self.provider_response_id,
+            "provider_item_id": self.provider_item_id,
+            "content_index": self.content_index,
+            "sequence": self.sequence,
+            "sample_count": self.sample_count,
+            "content_sha256": self.content_sha256,
+            "response": {
+                "interaction_id": self.response.interaction_id,
+                "response_id": self.response.response_id,
+                "response_generation": self.response.response_generation,
+            },
         }
 
 
@@ -627,9 +753,11 @@ class NativeContractLedger:
 
 
 __all__ = [
+    "MAX_NATIVE_AUDIO_SAMPLE_COUNT",
     "MAX_NATIVE_DELEGATE_UTF8_BYTES",
     "NATIVE_INTERACTION_CONTRACT_VERSION",
     "NativeContractLedger",
+    "NativeAudioObservation",
     "NativeDelegateProposal",
     "NativeInteractionBinding",
     "NativeInteractionContractViolation",

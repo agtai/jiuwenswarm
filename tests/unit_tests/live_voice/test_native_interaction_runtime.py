@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -22,6 +23,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeAudioObservation,
     NativeInteractionBinding,
     NativePresentationCursor,
     NativeTurnCommit,
@@ -191,7 +193,6 @@ async def test_native_turn_response_audio_done_and_history_positive_journey() ->
         )
         is True
     )
-
     history = await owner.acknowledge_audio(ack_for(runtime, admission.response, 0))
 
     assert history == NativeHistoryAdmission(
@@ -203,6 +204,46 @@ async def test_native_turn_response_audio_done_and_history_positive_journey() ->
         record.effect.effect_type != "history.append"
         for record in runtime.snapshot().effects
     )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_metadata_only_audio_observation_returns_runtime_presentation_unit() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response(
+        "provider-response-metadata", "native-response-metadata"
+    )
+    observation = NativeAudioObservation(
+        provider_event_id="provider-audio-metadata-0",
+        provider_response_id=admission.provider_response_id,
+        provider_item_id="provider-assistant-item-metadata",
+        content_index=0,
+        sequence=0,
+        sample_count=480,
+        content_sha256=hashlib.sha256(b"\x12\x34" * 480).hexdigest(),
+        response=admission.response,
+    )
+
+    admission_result = await owner.accept_audio_observation(observation)
+
+    assert admission_result is not None
+    assert admission_result.accepted is True
+    unit = admission_result.unit
+    assert unit.ref == admission.response
+    assert unit.surface is PresentationSurface.AUDIO
+    assert unit.seq == 0
+    assert unit.source_start_utf8 == 0
+    assert unit.source_end_utf8 == 480
+    assert unit.content_ref == f"sha256:{observation.content_sha256}"
+    replay = await owner.accept_audio_observation(observation)
+    assert replay is not None
+    assert replay.accepted is False
+    assert replay.unit == unit
+    assert [record.effect.effect_type for record in runtime.snapshot().effects] == [
+        "audio.enqueue"
+    ]
     await owner.close()
 
 

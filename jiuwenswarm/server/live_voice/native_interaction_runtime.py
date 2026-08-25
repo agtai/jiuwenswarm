@@ -28,6 +28,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     MAX_NATIVE_TRANSCRIPT_UTF8_BYTES,
+    NativeAudioObservation,
     NativeInteractionBinding,
     NativePresentationCursor,
     NativeTurnCommit,
@@ -62,6 +63,12 @@ class NativeInteractionRuntimeError(RuntimeError):
 class NativeResponseAdmission:
     provider_response_id: str
     response: ResponseRef
+
+
+@dataclass(frozen=True, slots=True)
+class NativeAudioAdmission:
+    accepted: bool
+    unit: PresentationUnit
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +107,8 @@ class _RuntimeResponse:
     next_sample_cursor: int = 0
     provider_item_id: str | None = None
     content_index: int | None = None
-    audio_by_sequence: dict[int, NativeAudioOutput] = field(default_factory=dict)
+    audio_by_sequence: dict[int, NativeAudioObservation] = field(default_factory=dict)
+    audio_units_by_sequence: dict[int, PresentationUnit] = field(default_factory=dict)
     speaking: bool = False
     done: NativeProviderDone | None = None
     cancelled: bool = False
@@ -195,7 +203,7 @@ class NativeInteractionRuntimeOwner:
         self._responses_by_ref: dict[ResponseRef, _RuntimeResponse] = {}
         self._response_ids: dict[str, str] = {}
         self._current_response: _RuntimeResponse | None = None
-        self._audio_event_ids: dict[str, NativeAudioOutput] = {}
+        self._audio_event_ids: dict[str, NativeAudioObservation] = {}
         self._done_event_ids: dict[str, NativeProviderDone] = {}
         self._barges: dict[
             str, tuple[ResponseRef, NativePresentationCursor, NativeBargeAdmission]
@@ -337,65 +345,114 @@ class NativeInteractionRuntimeOwner:
                 or retained.done is not None
             ):
                 return False
-            self._validate_audio(output, retained)
-            prior_sequence = retained.audio_by_sequence.get(output.sequence)
-            prior_event = self._audio_event_ids.get(output.provider_event_id)
-            if prior_sequence is not None or prior_event is not None:
-                if prior_sequence == output and prior_event == output:
-                    return False
+            self._validate_audio_output(output, retained)
+            observation = NativeAudioObservation(
+                provider_event_id=output.provider_event_id,
+                provider_response_id=output.provider_response_id,
+                provider_item_id=output.provider_item_id,
+                content_index=output.content_index,
+                sequence=output.sequence,
+                sample_count=len(output.pcm16) // 2,
+                content_sha256=hashlib.sha256(output.pcm16).hexdigest(),
+                response=output.response,
+            )
+            accepted, _unit = await self._accept_audio_observation_locked(
+                observation, retained
+            )
+            return accepted
+
+    async def accept_audio_observation(
+        self, observation: NativeAudioObservation
+    ) -> NativeAudioAdmission | None:
+        """Admit digest-only audio metadata and return Runtime media authority."""
+
+        async with self._lock:
+            self._require_open()
+            if not isinstance(observation, NativeAudioObservation):
                 raise NativeInteractionRuntimeError(
-                    "NATIVE_AUDIO_REPLAY_CONFLICT",
-                    "Native audio sequence or Provider event cannot change meaning",
+                    "NATIVE_AUDIO_INVALID",
+                    "audio observation must use NativeAudioObservation",
                 )
-            if output.sequence != retained.next_audio_sequence:
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_AUDIO_SEQUENCE_GAP",
-                    "Native audio sequence must be contiguous",
-                )
-            if retained.provider_item_id is not None and (
-                retained.provider_item_id != output.provider_item_id
-                or retained.content_index != output.content_index
+            retained = self._responses_by_provider.get(
+                observation.provider_response_id
+            )
+            if (
+                retained is None
+                or retained is not self._current_response
+                or retained.admission.response != observation.response
+                or retained.cancelled
+                or retained.done is not None
             ):
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_AUDIO_ITEM_MISMATCH",
-                    "Native audio must keep one Provider item and content index",
-                )
-            self._require_record_capacity(
-                len(self._audio_event_ids), "NATIVE_AUDIO_LEDGER_FULL"
+                return None
+            accepted, unit = await self._accept_audio_observation_locked(
+                observation, retained
             )
-            sample_count = len(output.pcm16) // 2
-            # NATIVE_AUDIO has no source text.  Under that policy only, the
-            # existing source span fields carry contiguous 24 kHz PCM samples.
-            unit = PresentationUnit(
-                ref=output.response,
-                surface=PresentationSurface.AUDIO,
-                unit_id=self._audio_unit_id(output),
-                seq=output.sequence,
-                source_start_utf8=retained.next_sample_cursor,
-                source_end_utf8=retained.next_sample_cursor + sample_count,
-                content_ref=f"sha256:{hashlib.sha256(output.pcm16).hexdigest()}",
+            return NativeAudioAdmission(accepted=accepted, unit=unit)
+
+    async def _accept_audio_observation_locked(
+        self,
+        observation: NativeAudioObservation,
+        retained: _RuntimeResponse,
+    ) -> tuple[bool, PresentationUnit]:
+        self._validate_audio_observation(observation, retained)
+        prior_sequence = retained.audio_by_sequence.get(observation.sequence)
+        prior_event = self._audio_event_ids.get(observation.provider_event_id)
+        if prior_sequence is not None or prior_event is not None:
+            if prior_sequence == observation and prior_event == observation:
+                return False, retained.audio_units_by_sequence[observation.sequence]
+            raise NativeInteractionRuntimeError(
+                "NATIVE_AUDIO_REPLAY_CONFLICT",
+                "Native audio sequence or Provider event cannot change meaning",
             )
-            if not retained.speaking:
-                await self._runtime.transition_response(
-                    output.response, ResponseState.SPEAKING
-                )
-                retained.speaking = True
-            await self._runtime.produce_unit(unit)
-            accepted, effect = await self._runtime.enqueue_unit(
-                output.response, PresentationSurface.AUDIO, unit.unit_id
+        if observation.sequence != retained.next_audio_sequence:
+            raise NativeInteractionRuntimeError(
+                "NATIVE_AUDIO_SEQUENCE_GAP",
+                "Native audio sequence must be contiguous",
             )
-            if not accepted or effect is None:
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_AUDIO_ENQUEUE_NOT_APPLIED",
-                    "new Native audio did not create one Runtime media effect",
-                )
-            retained.provider_item_id = output.provider_item_id
-            retained.content_index = output.content_index
-            retained.audio_by_sequence[output.sequence] = output
-            self._audio_event_ids[output.provider_event_id] = output
-            retained.next_audio_sequence += 1
-            retained.next_sample_cursor += sample_count
-            return True
+        if retained.provider_item_id is not None and (
+            retained.provider_item_id != observation.provider_item_id
+            or retained.content_index != observation.content_index
+        ):
+            raise NativeInteractionRuntimeError(
+                "NATIVE_AUDIO_ITEM_MISMATCH",
+                "Native audio must keep one Provider item and content index",
+            )
+        self._require_record_capacity(
+            len(self._audio_event_ids), "NATIVE_AUDIO_LEDGER_FULL"
+        )
+        # NATIVE_AUDIO has no source text.  Under that policy only, the
+        # existing source span fields carry contiguous 24 kHz PCM samples.
+        unit = PresentationUnit(
+            ref=observation.response,
+            surface=PresentationSurface.AUDIO,
+            unit_id=self._audio_unit_id(observation),
+            seq=observation.sequence,
+            source_start_utf8=retained.next_sample_cursor,
+            source_end_utf8=(retained.next_sample_cursor + observation.sample_count),
+            content_ref=f"sha256:{observation.content_sha256}",
+        )
+        if not retained.speaking:
+            await self._runtime.transition_response(
+                observation.response, ResponseState.SPEAKING
+            )
+            retained.speaking = True
+        await self._runtime.produce_unit(unit)
+        accepted, effect = await self._runtime.enqueue_unit(
+            observation.response, PresentationSurface.AUDIO, unit.unit_id
+        )
+        if not accepted or effect is None:
+            raise NativeInteractionRuntimeError(
+                "NATIVE_AUDIO_ENQUEUE_NOT_APPLIED",
+                "new Native audio did not create one Runtime media effect",
+            )
+        retained.provider_item_id = observation.provider_item_id
+        retained.content_index = observation.content_index
+        retained.audio_by_sequence[observation.sequence] = observation
+        retained.audio_units_by_sequence[observation.sequence] = unit
+        self._audio_event_ids[observation.provider_event_id] = observation
+        retained.next_audio_sequence += 1
+        retained.next_sample_cursor += observation.sample_count
+        return True, unit
 
     async def accept_provider_done(self, observation: NativeProviderDone) -> bool:
         async with self._lock:
@@ -619,7 +676,7 @@ class NativeInteractionRuntimeOwner:
             barge_count=len(self._barges),
         )
 
-    def _validate_audio(
+    def _validate_audio_output(
         self, output: NativeAudioOutput, retained: _RuntimeResponse
     ) -> None:
         _identity(output.provider_event_id, "provider_event_id")
@@ -645,6 +702,15 @@ class NativeInteractionRuntimeOwner:
                 "Native audio must match the exact Runtime response tuple",
             )
 
+    def _validate_audio_observation(
+        self, observation: NativeAudioObservation, retained: _RuntimeResponse
+    ) -> None:
+        if observation.response != retained.admission.response:
+            raise NativeInteractionRuntimeError(
+                "NATIVE_AUDIO_RESPONSE_MISMATCH",
+                "Native audio must match the exact Runtime response tuple",
+            )
+
     def _validate_done(self, observation: NativeProviderDone) -> None:
         _identity(observation.provider_event_id, "provider_event_id")
         _identity(observation.provider_response_id, "provider_response_id")
@@ -664,7 +730,7 @@ class NativeInteractionRuntimeOwner:
             _identity(provenance, "transcript_event_id")
 
     @staticmethod
-    def _audio_unit_id(output: NativeAudioOutput) -> str:
+    def _audio_unit_id(output: NativeAudioOutput | NativeAudioObservation) -> str:
         digest = hashlib.sha256(
             (
                 f"{output.response.interaction_id}\0{output.response.response_id}\0"
@@ -690,6 +756,7 @@ class NativeInteractionRuntimeOwner:
 
 
 __all__ = [
+    "NativeAudioAdmission",
     "NativeBargeAdmission",
     "NativeHistoryAdmission",
     "NativeInteractionRuntimeError",

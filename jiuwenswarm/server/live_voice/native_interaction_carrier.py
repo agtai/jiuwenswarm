@@ -9,6 +9,7 @@ delegate proposals that still require exact Runtime admission.
 
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,11 +28,13 @@ from jiuwenswarm.server.live_voice.interaction_engine import (
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     MAX_NATIVE_TRANSCRIPT_UTF8_BYTES,
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeAudioObservation,
     NativeDelegateProposal,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    NativeAudioOutput,
     NativeEngineEvent,
     NativeProviderDone,
 )
@@ -43,6 +46,7 @@ _PROPOSAL_KEYS = frozenset(
         "binding",
         "action",
         "turn_commit",
+        "audio_observation",
         "delegate",
         "provider_done",
     }
@@ -287,6 +291,7 @@ class NativeInteractionProposal:
     binding: NativeInteractionBinding
     action: InteractionAction | None = None
     turn_commit: NativeTurnCommit | None = None
+    audio_observation: NativeAudioObservation | None = None
     delegate: NativeDelegateProposal | None = None
     provider_done: NativeProviderDone | None = None
 
@@ -300,6 +305,7 @@ class NativeInteractionProposal:
             for item in (
                 self.action,
                 self.turn_commit,
+                self.audio_observation,
                 self.delegate,
                 self.provider_done,
             )
@@ -310,6 +316,12 @@ class NativeInteractionProposal:
         if self.action is not None:
             _action_from_dict(_action_to_dict(self.action), self.binding)
         if self.turn_commit is not None and self.turn_commit.binding != self.binding:
+            self._binding_mismatch()
+        if (
+            self.audio_observation is not None
+            and self.audio_observation.response.interaction_id
+            != self.binding.interaction_id
+        ):
             self._binding_mismatch()
         if self.delegate is not None and self.delegate.binding != self.binding:
             self._binding_mismatch()
@@ -338,16 +350,28 @@ class NativeInteractionProposal:
             raise NativeCarrierViolation(
                 "NATIVE_ENGINE_EVENT_INVALID", "event must use NativeEngineEvent"
             )
+        audio_observation = None
         if event.audio is not None:
-            raise NativeCarrierViolation(
-                "NATIVE_RAW_AUDIO_FORBIDDEN",
-                "Provider PCM must remain in Gateway-owned media",
-                ErrorCode.PERMISSION_DENIED,
+            if not isinstance(event.audio, NativeAudioOutput):
+                raise NativeCarrierViolation(
+                    "NATIVE_AUDIO_OBSERVATION_INVALID",
+                    "Provider audio must use NativeAudioOutput",
+                )
+            audio_observation = NativeAudioObservation(
+                provider_event_id=event.audio.provider_event_id,
+                provider_response_id=event.audio.provider_response_id,
+                provider_item_id=event.audio.provider_item_id,
+                content_index=event.audio.content_index,
+                sequence=event.audio.sequence,
+                sample_count=len(event.audio.pcm16) // 2,
+                content_sha256=hashlib.sha256(event.audio.pcm16).hexdigest(),
+                response=event.audio.response,
             )
         return cls(
             binding=binding,
             action=event.action,
             turn_commit=event.turn_commit,
+            audio_observation=audio_observation,
             delegate=event.delegate,
             provider_done=event.provider_done,
         )
@@ -378,6 +402,11 @@ class NativeInteractionProposal:
                 if data["turn_commit"] is None
                 else NativeTurnCommit.from_dict(data["turn_commit"])
             )
+            audio_observation = (
+                None
+                if data["audio_observation"] is None
+                else NativeAudioObservation.from_dict(data["audio_observation"])
+            )
             delegate = (
                 None
                 if data["delegate"] is None
@@ -388,7 +417,14 @@ class NativeInteractionProposal:
                 if data["provider_done"] is None
                 else _done_from_dict(data["provider_done"])
             )
-            return cls(binding, action, turn, delegate, done)
+            return cls(
+                binding=binding,
+                action=action,
+                turn_commit=turn,
+                audio_observation=audio_observation,
+                delegate=delegate,
+                provider_done=done,
+            )
         except NativeCarrierViolation:
             raise
         except Exception as error:
@@ -404,6 +440,11 @@ class NativeInteractionProposal:
             "action": None if self.action is None else _action_to_dict(self.action),
             "turn_commit": (
                 None if self.turn_commit is None else self.turn_commit.to_dict()
+            ),
+            "audio_observation": (
+                None
+                if self.audio_observation is None
+                else self.audio_observation.to_dict()
             ),
             "delegate": None if self.delegate is None else self.delegate.to_dict(),
             "provider_done": (

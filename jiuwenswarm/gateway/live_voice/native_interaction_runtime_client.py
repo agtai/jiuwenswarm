@@ -146,6 +146,38 @@ def _canonical_response_ref(value: object) -> bool:
     )
 
 
+def _canonical_audio_presentation_unit(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "response",
+        "surface",
+        "unit_id",
+        "seq",
+        "source_start_utf8",
+        "source_end_utf8",
+        "content_ref",
+    }:
+        return False
+    seq = value.get("seq")
+    start = value.get("source_start_utf8")
+    end = value.get("source_end_utf8")
+    content_ref = value.get("content_ref")
+    return (
+        _canonical_response_ref(value.get("response"))
+        and value.get("surface") == "audio"
+        and _canonical_result_identity(value.get("unit_id"))
+        and type(seq) is int
+        and 0 <= seq <= MAX_SAFE_INTEGER
+        and type(start) is int
+        and 0 <= start <= MAX_SAFE_INTEGER
+        and type(end) is int
+        and start < end <= MAX_SAFE_INTEGER
+        and type(content_ref) is str
+        and content_ref.startswith("sha256:")
+        and len(content_ref) == 71
+        and all(character in "0123456789abcdef" for character in content_ref[7:])
+    )
+
+
 def _canonical_transcript(value: object) -> bool:
     if (
         type(value) is not str
@@ -193,6 +225,20 @@ def _validate_method_result(
                 and result.get("accepted") is True
                 and _canonical_result_identity(result.get("provider_response_id"))
                 and _canonical_response_ref(response)
+            )
+        elif kind == "audio":
+            _closed_result(
+                result,
+                frozenset(
+                    {"kind", "status", "accepted", "presentation_unit"}
+                ),
+            )
+            valid = (
+                result.get("status") == "observed"
+                and type(result.get("accepted")) is bool
+                and _canonical_audio_presentation_unit(
+                    result.get("presentation_unit")
+                )
             )
         else:
             valid = False

@@ -26,6 +26,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeInteractionBinding,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    NativeAudioOutput,
     NativeEngineEvent,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
@@ -55,6 +56,20 @@ def listen_event() -> NativeEngineEvent:
             interaction_id=BINDING.interaction_id,
             scope=SCOPE,
             payload=(("provider_item_id", "provider-input-1"),),
+        )
+    )
+
+
+def audio_event() -> NativeEngineEvent:
+    return NativeEngineEvent(
+        audio=NativeAudioOutput(
+            provider_event_id="provider-audio-1",
+            provider_response_id="provider-response-1",
+            provider_item_id="provider-assistant-item-1",
+            content_index=0,
+            sequence=0,
+            pcm16=b"\x12\x34" * 480,
+            response=ResponseRef(BINDING.interaction_id, "native-response-1", 1),
         )
     )
 
@@ -257,6 +272,75 @@ async def test_gateway_native_response_result_is_closed_per_method() -> None:
     assert raised.value.reason == "NATIVE_RUNTIME_RESPONSE_INVALID"
     assert len(agent.requests) == 1
     assert client.snapshot().completed_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_closed_runtime_audio_admission_without_pcm() -> None:
+    client, agent, _sanitized = observed_client()
+    agent.result_override = {
+        "kind": "audio",
+        "status": "observed",
+        "accepted": True,
+        "presentation_unit": {
+            "response": {
+                "interaction_id": BINDING.interaction_id,
+                "response_id": "native-response-1",
+                "response_generation": 1,
+            },
+            "surface": "audio",
+            "unit_id": "native-audio-unit-1",
+            "seq": 0,
+            "source_start_utf8": 0,
+            "source_end_utf8": 480,
+            "content_ref": "sha256:" + "a" * 64,
+        },
+    }
+
+    result = await client.propose(
+        binding=BINDING,
+        capability=CAPABILITY,
+        event=audio_event(),
+        request_id="native-audio-1",
+    )
+
+    assert result == agent.result_override
+    proposal = agent.requests[0].params["proposal"]
+    assert "audio_observation" in proposal
+    assert "pcm16" not in str(proposal)
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_audio_admission_with_recoverable_audio_field() -> None:
+    client, agent, _sanitized = observed_client()
+    agent.result_override = {
+        "kind": "audio",
+        "status": "observed",
+        "accepted": True,
+        "presentation_unit": {
+            "response": {
+                "interaction_id": BINDING.interaction_id,
+                "response_id": "native-response-1",
+                "response_generation": 1,
+            },
+            "surface": "audio",
+            "unit_id": "native-audio-unit-1",
+            "seq": 0,
+            "source_start_utf8": 0,
+            "source_end_utf8": 480,
+            "content_ref": "sha256:" + "a" * 64,
+            "pcm16": "EjQ=",
+        },
+    }
+
+    with pytest.raises(NativeRuntimeClientError) as raised:
+        await client.propose(
+            binding=BINDING,
+            capability=CAPABILITY,
+            event=audio_event(),
+            request_id="native-audio-invalid-1",
+        )
+
+    assert raised.value.reason == "NATIVE_RUNTIME_RESPONSE_INVALID"
 
 
 @pytest.mark.asyncio

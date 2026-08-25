@@ -88,6 +88,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeTurnCommit,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    NativeAudioOutput,
     NativeEngineEvent,
 )
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
@@ -1752,6 +1753,26 @@ def _native_speak_proposal(
     )
 
 
+def _native_audio_proposal(
+    binding: NativeInteractionBinding,
+    response: ResponseRef,
+) -> NativeInteractionProposal:
+    return NativeInteractionProposal.from_engine_event(
+        binding,
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-1",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-assistant-item-1",
+                content_index=0,
+                sequence=0,
+                pcm16=b"\x12\x34" * 480,
+                response=response,
+            )
+        ),
+    )
+
+
 def _native_close_params(
     binding: NativeInteractionBinding, capability: str
 ) -> dict[str, object]:
@@ -2259,6 +2280,48 @@ async def test_native_speak_changed_replay_and_close_are_exactly_fenced(
     assert response_result["provider_response_id"] == "provider-response-1"
     assert cast(dict, response_result["response"])["response_generation"] == 1
     assert route.native_runtime_owner.snapshot().response_count == 1
+
+    response_ref = ResponseRef(
+        interaction_id=cast(dict, response_result["response"])["interaction_id"],
+        response_id=cast(dict, response_result["response"])["response_id"],
+        response_generation=cast(dict, response_result["response"])[
+            "response_generation"
+        ],
+    )
+    audio_proposal = _native_audio_proposal(binding, response_ref)
+    audio = await registry.handle_native_propose(
+        params=_native_propose_params(binding, capability, audio_proposal),
+        request_id="request-native-audio",
+        session_id=SCOPE.session_id,
+    )
+    audio_replay = await registry.handle_native_propose(
+        params=_native_propose_params(binding, capability, audio_proposal),
+        request_id="request-native-audio-replayed-event",
+        session_id=SCOPE.session_id,
+    )
+
+    assert audio.ok is audio_replay.ok is True
+    audio_result = cast(dict[str, object], audio.payload["result"])
+    replay_result = cast(dict[str, object], audio_replay.payload["result"])
+    assert audio_result["kind"] == "audio"
+    assert audio_result["status"] == "observed"
+    assert audio_result["accepted"] is True
+    assert replay_result["accepted"] is False
+    assert replay_result["presentation_unit"] == audio_result["presentation_unit"]
+    unit = cast(dict[str, object], audio_result["presentation_unit"])
+    assert unit == {
+        "response": cast(dict, response_result["response"]),
+        "surface": "audio",
+        "unit_id": unit["unit_id"],
+        "seq": 0,
+        "source_start_utf8": 0,
+        "source_end_utf8": 480,
+        "content_ref": (
+            "sha256:"
+            + hashlib.sha256(bytes.fromhex("1234") * 480).hexdigest()
+        ),
+    }
+    assert route.native_runtime_owner.snapshot().audio_count == 1
 
     closed = await registry.handle_native_close(
         params=_native_close_params(binding, capability),

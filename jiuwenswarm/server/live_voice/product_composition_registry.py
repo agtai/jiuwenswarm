@@ -4649,6 +4649,7 @@ class AgentServerProductCompositionRegistry:
                         or proposal.action.operation != "TURN_COMMIT"
                         or dict(proposal.action.payload).get("turn_id")
                         != proposal.turn_commit.turn_id
+                        or proposal.audio_observation is not None
                         or proposal.delegate is not None
                         or proposal.provider_done is not None
                     ):
@@ -4663,7 +4664,11 @@ class AgentServerProductCompositionRegistry:
                         "accepted": accepted,
                     }
                 elif proposal.provider_done is not None:
-                    if proposal.action is not None or proposal.delegate is not None:
+                    if (
+                        proposal.action is not None
+                        or proposal.audio_observation is not None
+                        or proposal.delegate is not None
+                    ):
                         raise NativeInteractionRuntimeError(
                             "NATIVE_DONE_PROPOSAL_INVALID",
                             "Native completion must be a standalone observation",
@@ -4673,6 +4678,44 @@ class AgentServerProductCompositionRegistry:
                         "kind": "done",
                         "status": "observed",
                         "accepted": accepted,
+                    }
+                elif proposal.audio_observation is not None:
+                    if (
+                        proposal.action is not None
+                        or proposal.turn_commit is not None
+                        or proposal.delegate is not None
+                        or proposal.provider_done is not None
+                    ):
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_AUDIO_PROPOSAL_INVALID",
+                            "Native audio metadata must be a standalone observation",
+                        )
+                    audio_admission = await owner.accept_audio_observation(
+                        proposal.audio_observation
+                    )
+                    if audio_admission is None:
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_AUDIO_RESPONSE_STALE",
+                            "Native audio requires the exact current Runtime response",
+                        )
+                    unit = audio_admission.unit
+                    result_payload = {
+                        "kind": "audio",
+                        "status": "observed",
+                        "accepted": audio_admission.accepted,
+                        "presentation_unit": {
+                            "response": {
+                                "interaction_id": unit.ref.interaction_id,
+                                "response_id": unit.ref.response_id,
+                                "response_generation": unit.ref.response_generation,
+                            },
+                            "surface": unit.surface.value,
+                            "unit_id": unit.unit_id,
+                            "seq": unit.seq,
+                            "source_start_utf8": unit.source_start_utf8,
+                            "source_end_utf8": unit.source_end_utf8,
+                            "content_ref": unit.content_ref,
+                        },
                     }
                 elif proposal.delegate is not None:
                     raise NativeInteractionRuntimeError(
