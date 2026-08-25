@@ -2333,6 +2333,14 @@ def _log_sink_unavailable(fact: SpeechDegradationFact, *, reason: str) -> None:
 
 
 def _log_transport_cleanup(*, kind: str, reason: str, retained_count: int) -> None:
+    if reason == "timeout":
+        _LOGGER.info(
+            "live_voice_speech_transport_cleanup_pending "
+            "kind=%s reason=attempt-budget retained_count=%d",
+            kind,
+            retained_count,
+        )
+        return
     _LOGGER.error(
         "live_voice_speech_transport_cleanup_incomplete "
         "kind=%s reason=%s retained_count=%d",

@@ -3022,6 +3022,7 @@ class AgentServerProductCompositionRegistry:
         *,
         retained: _P2Route,
         ack: PresentationAck,
+        ack_reservation_id: int,
         params: Mapping[str, object],
         route: AuthorityRouteContext,
         request_id: str,
@@ -3084,6 +3085,7 @@ class AgentServerProductCompositionRegistry:
             accepted_outcome = await retained.activation_lease.acknowledge_presentation(
                 retained.binding,
                 item,
+                reservation_id=ack_reservation_id,
             )
             return accepted_outcome
 
@@ -7975,26 +7977,37 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.UNAVAILABLE,
                         )
 
-                    async def acknowledge() -> P3RouteResult:
-                        marked_delivery: _ProgressDelivery | None = None
-                        try:
-                            async with self._lock:
-                                with self._task_presentation_state_lock:
-                                    mapped = self._task_presentation_deliveries.get(
-                                        ack.ref
+                    marked_delivery: _ProgressDelivery | None = None
+                    ack_reservation_id = retained.activation_lease.reserve_presentation_ack(
+                        retained.binding,
+                        ack,
+                    )
+                    try:
+                        with self._task_presentation_state_lock:
+                            mapped = self._task_presentation_deliveries.get(ack.ref)
+                            if mapped is not None:
+                                marked_delivery = mapped[0]
+                                if marked_delivery.audio_ack_in_flight:
+                                    raise FormalTaskViolation(
+                                        "PRESENTATION_ACK_IN_FLIGHT",
+                                        "an exact Task audio ACK is already in flight",
+                                        ErrorCode.CONFLICT,
                                     )
-                                    if mapped is not None:
-                                        marked_delivery = mapped[0]
-                                        if marked_delivery.audio_ack_in_flight:
-                                            raise FormalTaskViolation(
-                                                "PRESENTATION_ACK_IN_FLIGHT",
-                                                "an exact Task audio ACK is already in flight",
-                                                ErrorCode.CONFLICT,
-                                            )
-                                        marked_delivery.audio_ack_in_flight = True
+                                marked_delivery.audio_ack_in_flight = True
+                    except BaseException:
+                        retained.activation_lease.release_presentation_ack(
+                            retained.binding,
+                            ack,
+                            ack_reservation_id,
+                        )
+                        raise
+
+                    async def acknowledge() -> P3RouteResult:
+                        try:
                             outcome = await self._acknowledge_task_voice_presentation(
                                 retained=retained,
                                 ack=ack,
+                                ack_reservation_id=ack_reservation_id,
                                 params=params,
                                 route=parsed[5],
                                 request_id=request_id,
@@ -8003,6 +8016,7 @@ class AgentServerProductCompositionRegistry:
                                 outcome = await retained.activation_lease.acknowledge_presentation(
                                     retained.binding,
                                     ack,
+                                    reservation_id=ack_reservation_id,
                                 )
                             if (
                                 outcome.accepted
@@ -8043,14 +8057,29 @@ class AgentServerProductCompositionRegistry:
                             )
                         finally:
                             if marked_delivery is not None:
-                                async with self._lock:
-                                    with self._task_presentation_state_lock:
-                                        marked_delivery.audio_ack_in_flight = False
+                                with self._task_presentation_state_lock:
+                                    marked_delivery.audio_ack_in_flight = False
+                            retained.activation_lease.release_presentation_ack(
+                                retained.binding,
+                                ack,
+                                ack_reservation_id,
+                            )
 
-                    task = asyncio.create_task(
-                        acknowledge(),
-                        name=f"live-voice-product-p2-ack:{request_id}",
-                    )
+                    try:
+                        task = asyncio.create_task(
+                            acknowledge(),
+                            name=f"live-voice-product-p2-ack:{request_id}",
+                        )
+                    except BaseException:
+                        if marked_delivery is not None:
+                            with self._task_presentation_state_lock:
+                                marked_delivery.audio_ack_in_flight = False
+                        retained.activation_lease.release_presentation_ack(
+                            retained.binding,
+                            ack,
+                            ack_reservation_id,
+                        )
+                        raise
                     entry = _RetainedProductOperation(
                         fingerprint,
                         task,

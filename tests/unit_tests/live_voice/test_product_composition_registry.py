@@ -121,6 +121,10 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
 )
+from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+    P2LeaseCloseStatus,
+    P2LeaseState,
+)
 from jiuwenswarm.server.live_voice import product_composition_registry
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.presentation_ledger import (
@@ -11358,6 +11362,109 @@ async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
         "formal result",
     ]
     await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_close_waits_for_an_ack_admitted_before_close(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-ack-close-race",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-ack-close-race",
+            turn_id="turn-ack-close-race",
+            response_id="response-ack-close-race",
+            committed_at=NOW,
+            text="the admitted acknowledgement must win",
+        ),
+        request_id="request-ack-close-race-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+
+    presentation = None
+    response = None
+    for sequence in range(1, 5):
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-ack-close-race-notification-{sequence}",
+                session_id="session-product",
+            ),
+            timeout=1,
+        )
+        assert polled.ok is True
+        notification = cast(dict[str, object], polled.payload["result"])
+        if isinstance(notification["presentation_unit"], dict):
+            presentation = cast(
+                dict[str, object], notification["presentation_unit"]
+            )
+            response = cast(dict[str, object], notification["response"])
+            break
+    assert presentation is not None
+    assert response is not None
+
+    await route.activation_lease._operation_lock.acquire()
+    ack_request_id = "request-ack-close-race-ack"
+    ack_task = asyncio.create_task(
+        registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=response["response_id"],
+                response_generation=response["response_generation"],
+                surface=presentation["surface"],
+                unit_id=presentation["unit_id"],
+                contiguous_cursor=presentation["seq"],
+                presented_at=NOW,
+            ),
+            request_id=ack_request_id,
+            session_id="session-product",
+        )
+    )
+    for _ in range(200):
+        if ack_request_id in registry._p2_ack_operations:
+            break
+        await asyncio.sleep(0.005)
+    ack_was_admitted = ack_request_id in registry._p2_ack_operations
+    if not ack_was_admitted:
+        route.activation_lease._operation_lock.release()
+        unexpected = await ack_task
+        raise AssertionError(f"ACK was not admitted: {unexpected.payload!r}")
+
+    close_task = asyncio.create_task(
+        route.activation_lease.close(route.binding, timeout_seconds=1)
+    )
+    for _ in range(20):
+        if route.activation_lease.snapshot().state is P2LeaseState.CLOSING:
+            break
+        await asyncio.sleep(0)
+    close_state = route.activation_lease.snapshot().state
+    route.activation_lease._operation_lock.release()
+    assert close_state is P2LeaseState.CLOSING
+
+    acknowledged, lease_closed = await asyncio.gather(ack_task, close_task)
+    assert acknowledged.ok is True
+    assert cast(dict, acknowledged.payload["result"])["accepted"] is True
+    assert lease_closed.status is P2LeaseCloseStatus.CLOSED
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-ack-close-race-close",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+    assert len(history.assistants) == 1
+    assert registry._p2_routes == {}
+    await registry.stop()
 
 
 @pytest.mark.asyncio

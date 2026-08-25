@@ -557,6 +557,10 @@ class P2ActivationLease:
         self._operation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._close_coordinator: asyncio.Task[P2LeaseCloseResult] | None = None
+        self._presentation_ack_reservation_sequence = 0
+        self._presentation_ack_reservations: dict[int, PresentationAck] = {}
+        self._presentation_ack_reservations_settled = asyncio.Event()
+        self._presentation_ack_reservations_settled.set()
         attach_consumer = getattr(runtime, "attach_notification_consumer", None)
         self._notification_lease = (
             attach_consumer(
@@ -1029,12 +1033,23 @@ class P2ActivationLease:
         self,
         binding: P2InteractionBinding,
         ack: PresentationAck,
+        *,
+        reservation_id: int | None = None,
     ) -> PresentationAckResult:
         """Forward an exact presentation ACK to the retained history owner."""
 
         async with self._operation_lock:
             with self._state_lock:
-                self._require_open_exact_binding(binding)
+                if reservation_id is None:
+                    self._require_open_exact_binding(binding)
+                else:
+                    self._require_exact_binding(binding)
+                    if self._presentation_ack_reservations.get(reservation_id) != ack:
+                        raise _violation(
+                            "PRESENTATION_ACK_RESERVATION_MISMATCH",
+                            "presentation ACK changed after admission",
+                            ErrorCode.PERMISSION_DENIED,
+                        )
             acknowledge = getattr(self._runtime, "acknowledge_presentation", None)
             if not callable(acknowledge):
                 raise _violation(
@@ -1050,6 +1065,47 @@ class P2ActivationLease:
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
+
+    def reserve_presentation_ack(
+        self,
+        binding: P2InteractionBinding,
+        ack: PresentationAck,
+    ) -> int:
+        """Linearize one exact ACK before a later close can own the lease."""
+
+        if not isinstance(ack, PresentationAck):
+            raise _violation(
+                "INVALID_PRESENTATION_ACK",
+                "presentation ACK must be canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+            self._presentation_ack_reservation_sequence += 1
+            reservation_id = self._presentation_ack_reservation_sequence
+            self._presentation_ack_reservations[reservation_id] = ack
+            self._presentation_ack_reservations_settled.clear()
+            return reservation_id
+
+    def release_presentation_ack(
+        self,
+        binding: P2InteractionBinding,
+        ack: PresentationAck,
+        reservation_id: int,
+    ) -> None:
+        """Release the exact ACK admission after every owned effect settles."""
+
+        with self._state_lock:
+            self._require_exact_binding(binding)
+            if self._presentation_ack_reservations.get(reservation_id) != ack:
+                raise _violation(
+                    "PRESENTATION_ACK_RESERVATION_MISMATCH",
+                    "presentation ACK reservation is not active",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            self._presentation_ack_reservations.pop(reservation_id)
+            if not self._presentation_ack_reservations:
+                self._presentation_ack_reservations_settled.set()
 
     async def barge_in(
         self,
@@ -1195,6 +1251,7 @@ class P2ActivationLease:
 
     async def _run_close(self) -> P2LeaseCloseResult:
         try:
+            await self._presentation_ack_reservations_settled.wait()
             async with self._operation_lock:
                 if (
                     self._notification_lease is not None
