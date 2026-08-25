@@ -309,6 +309,14 @@ For the four-case fast screen, a B arm is eligible only when:
 - each A1/A2 p50 differs by at most 10% and the controls have identical outcome
   counts.
 
+For the fast/formal reducer, “not erased” is evaluated directly on the measured
+total component: candidate `final_voiced_frame_to_final_ms` p50 and p95 must
+each remain strictly below the corresponding value in both controls. Equality
+means the endpointing gain has been fully moved into later finalization and is
+therefore `SEMANTIC_VAD_NO_MATERIAL_GAIN`. `eot_to_final_ms` remains the
+diagnostic that identifies where that wait moved; percentile components are not
+added arithmetically.
+
 Passing this screen only admits the candidate to the semantic-generalization
 gate. The expanded corpus requires 100% integrity, transcript completeness,
 valid pacing and cleanup across all formal attempts, plus an improvement in
