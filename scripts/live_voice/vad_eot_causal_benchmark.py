@@ -615,16 +615,10 @@ async def run_vad_attempt(
         1,
         CaptureRef(f"capture-{uuid.uuid4().hex}", 1, 48_000),
     )
-    turn_detection = RecognitionTurnDetection(
-        RecognitionTurnDetectionMode.SERVER_VAD,
-        ServerVadConfig(
-            threshold=0.5,
-            prefix_padding_ms=300,
-            silence_duration_ms=silence_duration_ms,
-            create_response=False,
-            interrupt_response=False,
-        ),
-    )
+    configuration = parse_configuration(configuration_id)
+    if configuration.silence_duration_ms != silence_duration_ms:
+        raise ValueError("VAD_CONFIGURATION_INVALID")
+    turn_detection = turn_detection_for(configuration)
     sent_cursor = 0
     item_id: str | None = None
     eot_seen = asyncio.Event()
@@ -766,8 +760,8 @@ async def run_vad_attempt(
         elif not transcript_complete:
             reason = VadAttemptReason.TRANSCRIPT_INCOMPLETE
         elif disposition not in {
-            RecognitionCommitDisposition.SERVER_VAD_PENDING,
-            RecognitionCommitDisposition.SERVER_VAD_OBSERVED,
+            RecognitionCommitDisposition.SEMANTIC_VAD_PENDING if configuration.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD else RecognitionCommitDisposition.SERVER_VAD_PENDING,
+            RecognitionCommitDisposition.SEMANTIC_VAD_OBSERVED if configuration.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD else RecognitionCommitDisposition.SERVER_VAD_OBSERVED,
         }:
             reason = VadAttemptReason.PROVIDER_PROTOCOL
         else:
