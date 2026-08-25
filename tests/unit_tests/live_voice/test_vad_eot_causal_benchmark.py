@@ -726,6 +726,17 @@ async def test_real_factory_rejects_nonstreaming_selection(monkeypatch) -> None:
         )
 
 
+def test_parse_semantic_configuration_is_closed_and_builds_exact_detection() -> None:
+    auto = runner.parse_configuration("B_AUTO")
+    high = runner.parse_configuration("B_HIGH")
+    assert auto.silence_duration_ms is None and auto.semantic_eagerness.value == "auto"
+    assert high.silence_duration_ms is None and high.semantic_eagerness.value == "high"
+    assert runner.turn_detection_for(auto).semantic_vad.eagerness.value == "auto"
+    assert runner.turn_detection_for(runner.parse_configuration("A1_1200")).server_vad.silence_duration_ms == 1200
+    with pytest.raises(ValueError):
+        runner.VadConfiguration("bad", runner.RecognitionTurnDetectionMode.SEMANTIC_VAD, 1200, runner.SemanticVadEagerness.AUTO)
+
+
 def test_semantic_experiments_are_separate_three_arm_blocks_and_report_mode_fields(tmp_path: Path) -> None:
     common = dict(run_id="semantic-auto", mode="pilot", manifest_path=tmp_path / "manifest.json", output_path=tmp_path / "report.json", git_commit="a" * 40, source_clean=True)
     auto = runner.VadBenchmarkConfig(**common, experiment="semantic-auto")

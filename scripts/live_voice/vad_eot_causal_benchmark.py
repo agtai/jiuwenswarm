@@ -48,6 +48,7 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnBoundaryKind,
     RecognitionTurnDetection,
     RecognitionTurnDetectionMode,
+    SemanticVadEagerness,
     ServerVadConfig,
     StreamingRecognitionEvent,
 )
@@ -69,6 +70,32 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 def _has_control(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+@dataclass(frozen=True, slots=True)
+class VadConfiguration:
+    configuration_id: str
+    mode: RecognitionTurnDetectionMode
+    silence_duration_ms: int | None
+    semantic_eagerness: SemanticVadEagerness | None = None
+
+    def __post_init__(self) -> None:
+        semantic = self.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD
+        if semantic != (self.semantic_eagerness is not None) or (semantic and self.silence_duration_ms is not None) or (not semantic and self.silence_duration_ms != 1200):
+            raise ValueError("VAD_CONFIGURATION_INVALID")
+
+
+def parse_configuration(configuration_id: str) -> VadConfiguration:
+    if configuration_id == "B_AUTO": return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SEMANTIC_VAD, None, SemanticVadEagerness.AUTO)
+    if configuration_id == "B_HIGH": return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SEMANTIC_VAD, None, SemanticVadEagerness.HIGH)
+    if configuration_id in {"A1_1200", "A2_1200"}: return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SERVER_VAD, 1200)
+    raise ValueError("VAD_CONFIGURATION_INVALID")
+
+
+def turn_detection_for(configuration: VadConfiguration) -> RecognitionTurnDetection:
+    if configuration.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD:
+        return RecognitionTurnDetection.semantic_vad_configured(configuration.semantic_eagerness)
+    return RecognitionTurnDetection(RecognitionTurnDetectionMode.SERVER_VAD, ServerVadConfig(silence_duration_ms=1200))
 
 
 class VadAttemptOutcome(StrEnum):
