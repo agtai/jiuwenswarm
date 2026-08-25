@@ -386,6 +386,7 @@ class VadBenchmarkReport:
     schema_version: str
     run_id: str
     mode: str
+    experiment: str
     git_commit: str
     source_clean: bool
     corpus_id: str
@@ -495,6 +496,7 @@ def build_report(
         REPORT_SCHEMA_VERSION,
         config.run_id,
         config.mode,
+        config.experiment,
         config.git_commit,
         True,
         corpus_id,
@@ -565,12 +567,25 @@ def _validate_report_semantics(report: VadBenchmarkReport) -> None:
         or report.summaries != _safe_summary(report.attempts)
     ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
-    expected_attempts = 16 if report.mode == "pilot" else 80
+    config = VadBenchmarkConfig(
+        report.run_id,
+        report.mode,
+        Path("/private/manifest.json"),
+        Path("/private/report.json"),
+        report.git_commit,
+        True,
+        experiment=report.experiment,
+    )
+    expected_attempts = (
+        len(config.configuration_sequence)
+        * 4
+        * config.attempts_per_case
+    )
     if len(report.attempts) != expected_attempts:
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
     expected_slots = {
         (configuration_id, threshold, case_id, attempt_index)
-        for configuration_id, threshold in CONFIGURATION_SEQUENCE
+        for configuration_id, threshold in config.configuration_sequence
         for case_id in (
             "no-internal-pause",
             "internal-pause-300",
@@ -598,14 +613,6 @@ def _validate_report_semantics(report: VadBenchmarkReport) -> None:
         )
     ):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
-    config = VadBenchmarkConfig(
-        report.run_id,
-        report.mode,
-        Path("/private/manifest.json"),
-        Path("/private/report.json"),
-        report.git_commit,
-        True,
-    )
     if report.decision != _decision(config, report.attempts):
         raise ValueError("VAD_BENCHMARK_REPORT_INVALID")
 
@@ -1032,7 +1039,7 @@ async def run_screening(
     stt_model: str = "gpt-4o-mini-transcribe",
 ) -> VadBenchmarkReport:
     attempts = []
-    for configuration_id, threshold in CONFIGURATION_SEQUENCE:
+    for configuration_id, threshold in config.configuration_sequence:
         for case in manifest.cases:
             for attempt_index in range(config.attempts_per_case):
                 result = await attempt_runner(

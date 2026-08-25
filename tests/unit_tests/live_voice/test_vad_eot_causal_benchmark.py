@@ -876,6 +876,69 @@ def test_semantic_summaries_preserve_mode_eagerness_and_explicit_arm_order() -> 
     assert semantic.semantic_eagerness == "auto"
 
 
+@pytest.mark.asyncio
+async def test_semantic_screening_uses_exact_three_arm_population_and_report_labels(
+    tmp_path: Path,
+) -> None:
+    base = _config(tmp_path)
+    config = replace(
+        base,
+        run_id="semantic-auto-pilot",
+        experiment="semantic-auto",
+    )
+    manifest = support.load_vad_corpus_manifest(config.manifest_path)
+    calls = []
+
+    async def attempt_runner(_config, case, attempt_index, **kwargs):
+        configuration = runner.parse_configuration(kwargs["configuration_id"])
+        calls.append((configuration.configuration_id, case.case_id, attempt_index))
+        duration = 300.0 if configuration.silence_duration_ms is None else float(
+            configuration.silence_duration_ms
+        )
+        return runner.VadAttemptResult.completed(
+            configuration.configuration_id,
+            configuration.silence_duration_ms,
+            case.case_id,
+            attempt_index,
+            final_voiced_frame_to_eot_ms=duration,
+            eot_to_final_ms=100.0,
+            final_voiced_frame_to_final_ms=duration + 100.0,
+            provider_reported_speech_end_ms=1000.0,
+            pacing_p50_ms=0.0,
+            pacing_p95_ms=0.0,
+            pacing_max_ms=0.0,
+            turn_detection_mode=configuration.mode.value,
+            semantic_eagerness=(
+                configuration.semantic_eagerness.value
+                if configuration.semantic_eagerness is not None
+                else None
+            ),
+        )
+
+    async def unused_provider_factory(_turn_detection):
+        raise AssertionError("attempt runner must own the fake provider boundary")
+
+    report = await runner.run_screening(
+        config,
+        manifest,
+        provider_factory=unused_provider_factory,
+        attempt_runner=attempt_runner,
+    )
+
+    assert len(calls) == 12
+    assert [item[0] for item in calls[::4]] == [
+        "A1_1200",
+        "B_AUTO",
+        "A2_1200",
+    ]
+    assert report.experiment == "semantic-auto"
+    assert len(report.attempts) == 12
+    assert {summary.turn_detection_mode for summary in report.summaries} == {
+        "server_vad",
+        "semantic_vad",
+    }
+
+
 def test_report_is_private_closed_and_excludes_failed_samples(tmp_path: Path) -> None:
     config = _config(tmp_path)
     manifest = support.load_vad_corpus_manifest(config.manifest_path)
