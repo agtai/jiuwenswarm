@@ -4643,6 +4643,8 @@ class AgentServerProductCompositionRegistry:
                 or route.native_runtime_owner is None
                 or route.native_p3_authority is None
                 or route.native_capability is None
+                or route.native_closed
+                or route.native_close_retry is not None
                 or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
                 or route.binding.scope != binding.scope
                 or route.binding.correlation_id != binding.correlation_id
@@ -4886,6 +4888,7 @@ class AgentServerProductCompositionRegistry:
                 or route.native_p3_authority is None
                 or route.native_capability is None
                 or route.native_closed
+                or route.native_close_retry is not None
                 or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
                 or route.binding.scope != binding.scope
                 or route.binding.correlation_id != binding.correlation_id
@@ -5371,6 +5374,7 @@ class AgentServerProductCompositionRegistry:
                 or route.native_runtime_owner is None
                 or route.native_capability is None
                 or route.native_closed
+                or route.native_close_retry is not None
                 or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
                 or route.binding.scope != binding.scope
                 or route.binding.correlation_id != binding.correlation_id
@@ -5617,7 +5621,7 @@ class AgentServerProductCompositionRegistry:
                     route is None
                     or route.native_runtime_owner is None
                     or route.native_capability is None
-                    or route.native_closed
+                    or (route.native_closed and not retry_matches)
                     or (
                         not retry_matches
                         and route.activation_lease.snapshot().state
@@ -5743,7 +5747,7 @@ class AgentServerProductCompositionRegistry:
                     route.native_capability = None
                     route.native_close_retry = None
                 else:
-                    route.native_closed = False
+                    route.native_closed = True
                     route.native_close_retry = (
                         parsed_request_id,
                         bytes.fromhex(fingerprint),

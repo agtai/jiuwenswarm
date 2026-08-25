@@ -828,6 +828,8 @@ class _NativeMediaSession:
         default_factory=dict, repr=False
     )
     runtime_close_request_id: str | None = field(default=None, repr=False)
+    runtime_close_complete: bool = False
+    provider_close_complete: bool = False
     close_task: asyncio.Task[bool] | None = field(default=None, repr=False)
     closed: bool = False
 
@@ -1509,14 +1511,21 @@ class DedicatedMediaProductRegistry:
                 session.runtime_close_request_id = self._native_request_id(
                     session, "close"
                 )
-            with suppress(BaseException):
+            try:
                 await close_runtime(
                     binding=session.activation.binding,
                     capability=session.activation.capability,
                     request_id=session.runtime_close_request_id,
                 )
-        provider_close_complete = await session.engine.close()
-        if provider_close_complete is not True:
+            except BaseException:
+                pass
+            else:
+                session.runtime_close_complete = True
+        if not session.provider_close_complete:
+            session.provider_close_complete = await session.engine.close() is True
+        if not (
+            session.runtime_close_complete and session.provider_close_complete
+        ):
             return False
         with self._lock:
             self._native_close_capacity_reservations.discard(key)
@@ -5218,12 +5227,17 @@ class DedicatedMediaProductRegistry:
             self._schedule_native_close(record)
 
     def _schedule_native_close(self, record: _MediaAuthority) -> None:
-        if record.record_id not in self._native_session_keys_by_record:
+        key = self._native_session_keys_by_record.get(record.record_id)
+        if key is None:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        with self._lock:
+            if self._native_session_keys_by_record.get(record.record_id) != key:
+                return
+            self._native_close_capacity_reservations.add(key)
 
         async def close_retained() -> None:
             try:

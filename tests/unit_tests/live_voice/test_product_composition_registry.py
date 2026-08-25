@@ -3052,25 +3052,31 @@ async def test_native_activation_aborted_close_compensates_exact_p2_route(
 
 
 @pytest.mark.asyncio
-async def test_native_activation_abort_close_failure_retains_exact_retry_owner(
+async def test_native_activation_abort_close_failure_quiesces_exact_retry_owner(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, _manager, _pushed = _registry(
+    registry, _p3, manager = _unified_registry(
         tmp_path,
         interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
     )
-    activated = await registry.handle_p2_activate(
-        params=_p2_params(interaction_engine="openai-realtime-native"),
-        request_id="request-native-abort-retry-activate",
+    binding, capability, response = await _activate_native_delegate_source(
+        registry,
+        stem="native-abort-retry",
+    )
+    audio = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_audio_proposal(binding, response),
+        ),
+        request_id="request-native-abort-retry-audio",
         session_id=SCOPE.session_id,
-        channel_id="web",
     )
-    descriptor = cast(
+    assert audio.ok is True
+    presentation_unit = cast(
         dict[str, object],
-        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+        cast(dict[str, object], audio.payload["result"])["presentation_unit"],
     )
-    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
-    capability = cast(str, descriptor["capability"])
     route_key = (SCOPE.session_id, binding.interaction_id)
     route = registry._p2_routes[route_key]
 
@@ -3101,8 +3107,46 @@ async def test_native_activation_abort_close_failure_retains_exact_retry_owner(
     assert failed.ok is False
     assert route.native_runtime_owner is not None
     assert route.native_capability == capability
-    assert route.native_closed is False
     assert route_key in registry._p2_routes
+
+    owner_before_rejections = route.native_runtime_owner.snapshot()
+    propose_operations_before = dict(registry._native_propose_operations)
+    delegate_operations_before = dict(registry._native_delegate_operations)
+    ack_operations_before = dict(registry._native_ack_operations)
+    agent_calls_before = manager.agent.calls
+
+    rejected_ack = await registry.handle_native_presentation_ack(
+        params=_native_ack_params(
+            binding,
+            capability,
+            response,
+            unit_id=cast(str, presentation_unit["unit_id"]),
+        ),
+        request_id="request-native-activation-abort-rejected-ack",
+        session_id=SCOPE.session_id,
+    )
+    rejected_delegate = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_delegate_proposal(
+                binding,
+                response,
+                request_text="Tell me one short fact about Paris.",
+            ),
+        ),
+        request_id="request-native-activation-abort-rejected-delegate",
+        session_id=SCOPE.session_id,
+    )
+    rejected_turn = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_turn_proposal(binding, ordinal=2),
+        ),
+        request_id="request-native-activation-abort-rejected-turn",
+        session_id=SCOPE.session_id,
+    )
 
     changed_retry = await registry.handle_native_close(
         params=params,
@@ -3113,6 +3157,17 @@ async def test_native_activation_abort_close_failure_retains_exact_retry_owner(
     assert cast(dict, changed_retry.payload["error"])["reason"] == (
         "NATIVE_CLOSE_RETRY_IDENTITY_CONFLICT"
     )
+    for rejected in (rejected_ack, rejected_delegate, rejected_turn):
+        assert rejected.ok is False
+        assert cast(dict, rejected.payload["error"])["reason"] == (
+            "NATIVE_RUNTIME_CAPABILITY_REJECTED"
+        )
+    assert route.native_closed is True
+    assert route.native_runtime_owner.snapshot() == owner_before_rejections
+    assert registry._native_propose_operations == propose_operations_before
+    assert registry._native_delegate_operations == delegate_operations_before
+    assert registry._native_ack_operations == ack_operations_before
+    assert manager.agent.calls == agent_calls_before
     assert fail_once.calls == 1
 
     closed = await registry.handle_native_close(

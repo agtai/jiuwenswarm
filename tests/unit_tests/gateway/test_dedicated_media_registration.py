@@ -441,6 +441,62 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         return {"kind": "close", "status": "closed", "accepted": True}
 
 
+class _FailOnceNativeRuntimeCloseClient(_FakeNativeRuntimeClient):
+    async def close(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        assert self.activation is not None
+        assert binding == self.activation.binding
+        assert capability == self.activation.capability
+        assert request_id
+        self.close_calls += 1
+        self.close_request_ids.append(request_id)
+        if self.close_calls == 1:
+            raise OSError("transient Runtime close failure")
+        return {"kind": "close", "status": "closed", "accepted": True}
+
+
+class _MultiActivationNativeRuntimeClient(_FakeNativeRuntimeClient):
+    def __init__(self, activation: GatewayNativeActivation) -> None:
+        super().__init__(activation)
+        self.activations = [activation]
+
+    def activation_for(
+        self, *, session_id: str, interaction_id: str, connection_id: str
+    ) -> GatewayNativeActivation | None:
+        self.lookups.append((session_id, interaction_id, connection_id))
+        return next(
+            (
+                activation
+                for activation in self.activations
+                if activation.binding.scope.session_id == session_id
+                and activation.binding.interaction_id == interaction_id
+                and activation.connection_id == connection_id
+            ),
+            None,
+        )
+
+    async def close(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        assert any(
+            activation.binding == binding and activation.capability == capability
+            for activation in self.activations
+        )
+        assert request_id
+        self.close_calls += 1
+        self.close_request_ids.append(request_id)
+        return {"kind": "close", "status": "closed", "accepted": True}
+
+
 class _FakeNativeEngine:
     def __init__(self) -> None:
         self.events: asyncio.Queue[NativeEngineEvent | BaseException] = asyncio.Queue()
@@ -513,6 +569,16 @@ class _RetainedCloseNativeEngine(_FakeNativeEngine):
         if complete:
             self.close_event.set()
         return complete
+
+
+class _CountingCloseNativeEngine(_FakeNativeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    async def close(self) -> bool:
+        self.close_calls += 1
+        return await super().close()
 
 
 class _StartFailureRetainedCloseNativeEngine(_RetainedCloseNativeEngine):
@@ -1800,9 +1866,68 @@ async def test_incomplete_native_provider_close_retains_owner_until_exact_retry(
 
 
 @pytest.mark.asyncio
+async def test_runtime_close_failure_retains_provider_completed_owner_for_exact_retry() -> (
+    None
+):
+    activation_handle = _native_activation()
+    client = _FailOnceNativeRuntimeCloseClient(activation_handle)
+    engine = _CountingCloseNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        capacity=1,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    key = registry._native_session_keys_by_record[uplink.record_id]
+
+    assert await registry.close_native_interaction(uplink) is False
+    assert registry._native_sessions[key].engine is engine
+    assert registry._native_session_keys_by_record[uplink.record_id] == key
+    assert registry._media_capacity_in_use() == 1
+    assert client.close_calls == 1
+    assert engine.close_calls == 1
+
+    assert await registry.close_native_interaction(uplink) is True
+    assert client.close_calls == 2
+    assert client.close_request_ids[1] == client.close_request_ids[0]
+    assert engine.close_calls == 1
+    assert registry._native_sessions == {}
+    assert registry._native_session_keys_by_record == {}
+    assert registry._native_close_capacity_reservations == set()
+    assert registry._records == {uplink.record_id: uplink}
+    assert registry._media_capacity_in_use() == 1
+
+    registry.revoke(
+        params={
+            "session_id": "session-1",
+            "subject_id": activated["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    assert client.close_calls == 2
+    assert engine.close_calls == 1
+    assert registry._media_capacity_in_use() == 0
+
+
+@pytest.mark.asyncio
 async def test_incomplete_native_revoke_retains_capacity_until_provider_close() -> None:
     activation_handle = _native_activation()
-    client = _FakeNativeRuntimeClient(activation_handle)
+    client = _MultiActivationNativeRuntimeClient(activation_handle)
     engine = _RetainedCloseNativeEngine()
     registry = DedicatedMediaProductRegistry(
         enabled=True,
@@ -1820,6 +1945,28 @@ async def test_incomplete_native_revoke_retains_capacity_until_provider_close() 
     assert uplink is not None
     await registry.begin_native_interaction(uplink)
 
+    successor = _params(
+        interaction_id="interaction-2",
+        correlation_id="correlation-2",
+        activation_id="activation-2",
+        capture_id="capture-2",
+        sample_rate_hz=24_000,
+    )
+    successor_activation = GatewayNativeActivation(
+        binding=NativeInteractionBinding(
+            scope=ScopeRef(
+                "subject-native", None, "session-1", Assurance.AUTHENTICATED
+            ),
+            interaction_id="interaction-2",
+            activation_id="activation-2",
+            activation_generation=1,
+            correlation_id="correlation-2",
+        ),
+        capability="b" * 64,
+        connection_id="connection-1",
+    )
+    client.activations.append(successor_activation)
+
     registry.revoke(
         params={
             "session_id": "session-1",
@@ -1833,6 +1980,18 @@ async def test_incomplete_native_revoke_retains_capacity_until_provider_close() 
         connection_id="connection-1",
         user_id="user-1",
     )
+    assert registry._records == {}
+    assert len(registry._native_close_capacity_reservations) == 1
+    assert registry._media_capacity_in_use() == 1
+    with pytest.raises(MediaTransportViolation) as immediate_saturation:
+        _activate(
+            registry,
+            params=successor,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+        )
+    assert immediate_saturation.value.reason_id == "MEDIA_ROUTE_CAPACITY_EXCEEDED"
+
     cleanup = tuple(registry._native_cleanup_tasks)
     assert cleanup
     await asyncio.gather(*cleanup)
@@ -1840,26 +1999,6 @@ async def test_incomplete_native_revoke_retains_capacity_until_provider_close() 
     assert len(registry._native_sessions) == 1
     assert registry._records == {}
 
-    successor = _params(
-        interaction_id="interaction-2",
-        correlation_id="correlation-2",
-        activation_id="activation-2",
-        capture_id="capture-2",
-        sample_rate_hz=24_000,
-    )
-    client.activation = GatewayNativeActivation(
-        binding=NativeInteractionBinding(
-            scope=ScopeRef(
-                "subject-native", None, "session-1", Assurance.AUTHENTICATED
-            ),
-            interaction_id="interaction-2",
-            activation_id="activation-2",
-            activation_generation=1,
-            correlation_id="correlation-2",
-        ),
-        capability="b" * 64,
-        connection_id="connection-1",
-    )
     with pytest.raises(MediaTransportViolation) as saturated:
         _activate(
             registry,
