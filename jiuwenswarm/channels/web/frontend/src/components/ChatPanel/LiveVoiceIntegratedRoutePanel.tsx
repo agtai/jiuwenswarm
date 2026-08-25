@@ -1272,6 +1272,13 @@ export function retainBoundedPresentedProductResponse(responses: Map<string, tru
   responses.set(responseId, true);
 }
 
+function productResponseGenerationIdentity(response: Readonly<{
+  response_id: string;
+  response_generation: number;
+}>): string {
+  return `${response.response_generation}:${response.response_id}`;
+}
+
 function browserSpeechCompatibilityAvailable(): boolean {
   if (typeof window === 'undefined') return false;
   const browserWindow = window as Window & {
@@ -1608,7 +1615,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
   const generationInterruptSequenceRef = useRef(0);
   // Responses this route has interrupted. A fenced answer can still be in
-  // flight from the server, so identity, not timing, is what refuses it.
+  // flight from the server, so exact response id + generation, not timing, is
+  // what refuses it.
   const interruptedProductResponsesRef = useRef(new Map<string, true>());
   const interruptProductGenerationHandlerRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -2154,6 +2162,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // notification to the exact successor owner after cleanup completes.
       return disposition;
     }
+    const interruptedResponse =
+      disposition.kind === 'failed'
+        ? disposition.response ?? null
+        : disposition.kind === 'presentation' && !disposition.task_notification
+          ? disposition.response
+          : null;
+    if (
+      interruptedResponse !== null &&
+      interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(interruptedResponse))
+    ) {
+      // The speaker already interrupted this exact answer. Its expected
+      // cancellation terminal and any late output belong to the predecessor,
+      // so neither may fail, render, speak, acknowledge or reach history in
+      // the replacement turn.
+      return disposition;
+    }
     if (disposition.kind === 'failed') {
       if (
         foregroundPresentationFenceMatchesResponse(
@@ -2203,12 +2227,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       ) {
         scheduleProductVoiceLoopCapture();
       }
-      return disposition;
-    }
-    if (!disposition.task_notification && interruptedProductResponsesRef.current.has(disposition.response_id)) {
-      // The speaker already interrupted this exact answer. It must not render,
-      // speak, acknowledge or reach history, whether it arrives before or after
-      // the server-side fence settles.
       return disposition;
     }
     if (!disposition.task_notification && terminalAnnouncementStateRef.current === 'fetching' && terminalAnnouncementTaskIdRef.current !== null) {
@@ -5314,9 +5332,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     // it on the wire is refused by identity. It is only a guess that the server
     // will fence anything, and it is withdrawn below whenever the server says
     // it did not -- an answer the server left intact is a legitimate answer.
-    retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, input.response_id);
+    const interruptedResponseIdentity = productResponseGenerationIdentity(input);
+    retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, interruptedResponseIdentity);
     const withdrawOptimisticRefusal = () => {
-      interruptedProductResponsesRef.current.delete(input.response_id);
+      interruptedProductResponsesRef.current.delete(interruptedResponseIdentity);
     };
     try {
       const outcome = await p2Owner.interruptGeneration(input);

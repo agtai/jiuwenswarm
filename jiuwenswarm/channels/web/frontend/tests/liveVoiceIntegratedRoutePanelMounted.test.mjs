@@ -11366,7 +11366,7 @@ function generationInterruptResponder(options) {
   return state;
 }
 
-test('mounted speech during Agent generation fences that answer and the replacement is spoken', async () => {
+test('mounted generation interruption ignores the cancelled predecessor terminal and speaks the replacement', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-interrupt-session';
   const controlRef = { current: null };
@@ -11466,12 +11466,25 @@ test('mounted speech during Agent generation fences that answer and the replacem
       ],
     );
 
-    // The fenced answer now arrives late. It must not be spoken or acknowledged.
+    // The cancelled predecessor now reports its terminal failure, as the real
+    // Agent adapter does after its round is cancelled. That expected terminal
+    // belongs to the interrupted response and must not become a route recovery
+    // failure while the replacement utterance is still being captured.
     const interruptedResponse = responder.submits[0].response;
+    const statesBeforeCancelledTerminal = states.length;
     await act(async () => {
-      responder.releaseHeldAnswer(utterances[0]);
+      responder.failHeldAnswer(utterances[0]);
       await new Promise(resolve => setTimeout(resolve, 25));
     });
+    assert.equal(
+      states.slice(statesBeforeCancelledTerminal).some(
+        state =>
+          state.recovery_diagnostic?.response_id === interruptedResponse.response_id &&
+          state.recovery_diagnostic?.response_generation === interruptedResponse.response_generation,
+      ),
+      false,
+      'the interrupted predecessor terminal must not surface as a recovery failure',
+    );
     assert.equal(
       responder.calls.filter(
         call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === interruptedResponse.response_id,
@@ -11552,6 +11565,7 @@ test('mounted speech during Agent generation fences that answer and the replacem
     );
     assert.equal(responder.calls.filter(call => call.method === 'live_voice.composition.p2.barge_in').length, 0);
     assert.equal(responder.interruptCalls.length, 1, 'the whole journey needed exactly one interruption');
+    assert.equal(states.at(-1)?.recovery_diagnostic, null, 'replacement success must retain no predecessor recovery diagnostic');
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
