@@ -127,6 +127,18 @@ model 可显式覆盖，但不得由 Provider 响应、浏览器 payload 或未�
 
 Native v1 本身不新增持久化 authority、schema migration 或第二个 routing classifier。
 
+### 5.4 Gateway–AgentServer carrier 与 Browser downlink 投影
+
+源码勘察确认 Provider session/原始音频必须留在 Gateway，而 Conversation Runtime、Agent Bridge 和 Voice–Task Bridge/P3 留在 AgentServer。D-099 因此把跨进程 carrier 明确纳入同一个 `live-voice.native-interaction.v1`，风险仍为 Tier-3：
+
+- Native activation 继续使用现有 authenticated P2 activation，不增加 Browser RPC。AgentServer 为 exact session/scope/interaction/activation generation 生成一个随机 256-bit capability；Gateway response observer 取得它，向 Browser 转发前必须剥离，Browser payload、日志和 telemetry 永远不可见。
+- Gateway→AgentServer 只新增三个 internal E2A request method：`live_voice.internal.native.propose`、`live_voice.internal.native.presentation_ack`、`live_voice.internal.native.close`。它们不进入 Web registered/forwarded/allowlisted method set；每次调用都绑定 exact capability、v1 payload、request replay identity 和当前 activation lease。
+- `native.propose` 承载 Provider action/turn/response/done/delegate proposal；Runtime admission 或 canonical delegate result 是它的 typed response。delegate completion 不是 Gateway 可自报的第二个 request method。
+- `native.presentation_ack` 只承载现有 Audio I/O/Media 验证后的 response/generation/delivery ACK 或实际 played cursor；`native.close` 只关闭 exact Native route。两者都不能修改 Task 或绕过 Runtime。
+- Browser 只增加现有 `live_voice.composition.p2.notification.next` 的 exact `kind="native.audio"` 变体。它绑定 activation、`ResponseRef`、audio `PresentationUnit` 和现有 response-bound dedicated-media downlink descriptor；不增加媒体 frame/control、WebSocket subprotocol 或 Browser authority。Gateway 从自己的有界 Native downlink queue 投影该变体，队列为空时继续读取原 AgentServer P2 notification，不吞掉 Agent/Task 事实。
+
+该扩张不修改 shared `TurnCommit`、SQLite、P3 command、media v1 或 canonical history schema。任何更多 Browser method/notification kind、持久 capability、第二队列/Runtime owner 或通用 Gateway→AgentServer execution API 都触发第 16 节重新评估。
+
 ## 6. Authority 划分
 
 | Owner | 唯一职责 | 明确禁止 |
@@ -368,4 +380,4 @@ Native activation 不成功时产品可显示“Native unavailable；可重新�
 - precise truncate 无法从 Audio I/O 获取实际 played cursor；
 - direct response history 必须保存被打断的部分文本，但缺少可靠 audio/text alignment；
 - Native failure 需要产品级自动 fallback/跨 Engine continuation；
-- 范围扩展到新客户端协议、public deployment、account/billing、Production 或 remote ref update。
+- 范围扩展到 D-099 已冻结的单一 `native.audio` 变体之外的新客户端协议、public deployment、account/billing、Production 或 remote ref update。

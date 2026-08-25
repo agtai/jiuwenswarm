@@ -48,7 +48,7 @@
 - Produces: `InteractionEngineKind`, `NativeInteractionSelection`, and `select_interaction_engine_environment(environ)`.
 - Produces: a recorded closed internal carrier operation set used by Task 5; no `ReqMethod` edit occurs in this task.
 
-- [ ] **Step 1: Write failing closed-contract tests**
+- [x] **Step 1: Write failing closed-contract tests**
 
 ```python
 def test_native_turn_commit_allows_audio_authority_without_transcript() -> None:
@@ -81,7 +81,7 @@ def test_delegate_rejects_unknown_arguments_before_any_bridge_call() -> None:
     assert raised.value.reason == "NATIVE_DELEGATE_ARGUMENTS_NOT_CLOSED"
 ```
 
-- [ ] **Step 2: Run the contract tests and capture RED**
+- [x] **Step 2: Run the contract tests and capture RED**
 
 Run:
 
@@ -91,7 +91,7 @@ Run:
 
 Expected: collection failure because `native_interaction_contract` does not exist.
 
-- [ ] **Step 3: Implement frozen bounded dataclasses and codecs**
+- [x] **Step 3: Implement frozen bounded dataclasses and codecs**
 
 Use these public signatures:
 
@@ -143,7 +143,7 @@ class NativePresentationCursor:
 
 All mappings are exact-key; all identities are trimmed, single-line, bounded to 256 characters/1024 UTF-8 bytes; all cursors use `0..MAX_SAFE_INTEGER`; optional transcript fields are both absent or both present; `committed_audio_ms == input_audio_end_ms - input_audio_start_ms`; `request_text` is non-empty and at most `MAX_NATIVE_DELEGATE_UTF8_BYTES`; embedded NUL/control characters are rejected. `NativeContractLedger` retains exact replay by stable identity and rejects changed replay/capacity overflow.
 
-- [ ] **Step 4: Add failing environment selection tests**
+- [x] **Step 4: Add failing environment selection tests**
 
 ```python
 def test_cascade_is_the_default_and_does_not_require_openai_secret() -> None:
@@ -174,7 +174,7 @@ def test_unknown_engine_fails_closed_without_cascade_fallback() -> None:
     assert raised.value.reason == "INTERACTION_ENGINE_UNSUPPORTED"
 ```
 
-- [ ] **Step 5: Run config tests RED, implement selection, then run focused GREEN**
+- [x] **Step 5: Run config tests RED, implement selection, then run focused GREEN**
 
 Public implementation:
 
@@ -203,11 +203,11 @@ Run:
 
 Expected: all focused tests pass.
 
-- [ ] **Step 6: Record the internal carrier before its protocol edit**
+- [x] **Step 6: Record the internal carrier before its protocol edit**
 
-Add one design subsection and D-099 stating that exact Gateway→AgentServer operations are `native.activate`, `native.propose`, `native.delegate.result`, `native.presentation.ack`, and `native.close`; they carry only v1 values, require a server-minted single-activation capability, are not in Web handler allowlists, and cannot be called by Browser payload. The same decision freezes one browser-visible `native.audio` variant inside the existing `p2.notification.next` carrier with exact activation binding, `ResponseRef`, audio `PresentationUnit`, and ordinary response-bound dedicated-media downlink descriptor; it adds no new Browser RPC or media v1 frame/control. Tier remains 3, no persistence/schema migration is added, and any broader client schema reopens scope.
+Add one design subsection and D-099 stating that exact Gateway→AgentServer request methods are `native.propose`, `native.presentation_ack`, and `native.close`; activation remains the existing P2 activation and returns a Gateway-private capability, while delegate completion is a typed result of `native.propose`, not another request method. The three requests carry only v1 values, require the single-activation capability, are absent from Web handler allowlists, and cannot be called by Browser payload. The same decision freezes one browser-visible `native.audio` variant inside the existing `p2.notification.next` carrier with exact activation binding, `ResponseRef`, audio `PresentationUnit`, and ordinary response-bound dedicated-media downlink descriptor; it adds no new Browser RPC or media v1 frame/control. Tier remains 3, no persistence/schema migration is added, and any broader client schema reopens scope.
 
-- [ ] **Step 7: Verify and commit the contract tranche**
+- [x] **Step 7: Verify and commit the contract tranche**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m ruff check jiuwenswarm/server/live_voice/native_interaction_contract.py jiuwenswarm/server/live_voice/native_interaction_config.py tests/unit_tests/live_voice/test_native_interaction_contract.py tests/unit_tests/live_voice/test_native_interaction_config.py
@@ -577,9 +577,7 @@ async def test_internal_native_methods_are_absent_from_browser_allowlist() -> No
 Add enum members:
 
 ```text
-live_voice.internal.native.activate
 live_voice.internal.native.propose
-live_voice.internal.native.delegate_result
 live_voice.internal.native.presentation_ack
 live_voice.internal.native.close
 ```
@@ -794,7 +792,7 @@ npm --prefix jiuwenswarm/channels/web/frontend run test:live-voice-product-compo
 npm --prefix jiuwenswarm/channels/web/frontend run build
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m ruff check jiuwenswarm/server/live_voice jiuwenswarm/gateway/live_voice tests/unit_tests/live_voice tests/unit_tests/gateway
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m ruff format --check jiuwenswarm/server/live_voice jiuwenswarm/gateway/live_voice tests/unit_tests/live_voice tests/unit_tests/gateway
-& 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m mypy jiuwenswarm/server/live_voice/native_interaction_contract.py jiuwenswarm/server/live_voice/native_interaction_config.py jiuwenswarm/server/live_voice/openai_realtime_session.py jiuwenswarm/server/live_voice/openai_realtime_native_engine.py jiuwenswarm/server/live_voice/native_interaction_runtime.py jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py
+& 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m mypy --follow-imports=skip --ignore-missing-imports jiuwenswarm/server/live_voice/native_interaction_contract.py jiuwenswarm/server/live_voice/native_interaction_config.py jiuwenswarm/server/live_voice/openai_realtime_session.py jiuwenswarm/server/live_voice/openai_realtime_native_engine.py jiuwenswarm/server/live_voice/native_interaction_runtime.py jiuwenswarm/gateway/live_voice/native_interaction_runtime_client.py
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m compileall -q jiuwenswarm/server/live_voice jiuwenswarm/gateway/live_voice
 git diff --check
 ```

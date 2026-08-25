@@ -293,8 +293,10 @@ exact-source Alpha result.
 - **Owned product/test surfaces:** new closed
   `live-voice.native-interaction.v1` internal contract, shared Realtime session
   kernel extraction, independent Native Engine and Runtime adapter, thin
-  Gateway/Product activation/media composition, plus focused contract,
-  Provider-fake, Runtime, Bridge and cumulative Cascade regression tests.
+  Gateway/Product activation/media composition, D-099's three-method internal
+  authority carrier and single existing-P2 `native.audio` notification variant,
+  plus focused contract, Provider-fake, Runtime, Bridge and cumulative Cascade
+  regression tests.
 - **Exclusions:** no existing TurnCommit or SQLite migration, second
   classifier/Runtime/history/Task authority, Provider-direct Jiuwen Tool/MCP,
   silent cross-Engine fallback, Production/public deployment, remote update or
@@ -308,7 +310,7 @@ exact-source Alpha result.
   authority ownership, Provider function exposure, played-cursor truth or
   fallback policy triggers re-scope before code expansion. See the
   [accepted design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md)
-  and [D-098](decisions/DECISIONS.md).
+  and [D-098/D-099](decisions/DECISIONS.md).
 
 ### Separate outstanding P3-9 cumulative one-product acceptance Gate
 
