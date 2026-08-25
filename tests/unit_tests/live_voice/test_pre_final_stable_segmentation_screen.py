@@ -127,6 +127,29 @@ async def test_final_rewrite_fails_closed_without_attractive_timing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_candidate_long_delta_tail_does_not_exhaust_policy_events() -> None:
+    tail = tuple(("chat.delta", "x") for _ in range(300))
+    final = f"Paris is the capital. More follows.{''.join('x' for _ in range(300))}"
+    attempt = await screen.measure_attempt(
+        _Facade(
+            (
+                ("chat.delta", "Paris is the capital. "),
+                ("chat.delta", "More follows."),
+                *tail,
+                ("chat.final", final),
+            )
+        ),
+        WORKLOAD,
+        0,
+        monotonic=_Clock((10.0, 10.4, 10.9)),
+    )
+
+    assert attempt.outcome == "completed"
+    assert attempt.reconciliation_disposition == "exact_prefix"
+    assert attempt.candidate_to_final_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("event_type", ("chat.tool_call", "chat.tool_result", "chat.error"))
 async def test_forbidden_or_error_events_fail_closed(event_type: str) -> None:
     attempt = await screen.measure_attempt(

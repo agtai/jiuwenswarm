@@ -43,6 +43,7 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
 from jiuwenswarm.server.live_voice.stable_sentence_policy import (
     FinalReconciliationDisposition,
     StableSentenceStreamState,
+    StableSentenceViolation,
     commit_candidate,
     observe_agent_event,
     reconcile_final,
@@ -322,6 +323,8 @@ async def measure_attempt(
                         and isinstance(content, str)
                         and content
                     ):
+                        if candidate_at is not None:
+                            continue
                         observation = observe_agent_event(
                             state,
                             _policy_event(
@@ -377,6 +380,13 @@ async def measure_attempt(
             except Exception:
                 pass
         raise
+    except StableSentenceViolation as error:
+        failure_reason = error.reason
+        if handle is not None and handle.terminal_event is None:
+            try:
+                terminal_outcome = await _cancel_and_wait_terminal(handle, binding)
+            except Exception:
+                failure_reason = "ROUND_CANCEL_FAILED"
     except Exception:
         failure_reason = failure_reason or "AGENT_STREAM_FAILED"
         if handle is not None and handle.terminal_event is None:
