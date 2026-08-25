@@ -214,7 +214,7 @@ risks, dependencies, acceptance and integration order.
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist; repeated short/long TTS was physically audible on `e1df8b452` without the repaired ACK/receipt failures | Provider-neutral configuration, measured first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation; scoped physical PASS does not close feature-complete targets |
 | Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the accepted physical loop. The bounded P2 notification pull removes the diagnosed one-notification-per-RPC tail from production Web: Web requests `16`, the server accepts explicit `2..16`, and omitted input remains legacy single-pull compatibility | Backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery; fixed-corpus p50/p95 proof | Audio I/O plus Conversation Runtime; [D-094](decisions/DECISIONS.md) and cumulative real network/device verification |
 | Conversation Runtime | **PARTIAL.** Committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and playout-time barge-in passed the scoped physical journeys. Bounded final notification delivery is default-on. Formal Live Voice intentionally disables interactive Agent tools; ordinary clarification is spoken as a normal response and answered in the next committed turn | **Hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; fixed-corpus/generalization and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions; structured `ask_user` interrupt/resume is optional compatibility work only if later scope requires exact suspended-workflow continuation |
-| Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey. D-098 accepts the independent Tier-3 Native Interaction design and activates implementation on an isolated branch; no Native source/automation or real-path credit exists yet | Implement and review the explicit opt-in Native model-level duplex path; general natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization | [Native design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md), D-098, Streaming Speech plus Runtime and measured golden corpus |
+| Interaction Intelligence | **PARTIAL overall; explicit opt-in Native source/automation boundary passed.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey. D-098/D-100's Native model-level duplex path is frozen at `944a1e72` and independently reviewed `C0/I0/M0`; Cascade remains default | Real OpenAI Provider/device/human Native Gate is `NOT_RUN`; general natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization | [Native design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md), [source evidence](evidence/OPENAI_REALTIME_NATIVE_D100_SOURCE_CANDIDATE_EVIDENCE_20260825.md), Streaming Speech plus Runtime and measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; scheduled pre-P3-9 P3 code boundary closed.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; D-093 fixes absent primitives as stable zero-effect unsupported | Run the P3-9 cumulative one-product acceptance without adding a second Task, event, presentation or confirmation authority | Executor capability/admission/durability facts, Voice–Task Bridge and restart/concurrency matrix; D-093 [evidence](evidence/P3_COMPLETE_CAPABILITY_BOUNDARY_EVIDENCE_20260822.md) |
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | P3-9 cumulative acceptance; any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review and exact Wave-2/Wave-3 Direct/Store/Core evidence; no generic Executor or host-crash claim |
@@ -272,14 +272,16 @@ exact-source Alpha result.
 
 ### OpenAI Realtime Native Interaction Engine
 
-- **Status/source:** **ACTIVE / FAILED CANDIDATE UNDER D-100 CORRECTION** on
-  isolated branch `codex/openai-realtime-native-interaction-engine`, based on
-  clean integration source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`.
-  Exact candidate `0a1a5d36e851998e5fe384c48302f7b446f52d12` has substantial local
-  implementation and passing affected automation, but its independent cold
-  review is `C2/I5/M0 — FAIL`; it has no source-pass or acceptance credit. The
-  user accepted D-100 solution A, and correction implementation is now active.
-  The old
+- **Status/source:** **SOURCE/AUTOMATION GATE PASS `C0/I0/M0`; REAL
+  PROVIDER/DEVICE/HUMAN GATE NOT_RUN** on isolated branch
+  `codex/openai-realtime-native-interaction-engine`, based on clean integration
+  source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`. D-100 solution A is frozen
+  at exact source candidate
+  `944a1e72addeca67dbb53ec06d7801d5ddf2d232`; the complete affected backend,
+  frontend and build automation have passed, and independent Tier-3 cold review is
+  `C0/I0/M0 — PASS`. The earlier exact candidate
+  `0a1a5d36e851998e5fe384c48302f7b446f52d12` remains an immutable
+  `C2/I5/M0 — FAIL` result and receives no retroactive credit. The old
   `codex/openai-realtime-native-voice@42f448aff7f8af9b0759c59a841f6a57a5792449`
   remains an untouched Speech Adapter reference and has no Native Engine
   completion authority.
@@ -313,21 +315,26 @@ exact-source Alpha result.
   silent cross-Engine fallback, Production/public deployment, remote update or
   source/real-path claim before its Gate. Real Provider/device/human acceptance
   remains independent after source/automation and cold Tier-3 review pass.
-- **Acceptance and re-scope:** use red-green-refactor with deterministic
-  event/barrier/manual-clock races; mutation-capable negative paths assert zero
-  forbidden effects. The D-100 packet must prove 3 s/150-frame sustained audio,
+- **Acceptance and re-scope:** red-green-refactor plus deterministic
+  event/barrier/manual-clock races now proves 3 s/150-frame sustained audio,
   before-first/between-frame/duplicate speech-start, cursor/no-cursor fencing,
   both history settlement orders and autonomous writer retry, long delegate,
-  incomplete close ownership, single direct response and transactional
-  activation compensation. Freeze a new exact candidate, obtain independent
-  fix-only Tier-3 review at `C0/I0`, then decide whether machine-private real
-  Provider evidence is runnable. Any need to change shared wire/schema,
+  incomplete Runtime/Provider close ownership, atomic revoke capacity,
+  close-retry quiescing, single direct response and transactional activation
+  compensation. Mutation-capable negative paths assert zero forbidden effects,
+  and the frozen candidate passed independent fix-only Tier-3 review at
+  `C0/I0`. The remaining Gate is a separately authorized machine-private real
+  OpenAI Provider, real audio-device and human journey; it is `NOT_RUN` and
+  grants no physical, product-readiness, Production or deployment credit. Any
+  need to change shared wire/schema,
   authority ownership, Provider function exposure, played-cursor truth or
   fallback policy triggers re-scope before code expansion. See the
   [accepted design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md)
   and [D-098/D-099/D-100](decisions/DECISIONS.md); the executable correction
   boundary is in the
-  [D-100 plan](../docs/superpowers/plans/2026-08-25-openai-realtime-native-response-stream-correction.md).
+  [D-100 plan](../docs/superpowers/plans/2026-08-25-openai-realtime-native-response-stream-correction.md),
+  with exact verification and review recorded in the
+  [D-100 source-candidate evidence](evidence/OPENAI_REALTIME_NATIVE_D100_SOURCE_CANDIDATE_EVIDENCE_20260825.md).
 
 ### Separate outstanding P3-9 cumulative one-product acceptance Gate
 
