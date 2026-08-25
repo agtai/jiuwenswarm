@@ -307,6 +307,56 @@ class ConversationRuntime:
                 state=TurnState.COMMITTED.value,
             )
 
+    def commit_native_turn(
+        self,
+        *,
+        turn_id: str,
+        interaction_id: str,
+        scope: ScopeRef,
+        commit_id: str,
+    ) -> tuple[bool, RuntimeEvent | None]:
+        """Commit one Runtime-validated Native audio turn without forging text."""
+
+        with self._lock:
+            self._require_enabled()
+            parsed_turn_id = self._require_id(turn_id, "turn_id")
+            parsed_interaction_id = self._require_id(
+                interaction_id, "interaction_id"
+            )
+            parsed_commit_id = self._require_id(commit_id, "commit_id")
+            turn = self._turn(parsed_turn_id)
+            if scope != self._scope or turn.interaction_id != parsed_interaction_id:
+                raise ConversationRuntimeViolation(
+                    "NATIVE_TURN_COMMIT_SCOPE_MISMATCH",
+                    "Native commit must match the exact Runtime scope and interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if turn.state is TurnState.COMMITTED:
+                if turn.commit_id == parsed_commit_id:
+                    return False, None
+                raise ConversationRuntimeViolation(
+                    "NATIVE_TURN_COMMIT_CONFLICT",
+                    "a committed Native turn cannot change its commit identity",
+                    ErrorCode.CONFLICT,
+                )
+            validate_transition(
+                LifecycleKind.TURN,
+                turn.state.value,
+                TurnState.COMMITTED.value,
+            )
+            updated = replace(
+                turn,
+                state=TurnState.COMMITTED,
+                commit_id=parsed_commit_id,
+            )
+            self._turns[turn.turn_id] = updated
+            return True, self._emit(
+                "turn.committed",
+                turn.interaction_id,
+                turn_id=turn.turn_id,
+                state=TurnState.COMMITTED.value,
+            )
+
     def cancel_turn(self, turn_id: str) -> RuntimeEvent:
         with self._lock:
             self._require_enabled()
@@ -331,9 +381,19 @@ class ConversationRuntime:
         response_id: str,
         *,
         response_generation: int | None = None,
+        minimum_generation: int = 0,
     ) -> tuple[ResponseRef, RuntimeEvent]:
         with self._lock:
             self._require_enabled()
+            if (
+                type(minimum_generation) is not int
+                or not 0 <= minimum_generation <= MAX_SAFE_INTEGER
+            ):
+                raise ConversationRuntimeViolation(
+                    "INVALID_MINIMUM_RESPONSE_GENERATION",
+                    "minimum response generation must be a safe unsigned integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
             turn = self._turn(turn_id)
             if turn.state is not TurnState.COMMITTED:
                 raise ConversationRuntimeViolation(
@@ -362,7 +422,7 @@ class ConversationRuntime:
             generation = response_generation
             if generation is None:
                 generation = (
-                    prior_generation + 1
+                    max(minimum_generation, prior_generation + 1)
                     if self._response_generation_owner is None
                     else self._response_generation_owner(
                         interaction_id, prior_generation
@@ -371,6 +431,7 @@ class ConversationRuntime:
             if (
                 type(generation) is not int
                 or generation <= prior_generation
+                or generation < minimum_generation
                 or generation > MAX_SAFE_INTEGER
             ):
                 raise ConversationRuntimeViolation(

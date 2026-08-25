@@ -455,6 +455,8 @@ git commit -m "feat(live-voice): implement native Realtime interaction engine"
 
 - Create: `jiuwenswarm/server/live_voice/native_interaction_runtime.py`
 - Create: `tests/unit_tests/live_voice/test_native_interaction_runtime.py`
+- Modify: `jiuwenswarm/server/live_voice/conversation_runtime.py`
+- Modify: `tests/unit_tests/live_voice/test_conversation_runtime.py`
 - Modify: `jiuwenswarm/server/live_voice/conversation_runtime_loop.py`
 - Modify: `tests/unit_tests/live_voice/test_conversation_runtime_loop.py`
 - Modify: `jiuwenswarm/server/live_voice/presentation_ledger.py`
@@ -465,7 +467,7 @@ git commit -m "feat(live-voice): implement native Realtime interaction engine"
 - Consumes: Engine events and existing Runtime loop operations.
 - Produces: `NativeInteractionRuntimeOwner`, `NativeResponseAdmission`, `NativeBargeAdmission`, `NativeHistoryAdmission`.
 
-- [ ] **Step 1: Write failing authority and stale-audio tests**
+- [x] **Step 1: Write failing authority and stale-audio tests**
 
 ```python
 @pytest.mark.asyncio
@@ -491,11 +493,11 @@ async def test_stale_generation_audio_and_done_have_zero_effect() -> None:
     assert media.frames == []
 ```
 
-- [ ] **Step 2: Add a Native audio history policy without weakening text history**
+- [x] **Step 2: Add a Native audio history policy without weakening text history**
 
 Extend `HistorySurfacePolicy` with `NATIVE_AUDIO`. A Native audio `PresentationUnit` carries content reference/digest and PCM cursor, while complete assistant transcript is held separately in `NativeInteractionRuntimeOwner`. `PresentationLedger` marks the response presentation complete only after all contiguous audio units ACK. It returns history eligibility, not text. Existing `TEXT` and `AUDIO` behavior remains byte-for-byte compatible.
 
-- [ ] **Step 3: Implement Runtime owner methods**
+- [x] **Step 3: Implement Runtime owner methods**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -522,11 +524,13 @@ class NativeInteractionRuntimeOwner:
 
 The owner implements `start()`, `accept_turn(commit)`, `accept_provider_response(provider_response_id, response_id)`, `accept_audio(output)`, `barge_in(*, action_id, response, cursor)`, `accept_provider_done(observation)`, `acknowledge_audio(ack)`, and `close()`. `accept_turn()` opens/starts the exact turn and retains Native commit without converting it to standard `TurnCommit`. `accept_provider_response()` calls Runtime `accept_response` with `history_policy=HistorySurfacePolicy.NATIVE_AUDIO`. `accept_audio()` produces/enqueues one existing PresentationUnit and media effect only if the ref is current and unfenced. `barge_in()` first calls Runtime exact barge/cancel and only then returns permission for Provider cancel/truncate. `accept_provider_done()` does not write history. `acknowledge_audio()` yields assistant history only when done + complete presentation + current generation + exact complete transcript provenance are all true.
 
-- [ ] **Step 4: Write and pass barge/cancel/history races**
+- [x] **Step 4: Write and pass barge/cancel/history races**
 
 Cover browser local stop before Provider speech-start, Provider speech-start before local cursor, duplicate cancel, cancel vs done, done vs final ACK, close during delegate wait, stale transcript, missing transcript, partial presentation, complete presentation, and history writer failure. Assert old PCM and history remain zero after fence.
 
-- [ ] **Step 5: Run GREEN and commit**
+Task 4 closes every race expressible at the Runtime-owner boundary, including both cancel/done orders, missing or ahead playback cursors, ACK-before-done, stale generations and transcripts, partial presentation, and exact replay. The transport-owned browser speech-start/cursor ordering remains assigned to Task 6, close during a delegate wait remains assigned to Task 7, and history-writer failure remains assigned to Task 8 where this task's immutable eligibility value is consumed. Those candidate acceptance cases are deferred to their owning boundaries, not scoped out.
+
+- [x] **Step 5: Run GREEN and commit**
 
 ```powershell
 & 'C:\Users\admin\Desktop\live voice hx\.venv\Scripts\python.exe' -m pytest -q tests/unit_tests/live_voice/test_native_interaction_runtime.py tests/unit_tests/live_voice/test_conversation_runtime_loop.py tests/unit_tests/live_voice/test_presentation_ledger.py

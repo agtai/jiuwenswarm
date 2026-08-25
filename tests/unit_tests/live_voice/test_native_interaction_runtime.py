@@ -1,0 +1,553 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+
+import pytest
+
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ResponseRef,
+    ScopeRef,
+)
+from jiuwenswarm.server.live_voice import (
+    native_interaction_runtime as native_runtime_module,
+)
+from jiuwenswarm.server.live_voice.conversation_runtime import CancelState
+from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
+    ConversationRuntimeLoop,
+    EffectState,
+)
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeInteractionBinding,
+    NativePresentationCursor,
+    NativeTurnCommit,
+)
+from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeHistoryAdmission,
+    NativeInteractionRuntimeError,
+    NativeInteractionRuntimeOwner,
+)
+from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+    MAX_NATIVE_AUDIO_DELTA_BYTES,
+    NativeAudioOutput,
+    NativeProviderDone,
+)
+from jiuwenswarm.server.live_voice.presentation_ledger import (
+    HistorySurfacePolicy,
+    PresentationAck,
+    PresentationSurface,
+)
+
+
+_SCOPE = ScopeRef(
+    "subject-native", "project-native", "session-native", Assurance.AUTHENTICATED
+)
+
+
+def binding() -> NativeInteractionBinding:
+    return NativeInteractionBinding(
+        scope=_SCOPE,
+        interaction_id="native-interaction-1",
+        activation_id="native-activation-1",
+        activation_generation=1,
+        correlation_id="native-correlation-1",
+    )
+
+
+def turn_commit(turn_number: int = 1) -> NativeTurnCommit:
+    return NativeTurnCommit(
+        contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+        commit_id=f"native-commit-{turn_number}",
+        binding=binding(),
+        turn_id=f"native-turn-{turn_number}",
+        provider_session_id="provider-session-1",
+        provider_item_id=f"provider-user-item-{turn_number}",
+        provider_event_id=f"provider-commit-event-{turn_number}",
+        causation_id=f"provider-speech-event-{turn_number}",
+        input_audio_start_ms=(turn_number - 1) * 20,
+        input_audio_end_ms=turn_number * 20,
+        committed_audio_ms=20,
+    )
+
+
+def audio(
+    response: ResponseRef,
+    provider_response_id: str,
+    sequence: int,
+    *,
+    pcm16: bytes = b"\x00\x00" * 480,
+) -> NativeAudioOutput:
+    return NativeAudioOutput(
+        provider_event_id=f"provider-audio-event-{provider_response_id}-{sequence}",
+        provider_response_id=provider_response_id,
+        provider_item_id=f"provider-assistant-item-{provider_response_id}",
+        content_index=0,
+        sequence=sequence,
+        pcm16=pcm16,
+        response=response,
+    )
+
+
+def done(
+    response: ResponseRef,
+    provider_response_id: str,
+    *,
+    transcript: str | None = "Canonical answer.",
+    completed: bool = True,
+) -> NativeProviderDone:
+    return NativeProviderDone(
+        provider_event_id=f"provider-done-event-{provider_response_id}",
+        provider_response_id=provider_response_id,
+        response=response,
+        completed=completed,
+        transcript=transcript,
+        transcript_event_id=(
+            None
+            if transcript is None
+            else f"provider-transcript-{provider_response_id}"
+        ),
+    )
+
+
+async def active_owner() -> tuple[
+    NativeInteractionRuntimeOwner, ConversationRuntimeLoop
+]:
+    runtime = ConversationRuntimeLoop(_SCOPE)
+    owner = NativeInteractionRuntimeOwner(binding(), runtime=runtime)
+    assert await owner.start() is True
+    assert await owner.accept_turn(turn_commit()) is True
+    return owner, runtime
+
+
+def ack_for(
+    runtime: ConversationRuntimeLoop,
+    response: ResponseRef,
+    sequence: int,
+    *,
+    presented_at: str = "2026-08-25T10:00:01Z",
+) -> PresentationAck:
+    record = next(
+        item
+        for item in runtime.snapshot().presentation.records
+        if item.unit.ref == response and item.unit.seq == sequence
+    )
+    return PresentationAck(
+        ref=response,
+        surface=PresentationSurface.AUDIO,
+        unit_id=record.unit.unit_id,
+        contiguous_cursor=sequence,
+        presented_at=presented_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_turn_response_audio_done_and_history_positive_journey() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response(
+        "provider-response-1", "native-response-1"
+    )
+    assert admission.response.response_generation == 1
+    assert (
+        await owner.accept_audio(
+            audio(admission.response, admission.provider_response_id, 0)
+        )
+        is True
+    )
+    snapshot = runtime.snapshot()
+    assert snapshot.presentation.policies == (
+        (admission.response, HistorySurfacePolicy.NATIVE_AUDIO),
+    )
+    assert [record.effect.effect_type for record in snapshot.effects] == [
+        "audio.enqueue"
+    ]
+    assert (
+        await owner.accept_provider_done(
+            done(admission.response, admission.provider_response_id)
+        )
+        is True
+    )
+
+    history = await owner.acknowledge_audio(ack_for(runtime, admission.response, 0))
+
+    assert history == NativeHistoryAdmission(
+        response=admission.response,
+        transcript="Canonical answer.",
+        presented_at="2026-08-25T10:00:01Z",
+    )
+    assert all(
+        record.effect.effect_type != "history.append"
+        for record in runtime.snapshot().effects
+    )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_replacement_fences_stale_audio_done_ack_and_history() -> None:
+    owner, runtime = await active_owner()
+    old = await owner.accept_provider_response("provider-response-1", "native-r1")
+    current = await owner.accept_provider_response("provider-response-2", "native-r2")
+    before = runtime.snapshot()
+
+    assert (
+        await owner.accept_audio(audio(old.response, "provider-response-1", 0)) is False
+    )
+    assert (
+        await owner.accept_provider_done(done(old.response, "provider-response-1"))
+        is False
+    )
+    stale_ack = PresentationAck(
+        ref=old.response,
+        surface=PresentationSurface.AUDIO,
+        unit_id="missing-old-unit",
+        contiguous_cursor=0,
+        presented_at="2026-08-25T10:00:01Z",
+    )
+    assert await owner.acknowledge_audio(stale_ack) is None
+
+    after = runtime.snapshot()
+    assert after.effects == before.effects
+    assert after.presentation.records == before.presentation.records == ()
+    assert current.response.response_generation > old.response.response_generation
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_ack_and_missing_transcript_never_admit_history() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    for sequence in range(2):
+        assert (
+            await owner.accept_audio(
+                audio(admission.response, admission.provider_response_id, sequence)
+            )
+            is True
+        )
+    assert (
+        await owner.accept_provider_done(
+            done(admission.response, admission.provider_response_id, transcript=None)
+        )
+        is True
+    )
+
+    assert (
+        await owner.acknowledge_audio(ack_for(runtime, admission.response, 0)) is None
+    )
+    assert (
+        await owner.acknowledge_audio(
+            ack_for(
+                runtime,
+                admission.response,
+                1,
+                presented_at="2026-08-25T10:00:02Z",
+            )
+        )
+        is None
+    )
+    assert runtime.snapshot().presentation.completed_surfaces == (
+        (admission.response, PresentationSurface.AUDIO),
+    )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_final_ack_before_done_becomes_eligible_on_exact_ack_replay() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    assert (
+        await owner.accept_audio(
+            audio(admission.response, admission.provider_response_id, 0)
+        )
+        is True
+    )
+    ack = ack_for(runtime, admission.response, 0)
+
+    assert await owner.acknowledge_audio(ack) is None
+    assert (
+        await owner.accept_provider_done(
+            done(admission.response, admission.provider_response_id)
+        )
+        is True
+    )
+    assert await owner.acknowledge_audio(ack) == NativeHistoryAdmission(
+        admission.response,
+        "Canonical answer.",
+        "2026-08-25T10:00:01Z",
+    )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_barge_is_idempotent_and_changed_cursor_has_zero_new_effect() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    output = audio(admission.response, admission.provider_response_id, 0)
+    assert await owner.accept_audio(output) is True
+    cursor = NativePresentationCursor(
+        response=admission.response,
+        provider_item_id=output.provider_item_id,
+        content_index=0,
+        audio_end_ms=10,
+    )
+
+    first = await owner.barge_in(
+        action_id="native-stop-1", response=admission.response, cursor=cursor
+    )
+    effect_count = len(runtime.snapshot().effects)
+    replay = await owner.barge_in(
+        action_id="native-stop-1", response=admission.response, cursor=cursor
+    )
+
+    assert first == replay
+    assert first.applied is True
+    assert len(runtime.snapshot().effects) == effect_count
+    response_record = runtime.snapshot().conversation.responses[-1]
+    assert response_record.cancel_state is CancelState.REQUESTED
+    assert response_record.fenced is True
+    with pytest.raises(NativeInteractionRuntimeError) as changed:
+        await owner.barge_in(
+            action_id="native-stop-1",
+            response=admission.response,
+            cursor=NativePresentationCursor(
+                response=admission.response,
+                provider_item_id=output.provider_item_id,
+                content_index=0,
+                audio_end_ms=9,
+            ),
+        )
+    assert changed.value.reason == "NATIVE_BARGE_ACTION_CONFLICT"
+    assert len(runtime.snapshot().effects) == effect_count
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_requires_received_audio_and_exact_confirmed_cursor() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    before_audio = runtime.snapshot()
+    missing_audio_cursor = NativePresentationCursor(
+        response=admission.response,
+        provider_item_id="provider-assistant-item-provider-response-1",
+        content_index=0,
+        audio_end_ms=0,
+    )
+
+    with pytest.raises(NativeInteractionRuntimeError) as missing:
+        await owner.barge_in(
+            action_id="native-stop-before-audio",
+            response=admission.response,
+            cursor=missing_audio_cursor,
+        )
+    assert missing.value.reason == "NATIVE_BARGE_CURSOR_MISMATCH"
+    assert runtime.snapshot() == before_audio
+
+    output = audio(admission.response, admission.provider_response_id, 0)
+    assert await owner.accept_audio(output) is True
+    after_audio = runtime.snapshot()
+    with pytest.raises(NativeInteractionRuntimeError) as ahead:
+        await owner.barge_in(
+            action_id="native-stop-ahead",
+            response=admission.response,
+            cursor=NativePresentationCursor(
+                response=admission.response,
+                provider_item_id=output.provider_item_id,
+                content_index=output.content_index,
+                audio_end_ms=21,
+            ),
+        )
+    assert ahead.value.reason == "NATIVE_BARGE_CURSOR_AHEAD"
+    assert runtime.snapshot() == after_audio
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_response_rejects_late_audio_done_and_ack() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    output = audio(admission.response, admission.provider_response_id, 0)
+    assert await owner.accept_audio(output) is True
+    ack = ack_for(runtime, admission.response, 0)
+    await owner.barge_in(
+        action_id="native-stop-1",
+        response=admission.response,
+        cursor=NativePresentationCursor(
+            response=admission.response,
+            provider_item_id=output.provider_item_id,
+            content_index=0,
+            audio_end_ms=10,
+        ),
+    )
+    before = runtime.snapshot()
+
+    assert await owner.accept_audio(output) is False
+    assert (
+        await owner.accept_provider_done(
+            done(admission.response, admission.provider_response_id)
+        )
+        is False
+    )
+    assert await owner.acknowledge_audio(ack) is None
+
+    after = runtime.snapshot()
+    assert after.effects == before.effects
+    assert sum(record.state is EffectState.PENDING for record in after.effects) == sum(
+        record.state is EffectState.PENDING for record in before.effects
+    )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_done_wins_race_and_late_barge_has_zero_cancel_effect() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    output = audio(admission.response, admission.provider_response_id, 0)
+    assert await owner.accept_audio(output) is True
+    assert (
+        await owner.accept_provider_done(
+            done(admission.response, admission.provider_response_id)
+        )
+        is True
+    )
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as stale:
+        await owner.barge_in(
+            action_id="native-stop-after-done",
+            response=admission.response,
+            cursor=NativePresentationCursor(
+                response=admission.response,
+                provider_item_id=output.provider_item_id,
+                content_index=output.content_index,
+                audio_end_ms=10,
+            ),
+        )
+
+    assert stale.value.reason == "NATIVE_BARGE_RESPONSE_STALE"
+    assert runtime.snapshot() == before
+    assert all(
+        record.effect.effect_type != "response.cancel" for record in before.effects
+    )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_exact_audio_and_done_are_at_most_once() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    output = audio(admission.response, admission.provider_response_id, 0)
+
+    audio_results = await asyncio.gather(
+        owner.accept_audio(output), owner.accept_audio(output)
+    )
+    done_value = done(admission.response, admission.provider_response_id)
+    done_results = await asyncio.gather(
+        owner.accept_provider_done(done_value), owner.accept_provider_done(done_value)
+    )
+
+    assert sorted(audio_results) == [False, True]
+    assert sorted(done_results) == [False, True]
+    assert [record.effect.effect_type for record in runtime.snapshot().effects].count(
+        "audio.enqueue"
+    ) == 1
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_done_provenance_fails_before_terminal_or_history_effect() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    assert (
+        await owner.accept_audio(
+            audio(admission.response, admission.provider_response_id, 0)
+        )
+        is True
+    )
+    before = runtime.snapshot()
+    invalid = NativeProviderDone(
+        provider_event_id="provider-done-invalid",
+        provider_response_id=admission.provider_response_id,
+        response=admission.response,
+        completed=True,
+        transcript="Canonical answer.",
+        transcript_event_id=None,
+    )
+
+    with pytest.raises(NativeInteractionRuntimeError) as raised:
+        await owner.accept_provider_done(invalid)
+
+    assert raised.value.reason == "NATIVE_TRANSCRIPT_PROVENANCE_INVALID"
+    assert runtime.snapshot() == before
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_audio_event_identity_cannot_be_reused_across_responses() -> None:
+    owner, runtime = await active_owner()
+    first = await owner.accept_provider_response("provider-response-1", "native-r1")
+    first_output = audio(first.response, first.provider_response_id, 0)
+    assert await owner.accept_audio(first_output) is True
+    second = await owner.accept_provider_response("provider-response-2", "native-r2")
+    reused = replace(
+        audio(second.response, second.provider_response_id, 0),
+        provider_event_id=first_output.provider_event_id,
+    )
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as raised:
+        await owner.accept_audio(reused)
+
+    assert raised.value.reason == "NATIVE_AUDIO_REPLAY_CONFLICT"
+    assert runtime.snapshot() == before
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_oversized_audio_fails_before_runtime_or_media_effect() -> None:
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    oversized = audio(
+        admission.response,
+        admission.provider_response_id,
+        0,
+        pcm16=b"\x00\x00" * (MAX_NATIVE_AUDIO_DELTA_BYTES // 2 + 1),
+    )
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as raised:
+        await owner.accept_audio(oversized)
+
+    assert raised.value.reason == "NATIVE_AUDIO_INVALID"
+    assert runtime.snapshot() == before
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_audio_ledger_capacity_fails_before_runtime_or_media_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_runtime_module, "_MAX_NATIVE_RUNTIME_RECORDS", 1)
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    assert (
+        await owner.accept_audio(
+            audio(admission.response, admission.provider_response_id, 0)
+        )
+        is True
+    )
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as raised:
+        await owner.accept_audio(
+            audio(admission.response, admission.provider_response_id, 1)
+        )
+
+    assert raised.value.reason == "NATIVE_AUDIO_LEDGER_FULL"
+    assert runtime.snapshot() == before
+    await owner.close()

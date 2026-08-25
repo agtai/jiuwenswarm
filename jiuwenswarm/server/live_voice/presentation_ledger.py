@@ -57,6 +57,7 @@ class HistorySurfacePolicy(StrEnum):
     TEXT = "text"
     AUDIO = "audio"
     UNION = "union"
+    NATIVE_AUDIO = "native_audio"
 
 
 class PresentationState(StrEnum):
@@ -113,6 +114,8 @@ class PresentationLedgerSnapshot:
     records: tuple[PresentationRecord, ...]
     closed_surfaces: tuple[tuple[ResponseRef, PresentationSurface, str], ...]
     cursors: tuple[tuple[ResponseRef, PresentationSurface, int], ...]
+    sealed_surfaces: tuple[tuple[ResponseRef, PresentationSurface, int], ...]
+    completed_surfaces: tuple[tuple[ResponseRef, PresentationSurface], ...]
 
 
 class PresentationLedger:
@@ -131,13 +134,17 @@ class PresentationLedger:
         self._ack_history: dict[
             tuple[ResponseRef, PresentationSurface], dict[int, PresentationAck]
         ] = {}
+        self._sealed: dict[tuple[ResponseRef, PresentationSurface], int] = {}
+        self._completed: dict[
+            tuple[ResponseRef, PresentationSurface], None
+        ] = {}
 
     def begin_response(self, ref: ResponseRef, policy: HistorySurfacePolicy) -> None:
         with self._lock:
             if not isinstance(policy, HistorySurfacePolicy):
                 raise PresentationLedgerViolation(
                     "INVALID_HISTORY_SURFACE_POLICY",
-                    "history policy must be text, audio, or union",
+                    "history policy must be text, audio, union, or native audio",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             if ref in self._policies:
@@ -155,6 +162,12 @@ class PresentationLedger:
             self._validate_unit(unit)
             key = (unit.ref, unit.surface)
             self._require_open(key)
+            if key in self._sealed:
+                raise PresentationLedgerViolation(
+                    "PRESENTATION_SURFACE_SEALED",
+                    "a sealed presentation surface cannot produce future output",
+                    ErrorCode.STALE,
+                )
             records = self._records[key]
 
             for record in records:
@@ -267,7 +280,45 @@ class PresentationLedger:
                 updated.append(item)
             self._latest_ack[key] = ack
             self._ack_history.setdefault(key, {})[ack.contiguous_cursor] = ack
+            self._refresh_completion(key)
             return True, tuple(updated)
+
+    def seal_surface(
+        self,
+        ref: ResponseRef,
+        surface: PresentationSurface,
+        *,
+        unit_count: int,
+    ) -> bool:
+        with self._lock:
+            key = self._key(ref, surface)
+            self._require_open(key)
+            count = self._require_uint(unit_count, "unit_count")
+            prior = self._sealed.get(key)
+            if prior is not None:
+                if prior == count:
+                    return False
+                raise PresentationLedgerViolation(
+                    "PRESENTATION_SEAL_CONFLICT",
+                    "a presentation seal cannot change its final unit count",
+                    ErrorCode.CONFLICT,
+                )
+            if len(self._records[key]) != count:
+                raise PresentationLedgerViolation(
+                    "PRESENTATION_SEAL_COUNT_MISMATCH",
+                    "presentation seal must match the exact produced unit count",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            self._sealed[key] = count
+            self._refresh_completion(key)
+            return True
+
+    def presentation_complete(
+        self, ref: ResponseRef, surface: PresentationSurface
+    ) -> bool:
+        with self._lock:
+            key = self._key(ref, surface)
+            return key in self._completed
 
     def close_surface(
         self, ref: ResponseRef, surface: PresentationSurface, *, reason: str
@@ -312,7 +363,10 @@ class PresentationLedger:
             selected: tuple[PresentationSurface, ...]
             if policy is HistorySurfacePolicy.TEXT:
                 selected = (PresentationSurface.TEXT,)
-            elif policy is HistorySurfacePolicy.AUDIO:
+            elif policy in {
+                HistorySurfacePolicy.AUDIO,
+                HistorySurfacePolicy.NATIVE_AUDIO,
+            }:
                 selected = (PresentationSurface.AUDIO,)
             else:
                 selected = tuple(PresentationSurface)
@@ -368,7 +422,24 @@ class PresentationLedger:
                     (ref, surface, ack.contiguous_cursor)
                     for (ref, surface), ack in self._latest_ack.items()
                 ),
+                sealed_surfaces=tuple(
+                    (ref, surface, count)
+                    for (ref, surface), count in self._sealed.items()
+                ),
+                completed_surfaces=tuple(self._completed),
             )
+
+    def _refresh_completion(
+        self, key: tuple[ResponseRef, PresentationSurface]
+    ) -> None:
+        count = self._sealed.get(key)
+        if count is None or count == 0:
+            return
+        records = self._records[key]
+        if len(records) == count and all(
+            record.state is PresentationState.PRESENTED for record in records
+        ):
+            self._completed.setdefault(key, None)
 
     def _validate_unit(self, unit: PresentationUnit) -> None:
         if not isinstance(unit, PresentationUnit):

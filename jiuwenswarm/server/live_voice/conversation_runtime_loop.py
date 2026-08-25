@@ -29,6 +29,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime import (
     RuntimeEvent,
     TurnState,
 )
+from jiuwenswarm.server.live_voice.native_interaction_contract import NativeTurnCommit
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
@@ -312,6 +313,25 @@ class ConversationRuntimeLoop:
 
         return await self._submit(apply)
 
+    async def commit_native_turn(
+        self, commit: NativeTurnCommit
+    ) -> tuple[bool, RuntimeEvent | None]:
+        def apply() -> tuple[bool, RuntimeEvent | None]:
+            if not isinstance(commit, NativeTurnCommit):
+                raise ConversationRuntimeLoopViolation(
+                    "INVALID_NATIVE_TURN_COMMIT",
+                    "Native commit has an unsupported type",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            return self._runtime.commit_native_turn(
+                turn_id=commit.turn_id,
+                interaction_id=commit.binding.interaction_id,
+                scope=commit.binding.scope,
+                commit_id=commit.commit_id,
+            )
+
+        return await self._submit(apply)
+
     async def cancel_turn(self, turn_id: str) -> RuntimeEvent:
         return await self._submit(lambda: self._runtime.cancel_turn(turn_id))
 
@@ -322,6 +342,7 @@ class ConversationRuntimeLoop:
         *,
         history_policy: HistorySurfacePolicy = HistorySurfacePolicy.TEXT,
         response_generation: int | None = None,
+        minimum_generation: int = 0,
     ) -> tuple[ResponseRef, RuntimeEvent]:
         def apply() -> tuple[ResponseRef, RuntimeEvent]:
             policy = self._history_policy(history_policy)
@@ -342,6 +363,7 @@ class ConversationRuntimeLoop:
                 turn_id,
                 response_id,
                 response_generation=response_generation,
+                minimum_generation=minimum_generation,
             )
             self._presentation.begin_response(ref, policy)
             if prior is not None:
@@ -474,6 +496,34 @@ class ConversationRuntimeLoop:
 
     async def acknowledge_presentation(self, ack: PresentationAck) -> bool:
         return await self._await_future(self.post_presentation_ack(ack))
+
+    async def seal_presentation(
+        self,
+        ref: ResponseRef,
+        surface: PresentationSurface,
+        *,
+        unit_count: int,
+    ) -> bool:
+        return await self._await_future(
+            self._post(
+                lambda: self._presentation.seal_surface(
+                    ref, surface, unit_count=unit_count
+                ),
+                control=False,
+                ordered_observation=True,
+            )
+        )
+
+    async def presentation_complete(
+        self, ref: ResponseRef, surface: PresentationSurface
+    ) -> bool:
+        return await self._await_future(
+            self._post(
+                lambda: self._presentation.presentation_complete(ref, surface),
+                control=False,
+                ordered_observation=True,
+            )
+        )
 
     def post_presentation_ack_with_history(
         self,
@@ -693,7 +743,7 @@ class ConversationRuntimeLoop:
                 ),
                 -1,
             )
-            records = sorted(
+            candidate_records = sorted(
                 (
                     record
                     for record in snapshot.records
@@ -703,7 +753,7 @@ class ConversationRuntimeLoop:
                 ),
                 key=lambda record: record.unit.seq,
             )
-            for record in records:
+            for record in candidate_records:
                 unit = record.unit
                 content = content_resolver(unit)
                 if not isinstance(content, bytes):
@@ -733,14 +783,14 @@ class ConversationRuntimeLoop:
                     ) from error
                 prepared.append(PresentedHistoryContent(unit, content))
 
-        accepted, records = self._presentation.acknowledge(ack)
+        accepted, acknowledged_records = self._presentation.acknowledge(ack)
         if not accepted:
             return False, None
         self._mark_effect_presented(ack)
         if ack.surface is not PresentationSurface.TEXT:
             return True, None
         if tuple(item.unit for item in prepared) != tuple(
-            record.unit for record in records
+            record.unit for record in acknowledged_records
         ):
             raise ConversationRuntimeLoopViolation(
                 "HISTORY_ACK_SERIALIZATION_MISMATCH",
