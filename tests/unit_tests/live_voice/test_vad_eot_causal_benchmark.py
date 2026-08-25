@@ -733,6 +733,10 @@ def test_parse_semantic_configuration_is_closed_and_builds_exact_detection() -> 
     assert high.silence_duration_ms is None and high.semantic_eagerness.value == "high"
     assert runner.turn_detection_for(auto).semantic_vad.eagerness.value == "auto"
     assert runner.turn_detection_for(runner.parse_configuration("A1_1200")).server_vad.silence_duration_ms == 1200
+    assert runner.parse_configuration("A1").silence_duration_ms == 1200
+    assert runner.parse_configuration("E1").silence_duration_ms == 900
+    assert runner.parse_configuration("E2").silence_duration_ms == 800
+    assert runner.turn_detection_for(runner.parse_configuration("E1")).server_vad.silence_duration_ms == 900
     with pytest.raises(ValueError):
         runner.VadConfiguration("bad", runner.RecognitionTurnDetectionMode.SEMANTIC_VAD, 1200, runner.SemanticVadEagerness.AUTO)
 

@@ -81,21 +81,31 @@ class VadConfiguration:
 
     def __post_init__(self) -> None:
         semantic = self.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD
-        if semantic != (self.semantic_eagerness is not None) or (semantic and self.silence_duration_ms is not None) or (not semantic and self.silence_duration_ms != 1200):
+        if (
+            semantic != (self.semantic_eagerness is not None)
+            or (semantic and self.silence_duration_ms is not None)
+            or (not semantic and self.silence_duration_ms not in {800, 900, 1200})
+        ):
             raise ValueError("VAD_CONFIGURATION_INVALID")
 
 
 def parse_configuration(configuration_id: str) -> VadConfiguration:
-    if configuration_id == "B_AUTO": return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SEMANTIC_VAD, None, SemanticVadEagerness.AUTO)
-    if configuration_id == "B_HIGH": return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SEMANTIC_VAD, None, SemanticVadEagerness.HIGH)
-    if configuration_id in {"A1_1200", "A2_1200"}: return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SERVER_VAD, 1200)
+    semantic = {
+        "B_AUTO": SemanticVadEagerness.AUTO,
+        "B_HIGH": SemanticVadEagerness.HIGH,
+    }
+    if configuration_id in semantic:
+        return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SEMANTIC_VAD, None, semantic[configuration_id])
+    legacy = {"A1": 1200, "E1": 900, "E2": 800, "A2": 1200, "A1_1200": 1200, "A2_1200": 1200}
+    if configuration_id in legacy:
+        return VadConfiguration(configuration_id, RecognitionTurnDetectionMode.SERVER_VAD, legacy[configuration_id])
     raise ValueError("VAD_CONFIGURATION_INVALID")
 
 
 def turn_detection_for(configuration: VadConfiguration) -> RecognitionTurnDetection:
     if configuration.mode is RecognitionTurnDetectionMode.SEMANTIC_VAD:
         return RecognitionTurnDetection.semantic_vad_configured(configuration.semantic_eagerness)
-    return RecognitionTurnDetection(RecognitionTurnDetectionMode.SERVER_VAD, ServerVadConfig(silence_duration_ms=1200))
+    return RecognitionTurnDetection(RecognitionTurnDetectionMode.SERVER_VAD, ServerVadConfig(silence_duration_ms=configuration.silence_duration_ms))
 
 
 class VadAttemptOutcome(StrEnum):
