@@ -125,6 +125,31 @@ def activation_payload() -> dict[str, object]:
     }
 
 
+def activation_payload_for(
+    binding: NativeInteractionBinding, capability: str
+) -> dict[str, object]:
+    return {
+        "request_id": f"activate-request-{binding.activation_generation}",
+        "ok": True,
+        "result": {
+            "status": "active",
+            "replayed": False,
+            "session_id": binding.scope.session_id,
+            "correlation_id": binding.correlation_id,
+            "interaction_id": binding.interaction_id,
+            "activation_id": binding.activation_id,
+            "activation_generation": binding.activation_generation,
+            NATIVE_GATEWAY_DESCRIPTOR_KEY: {
+                "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+                "binding": binding.to_dict(),
+                "capability": capability,
+            },
+        },
+        "error": None,
+        "product_composition": {"enabled": True},
+    }
+
+
 class FakeAgentClient:
     def __init__(self) -> None:
         self.requests: list[object] = []
@@ -250,6 +275,72 @@ def test_gateway_native_activation_handle_is_exact_private_and_connection_bound(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_activation_compensation_preserves_newer_exact_capability() -> None:
+    agent = FakeAgentClient()
+    client = GatewayNativeInteractionRuntimeClient(
+        agent,
+        native_model="gpt-realtime-2.1-mini",
+        timeout_seconds=0.2,
+    )
+    newer = NativeInteractionBinding(
+        scope=SCOPE,
+        interaction_id=BINDING.interaction_id,
+        activation_id="activation-native-2",
+        activation_generation=2,
+        correlation_id="correlation-native-2",
+    )
+    expected_newer = client_module.GatewayNativeActivation(
+        newer, "b" * 64, "web-connection-2"
+    )
+    client.observe_activation_response(
+        activation_payload_for(newer, "b" * 64),
+        routed_session_id=SCOPE.session_id,
+        connection_id="web-connection-2",
+        request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+    )
+
+    with pytest.raises(NativeRuntimeClientError) as stale:
+        client.observe_activation_response(
+            activation_payload(),
+            routed_session_id=SCOPE.session_id,
+            connection_id="web-connection-1",
+            request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        )
+    assert stale.value.reason == "NATIVE_RUNTIME_ACTIVATION_STALE"
+    assert client.activation_for(
+        session_id=SCOPE.session_id,
+        interaction_id=BINDING.interaction_id,
+        connection_id="web-connection-2",
+    ) == expected_newer
+
+    first = await client.abort_activation_response(
+        activation_payload(),
+        routed_session_id=SCOPE.session_id,
+        connection_id="web-connection-1",
+        request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        request_id="native-activation-aborted:old",
+    )
+    replay = await client.abort_activation_response(
+        activation_payload(),
+        routed_session_id=SCOPE.session_id,
+        connection_id="web-connection-1",
+        request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        request_id="native-activation-aborted:old",
+    )
+
+    assert first == replay == {"kind": "close", "status": "closed", "accepted": True}
+    assert len(agent.requests) == 2
+    assert all(
+        request.params["binding"] == BINDING.to_dict() for request in agent.requests
+    )
+    assert client.activation_for(
+        session_id=SCOPE.session_id,
+        interaction_id=BINDING.interaction_id,
+        connection_id="web-connection-2",
+    ) == expected_newer
 
 
 @pytest.mark.asyncio

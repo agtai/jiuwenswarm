@@ -3052,6 +3052,87 @@ async def test_native_activation_aborted_close_compensates_exact_p2_route(
 
 
 @pytest.mark.asyncio
+async def test_native_activation_abort_close_failure_retains_exact_retry_owner(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-abort-retry-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    route_key = (SCOPE.session_id, binding.interaction_id)
+    route = registry._p2_routes[route_key]
+
+    class _FailOnceLease:
+        def __init__(self, retained) -> None:
+            self.retained = retained
+            self.calls = 0
+
+        async def close(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("transient P2 close failure")
+            await self.retained.close()
+
+    fail_once = _FailOnceLease(route.lease)
+    route.lease = fail_once  # type: ignore[assignment]
+    params = _native_close_params(
+        binding,
+        capability,
+        disposition="activation_aborted",
+    )
+
+    failed = await registry.handle_native_close(
+        params=params,
+        request_id="request-native-activation-abort-retry",
+        session_id=SCOPE.session_id,
+    )
+    assert failed.ok is False
+    assert route.native_runtime_owner is not None
+    assert route.native_capability == capability
+    assert route.native_closed is False
+    assert route_key in registry._p2_routes
+
+    changed_retry = await registry.handle_native_close(
+        params=params,
+        request_id="request-native-activation-abort-changed",
+        session_id=SCOPE.session_id,
+    )
+    assert changed_retry.ok is False
+    assert cast(dict, changed_retry.payload["error"])["reason"] == (
+        "NATIVE_CLOSE_RETRY_IDENTITY_CONFLICT"
+    )
+    assert fail_once.calls == 1
+
+    closed = await registry.handle_native_close(
+        params=params,
+        request_id="request-native-activation-abort-retry",
+        session_id=SCOPE.session_id,
+    )
+    replay = await registry.handle_native_close(
+        params=params,
+        request_id="request-native-activation-abort-retry",
+        session_id=SCOPE.session_id,
+    )
+    assert closed.ok is replay.ok is True
+    assert closed.payload == replay.payload
+    assert fail_once.calls == 2
+    assert route_key not in registry._p2_routes
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_presentation_ack_closed_fence_variant_cancels_runtime_only(
     tmp_path: Path,
 ) -> None:

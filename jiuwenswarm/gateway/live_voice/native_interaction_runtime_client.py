@@ -392,23 +392,21 @@ class GatewayNativeInteractionRuntimeClient:
         self._activations: dict[tuple[str, str], GatewayNativeActivation] = {}
         self._completed_requests = 0
 
-    def observe_activation_response(
+    def _decode_activation_response(
         self,
         payload: dict[str, object],
         *,
         routed_session_id: str | None,
         connection_id: str | None,
         request_method: str | None,
-    ) -> dict[str, object]:
-        """Consume and remove one private descriptor before Browser delivery."""
-
+    ) -> tuple[dict[str, object], dict[str, object] | None, GatewayNativeActivation | None]:
         sanitized = copy.deepcopy(payload)
         result = sanitized.get("result")
         if not isinstance(result, dict):
-            return sanitized
+            return sanitized, None, None
         descriptor = result.pop(NATIVE_GATEWAY_DESCRIPTOR_KEY, None)
         if descriptor is None:
-            return sanitized
+            return sanitized, result, None
         if (
             request_method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value
             or payload.get("ok") is not True
@@ -450,11 +448,46 @@ class GatewayNativeInteractionRuntimeClient:
                 "Native activation descriptor does not match visible P2 authority",
             )
         capability = _capability(descriptor["capability"])
+        return (
+            sanitized,
+            result,
+            GatewayNativeActivation(binding, capability, connection_id),
+        )
+
+    def observe_activation_response(
+        self,
+        payload: dict[str, object],
+        *,
+        routed_session_id: str | None,
+        connection_id: str | None,
+        request_method: str | None,
+    ) -> dict[str, object]:
+        """Consume and remove one private descriptor before Browser delivery."""
+
+        sanitized, result, activation = self._decode_activation_response(
+            payload,
+            routed_session_id=routed_session_id,
+            connection_id=connection_id,
+            request_method=request_method,
+        )
+        if result is None or activation is None:
+            return sanitized
+        binding = activation.binding
         key = (binding.scope.session_id or "", binding.interaction_id)
         prior = self._activations.get(key)
-        activation = GatewayNativeActivation(binding, capability, connection_id)
         if prior is not None and prior != activation:
-            self._activations.pop(key, None)
+            prior_generation = prior.binding.activation_generation
+            candidate_generation = binding.activation_generation
+            if candidate_generation < prior_generation:
+                raise NativeRuntimeClientError(
+                    "NATIVE_RUNTIME_ACTIVATION_STALE",
+                    "Native activation response is older than the retained activation",
+                )
+            if candidate_generation == prior_generation:
+                raise NativeRuntimeClientError(
+                    "NATIVE_RUNTIME_ACTIVATION_CONFLICT",
+                    "Native activation response conflicts with retained authority",
+                )
         self._activations[key] = activation
         result[NATIVE_BROWSER_DESCRIPTOR_KEY] = {
             "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
@@ -603,37 +636,31 @@ class GatewayNativeInteractionRuntimeClient:
     ) -> dict[str, object]:
         """Compensate one exact private activation that cannot reach Browser."""
 
-        sanitized = self.observe_activation_response(
+        _sanitized, _result, candidate = self._decode_activation_response(
             payload,
             routed_session_id=routed_session_id,
             connection_id=connection_id,
             request_method=request_method,
         )
-        result = sanitized.get("result")
-        if not isinstance(result, dict):
+        if candidate is None:
             raise NativeRuntimeClientError(
                 "NATIVE_RUNTIME_ACTIVATION_INVALID",
-                "Native activation compensation requires an exact result",
+                "Native activation compensation requires an exact private descriptor",
             )
-        session_id = result.get("session_id")
-        interaction_id = result.get("interaction_id")
-        if type(session_id) is not str or type(interaction_id) is not str:
-            raise NativeRuntimeClientError(
-                "NATIVE_RUNTIME_ACTIVATION_INVALID",
-                "Native activation compensation lost its exact binding",
-            )
-        retained = self._activations.get((session_id, interaction_id))
-        if retained is None or retained.connection_id != connection_id:
-            raise NativeRuntimeClientError(
-                "NATIVE_RUNTIME_ACTIVATION_INVALID",
-                "Native activation compensation has no exact capability",
-            )
-        return await self.close(
-            binding=retained.binding,
-            capability=retained.capability,
+        close_result = await self._request(
+            method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE,
+            binding=candidate.binding,
+            capability=candidate.capability,
             request_id=request_id,
-            disposition="activation_aborted",
+            extra={"disposition": "activation_aborted"},
         )
+        key = (
+            candidate.binding.scope.session_id or "",
+            candidate.binding.interaction_id,
+        )
+        if self._activations.get(key) == candidate:
+            self._activations.pop(key, None)
+        return close_result
 
     def forget_connection(self, connection_id: str) -> int:
         """Drop process-private capabilities when one Gateway socket closes."""

@@ -87,6 +87,7 @@ class NativeResponseDownlinkSource:
         sample_rate_hz: int,
         capacity: int,
         max_frames: int,
+        append_timeout_seconds: float = 3.0,
     ) -> None:
         if not isinstance(response, ResponseRef):
             raise MediaTransportViolation(
@@ -101,6 +102,9 @@ class NativeResponseDownlinkSource:
             or not 0 < capacity <= 256
             or type(max_frames) is not int
             or not 0 < max_frames <= 9_000
+            or isinstance(append_timeout_seconds, bool)
+            or not isinstance(append_timeout_seconds, (int, float))
+            or not 0 < float(append_timeout_seconds) <= 30.0
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_STREAM_LIMIT_INVALID",
@@ -110,6 +114,7 @@ class NativeResponseDownlinkSource:
         self.sample_rate_hz = sample_rate_hz
         self.capacity = capacity
         self.max_frames = max_frames
+        self.append_timeout_seconds = float(append_timeout_seconds)
         self.completed = False
         self.emitted_frames = 0
         self.appended_frames = 0
@@ -174,11 +179,25 @@ class NativeResponseDownlinkSource:
                 "MEDIA_NATIVE_STREAM_FRAME_INVALID",
                 "Native stream requires one exact admitted 20 ms Provider frame",
             )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.append_timeout_seconds
         async with self._condition:
             while len(self._frames) >= self.capacity and not (
                 self._closed or self._sealed
             ):
-                await self._condition.wait()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise MediaTransportViolation(
+                        "MEDIA_NATIVE_STREAM_BACKPRESSURE_TIMEOUT",
+                        "Native response source remained saturated",
+                    )
+                try:
+                    await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                except TimeoutError:
+                    raise MediaTransportViolation(
+                        "MEDIA_NATIVE_STREAM_BACKPRESSURE_TIMEOUT",
+                        "Native response source remained saturated",
+                    ) from None
             if self._closed:
                 raise MediaTransportViolation(
                     "MEDIA_NATIVE_STREAM_CLOSED", "Native response source is closed"

@@ -6207,6 +6207,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     response_generation: 1,
   });
   const unitId = 'native-audio-unit-0';
+  const nativeFrameCount = 150;
   const downlinkBinding = {
     ...serverBinding(),
     lease_id: 'native-downlink-lease-1',
@@ -6236,16 +6237,27 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
           this.serverBinding.generation.value === 1 &&
           control.type === 'media.ack'
         ) {
-          queueMicrotask(() => this.onmessage?.({
-            data: serializeMediaControl({
-              type: 'media.detach',
-              lease_id: this.serverBinding.lease_id,
-              generation: this.serverBinding.generation.value,
-              reason_id: 'MEDIA_LOCAL_CLOSE',
-              through_seq: control.through_seq,
-              business_cancel_count_delta: 0,
-            }),
-          }));
+          if (control.through_seq + 1 < nativeFrameCount) {
+            const sequence = control.through_seq + 1;
+            queueMicrotask(() => this.onmessage?.({
+              data: encodeAudioFrame(this.serverBinding, {
+                seq: sequence,
+                sample_cursor: sequence * 960,
+                samples: new Float32Array(960).fill(sequence / nativeFrameCount),
+              }),
+            }));
+          } else {
+            queueMicrotask(() => this.onmessage?.({
+              data: serializeMediaControl({
+                type: 'media.detach',
+                lease_id: this.serverBinding.lease_id,
+                generation: this.serverBinding.generation.value,
+                reason_id: 'MEDIA_LOCAL_CLOSE',
+                through_seq: control.through_seq,
+                business_cancel_count_delta: 0,
+              }),
+            }));
+          }
         }
         return;
       }
@@ -6358,8 +6370,8 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   });
 
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
-  assert.equal(environment.contexts[0].sourceStartCount, 1);
-  assert.equal(environment.contexts[0].sourceEndCount, 1);
+  assert.equal(environment.contexts[0].sourceStartCount, nativeFrameCount);
+  assert.equal(environment.contexts[0].sourceEndCount, nativeFrameCount);
   assert.equal(uplink.readyState, 1);
   assert.equal(uplink.sent.filter(value => typeof value !== 'string').length, uplinkFramesBeforePlayout);
   assert.equal(calls.filter(([method]) => method.includes('speech.recognize')).length, 0);
@@ -6367,6 +6379,19 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   const receiptCalls = calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD);
   assert.equal(receiptCalls.length, 1);
   assert.equal(receiptCalls[0][1].capture_frames_acked, 1);
+  assert.equal(receiptCalls[0][1].rendered_chunks, nativeFrameCount);
+  assert.equal(receiptCalls[0][1].rendered_through_seq, nativeFrameCount - 1);
+  const firstDownlink = sockets.find(
+    socket => socket.serverBinding?.generation?.id === response.response_id,
+  );
+  const firstDownlinkAcks = firstDownlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.ack');
+  assert.deepEqual(
+    firstDownlinkAcks.map(control => control.through_seq),
+    Array.from({ length: nativeFrameCount }, (_value, sequence) => sequence),
+  );
 
   environment.contexts[0].deferSourceEnds = false;
   const secondResponse = Object.freeze({

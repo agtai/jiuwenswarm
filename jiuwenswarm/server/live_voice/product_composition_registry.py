@@ -458,6 +458,7 @@ class _P2Route:
         default=None, repr=False
     )
     native_capability: str | None = field(default=None, repr=False)
+    native_close_retry: tuple[str, bytes] | None = field(default=None, repr=False)
     native_closed: bool = False
 
 
@@ -5597,12 +5598,31 @@ class AgentServerProductCompositionRegistry:
                         request_id, reason="PRODUCT_COMPOSITION_STOPPED"
                     )
                 route = self._p2_routes.get((routed_session, binding.interaction_id))
+                retry_identity = (parsed_request_id, bytes.fromhex(fingerprint))
+                retry_matches = (
+                    route is not None and route.native_close_retry == retry_identity
+                )
+                if (
+                    route is not None
+                    and route.native_close_retry is not None
+                    and not retry_matches
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="NATIVE_CLOSE_RETRY_IDENTITY_CONFLICT",
+                        code=ErrorCode.CONFLICT,
+                        manifest=route.manifest,
+                    )
                 if (
                     route is None
                     or route.native_runtime_owner is None
                     or route.native_capability is None
                     or route.native_closed
-                    or route.activation_lease.snapshot().state is not P2LeaseState.OPEN
+                    or (
+                        not retry_matches
+                        and route.activation_lease.snapshot().state
+                        is not P2LeaseState.OPEN
+                    )
                     or route.binding.scope != binding.scope
                     or route.binding.correlation_id != binding.correlation_id
                     or route.binding.activation_id != binding.activation_id
@@ -5687,11 +5707,11 @@ class AgentServerProductCompositionRegistry:
         try:
             await owner.close()
             if disposition == "activation_aborted":
+                await retained_route.lease.close()
                 self._close_task_presentations_for_p2_route(
                     retained_route,
                     reason="native_activation_aborted",
                 )
-                await retained_route.lease.close()
         except Exception as exc:
             result = _error_result(
                 request_id,
@@ -5718,8 +5738,16 @@ class AgentServerProductCompositionRegistry:
                 )
             )
             if route is retained_route and route.native_runtime_owner is owner:
-                route.native_runtime_owner = None
-                route.native_capability = None
+                if result.ok:
+                    route.native_runtime_owner = None
+                    route.native_capability = None
+                    route.native_close_retry = None
+                else:
+                    route.native_closed = False
+                    route.native_close_retry = (
+                        parsed_request_id,
+                        bytes.fromhex(fingerprint),
+                    )
                 if result.ok and disposition == "activation_aborted":
                     key = (
                         retained_route.binding.session_id,
@@ -5736,13 +5764,19 @@ class AgentServerProductCompositionRegistry:
                         ),
                     )
                     self._critical_token_gate.release_interaction(key[1])
-            if len(self._native_close_operations) >= self._PRODUCT_OPERATION_CAPACITY:
-                expired_request_id = next(iter(self._native_close_operations))
-                self._native_close_operations.pop(expired_request_id)
-                self._mark_evicted_product_request("native.close", expired_request_id)
-            self._native_close_operations[parsed_request_id] = _NativeProductOperation(
-                fingerprint, result
-            )
+            if result.ok:
+                if (
+                    len(self._native_close_operations)
+                    >= self._PRODUCT_OPERATION_CAPACITY
+                ):
+                    expired_request_id = next(iter(self._native_close_operations))
+                    self._native_close_operations.pop(expired_request_id)
+                    self._mark_evicted_product_request(
+                        "native.close", expired_request_id
+                    )
+                self._native_close_operations[parsed_request_id] = (
+                    _NativeProductOperation(fingerprint, result)
+                )
             self._native_close_pending_operations.pop(parsed_request_id, None)
         return result
 

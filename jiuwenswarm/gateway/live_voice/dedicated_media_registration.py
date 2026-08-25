@@ -827,6 +827,7 @@ class _NativeMediaSession:
     downlink_record_ids: dict[ResponseRef, str] = field(
         default_factory=dict, repr=False
     )
+    runtime_close_request_id: str | None = field(default=None, repr=False)
     close_task: asyncio.Task[bool] | None = field(default=None, repr=False)
     closed: bool = False
 
@@ -1035,6 +1036,7 @@ class DedicatedMediaProductRegistry:
         native_engine_factory: (
             Callable[[Any], OpenAIRealtimeNativeInteractionEngine] | None
         ) = None,
+        native_downlink_append_timeout_seconds: float = 3.0,
     ) -> None:
         self.enabled = enabled is True
         self._monotonic = monotonic
@@ -1044,12 +1046,18 @@ class DedicatedMediaProductRegistry:
         self.end_of_turn_enabled = end_of_turn_enabled is True
         self._native_runtime_client = native_runtime_client
         self._native_engine_factory = native_engine_factory
+        self._native_downlink_append_timeout_seconds = (
+            native_downlink_append_timeout_seconds
+        )
         self._native_session_lock = asyncio.Lock()
         self._native_playout_lock = asyncio.Lock()
         self._native_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._native_sessions: dict[
             tuple[str, str, str, str, int], _NativeMediaSession
         ] = {}
+        self._native_close_capacity_reservations: set[
+            tuple[str, str, str, str, int]
+        ] = set()
         self._native_session_keys_by_record: dict[
             str, tuple[str, str, str, str, int]
         ] = {}
@@ -1446,6 +1454,7 @@ class DedicatedMediaProductRegistry:
             session.activation.connection_id,
         )
         with self._lock:
+            self._native_close_capacity_reservations.add(key)
             record.route_completed = True
             record.recognition_content_sha256 = None
             record.synthesis_content_sha256.clear()
@@ -1496,15 +1505,21 @@ class DedicatedMediaProductRegistry:
         client = self._native_runtime_client
         close_runtime = getattr(client, "close", None)
         if callable(close_runtime):
+            if session.runtime_close_request_id is None:
+                session.runtime_close_request_id = self._native_request_id(
+                    session, "close"
+                )
             with suppress(BaseException):
                 await close_runtime(
                     binding=session.activation.binding,
                     capability=session.activation.capability,
-                    request_id=self._native_request_id(session, "close"),
+                    request_id=session.runtime_close_request_id,
                 )
         provider_close_complete = await session.engine.close()
         if provider_close_complete is not True:
             return False
+        with self._lock:
+            self._native_close_capacity_reservations.discard(key)
         async with self._native_session_lock:
             if self._native_sessions.get(key) is session:
                 self._native_sessions.pop(key, None)
@@ -1839,7 +1854,7 @@ class DedicatedMediaProductRegistry:
             )
         with self._lock:
             self._prune(now)
-            if len(self._records) >= self._capacity:
+            if self._media_capacity_in_use() >= self._capacity:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
@@ -1876,6 +1891,7 @@ class DedicatedMediaProductRegistry:
                 sample_rate_hz=browser_sample_rate,
                 capacity=8,
                 max_frames=_MAX_DOWNLINK_FRAMES,
+                append_timeout_seconds=self._native_downlink_append_timeout_seconds,
             )
             downlink = _MediaAuthority(
                 record_id=record_id,
@@ -2648,7 +2664,7 @@ class DedicatedMediaProductRegistry:
         )
         with self._lock:
             self._prune(now)
-            if len(self._records) >= self._capacity:
+            if self._media_capacity_in_use() >= self._capacity:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
@@ -4321,7 +4337,7 @@ class DedicatedMediaProductRegistry:
                 and parent.synthesis_content_sha256.get(key) == binding.content_sha256
                 and now <= parent.authority_expires_at
                 and self._has_retained_product_activation(parent, now)
-                and len(self._records) < self._capacity
+                and self._media_capacity_in_use() < self._capacity
             ):
                 ticket = secrets.token_urlsafe(32)
                 record_id = f"media-record-{secrets.token_hex(16)}"
@@ -4525,7 +4541,7 @@ class DedicatedMediaProductRegistry:
                 return _streaming_error_envelope(
                     request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
                 )
-            if len(self._records) >= self._capacity:
+            if self._media_capacity_in_use() >= self._capacity:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
@@ -5076,6 +5092,24 @@ class DedicatedMediaProductRegistry:
         for ticket, pending_record_id in tuple(self._pending_tickets.items()):
             if pending_record_id == record_id:
                 self._pending_tickets.pop(ticket, None)
+
+    def _media_capacity_in_use(self) -> int:
+        """Count live media records plus orphaned retained Native close owners."""
+
+        record_owned_sessions = {
+            session_key
+            for record_id, session_key in self._native_session_keys_by_record.items()
+            if record_id in self._records
+        }
+        record_owned_sessions.update(
+            record.native_session_key
+            for record in self._records.values()
+            if record.native_session_key is not None
+        )
+        orphaned_close_owners = (
+            self._native_close_capacity_reservations - record_owned_sessions
+        )
+        return len(self._records) + len(orphaned_close_owners)
 
     def _prune(self, now: float) -> None:
         expired = [

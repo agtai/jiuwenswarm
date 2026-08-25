@@ -32,24 +32,27 @@ def _unit(response: ResponseRef, sequence: int, pcm16: bytes) -> NativeDownlinkP
 
 
 @pytest.mark.asyncio
-async def test_three_second_native_response_is_one_bounded_contiguous_source() -> None:
+@pytest.mark.parametrize("frame_count", [149, 150, 151])
+async def test_native_response_frame_boundary_is_one_bounded_contiguous_source(
+    frame_count: int,
+) -> None:
     response = ResponseRef("interaction-1", "response-1", 1)
     source = NativeResponseDownlinkSource(
         response=response,
         sample_rate_hz=48_000,
         capacity=8,
-        max_frames=150,
+        max_frames=frame_count,
     )
     observed: list[MediaAudioFrame] = []
 
     async def produce() -> None:
-        for sequence in range(150):
+        for sequence in range(frame_count):
             pcm16 = sequence.to_bytes(2, "little") * 480
             await source.append(
                 MediaAudioFrame(
                     seq=sequence,
                     sample_cursor=sequence * 960,
-                    samples=(sequence / 150.0,) * 960,
+                    samples=(sequence / frame_count,) * 960,
                 ),
                 _unit(response, sequence, pcm16),
                 pcm16=pcm16,
@@ -62,20 +65,24 @@ async def test_three_second_native_response_is_one_bounded_contiguous_source() -
 
     await asyncio.gather(produce(), consume())
 
-    assert [frame.seq for frame in observed] == list(range(150))
+    assert [frame.seq for frame in observed] == list(range(frame_count))
     assert [frame.sample_cursor for frame in observed] == [
-        sequence * 960 for sequence in range(150)
+        sequence * 960 for sequence in range(frame_count)
     ]
-    assert source.appended_frames == 150
-    assert source.emitted_frames == 150
+    assert source.appended_frames == frame_count
+    assert source.emitted_frames == frame_count
     assert source.completed is True
     assert source.buffered_frames == 0
     assert 0 < source.peak_buffered_frames <= 8
-    assert source.unit_for_media_sequence(149) == _unit(
-        response, 149, (149).to_bytes(2, "little") * 480
+    final_sequence = frame_count - 1
+    assert source.unit_for_media_sequence(final_sequence) == _unit(
+        response, final_sequence, final_sequence.to_bytes(2, "little") * 480
     )
     expected_digest = hashlib.sha256(
-        b"".join(sequence.to_bytes(2, "little") * 480 for sequence in range(150))
+        b"".join(
+            sequence.to_bytes(2, "little") * 480
+            for sequence in range(frame_count)
+        )
     ).hexdigest()
     assert source.content_sha256 == expected_digest
 
@@ -116,3 +123,33 @@ async def test_native_source_close_unblocks_producer_and_changed_scope_is_zero_e
     with pytest.raises(MediaTransportViolation, match="response"):
         await source.seal(ResponseRef("foreign-interaction", "response-1", 1))
     assert source.content_sha256 == before
+
+
+@pytest.mark.asyncio
+async def test_full_native_source_times_out_without_unbounded_control_stall() -> None:
+    response = ResponseRef("interaction-1", "response-1", 1)
+    source = NativeResponseDownlinkSource(
+        response=response,
+        sample_rate_hz=24_000,
+        capacity=1,
+        max_frames=4,
+        append_timeout_seconds=0.01,
+    )
+    pcm16 = b"\x01\x00" * 480
+    await source.append(
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+        _unit(response, 0, pcm16),
+        pcm16=pcm16,
+    )
+
+    with pytest.raises(MediaTransportViolation) as timed_out:
+        await source.append(
+            MediaAudioFrame(seq=1, sample_cursor=480, samples=(0.0,) * 480),
+            _unit(response, 1, pcm16),
+            pcm16=pcm16,
+        )
+
+    assert timed_out.value.reason_id == "MEDIA_NATIVE_STREAM_BACKPRESSURE_TIMEOUT"
+    assert source.appended_frames == 1
+    assert source.emitted_frames == 0
+    assert source.buffered_frames == 1
