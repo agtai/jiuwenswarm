@@ -99,12 +99,14 @@ _NO_CLEANUP_PROGRESS_REASONS = frozenset(
         ProductP3TextReason.AUTHORITY_UNAVAILABLE.value,
         ProductP3TextReason.PROGRESS_CLEANUP_CAPACITY.value,
         TaskProgressReturnReason.FEATURE_DISABLED.value,
-        TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE.value,
     }
 )
 
 _OPTIONAL_CLEANUP_PROGRESS_REASONS = frozenset(
-    {ProductP3TextReason.PROGRESS_ACTIVATION_FAILED.value}
+    {
+        ProductP3TextReason.PROGRESS_ACTIVATION_FAILED.value,
+        TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE.value,
+    }
 )
 
 _INACTIVE_PRODUCT_PROGRESS_REASONS = frozenset(

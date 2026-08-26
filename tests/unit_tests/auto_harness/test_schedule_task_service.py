@@ -425,11 +425,18 @@ async def test_new_task_fails_closed_for_explicit_invalid_owner_scope(
             owner_scope=invalid_owner_scope,
         )
 
-    assert result["code"] == "TASK_SCOPE_REQUIRED"
-    assert "task_id" not in result
+    assert result == {
+        "error": "调度任务缺少服务端所有者范围",
+        "code": "TASK_SCOPE_REQUIRED",
+    }
     assert task_store.tasks == {}
     assert task_store.added == []
+    assert task_store.updates == []
+    assert task_store.deleted == []
+    assert task_store.log_reads == []
     assert scheduler.triggered == []
+    assert scheduler.cancelled == []
+    assert service._scheduled_task_execution_contexts == {}
 
 
 @pytest.mark.asyncio
@@ -2080,6 +2087,12 @@ class _CompletedBoundExecutionService(_SchedulerService):
                 "RESULT = 'task one verified'\n",
                 encoding="utf-8",
             )
+        elif self.mutation == "too_many_source_paths":
+            for index in range(33):
+                (self.target_dir / f"generated-{index:02d}.py").write_text(
+                    f"RESULT = {index}\n",
+                    encoding="utf-8",
+                )
         elif self.mutation == "ignored":
             ignored_dir = self.target_dir / ".cache"
             ignored_dir.mkdir()
@@ -2101,6 +2114,12 @@ class _CompletedBoundExecutionService(_SchedulerService):
                 "RESULT = 'task one verified'\n",
                 encoding="utf-8",
             )
+        elif self.mutation == "too_many_source_paths":
+            for index in range(33):
+                (self.target_dir / f"generated-{index:02d}.py").write_text(
+                    f"RESULT = {index}\n",
+                    encoding="utf-8",
+                )
         elif self.mutation == "ignored":
             ignored_dir = self.target_dir / ".cache"
             ignored_dir.mkdir()
@@ -2346,6 +2365,143 @@ async def test_live_voice_result_contract_rejects_unreadable_target_before_agent
     assert stored["last_error"] == "target unreadable"
     assert service.started == 0
     assert service.released == [task_id]
+
+
+@pytest.mark.asyncio
+async def test_live_voice_result_contract_rejects_33_dirty_paths_before_agent(
+    tmp_path,
+) -> None:
+    task_id = "sch_manifest_pre_capacity"
+    target_dir, _ = _create_git_project(tmp_path, "target")
+    for index in range(33):
+        (target_dir / f"dirty-{index:02d}.txt").write_text(
+            f"dirty {index}\n",
+            encoding="utf-8",
+        )
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create a project file",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(target_dir)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(target_dir),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": PROJECT_CODE_PIPELINE,
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
+        }
+    )
+    service = _CompletedBoundExecutionService(task_id, target_dir, "source")
+    scheduler = Scheduler(service, task_store)
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["last_error"].startswith(
+        "TARGET_CHANGE_VALIDATION_FAILED: GIT_MANIFEST_CAPACITY_EXCEEDED:"
+    )
+    assert service.started == 0
+    assert not (target_dir / "generated.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_live_voice_result_contract_rejects_oversize_file_before_agent(
+    tmp_path,
+) -> None:
+    task_id = "sch_manifest_pre_file_capacity"
+    target_dir, _ = _create_git_project(tmp_path, "target")
+    (target_dir / "oversize.bin").write_bytes(b"x" * (1024 * 1024 + 1))
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create a project file",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(target_dir)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(target_dir),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": PROJECT_CODE_PIPELINE,
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
+        }
+    )
+    service = _CompletedBoundExecutionService(task_id, target_dir, "source")
+    scheduler = Scheduler(service, task_store)
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert "content_bytes_per_path limit=1048576" in stored["last_error"]
+    assert service.started == 0
+    assert not (target_dir / "generated.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_live_voice_result_contract_preserves_post_agent_overflow(
+    tmp_path,
+) -> None:
+    task_id = "sch_manifest_post_capacity"
+    target_dir, _ = _create_git_project(tmp_path, "target")
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create many project files",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(target_dir)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(target_dir),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": PROJECT_CODE_PIPELINE,
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
+        }
+    )
+    service = _CompletedBoundExecutionService(
+        task_id,
+        target_dir,
+        "too_many_source_paths",
+    )
+    scheduler = Scheduler(service, task_store)
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["last_error"].startswith(
+        "TARGET_CHANGE_VALIDATION_FAILED: GIT_MANIFEST_CAPACITY_EXCEEDED:"
+    )
+    assert service.started == 1
+    assert len(list(target_dir.glob("generated-*.py"))) == 33
 
 
 @pytest.mark.asyncio

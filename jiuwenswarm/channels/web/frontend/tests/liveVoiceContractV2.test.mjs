@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -46,6 +47,18 @@ function load(name) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+function captureContractViolation(operation) {
+  try {
+    operation();
+  } catch (error) {
+    if (error instanceof ContractViolation) {
+      return { reason: error.error.reason, code: error.error.code };
+    }
+    throw error;
+  }
+  return { accepted: true };
 }
 
 const wave2CommandCases = [
@@ -2244,4 +2257,110 @@ test('stateful TypeScript helpers normalize mutable structural inputs at entry',
   rawGap.payload.state = 'blocked';
   const first = eventFrom(fixture, { eventId: 'normalized-first', seq: 0 });
   assert.deepEqual(tracker.accept(first).appliedEventIds, ['normalized-first', 'normalized-gap']);
+});
+
+test('strict review shared literal corpus has exact TypeScript identity reasons and codes', () => {
+  const corpus = load('strict_review_stage2_parity.json');
+  const identities = new IdentityRegistry();
+  const scope = parseScopeRef(corpus.identity.scope);
+  identities.register({ ...corpus.identity.record, scope });
+  const observed = {
+    conflict: captureContractViolation(() =>
+      identities.register({ ...corpus.identity.record, scope: parseScopeRef(corpus.identity.conflicting_scope) })
+    ),
+    missing: captureContractViolation(() => identities.require(corpus.identity.missing_ref)),
+  };
+  assert.equal(identities.require(corpus.identity.record.ref).scope.session_id, scope.session_id);
+  assert.deepEqual(observed, corpus.identity.expected);
+});
+
+test('strict review shared literal corpus rejects every required-text Unicode whitespace identically in TypeScript', () => {
+  const corpus = load('strict_review_stage2_parity.json');
+  const fixture = load('critical_kernel.valid.json');
+  const observed = [];
+  for (const item of corpus.required_text) {
+    const command = clone(fixture.command);
+    command.request_id = item.value;
+    observed.push({ name: item.name, actual: captureContractViolation(() => parseCommandEnvelope(command)), expected: item.expected });
+  }
+  assert.deepEqual(
+    observed.map(item => ({ name: item.name, ...item.actual })),
+    observed.map(item => ({ name: item.name, ...item.expected }))
+  );
+});
+
+test('strict review shared literal corpus rejects illegal progress source kind before authority and preserves registry state in TypeScript', () => {
+  const corpus = load('strict_review_stage2_parity.json');
+  const progressFixture = load('work_progress.v2.json');
+  const identities = new IdentityRegistry();
+  const scope = parseScopeRef(corpus.identity.scope);
+  identities.register({ ...corpus.identity.record, scope });
+  const progress = clone(progressFixture.progress_events[0].payload);
+  progress.source.source_work_ref = {
+    kind: corpus.invalid_progress_source.kind,
+    id: corpus.invalid_progress_source.id,
+  };
+  assert.deepEqual(
+    captureContractViolation(() => parseWorkProgressEventV2(progress, scope, identities)),
+    corpus.invalid_progress_source.expected
+  );
+  assert.equal(identities.require(corpus.identity.record.ref).scope.session_id, scope.session_id);
+  assert.throws(
+    () => identities.require(corpus.identity.missing_ref),
+    error => error instanceof ContractViolation && error.error.reason === corpus.identity.expected.missing.reason
+  );
+});
+
+test('strict review shared literal corpus has exact malformed-JSON reasons and codes in TypeScript', () => {
+  const corpus = load('strict_review_stage2_parity.json');
+  const fixture = load('critical_kernel.valid.json');
+  const observed = [];
+  for (const item of corpus.malformed_json) {
+    const command = clone(fixture.command);
+    if (item.operation === 'native_object_key') {
+      Object.defineProperty(command.payload, Symbol('native-key'), { value: 'forbidden', enumerable: true });
+    } else if (item.operation === 'non_finite_number') {
+      command.payload.non_finite = Number.NaN;
+    } else if (item.operation === 'duplicate_capability') {
+      command.required_capabilities = ['task.create', 'task.create'];
+    } else {
+      assert.fail(`unknown corpus operation ${item.operation}`);
+    }
+    observed.push({ name: item.name, actual: captureContractViolation(() => parseCommandEnvelope(command)), expected: item.expected });
+  }
+  assert.deepEqual(
+    observed.map(item => ({ name: item.name, ...item.actual })),
+    observed.map(item => ({ name: item.name, ...item.expected }))
+  );
+});
+
+test('strict review P2 durable-text corpus has exact TypeScript UTF-8 and canonical byte counts', () => {
+  const corpus = load('strict_review_stage2_parity.json').p2_durable_committed_text;
+  const goldenOperation = {
+    ...corpus.operation_without_text,
+    params: { ...corpus.operation_without_text.params, text: corpus.canonical_golden.text },
+  };
+  const goldenBytes = canonicalJsonBytes(goldenOperation);
+  assert.equal(goldenBytes.byteLength, corpus.canonical_golden.canonical_operation_utf8_bytes);
+  assert.equal(createHash('sha256').update(goldenBytes).digest('hex'), corpus.canonical_golden.canonical_operation_sha256);
+  for (const item of corpus.cases) {
+    const text = item.token.repeat(item.repeat);
+    const operation = {
+      ...corpus.operation_without_text,
+      params: { ...corpus.operation_without_text.params, text },
+    };
+    const rawBytes = new TextEncoder().encode(text).byteLength;
+    const operationBytes = canonicalJsonBytes(operation).byteLength;
+    assert.equal(rawBytes, item.raw_utf8_bytes, `${item.name} raw bytes`);
+    assert.equal(operationBytes, item.canonical_operation_utf8_bytes, `${item.name} canonical bytes`);
+    assert.equal(
+      rawBytes <= corpus.raw_text_max_utf8_bytes && operationBytes <= corpus.canonical_operation_max_utf8_bytes,
+      item.accepted,
+      `${item.name} acceptance`,
+    );
+  }
+  assert.throws(
+    () => canonicalJsonBytes({ ...corpus.operation_without_text, params: { ...corpus.operation_without_text.params, text: '\ud800' } }),
+    error => error instanceof ContractViolation && error.error.reason === 'INVALID_UNICODE_SCALAR',
+  );
 });

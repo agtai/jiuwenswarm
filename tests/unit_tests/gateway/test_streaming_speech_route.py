@@ -1406,6 +1406,62 @@ async def test_business_capacity_never_blocks_provider_cleanup_reserve(
 
 
 @pytest.mark.asyncio
+async def test_fallback_cancel_uses_cleanup_capacity_when_business_pool_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B23: fallback cancellation must not compete with event/send work."""
+
+    monkeypatch.setattr(streaming_speech_route, "_MAX_RETAINED_PROVIDER_TASKS", 2)
+    provider = _Provider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    handle, fallback = await owner.begin(_binding())
+    assert fallback is None
+    assert handle is not None
+    for _ in range(16):
+        if owner._provider_task_capacity_in_use == 1:
+            break
+        await asyncio.sleep(0)
+    assert owner._provider_task_capacity_in_use == 1
+
+    blocker_started = asyncio.Event()
+    blocker_release = asyncio.Event()
+
+    async def business_blocker() -> None:
+        blocker_started.set()
+        await blocker_release.wait()
+
+    blocker = asyncio.create_task(
+        owner._bounded_provider_call(
+            business_blocker,
+            timeout_seconds=60.0,
+            task_name="business-capacity-blocker",
+        )
+    )
+    await blocker_started.wait()
+    assert owner._provider_task_capacity_in_use == 2
+
+    handle.failure = StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
+    outcome = await owner.finish(handle)
+    blocker_release.set()
+    await blocker
+
+    assert outcome.completed is False
+    assert outcome.reason is StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
+    assert provider.cancel_count == 1
+    assert provider.frames == []
+    assert handle.settled is True
+    assert owner._handles == {}
+    assert owner._provider_task_capacity_in_use == 0
+    assert owner._provider_cleanup_capacity_in_use == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_late_provider_obligation_survives_full_cleanup_reserve_until_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

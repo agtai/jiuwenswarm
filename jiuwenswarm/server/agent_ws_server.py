@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Optional
 from weakref import WeakValueDictionary
@@ -26,7 +27,7 @@ from jiuwenswarm.agents.harness.common.auto_harness.project_execution import (
     PROJECT_CODE_PIPELINE,
 )
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
-from jiuwenswarm.server.ws_send import send_wire_payload
+from jiuwenswarm.server.ws_send import send_serialized_payload, send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
@@ -914,6 +915,46 @@ def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
         )
 
 
+class _GatewayConnectionRevoked(RuntimeError):
+    """The exact Gateway generation no longer owns admission or transport."""
+
+
+@dataclass(eq=False, slots=True)
+class _GatewayConnectionLease:
+    transport_ws: Any
+    send_lock: asyncio.Lock
+    generation: int
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    message_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    revoked: bool = False
+    cleanup_task: asyncio.Task[None] | None = None
+    guarded_ws: Any = None
+
+
+class _GatewayConnectionSocket:
+    """Delegate one socket while fencing sends through its exact lease."""
+
+    __slots__ = ("_server", "_lease")
+
+    def __init__(
+        self,
+        server: "AgentWebSocketServer",
+        lease: _GatewayConnectionLease,
+    ) -> None:
+        self._server = server
+        self._lease = lease
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._lease.transport_ws, name)
+
+    async def send(self, payload: str | bytes) -> Any:
+        if not self._server._is_current_gateway_lease(self._lease):
+            raise _GatewayConnectionRevoked(
+                f"Gateway generation {self._lease.generation} is revoked"
+            )
+        return await send_serialized_payload(self._lease.transport_ws, payload)
+
+
 class AgentWebSocketServer:
     """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
 
@@ -947,6 +988,8 @@ class AgentWebSocketServer:
         self._gateway_connection_lifecycle_lock = asyncio.Lock()
         self._gateway_connection_generation = 0
         self._current_ws_done: asyncio.Event | None = None
+        self._current_gateway_lease: _GatewayConnectionLease | None = None
+        self._gateway_generation_cleanups: set[asyncio.Task[None]] = set()
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
@@ -1599,8 +1642,213 @@ class AgentWebSocketServer:
         )
         return forbidden_origin_response(args)
 
+    def _is_current_gateway_lease(self, lease: _GatewayConnectionLease) -> bool:
+        return (
+            not lease.revoked
+            and getattr(self, "_current_gateway_lease", None) is lease
+        )
+
+    async def _adopt_gateway_connection(
+        self,
+        transport_ws: Any,
+    ) -> tuple[_GatewayConnectionLease, _GatewayConnectionSocket]:
+        """Publish a successor lease without waiting for predecessor cleanup."""
+
+        send_lock = asyncio.Lock()
+        previous: _GatewayConnectionLease | None
+        async with self._gateway_connection_lifecycle_lock:
+            previous = getattr(self, "_current_gateway_lease", None)
+            if previous is not None:
+                previous.revoked = True
+            self._gateway_connection_generation += 1
+            lease = _GatewayConnectionLease(
+                transport_ws=transport_ws,
+                send_lock=send_lock,
+                generation=self._gateway_connection_generation,
+            )
+            guarded_ws = _GatewayConnectionSocket(self, lease)
+            lease.guarded_ws = guarded_ws
+            self._current_gateway_lease = lease
+            # Compatibility projections are never authoritative on their own.
+            self._current_ws = transport_ws
+            self._current_send_lock = send_lock
+            self._current_ws_done = lease.done
+        if previous is not None:
+            self._schedule_gateway_generation_cleanup(previous)
+        return lease, guarded_ws
+
+    def _schedule_gateway_generation_cleanup(
+        self,
+        lease: _GatewayConnectionLease,
+    ) -> asyncio.Task[None]:
+        existing = lease.cleanup_task
+        if existing is not None:
+            return existing
+        cleanups = getattr(self, "_gateway_generation_cleanups", None)
+        if cleanups is None:
+            cleanups = set()
+            self._gateway_generation_cleanups = cleanups
+        cleanup = asyncio.create_task(
+            self._cleanup_gateway_generation(lease),
+            name=f"gateway-generation-{lease.generation}-cleanup",
+        )
+        lease.cleanup_task = cleanup
+        cleanups.add(cleanup)
+
+        def _settled(task: asyncio.Task[None]) -> None:
+            cleanups.discard(task)
+            if task.cancelled():
+                logger.error(
+                    "[AgentWebSocketServer] Gateway generation cleanup cancelled: generation=%s",
+                    lease.generation,
+                )
+                return
+            error = task.exception()
+            if error is not None:
+                logger.error(
+                    "[AgentWebSocketServer] Gateway generation cleanup failed: generation=%s error=%s",
+                    lease.generation,
+                    error,
+                )
+
+        cleanup.add_done_callback(_settled)
+        return cleanup
+
+    async def _cleanup_gateway_generation(
+        self,
+        lease: _GatewayConnectionLease,
+    ) -> None:
+        """Revoke only one connection generation and retain its cleanup owner."""
+
+        try:
+            lease.revoked = True
+            for task in tuple(lease.message_tasks):
+                if not task.done():
+                    task.cancel()
+            close = getattr(lease.transport_ws, "close", None)
+            if callable(close):
+                try:
+                    close_result = close()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                except asyncio.CancelledError:
+                    logger.exception(
+                        "[AgentWebSocketServer] Gateway generation socket close self-cancelled: generation=%s",
+                        lease.generation,
+                    )
+                except Exception:  # noqa: BLE001 -- continue exact owner cleanup
+                    logger.exception(
+                        "[AgentWebSocketServer] Gateway generation socket close failed: generation=%s",
+                        lease.generation,
+                    )
+            if lease.message_tasks:
+                await asyncio.gather(
+                    *tuple(lease.message_tasks), return_exceptions=True
+                )
+            guarded_ws = lease.guarded_ws
+            if guarded_ws is not None:
+                self._clear_ws_acp_client_capabilities(guarded_ws)
+            self._clear_ws_acp_client_capabilities(lease.transport_ws)
+            registry = getattr(self, "_live_voice_product_composition", None)
+            if registry is not None:
+                try:
+                    await registry.close_active_routes_for_transport_generation(
+                        lease.generation
+                    )
+                except asyncio.CancelledError:
+                    logger.exception(
+                        "[LiveVoiceProduct] Gateway generation cleanup self-cancelled: generation=%s",
+                        lease.generation,
+                    )
+                except Exception:  # noqa: BLE001 -- registry retains retryable cleanup truth
+                    logger.exception(
+                        "[LiveVoiceProduct] Gateway generation cleanup pending: generation=%s",
+                        lease.generation,
+                    )
+        finally:
+            lease.done.set()
+
+    async def _revoke_gateway_lease(
+        self,
+        lease: _GatewayConnectionLease,
+        *,
+        only_if_current: bool,
+    ) -> bool:
+        revoked_current = False
+        async with self._gateway_connection_lifecycle_lock:
+            current = getattr(self, "_current_gateway_lease", None)
+            if current is lease:
+                lease.revoked = True
+                self._current_gateway_lease = None
+                self._current_ws = None
+                self._current_send_lock = None
+                self._current_ws_done = None
+                revoked_current = True
+            elif only_if_current:
+                return False
+            else:
+                lease.revoked = True
+        self._schedule_gateway_generation_cleanup(lease)
+        return revoked_current
+
+    async def _revoke_current_gateway_lease(self) -> None:
+        async with self._gateway_connection_lifecycle_lock:
+            lease = getattr(self, "_current_gateway_lease", None)
+            if lease is None:
+                return
+            lease.revoked = True
+            self._current_gateway_lease = None
+            self._current_ws = None
+            self._current_send_lock = None
+            self._current_ws_done = None
+        self._schedule_gateway_generation_cleanup(lease)
+
+    async def _drain_gateway_generation_cleanups(self) -> None:
+        while True:
+            cleanups = tuple(
+                getattr(self, "_gateway_generation_cleanups", set())
+            )
+            if not cleanups:
+                return
+            await asyncio.shield(
+                asyncio.gather(*cleanups, return_exceptions=True)
+            )
+
+    async def _stop_gateway_process_owners(self) -> None:
+        try:
+            await self._agent_manager.cancel_all_inflight_work(
+                reason="[AgentWebSocketServer stopping] ",
+            )
+        except Exception:  # noqa: BLE001 -- continue process shutdown
+            logger.exception("[AgentWebSocketServer] cancel_all_inflight_work failed")
+        try:
+            await self._stop_scheduler()
+        except Exception:  # noqa: BLE001 -- continue process shutdown
+            logger.exception("[AgentWebSocketServer] scheduler stop failed")
+        try:
+            from jiuwenswarm.agents.harness.team import (
+                cancel_all_team_stream_tasks_across_managers,
+            )
+
+            await cancel_all_team_stream_tasks_across_managers(
+                reason="[AgentWebSocketServer stopping] ",
+            )
+        except Exception:  # noqa: BLE001 -- continue process shutdown
+            logger.exception("[AgentWebSocketServer] team stream cancel failed")
+
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        # Stop admission first, revoke the exact current lease, then drain every
+        # generation cleanup before process-wide owners are touched.
+        had_server = self._server is not None
+        if had_server:
+            self._server.close()
+        await self._revoke_current_gateway_lease()
+        if had_server:
+            await self._server.wait_closed()
+            self._server = None
+        await self._drain_gateway_generation_cleanups()
+
         # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
         warmup = self._checkpointer_warmup_task
         self._checkpointer_warmup_task = None
@@ -1625,12 +1873,6 @@ class AgentWebSocketServer:
                 logger.warning(
                     "[AgentWebSocketServer] image modality refresh cancel failed: %s", exc
                 )
-        had_server = self._server is not None
-        if had_server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
-
         # Product leases consume the authenticated P3 Core/Store and must
         # detach before that lower owner closes.
         product_stopped = await self._stop_live_voice_product_composition()
@@ -1640,6 +1882,9 @@ class AgentWebSocketServer:
             logger.warning(
                 "[LiveVoiceProduct] retaining P3 owner until product cleanup retries"
             )
+
+        if had_server:
+            await self._stop_gateway_process_owners()
 
         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
             cancel_pending_tasks,
@@ -1662,112 +1907,56 @@ class AgentWebSocketServer:
         remote = ws.remote_address
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
-        send_lock = asyncio.Lock()
-        async with self._gateway_connection_lifecycle_lock:
-            previous_ws = self._current_ws
-            previous_done = self._current_ws_done
-            if previous_ws is not None and previous_ws is not ws:
-                close = getattr(previous_ws, "close", None)
-                if callable(close):
-                    close_result = close()
-                    if inspect.isawaitable(close_result):
-                        await close_result
-                if previous_done is not None:
-                    await previous_done.wait()
-            self._gateway_connection_generation += 1
-            connection_generation = self._gateway_connection_generation
-            connection_done = asyncio.Event()
-            self._current_ws = ws
-            self._current_send_lock = send_lock
-            self._current_ws_done = connection_done
-
-        # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
-        try:
-            ack_frame = {
-                "type": "event",
-                "event": "connection.ack",
-                "payload": {"status": "ready"},
-            }
-            await send_wire_payload(ws, ack_frame)
-            logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
-        except Exception as e:
-            logger.warning("[AgentWebSocketServer] 发送 connection.ack 失败: %s", e)
-
-        tasks: set[asyncio.Task] = set()
+        lease, guarded_ws = await self._adopt_gateway_connection(ws)
 
         try:
-            async for raw in ws:
-                task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
-        except WebSocketConnectionClosed as e:
-            logger.info(
-                "[AgentWebSocketServer] 连接关闭: %s",
-                format_ws_diagnostics(
-                    {
-                        "remote": remote,
-                        "active_tasks": len(tasks),
-                        "session_stream_tasks": len(self._session_stream_tasks),
-                        "ping_interval": self._ping_interval,
-                        "ping_timeout": self._ping_timeout,
-                    },
-                    describe_ws_peer(ws),
-                    describe_ws_exception(e),
-                ),
-            )
-        except Exception as e:
-            logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
-        finally:
-            self._clear_ws_acp_client_capabilities(ws)
-            connection_tasks = list(tasks)
-            for task in connection_tasks:
-                if not task.done():
-                    task.cancel()
-            if (
-                self._current_ws is not ws
-                or self._gateway_connection_generation != connection_generation
-            ):
-                if connection_tasks:
-                    await asyncio.gather(*connection_tasks, return_exceptions=True)
-                connection_done.set()
+            # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
+            try:
+                ack_frame = {
+                    "type": "event",
+                    "event": "connection.ack",
+                    "payload": {"status": "ready"},
+                }
+                async with lease.send_lock:
+                    await send_wire_payload(guarded_ws, ack_frame)
+                logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
+            except Exception as e:
+                logger.warning("[AgentWebSocketServer] 发送 connection.ack 失败: %s", e)
+                # A late ACK failure may revoke only the lease which attempted it;
+                # it must never erase an already-published successor.
+                await self._revoke_gateway_lease(lease, only_if_current=True)
                 return
-            registry = getattr(self, "_live_voice_product_composition", None)
-            if registry is not None:
-                try:
-                    await registry.close_active_routes()
-                except Exception:
-                    logger.exception(
-                        "[LiveVoiceProduct] Gateway disconnect cleanup pending"
-                    )
-            # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
-            # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
-            try:
-                await self._agent_manager.cancel_all_inflight_work(
-                    reason=f"[gateway ws closed {remote}] ",
-                )
-            except Exception:
-                logger.exception("[AgentWebSocketServer] cancel_all_inflight_work failed")
-            # Stop scheduler on server shutdown
-            try:
-                await self._stop_scheduler()
-            except Exception:
-                logger.exception("[AgentWebSocketServer] scheduler stop failed")
-            try:
-                from jiuwenswarm.agents.harness.team import cancel_all_team_stream_tasks_across_managers
 
-                await cancel_all_team_stream_tasks_across_managers(
-                    reason=f"[gateway ws closed {remote}] ",
+            try:
+                async for raw in ws:
+                    if not self._is_current_gateway_lease(lease):
+                        break
+                    task = asyncio.create_task(
+                        self._handle_message(guarded_ws, raw, lease.send_lock)
+                    )
+                    lease.message_tasks.add(task)
+                    task.add_done_callback(lease.message_tasks.discard)
+            except WebSocketConnectionClosed as e:
+                logger.info(
+                    "[AgentWebSocketServer] 连接关闭: %s",
+                    format_ws_diagnostics(
+                        {
+                            "remote": remote,
+                            "active_tasks": len(lease.message_tasks),
+                            "session_stream_tasks": len(self._session_stream_tasks),
+                            "ping_interval": self._ping_interval,
+                            "ping_timeout": self._ping_timeout,
+                        },
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
                 )
-            except Exception:
-                logger.exception("[AgentWebSocketServer] team stream cancel failed")
-            if connection_tasks:
-                await asyncio.gather(*connection_tasks, return_exceptions=True)
-            self._session_stream_tasks.clear()
-            if self._current_ws is ws:
-                self._current_ws = None
-                self._current_send_lock = None
-                self._current_ws_done = None
-            connection_done.set()
+            except Exception as e:
+                logger.exception(
+                    "[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e
+                )
+        finally:
+            await self._revoke_gateway_lease(lease, only_if_current=False)
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
@@ -1782,6 +1971,8 @@ class AgentWebSocketServer:
             try:
                 async with send_lock:
                     await send_wire_payload(ws, wire)
+            except _GatewayConnectionRevoked:
+                return
             except WebSocketConnectionClosed as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，JSON 解析错误未发送: %s",
@@ -2184,6 +2375,11 @@ class AgentWebSocketServer:
                 request.request_id,
                 request.session_id,
             )
+        except _GatewayConnectionRevoked:
+            logger.info(
+                "[AgentWebSocketServer] 已撤销 Gateway generation，放弃请求回包: request_id=%s",
+                request.request_id,
+            )
         except WebSocketConnectionClosed as e:
             logger.info(
                 "[AgentWebSocketServer] WebSocket 已关闭，放弃请求回包: %s",
@@ -2216,6 +2412,8 @@ class AgentWebSocketServer:
             try:
                 async with send_lock:
                     await send_wire_payload(ws, wire)
+            except _GatewayConnectionRevoked:
+                return
             except WebSocketConnectionClosed as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: %s",
@@ -3118,7 +3316,7 @@ class AgentWebSocketServer:
                         )
             except asyncio.CancelledError:
                 pass
-            except WebSocketConnectionClosed:
+            except (_GatewayConnectionRevoked, WebSocketConnectionClosed):
                 logger.info(
                     "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
                     request.request_id,
@@ -3163,7 +3361,7 @@ class AgentWebSocketServer:
                             chunk_count - 1,
                         )
                         return
-                except WebSocketConnectionClosed:
+                except (_GatewayConnectionRevoked, WebSocketConnectionClosed):
                     logger.info(
                         "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
                         request.request_id,
@@ -3179,7 +3377,7 @@ class AgentWebSocketServer:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
-                except WebSocketConnectionClosed:
+                except (_GatewayConnectionRevoked, WebSocketConnectionClosed):
                     pass
             # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
             entries = self._session_stream_tasks.get(session_id)
@@ -8030,7 +8228,15 @@ class AgentWebSocketServer:
         payload 格式与 AgentResponse.payload 一致，
         可含 event_type 等字段供 Gateway 转为 Message 派发到 Channel。
         """
-        if self._current_ws is None or self._current_send_lock is None:
+        lease = getattr(self, "_current_gateway_lease", None)
+        if lease is not None:
+            current_ws = lease.guarded_ws
+            current_send_lock = lease.send_lock
+        else:
+            # Compatibility for narrow test harnesses created via __new__.
+            current_ws = getattr(self, "_current_ws", None)
+            current_send_lock = getattr(self, "_current_send_lock", None)
+        if current_ws is None or current_send_lock is None:
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
@@ -8039,8 +8245,10 @@ class AgentWebSocketServer:
         delivered = False
         try:
             wire = build_server_push_wire(msg)
-            async with self._current_send_lock:
-                sent_original = await send_wire_payload(self._current_ws, wire)
+            async with current_send_lock:
+                if lease is not None and not self._is_current_gateway_lease(lease):
+                    return False
+                sent_original = await send_wire_payload(current_ws, wire)
             if not sent_original:
                 logger.warning(
                     "[AgentWebSocketServer] send_push 内容过大已降级为错误帧: channel_id=%s",
@@ -9175,6 +9383,12 @@ class AgentWebSocketServer:
 
         registry = getattr(self, "_live_voice_product_composition", None)
         operation_started = time.monotonic()
+        gateway_lease = getattr(ws, "_lease", None)
+        transport_generation = (
+            gateway_lease.generation
+            if isinstance(gateway_lease, _GatewayConnectionLease)
+            else None
+        )
         if registry is None:
             result_ok = False
             payload: dict[str, object] = {
@@ -9195,12 +9409,15 @@ class AgentWebSocketServer:
             }
             method = request.req_method
             if method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE:
-                result = await registry.handle_p2_activate(
+                activation_kwargs: dict[str, object] = dict(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,
                     channel_id=request.channel_id,
                 )
+                if transport_generation is not None:
+                    activation_kwargs["transport_generation"] = transport_generation
+                result = await registry.handle_p2_activate(**activation_kwargs)
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE:
                 result = await registry.handle_p2_close(
                     params=params,
@@ -9276,11 +9493,16 @@ class AgentWebSocketServer:
                     session_id=request.session_id,
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE:
-                result = await registry.handle_p3_progress_activate(
+                activation_kwargs = dict(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,
                     channel_id=request.channel_id,
+                )
+                if transport_generation is not None:
+                    activation_kwargs["transport_generation"] = transport_generation
+                result = await registry.handle_p3_progress_activate(
+                    **activation_kwargs
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE:
                 result = await registry.handle_p3_progress_close(
@@ -9649,7 +9871,11 @@ class AgentWebSocketServer:
                 if agent is None:
                     raise ValueError("Failed to get agent for schedule request")
                 if action in ("create", "run"):
-                    execution_agent = agent.get_instance()
+                    execution_agent = await agent.ensure_instance()
+                    if execution_agent is None:
+                        raise ValueError(
+                            "Failed to initialize agent for schedule request"
+                        )
                     execution_target = _build_schedule_execution_target(
                         request,
                         resolved_project_dir,

@@ -60,11 +60,9 @@ class ProductSegmentActivationError(RuntimeError):
 
     def __init__(
         self,
-        reason: str,
         *,
         cleanup_lease: SegmentLease | None = None,
     ) -> None:
-        _required_text(reason, "segment_failure.reason")
         if cleanup_lease is not None and not callable(
             getattr(cleanup_lease, "close", None)
         ):
@@ -72,7 +70,6 @@ class ProductSegmentActivationError(RuntimeError):
                 "segment failure cleanup lease must expose close"
             )
         super().__init__("Live Voice product segment activation failed")
-        self.reason = reason
         self.cleanup_lease = cleanup_lease
 
 

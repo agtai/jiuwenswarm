@@ -1702,8 +1702,26 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (terminalAnnouncementStateRef.current === 'idle') updateTerminalAnnouncementState('queued', taskId);
   };
   const adoptCreatedProgressRoute = (route: typeof createdProgressRoute) => {
-    const previousTaskId = createdProgressRouteRef.current?.task_id ?? null;
-    const nextTaskId = route?.task_id ?? null;
+    const previous = createdProgressRouteRef.current;
+    let nextRoute = route;
+    if (
+      previous !== null &&
+      route !== null &&
+      previous.task_id === route.task_id &&
+      previous.correlation_id === route.correlation_id
+    ) {
+      const nextOrigin = route.origin ?? previous.origin;
+      const originUnchanged =
+        previous.origin === nextOrigin ||
+        (previous.origin !== null &&
+          nextOrigin !== null &&
+          previous.origin.kind === nextOrigin.kind &&
+          previous.origin.id === nextOrigin.id);
+      if (originUnchanged) return;
+      nextRoute = Object.freeze({ ...route, origin: nextOrigin });
+    }
+    const previousTaskId = previous?.task_id ?? null;
+    const nextTaskId = nextRoute?.task_id ?? null;
     if (nextTaskId !== null && nextTaskId !== previousTaskId) {
       terminalNotificationTaskIdRef.current = null;
       updateTerminalAnnouncementState('idle', null);
@@ -1711,11 +1729,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setTerminalNotification(null);
       setAdjustmentNotification(null);
     }
-    createdProgressRouteRef.current = route;
+    createdProgressRouteRef.current = nextRoute;
     terminalNotificationCheckRequiredRef.current = Boolean(
-      nextTaskId !== null && route?.origin?.kind === 'voice' && terminalNotificationTaskIdRef.current !== nextTaskId,
+      nextTaskId !== null && nextRoute?.origin?.kind === 'voice' && terminalNotificationTaskIdRef.current !== nextTaskId,
     );
-    setCreatedProgressRoute(route);
+    setCreatedProgressRoute(nextRoute);
   };
   const cancelP3RetryInspection = () => {
     p3RetryInspectionGenerationRef.current += 1;
@@ -2289,7 +2307,45 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (retiredRequestId !== undefined) {
           retiredPresentationAckOwnerRequestRef.current.delete(owner);
           retiredPresentationAckInFlightRef.current.delete(retiredRequestId);
-          if (mountedRef.current) setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
+          // The exact request has now left the in-flight fence.  Start the
+          // existing locked journal drain here so recovery does not depend on
+          // an unrelated render reaching the passive recovery effect.
+          const journal = p2ActivationJournalRef.current;
+          const ownedSessionId = activeSessionRef.current;
+          const retainsExactRequest = () =>
+            journal?.snapshot().retired_presentation_acks.some(operation => operation.request_id === retiredRequestId) === true;
+          const isCurrent = () =>
+            Boolean(
+              mountedRef.current &&
+                ownedSessionId &&
+                activeSessionRef.current === ownedSessionId &&
+                p2ActivationJournalRef.current === journal &&
+                props.agentRouteAvailable &&
+                props.isConnected &&
+                retainsExactRequest(),
+            );
+          if (journal !== null && ownedSessionId !== null && isCurrent()) {
+            void reconcileRetiredProductP2PresentationAcks({
+              journal,
+              replay_operation: operation =>
+                replayProductP2DurableOperation({
+                  operation,
+                  request: (method, params, requestId) =>
+                    productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+                }),
+              operation_definitive: error =>
+                isDefinitiveProductOperationError(error) ||
+                ['PRODUCT_P2_ROUTE_NOT_FOUND', 'STALE_RESPONSE_OUTPUT', 'UNKNOWN_AGENT_RESPONSE'].includes(
+                  extractWebErrorReason(error) ?? '',
+                ),
+              operation_in_flight: operation => retiredPresentationAckInFlightRef.current.has(operation.request_id),
+              is_current: isCurrent,
+            }).then(result => {
+              if (isCurrent() && result.kind === 'retry') {
+                setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
+              }
+            });
+          }
         }
       });
     retained.settlement = settlement;
@@ -4321,11 +4377,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p3AcceptedFollowTargetRef.current = null;
     voiceTaskOriginRef.current = null;
     recognizedVoiceRef.current = null;
+    p3VoiceDraftBindingRef.current = null;
     activeVoiceResponseRef.current = null;
     pendingFormalP3MutationRef.current = null;
     formalTaskControlLeafRef.current?.disconnect();
     formalTaskControlLeafRef.current = null;
     setP3MutationOperation('task.create');
+    setP3TaskName('');
+    setP3TaskInstruction('');
     setP3TargetTaskId('');
     setP3MutationStatus('idle');
     setP3RetryInspectionStatus('idle');
@@ -6303,9 +6362,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     mutation = mutation ?? buildP3Mutation();
     if (!owner || !mutation) return;
     pendingP3MutationRef.current = mutation;
+    const confirmationIsCurrent = () =>
+      mountedRef.current &&
+      activeSessionRef.current === mutation.session_id &&
+      p3MutationOwnerRef.current === owner &&
+      pendingP3MutationRef.current === mutation;
     setP3MutationStatus('issuing');
     try {
       const receipt = await owner.issue(mutation);
+      if (!confirmationIsCurrent()) return;
       let leaf = formalTaskControlLeafRef.current;
       const currentBinding = leaf?.snapshot().binding ?? null;
       let receiptLeaf = leaf;
@@ -6332,6 +6397,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             pendingP3MutationRef.current === mutation &&
             activeSessionRef.current === mutation.session_id,
         });
+        if (!confirmationIsCurrent()) {
+          if (receiptLeaf !== leaf) receiptLeaf.disconnect();
+          return;
+        }
         if (mutation.operation === 'task.retry' && (!refreshed.admission.eligible || !isFormalTaskRetryEligible(refreshed.record))) {
           if (p3MutationOwnerRef.current !== owner || pendingP3MutationRef.current !== mutation || activeSessionRef.current !== mutation.session_id) {
             return;
@@ -6375,7 +6444,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setP3MutationStatus('confirmed');
       }
     } catch (error) {
-      if (p3MutationOwnerRef.current === owner) {
+      if (confirmationIsCurrent()) {
         if (!owner.hasPendingMutation()) pendingP3MutationRef.current = null;
         setP3MutationStatus('failed');
         setP3MutationReason(extractWebErrorReason(error) ?? 'PRODUCT_P3_CONFIRMATION_ISSUE_FAILED');
@@ -6450,10 +6519,25 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const leaf = formalTaskControlLeafRef.current;
     const prepared = pendingFormalP3MutationRef.current;
     if (!owner || !mutation || !leaf || !prepared) return;
+    const mutationIsCurrent = () =>
+      mountedRef.current &&
+      activeSessionRef.current === mutation.session_id &&
+      p3MutationOwnerRef.current === owner &&
+      pendingP3MutationRef.current === mutation &&
+      formalTaskControlLeafRef.current === leaf &&
+      pendingFormalP3MutationRef.current === prepared &&
+      sameFormalTaskControlBinding(leaf.snapshot().binding, prepared.binding) &&
+      prepared.mutation.operation === mutation.operation &&
+      prepared.mutation.command_id === mutation.command_id &&
+      prepared.mutation.task_id === (mutation.operation === 'task.create' ? null : mutation.task_id) &&
+      prepared.confirmation.operation === mutation.operation &&
+      prepared.confirmation.command_id === mutation.command_id &&
+      prepared.confirmation.target_task_id === (mutation.operation === 'task.create' ? null : mutation.task_id);
     setP3MutationStatus('mutating');
     setP3MutationReason(null);
     try {
       const result = await leaf.submitMutation(prepared, () => owner.mutate(mutation));
+      if (!mutationIsCurrent()) return;
       leaf.adopt(mutation.operation, result, {
         connection_generation: leaf.snapshot().connection_generation,
         command_id: mutation.command_id,
@@ -6519,7 +6603,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
       }
     } catch (error) {
-      if (p3MutationOwnerRef.current === owner) {
+      if (mutationIsCurrent()) {
         if (isDefinitiveProductOperationError(error) && !owner.hasPendingMutation()) {
           pendingP3MutationRef.current = null;
           pendingFormalP3MutationRef.current = null;

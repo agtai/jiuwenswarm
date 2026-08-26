@@ -150,6 +150,44 @@ test('granted permission enumerates without probing and exposes only opaque toke
   owner.close();
 });
 
+test('initial load cannot publish a stale inventory after devicechange during enumeration', async () => {
+  const fake = environment();
+  const invalidations = [];
+  const staleInventory = fake.mediaDevices.devices.map(device => ({ ...device }));
+  const enumeration = deferred();
+  const enumerationStarted = deferred();
+  let enumerationCount = 0;
+  fake.mediaDevices.enumerateDevices = () => {
+    enumerationCount += 1;
+    if (enumerationCount === 1) {
+      enumerationStarted.resolve();
+      return enumeration.promise;
+    }
+    return Promise.resolve(fake.mediaDevices.devices.map(device => ({ ...device })));
+  };
+  const owner = new BrowserAudioDeviceSelectionOwner({
+    enabled: true,
+    environment: fake.value,
+    on_device_invalidated: reason => invalidations.push(reason),
+  });
+
+  const loading = owner.load();
+  await enumerationStarted.promise;
+  const listenersDuringEnumeration = fake.mediaDevices.count('devicechange');
+  fake.mediaDevices.devices = fake.mediaDevices.devices.filter(device => device.deviceId !== 'private-input-1');
+  fake.mediaDevices.emit('devicechange');
+  enumeration.resolve(staleInventory);
+  const loaded = await loading;
+
+  assert.equal(listenersDuringEnumeration, 1);
+  assert.equal(enumerationCount, 2);
+  assert.equal(loaded.status, 'ready');
+  assert.equal(loaded.inputs.some(device => device.label === 'Headset microphone'), false);
+  assert.deepEqual(invalidations, []);
+  assert.deepEqual(owner.appliedRoute(), { selection_generation: 1 });
+  owner.close();
+});
+
 test('prompt permission uses one bounded getUserMedia probe, stops it, then enumerates', async () => {
   const fake = environment();
   fake.permission.state = 'prompt';
@@ -231,6 +269,32 @@ test('a reload failure clears an already-applied exact route and removes prior l
     () => owner.appliedRoute(),
     error => error.reason === 'MICROPHONE_PERMISSION_DENIED'
   );
+});
+
+test('reload permission-query failure retires the previous permission owner before publishing ready', async () => {
+  const fake = environment();
+  const invalidations = [];
+  const owner = new BrowserAudioDeviceSelectionOwner({
+    enabled: true,
+    environment: fake.value,
+    on_device_invalidated: reason => invalidations.push(reason),
+  });
+  await owner.load();
+  assert.equal(fake.permission.count('change'), 1);
+  fake.value.query_microphone_permission = async () => {
+    throw new Error('permission query unavailable');
+  };
+
+  const reloaded = await owner.load();
+  assert.equal(reloaded.status, 'ready');
+  assert.equal(fake.mediaDevices.probes, 1);
+  assert.equal(fake.permission.count('change'), 0);
+  assert.equal(fake.mediaDevices.count('devicechange'), 1);
+
+  fake.permission.change('denied');
+  assert.equal(owner.snapshot().status, 'ready');
+  assert.deepEqual(invalidations, []);
+  owner.close();
 });
 
 test('partial listener registration is rolled back and the route remains unavailable', async () => {
@@ -572,6 +636,187 @@ test('an in-progress reload cannot expose its retained exact route to a concurre
   enumeration.resolve(fake.mediaDevices.devices);
   await reloading;
   assert.equal(owner.appliedRoute().input_device_id, 'private-input-1');
+  owner.close();
+});
+
+test('device loss reported while reload is loading cannot be dropped behind its stale enumeration result', async () => {
+  const fake = environment();
+  const invalidations = [];
+  const owner = new BrowserAudioDeviceSelectionOwner({
+    enabled: true,
+    environment: fake.value,
+    on_device_invalidated: reason => invalidations.push(reason),
+  });
+  const initial = await owner.load();
+  owner.apply({
+    inventory_generation: initial.inventory_generation,
+    input_token: initial.inputs[0].token,
+    output_token: BROWSER_AUDIO_SYSTEM_DEFAULT_TOKEN,
+  });
+  const staleInventory = fake.mediaDevices.devices.map(device => ({ ...device }));
+  const enumeration = deferred();
+  const enumerationStarted = deferred();
+  let enumerationCount = 0;
+  fake.mediaDevices.enumerateDevices = () => {
+    enumerationCount += 1;
+    if (enumerationCount === 1) {
+      enumerationStarted.resolve();
+      return enumeration.promise;
+    }
+    return Promise.resolve(fake.mediaDevices.devices.map(device => ({ ...device })));
+  };
+
+  const reloading = owner.load();
+  assert.equal(owner.snapshot().status, 'loading');
+  await enumerationStarted.promise;
+  fake.mediaDevices.devices = fake.mediaDevices.devices.filter(device => device.deviceId !== 'private-input-1');
+  fake.mediaDevices.emit('devicechange');
+  enumeration.resolve(staleInventory);
+  await reloading;
+
+  assert.equal(owner.snapshot().status, 'selection_invalidated');
+  assert.equal(owner.snapshot().reason, 'AUDIO_INPUT_SELECTION_LOST');
+  assert.equal(enumerationCount, 2);
+  assert.deepEqual(invalidations, ['AUDIO_INPUT_SELECTION_LOST']);
+  assert.throws(
+    () => owner.appliedRoute(),
+    error => error instanceof BrowserAudioDeviceSelectionViolation && error.reason === 'AUDIO_INPUT_SELECTION_LOST'
+  );
+  owner.close();
+});
+
+test('devicechange during reload re-verifies without inventing selection loss when the exact route survives', async () => {
+  const fake = environment();
+  const invalidations = [];
+  const owner = new BrowserAudioDeviceSelectionOwner({
+    enabled: true,
+    environment: fake.value,
+    on_device_invalidated: reason => invalidations.push(reason),
+  });
+  const initial = await owner.load();
+  owner.apply({
+    inventory_generation: initial.inventory_generation,
+    input_token: initial.inputs[0].token,
+    output_token: initial.outputs[0].token,
+  });
+  const exactRoute = owner.appliedRoute();
+  const staleInventory = fake.mediaDevices.devices.map(device => ({ ...device }));
+  const enumeration = deferred();
+  const enumerationStarted = deferred();
+  let enumerationCount = 0;
+  fake.mediaDevices.enumerateDevices = () => {
+    enumerationCount += 1;
+    if (enumerationCount === 1) {
+      enumerationStarted.resolve();
+      return enumeration.promise;
+    }
+    return Promise.resolve(fake.mediaDevices.devices.map(device => ({ ...device })));
+  };
+
+  const reloading = owner.load();
+  await enumerationStarted.promise;
+  fake.mediaDevices.devices = [
+    ...fake.mediaDevices.devices,
+    { kind: 'audioinput', deviceId: 'private-input-2', label: 'Other microphone' },
+  ];
+  fake.mediaDevices.emit('devicechange');
+  enumeration.resolve(staleInventory);
+  const reloaded = await reloading;
+
+  assert.equal(reloaded.status, 'ready');
+  assert.equal(reloaded.reason, null);
+  assert.equal(enumerationCount, 2);
+  assert.deepEqual(invalidations, []);
+  assert.deepEqual(owner.appliedRoute(), {
+    selection_generation: exactRoute.selection_generation,
+    input_device_id: exactRoute.input_device_id,
+    output_device_id: exactRoute.output_device_id,
+  });
+  assert.equal(reloaded.inputs.some(device => device.label === 'Other microphone'), true);
+  owner.close();
+});
+
+test('close during the queued reload enumeration keeps the owner closed and removes every listener', async () => {
+  const fake = environment();
+  const invalidations = [];
+  const owner = new BrowserAudioDeviceSelectionOwner({
+    enabled: true,
+    environment: fake.value,
+    on_device_invalidated: reason => invalidations.push(reason),
+  });
+  await owner.load();
+  const staleInventory = fake.mediaDevices.devices.map(device => ({ ...device }));
+  const firstEnumeration = deferred();
+  const firstStarted = deferred();
+  const secondEnumeration = deferred();
+  const secondStarted = deferred();
+  let enumerationCount = 0;
+  fake.mediaDevices.enumerateDevices = () => {
+    enumerationCount += 1;
+    if (enumerationCount === 1) {
+      firstStarted.resolve();
+      return firstEnumeration.promise;
+    }
+    secondStarted.resolve();
+    return secondEnumeration.promise;
+  };
+
+  const reloading = owner.load();
+  await firstStarted.promise;
+  fake.mediaDevices.emit('devicechange');
+  firstEnumeration.resolve(staleInventory);
+  await secondStarted.promise;
+  assert.equal(owner.close(), true);
+  secondEnumeration.resolve(fake.mediaDevices.devices);
+
+  await assert.rejects(
+    () => reloading,
+    error => error instanceof BrowserAudioDeviceSelectionViolation && error.reason === 'AUDIO_DEVICE_SELECTION_CANCELLED'
+  );
+  assert.equal(enumerationCount, 2);
+  assert.equal(owner.snapshot().status, 'closed');
+  assert.deepEqual(invalidations, []);
+  assert.equal(fake.mediaDevices.count('devicechange'), 0);
+  assert.equal(fake.permission.count('change'), 0);
+});
+
+test('system-default reload consumes a queued devicechange without inventing route loss', async () => {
+  const fake = environment();
+  const invalidations = [];
+  const owner = new BrowserAudioDeviceSelectionOwner({
+    enabled: true,
+    environment: fake.value,
+    on_device_invalidated: reason => invalidations.push(reason),
+  });
+  await owner.load();
+  const staleInventory = fake.mediaDevices.devices.map(device => ({ ...device }));
+  const enumeration = deferred();
+  const enumerationStarted = deferred();
+  let enumerationCount = 0;
+  fake.mediaDevices.enumerateDevices = () => {
+    enumerationCount += 1;
+    if (enumerationCount === 1) {
+      enumerationStarted.resolve();
+      return enumeration.promise;
+    }
+    return Promise.resolve(fake.mediaDevices.devices.map(device => ({ ...device })));
+  };
+
+  const reloading = owner.load();
+  await enumerationStarted.promise;
+  fake.mediaDevices.devices = [
+    ...fake.mediaDevices.devices,
+    { kind: 'audiooutput', deviceId: 'private-output-2', label: 'Other speaker' },
+  ];
+  fake.mediaDevices.emit('devicechange');
+  enumeration.resolve(staleInventory);
+  const reloaded = await reloading;
+
+  assert.equal(reloaded.status, 'ready');
+  assert.equal(enumerationCount, 2);
+  assert.deepEqual(invalidations, []);
+  assert.deepEqual(owner.appliedRoute(), { selection_generation: 1 });
+  assert.equal(reloaded.outputs.some(device => device.label === 'Other speaker'), true);
   owner.close();
 });
 

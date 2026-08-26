@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from contextlib import suppress
 from dataclasses import replace
 import base64
 import io
@@ -23,10 +24,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAck,
+    MediaAttach,
     MediaAudioFrame,
     MediaDetach,
     MediaDetachReason,
     MediaTransportViolation,
+    StrictMediaReceiver,
     deserialize_media_control,
     encode_audio_frame,
     serialize_media_control,
@@ -35,11 +38,18 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry,
     MEDIA_AUTH_CONTRACT_VERSION,
     MEDIA_ACTIVATE_METHOD,
+    MEDIA_CLOSE_METHOD,
+    STREAMING_RECOGNITION_RESULT_METHOD,
     register_dedicated_media_rpc_handlers,
     handle_registered_media_socket,
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
     DedicatedMediaSocketLeafResult,
+)
+from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
+    StreamingRecognitionFallbackReason,
+    StreamingRecognitionOutcome,
+    StreamingRecognitionRouteOwner,
 )
 from jiuwenswarm.gateway.live_voice import dedicated_media_registration
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
@@ -48,6 +58,9 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannelConfig,
 )
 from jiuwenswarm.gateway.channel_manager.web import web_connect
+from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+    _MAX_ROUTE_IDENTITIES,
+)
 from jiuwenswarm.server.live_voice.batch_speech import (
     BatchSpeechProvider,
     FormalBatchSpeechService,
@@ -63,9 +76,112 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechRpcContext,
 )
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
+from jiuwenswarm.server.live_voice.observability import LiveVoiceObservabilityCollector
+from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    SpeechRouteTier,
+    StreamingSpeechSelection,
+)
+from jiuwenswarm.server.live_voice.speech_ports import ProviderRef, SpeechMode
+from jiuwenswarm.server.live_voice.streaming_speech import (
+    CapabilityProvenance,
+    MAX_STREAMING_IDENTITY_LEDGER,
+    ProviderTransport,
+    RecognitionProviderSupport,
+    StreamingProviderCapability,
+    SynthesisProviderSupport,
+)
 
 
 ORIGIN = "https://voice.example.test"
+
+
+class _DelayedPreopenStreamingProvider:
+    capability = StreamingProviderCapability(
+        provider=ProviderRef("preopen-delayed", "formal"),
+        recognition=RecognitionProviderSupport(
+            modes=frozenset({SpeechMode.STREAM}),
+            transport=ProviderTransport.NATIVE_STREAM,
+            ordered_events=CapabilityProvenance.PROVIDER_NATIVE,
+            exact_audio_cursor=CapabilityProvenance.ADAPTER_DERIVED,
+            provider_cancel_ack=CapabilityProvenance.UNAVAILABLE,
+            native_partials=CapabilityProvenance.PROVIDER_NATIVE,
+            server_vad=CapabilityProvenance.PROVIDER_NATIVE,
+        ),
+        synthesis=SynthesisProviderSupport(
+            modes=frozenset({SpeechMode.STREAM}),
+            transport=ProviderTransport.NATIVE_STREAM,
+            ordered_events=CapabilityProvenance.PROVIDER_NATIVE,
+            exact_audio_cursor=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    fallback_tier = SpeechRouteTier.BATCH
+
+    def __init__(self) -> None:
+        self.open_started = asyncio.Event()
+        self.open_release = asyncio.Event()
+        self.never_event = asyncio.Event()
+        self.frames: list[object] = []
+        self.cancel_count = 0
+
+    async def open_recognition(self, request, *, timeout_seconds: float) -> None:
+        del timeout_seconds
+        self.ref = request.ref
+        self.open_started.set()
+        await self.open_release.wait()
+
+    async def send_recognition_audio(self, frame) -> None:
+        self.frames.append(frame)
+
+    async def commit_recognition(self, ref):
+        del ref
+        raise AssertionError("pre-open byte-budget test must not commit")
+
+    async def next_recognition_event(self, ref, *, timeout_seconds: float):
+        del ref, timeout_seconds
+        await self.never_event.wait()
+        raise AssertionError("unreachable")
+
+    async def cancel_recognition(self, ref, *, reason: str = "caller_cancel") -> None:
+        del ref, reason
+        self.cancel_count += 1
+
+    async def close(self) -> None:
+        self.open_release.set()
+        self.never_event.set()
+
+
+class _ResultRpcChannel:
+    def __init__(self, *, fail_send: bool = False) -> None:
+        self.methods: dict[str, object] = {}
+        self.responses: list[dict[str, object]] = []
+        self.fail_send = fail_send
+        self.send_calls = 0
+
+    def register_method(self, name: str, handler: object) -> None:
+        self.methods[name] = handler
+
+    async def send_response(
+        self,
+        _ws: object,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        self.send_calls += 1
+        if self.fail_send:
+            raise RuntimeError("simulated disconnected response transport")
+        self.responses.append(
+            {
+                "req_id": req_id,
+                "ok": ok,
+                "payload": payload,
+                "error": error,
+                "code": code,
+            }
+        )
 
 
 def _wav(sample_rate: int) -> bytes:
@@ -232,6 +348,33 @@ def _activate(
     )
 
 
+def _streaming_result_params(
+    activation: dict[str, object], params: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "session_id": params["session_id"],
+        "subject_id": activation["subject_id"],
+        "correlation_id": params["correlation_id"],
+        "interaction_id": params["interaction_id"],
+        "capture_id": params["capture_id"],
+        "capture_generation": params["capture_generation"],
+        "track_id": params["track_id"],
+    }
+
+
+def _media_close_params(
+    activation: dict[str, object], params: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "session_id": params["session_id"],
+        "subject_id": activation["subject_id"],
+        "correlation_id": params["correlation_id"],
+        "interaction_id": params["interaction_id"],
+        "activation_id": params["activation_id"],
+        "activation_generation": params["activation_generation"],
+    }
+
+
 def test_feature_off_and_provider_off_create_no_route() -> None:
     disabled = DedicatedMediaProductRegistry(enabled=False)
     assert disabled.activate(
@@ -245,6 +388,214 @@ def test_feature_off_and_provider_off_create_no_route() -> None:
         "status": "unavailable",
         "reason_id": "MEDIA_PROVIDER_UNAVAILABLE",
     }
+
+
+@pytest.mark.asyncio
+async def test_streaming_preopen_retention_obeys_capture_resident_byte_budget(
+    tmp_path: Path,
+) -> None:
+    """B22: legal 96 kHz frames remain bounded by the existing capture owner."""
+
+    provider = _DelayedPreopenStreamingProvider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    registry = _active_registry()
+    registry.configure_streaming_recognition(
+        owner,
+        receipt_issuer=lambda **_binding: asyncio.sleep(0, result="unused"),
+    )
+    await registry.prepare_streaming_provider()
+    activation = _activate(
+        registry,
+        params=_params(sample_rate_hz=96_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    foreign_activation = _activate(
+        registry,
+        params=_params(
+            session_id="session-foreign",
+            interaction_id="interaction-foreign",
+            correlation_id="correlation-foreign",
+            activation_id="activation-foreign",
+            capture_id="capture-foreign",
+            track_id="track-foreign",
+        ),
+        request_origin=ORIGIN,
+        connection_id="connection-foreign",
+        user_id="user-foreign",
+    )
+    foreign_record = _pending_record(registry, _media_ticket(foreign_activation))
+    foreign_before = (
+        foreign_record.ticket_consumed,
+        foreign_record.accepted_frames,
+        bytes(foreign_record.pcm),
+        tuple(foreign_record.streaming_preopen_frames),
+        foreign_record.route_completed,
+    )
+    files_before = tuple(tmp_path.rglob("*"))
+
+    try:
+        registry.start_streaming_recognition(record)
+        await asyncio.wait_for(provider.open_started.wait(), timeout=1)
+        begin_task = record.streaming_recognition_begin_task
+        assert begin_task is not None and not begin_task.done()
+
+        receiver = StrictMediaReceiver(
+            record.binding,
+            on_audio_frame=lambda frame: (
+                registry.accept_frame(record, frame),
+                registry.accept_streaming_frame(record, frame),
+            ),
+        )
+        assert receiver.attach(MediaAttach(binding=record.binding)) is None
+        source_samples = (0.25,) * 1_920
+        acknowledgements: list[MediaAck] = []
+        for seq in range(547):
+            accepted = receiver.accept_binary(
+                encode_audio_frame(
+                    record.binding,
+                    MediaAudioFrame(
+                        seq=seq,
+                        sample_cursor=seq * len(source_samples),
+                        samples=source_samples,
+                    ),
+                )
+            )
+            assert isinstance(accepted, MediaAck)
+            acknowledgements.append(accepted)
+
+        retained_f32_bytes = sum(
+            len(frame.samples) * 4 for frame in record.streaming_preopen_frames
+        )
+        outcome = record.streaming_recognition_outcome
+        assert len(acknowledgements) == 547
+        assert retained_f32_bytes <= dedicated_media_registration._MAX_CAPTURE_WAV_BYTES
+        assert record.streaming_preopen_frames == []
+        assert outcome is not None
+        assert outcome.reason is StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
+
+        # Once the exact stream fell back, later legal frames cannot recreate
+        # retained pre-open state or replace the settled outcome.
+        next_frame = MediaAudioFrame(
+            seq=547,
+            sample_cursor=547 * len(source_samples),
+            samples=source_samples,
+        )
+        registry.accept_streaming_frame(record, next_frame)
+        assert record.streaming_preopen_frames == []
+        assert record.streaming_recognition_outcome is outcome
+        assert (
+            foreign_record.ticket_consumed,
+            foreign_record.accepted_frames,
+            bytes(foreign_record.pcm),
+            tuple(foreign_record.streaming_preopen_frames),
+            foreign_record.route_completed,
+        ) == foreign_before
+        assert tuple(tmp_path.rglob("*")) == files_before == ()
+        assert not any(
+            callable(getattr(registry, name, None))
+            for name in (
+                "dispatch_agent",
+                "dispatch_tool",
+                "mutate_task",
+                "write_chat",
+                "write_history",
+            )
+        )
+    finally:
+        provider.open_release.set()
+        begin_task = record.streaming_recognition_begin_task
+        if begin_task is not None:
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(begin_task), timeout=3)
+        await asyncio.wait_for(owner.close(), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_early_streaming_degradation_does_not_suppress_later_success_latency() -> (
+    None
+):
+    """L12: degradation and terminal recognition own independent X-OBS slots."""
+
+    now = [0.0]
+    collector = LiveVoiceObservabilityCollector()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now[0],
+        streaming_observability=collector,
+    )
+    registry.set_provider_available(True)
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.streaming_started_at = 0.0
+
+    now[0] = 0.1
+    registry._emit_streaming_observability(
+        record,
+        outcome=registry._streaming_fallback(
+            StreamingRecognitionFallbackReason.ROUTE_ABORTED
+        ),
+    )
+    now[0] = 0.4
+    record.route_completed = True
+    record.streaming_recognition_outcome = StreamingRecognitionOutcome(
+        completed=True,
+        final_text="private transcript is not observed",
+        provider=ProviderRef("formal-stream", "formal"),
+        fallback_tier=None,
+        reason=None,
+    )
+    record.streaming_voice_commit_receipt = "receipt-12345678901234567890"
+    result = await registry.streaming_recognition_result(
+        params={
+            "session_id": "session-1",
+            "subject_id": activation["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "capture_id": "capture-1",
+            "capture_generation": 0,
+            "track_id": "track-1",
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        request_origin=ORIGIN,
+    )
+    for _ in range(100):
+        if len(collector.observations()) >= 2 and len(collector.metrics()) >= 2:
+            break
+        import time
+
+        time.sleep(0.001)
+    observations = collector.observations()
+    metrics = collector.metrics()
+    registry.close_streaming_observability()
+
+    assert result["status"] == "completed"
+    assert [item.event_name for item in observations] == [
+        "degradation.activated",
+        "segment.completed",
+    ]
+    assert [item.metric_name for item in metrics] == [
+        "live_voice.degradation_total",
+        "live_voice.segment_latency_ms",
+    ]
+    assert metrics[-1].value == 400.0
+    assert "private transcript" not in repr(observations + metrics)
+    assert not hasattr(registry, "dispatch_agent")
+    assert not hasattr(registry, "mutate_task")
 
 
 def test_websocket_transport_debug_cannot_persist_binary_media(
@@ -888,6 +1239,404 @@ async def test_activation_handler_rejects_a_forged_session_before_allocation() -
         }
     ]
     assert registry._records == {}
+
+
+@pytest.mark.asyncio
+async def test_blocked_streaming_result_does_not_own_same_connection_close() -> None:
+    """B21: close dispatches while a prior exact result request is unresolved."""
+
+    registry = _active_registry()
+
+    class SameConnectionSocket:
+        closed = False
+        remote_address = ("127.0.0.1", 32100)
+        request_headers = {"Origin": ORIGIN}
+
+        def __init__(self) -> None:
+            self.read_requested = asyncio.Event()
+            self.frames_ready = asyncio.Event()
+            self._frames = iter(())
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.read_requested.set()
+            await self.frames_ready.wait()
+            try:
+                return next(self._frames)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+
+        def publish(self, frames: list[str]) -> None:
+            self._frames = iter(frames)
+            self.frames_ready.set()
+
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    register_dedicated_media_rpc_handlers(channel, registry=registry)
+    callbacks: list[object] = []
+    responses: list[dict[str, object]] = []
+    channel.on_message(callbacks.append)
+
+    async def capture_response(
+        _ws: object,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        responses.append(
+            {
+                "req_id": req_id,
+                "ok": ok,
+                "payload": payload,
+                "error": error,
+                "code": code,
+            }
+        )
+
+    channel.send_response = capture_response  # type: ignore[method-assign]
+    socket = SameConnectionSocket()
+    connection = asyncio.create_task(
+        channel._connection_handler(
+            socket,
+            "/ws?user_id=user-1&session_id=session-1",
+        )
+    )
+    await socket.read_requested.wait()
+
+    activation_params = _params()
+    activation = _activate(
+        registry,
+        params=activation_params,
+        request_origin=ORIGIN,
+        connection_id=socket._jiuwen_ws_id,
+    )
+    record = registry.consume_ticket(
+        str(activation["media_ticket"]), request_origin=ORIGIN
+    )
+    assert record is not None
+    record.route_completed = True
+    ready = asyncio.get_running_loop().create_future()
+    record.streaming_recognition_ready = ready
+    result_params = {
+        "session_id": "session-1",
+        "subject_id": activation["subject_id"],
+        "correlation_id": activation_params["correlation_id"],
+        "interaction_id": activation_params["interaction_id"],
+        "capture_id": activation_params["capture_id"],
+        "capture_generation": activation_params["capture_generation"],
+        "track_id": activation_params["track_id"],
+    }
+    close_params = {
+        "session_id": "session-1",
+        "subject_id": activation["subject_id"],
+        "correlation_id": activation_params["correlation_id"],
+        "interaction_id": activation_params["interaction_id"],
+        "activation_id": activation_params["activation_id"],
+        "activation_generation": activation_params["activation_generation"],
+    }
+    result_entered = asyncio.Event()
+    close_dispatched = asyncio.Event()
+    original_result = registry._settle_streaming_recognition_result
+    original_revoke = registry.revoke
+
+    async def observed_result(
+        claimed_record: object, **kwargs: object
+    ) -> dict[str, object]:
+        result_entered.set()
+        return await original_result(claimed_record, **kwargs)  # type: ignore[arg-type]
+
+    def observed_revoke(**kwargs: object) -> dict[str, object]:
+        close_dispatched.set()
+        return original_revoke(**kwargs)
+
+    registry._settle_streaming_recognition_result = observed_result  # type: ignore[method-assign]
+    registry.revoke = observed_revoke  # type: ignore[method-assign]
+    socket.publish(
+        [
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "streaming-result-blocked",
+                    "method": STREAMING_RECOGNITION_RESULT_METHOD,
+                    "params": result_params,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "streaming-result-duplicate",
+                    "method": STREAMING_RECOGNITION_RESULT_METHOD,
+                    "params": result_params,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "media-close-same-connection",
+                    "method": MEDIA_CLOSE_METHOD,
+                    "params": close_params,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "streaming-result-late",
+                    "method": STREAMING_RECOGNITION_RESULT_METHOD,
+                    "params": result_params,
+                }
+            ),
+        ]
+    )
+    await asyncio.wait_for(result_entered.wait(), timeout=1)
+    for _ in range(100):
+        if close_dispatched.is_set():
+            break
+        await asyncio.sleep(0.001)
+    close_was_dispatched_while_result_blocked = close_dispatched.is_set()
+    assert len(registry._streaming_cleanup_tasks) == 1
+
+    ready.set_result(
+        StreamingRecognitionOutcome(
+            completed=False,
+            final_text=None,
+            provider=None,
+            fallback_tier=SpeechRouteTier.BATCH,
+            reason=StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED,
+        )
+    )
+    await asyncio.wait_for(connection, timeout=5)
+    for _ in range(100):
+        if len(responses) == 4 and not registry._streaming_result_dispatch_tasks:
+            break
+        await asyncio.sleep(0.001)
+
+    assert callbacks == []
+    blocked = next(
+        item for item in responses if item["req_id"] == "streaming-result-blocked"
+    )
+    assert blocked["ok"] is True
+    assert blocked["payload"]["status"] == "fallback"  # type: ignore[index]
+    duplicate = next(
+        item for item in responses if item["req_id"] == "streaming-result-duplicate"
+    )
+    assert duplicate["ok"] is False
+    assert duplicate["code"] == "MEDIA_INVALID_STREAMING_RESULT"
+    assert [item["req_id"] for item in responses].count(
+        "media-close-same-connection"
+    ) == 1
+    late = next(item for item in responses if item["req_id"] == "streaming-result-late")
+    assert late["ok"] is False
+    assert late["code"] == "MEDIA_STREAMING_RESULT_UNAUTHORIZED"
+    assert close_was_dispatched_while_result_blocked is True
+    assert record.streaming_result_dispatch_pending is False
+    assert registry._streaming_result_dispatch_tasks == {}
+    assert registry._streaming_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_streaming_result_dispatch_capacity_survives_close_and_recovers() -> None:
+    """B21: closed records still consume the existing dispatch cap until settled."""
+
+    registry = DedicatedMediaProductRegistry(enabled=True, capacity=1)
+    registry.set_provider_available(True)
+    channel = _ResultRpcChannel()
+    register_dedicated_media_rpc_handlers(channel, registry=registry)
+    handler = channel.methods[STREAMING_RECOGNITION_RESULT_METHOD]
+    socket = SimpleNamespace(_jiuwen_ws_id="connection-1", request_headers={"Origin": ORIGIN})
+
+    first_params = _params()
+    first_activation = _activate(
+        registry,
+        params=first_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    first_record = registry.consume_ticket(
+        _media_ticket(first_activation), request_origin=ORIGIN
+    )
+    assert first_record is not None
+    first_record.route_completed = True
+    first_ready = asyncio.get_running_loop().create_future()
+    first_record.streaming_recognition_ready = first_ready
+    await handler(  # type: ignore[operator]
+        socket,
+        "result-first",
+        _streaming_result_params(first_activation, first_params),
+        "session-1",
+        None,
+    )
+    assert len(registry._streaming_result_dispatch_tasks) == 1
+
+    registry.revoke(
+        params=_media_close_params(first_activation, first_params),
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    second_params = _params(
+        correlation_id="correlation-2",
+        interaction_id="interaction-2",
+        activation_id="activation-2",
+        capture_id="capture-2",
+        track_id="track-2",
+    )
+    second_activation = _activate(
+        registry,
+        params=second_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    second_record = registry.consume_ticket(
+        _media_ticket(second_activation), request_origin=ORIGIN
+    )
+    assert second_record is not None
+    second_record.route_completed = True
+    second_ready = asyncio.get_running_loop().create_future()
+    second_record.streaming_recognition_ready = second_ready
+
+    await handler(  # type: ignore[operator]
+        socket,
+        "result-capacity-rejected",
+        _streaming_result_params(second_activation, second_params),
+        "session-1",
+        None,
+    )
+
+    rejected = next(
+        item
+        for item in channel.responses
+        if item["req_id"] == "result-capacity-rejected"
+    )
+    assert rejected["ok"] is False
+    assert rejected["code"] == "MEDIA_INVALID_STREAMING_RESULT"
+    assert len(registry._streaming_result_dispatch_tasks) == 1
+    assert len(registry._streaming_cleanup_tasks) == 1
+    assert second_record.streaming_result_dispatch_pending is False
+    assert second_ready.done() is False
+
+    first_ready.set_result(
+        StreamingRecognitionOutcome(
+            completed=False,
+            final_text=None,
+            provider=None,
+            fallback_tier=SpeechRouteTier.TEXT,
+            reason=StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED,
+        )
+    )
+    for _ in range(100):
+        if not registry._streaming_result_dispatch_tasks:
+            break
+        await asyncio.sleep(0.001)
+    assert first_record.streaming_result_dispatch_pending is False
+    assert registry._streaming_result_dispatch_tasks == {}
+
+    await handler(  # type: ignore[operator]
+        socket,
+        "result-capacity-recovered",
+        _streaming_result_params(second_activation, second_params),
+        "session-1",
+        None,
+    )
+    assert len(registry._streaming_result_dispatch_tasks) == 1
+    second_ready.set_result(
+        StreamingRecognitionOutcome(
+            completed=False,
+            final_text=None,
+            provider=None,
+            fallback_tier=SpeechRouteTier.TEXT,
+            reason=StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED,
+        )
+    )
+    for _ in range(100):
+        if not registry._streaming_result_dispatch_tasks:
+            break
+        await asyncio.sleep(0.001)
+
+    recovered = next(
+        item
+        for item in channel.responses
+        if item["req_id"] == "result-capacity-recovered"
+    )
+    assert recovered["ok"] is True
+    assert recovered["payload"]["status"] == "fallback"  # type: ignore[index]
+    assert second_record.streaming_result_dispatch_pending is False
+    assert registry._streaming_result_dispatch_tasks == {}
+    assert registry._streaming_cleanup_tasks == set()
+    assert not any(
+        callable(getattr(registry, name, None))
+        for name in (
+            "dispatch_agent",
+            "dispatch_tool",
+            "mutate_task",
+            "write_chat",
+            "write_history",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_streaming_result_send_failure_releases_dispatch_without_retry() -> None:
+    """B21: disconnected response transport cannot leak or retry the owner task."""
+
+    registry = DedicatedMediaProductRegistry(enabled=True, capacity=1)
+    registry.set_provider_available(True)
+    channel = _ResultRpcChannel(fail_send=True)
+    register_dedicated_media_rpc_handlers(channel, registry=registry)
+    handler = channel.methods[STREAMING_RECOGNITION_RESULT_METHOD]
+    socket = SimpleNamespace(_jiuwen_ws_id="connection-1", request_headers={"Origin": ORIGIN})
+    params = _params()
+    activation = _activate(
+        registry,
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    record.streaming_recognition_outcome = StreamingRecognitionOutcome(
+        completed=False,
+        final_text=None,
+        provider=None,
+        fallback_tier=SpeechRouteTier.TEXT,
+        reason=StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED,
+    )
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    unobserved: list[dict[str, object]] = []
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        await handler(  # type: ignore[operator]
+            socket,
+            "result-disconnected",
+            _streaming_result_params(activation, params),
+            "session-1",
+            None,
+        )
+        for _ in range(100):
+            if (
+                not registry._streaming_result_dispatch_tasks
+                and not registry._streaming_cleanup_tasks
+            ):
+                break
+            await asyncio.sleep(0.001)
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+
+    assert channel.send_calls == 1
+    assert channel.responses == []
+    assert unobserved == []
+    assert record.streaming_result_dispatch_pending is False
+    assert registry._streaming_result_dispatch_tasks == {}
+    assert registry._streaming_cleanup_tasks == set()
+    assert not hasattr(registry, "dispatch_agent")
+    assert not hasattr(registry, "dispatch_tool")
+    assert not hasattr(registry, "mutate_task")
 
 
 @pytest.mark.asyncio
@@ -2896,3 +3645,19 @@ def test_replacing_p2_activation_revokes_old_media_before_new_provider_use() -> 
     assert record.pcm == bytearray()
     assert record.recognition_content_sha256 is None
     assert record.synthesis_content_sha256 == {}
+
+
+def test_product_tts_identity_budget_is_aligned_with_the_synthesis_route() -> None:
+    """The product TTS allocation mints one fresh identity per request.
+
+    ``_handle_streaming_synthesis`` derives ``product-tts-<digest>`` from the
+    operation, response and unit of every accepted synthesize call and always
+    opens it at generation zero, so each product TTS request costs one new
+    streaming identity.  The ledgers upstream therefore decide how many product
+    TTS requests one long-lived registry can serve, and the Provider budget
+    must not be tighter than the route's own retained-binding ledger: a
+    Provider that refuses first becomes the wall for an identity the route
+    still treats as live.
+    """
+
+    assert MAX_STREAMING_IDENTITY_LEDGER == _MAX_ROUTE_IDENTITIES

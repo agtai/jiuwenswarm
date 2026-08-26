@@ -3096,6 +3096,805 @@ test('mounted route panel survives session replacement and closes every effect o
   assert.equal(renderer.toJSON(), null);
 });
 
+test('connected P1/P2/P3 session replacement clears the old structured Task draft before any new-session effect', async () => {
+  const i18n = await createI18n();
+  const oldSessionId = 'mounted-draft-old-session';
+  const newSessionId = 'mounted-draft-new-session';
+  const oldTaskId = 'mounted-draft-old-task';
+  const oldTaskBinding = {
+    subject_id: 'mounted-draft-old-subject',
+    session_id: oldSessionId,
+    project_id: 'mounted-draft-old-project',
+    correlation_id: 'mounted-draft-old-task-correlation',
+    generation: 1,
+  };
+  const calls = [];
+  const states = [];
+  const controlRef = { current: null };
+  let activeMediaBinding = null;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  globalThis.window.sessionStorage.setItem(
+    `jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(oldSessionId)}`,
+    JSON.stringify({
+      contract_version: 'live-voice.product-p3-task-target.v1',
+      session_id: oldSessionId,
+      correlation_id: oldTaskBinding.correlation_id,
+      task_id: oldTaskId,
+      task_control_binding: oldTaskBinding,
+    }),
+  );
+  const activateP2 = createMountedP2ActivationResponder();
+  let renderer;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.status') {
+      return mountedP3Status(oldTaskBinding, { taskId: oldTaskId, state: 'running', eventHead: 1 });
+    }
+    if (method === 'live_voice.task.events') {
+      return mountedP3Events(oldTaskBinding, { taskId: oldTaskId });
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, 1);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'mounted-draft-old-media-subject',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'D'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: params.operation,
+          command_id: params.command_id,
+          target_task_id: null,
+          confirmation_id: 'stale-session-confirmation',
+          expires_at: '2999-08-25T00:00:00Z',
+          task_control_binding: {
+            subject_id: 'subject-stale-session',
+            session_id: params.session_id,
+            project_id: 'project-stale-session',
+            correlation_id: params.correlation_id,
+            generation: 1,
+          },
+        },
+      };
+    }
+    throw new Error(`unexpected connected replacement request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, oldSessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () =>
+          controlRef.current !== null &&
+          states.at(-1)?.available === true &&
+          calls.some(call => call.method === 'live_voice.composition.p2.activate' && call.params.session_id === oldSessionId) &&
+          calls.some(
+            call =>
+              call.method === 'live_voice.composition.p3.progress.activate' &&
+              call.params.session_id === oldSessionId &&
+              call.params.task_id === oldTaskId,
+          ),
+        'fully-enabled old Session did not start its P1/P2/P3 owners',
+      );
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'old Session P1 capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'old Session P1 capture did not become ready');
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'live-voice-integrated-product-text' })
+        .findByType('textarea')
+        .props.onChange({ target: { value: 'Old Session Agent Input' } });
+      mountedTaskIntentControls(renderer).textarea.props.onChange({ target: { value: 'Old natural Task input' } });
+      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.create' } });
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.create',
+        'old Session P3 create draft did not become editable',
+      );
+      const controls = mountedP3Controls(renderer).root;
+      controls.findAllByType('input')[0].props.onChange({ target: { value: 'Old Session Task' } });
+      controls.findByType('textarea').props.onChange({ target: { value: 'Must never submit in the replacement Session' } });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      renderer.update(
+        mountedFullyEnabledElement(i18n, newSessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () =>
+          calls.some(call => call.method === 'live_voice.media.close' && call.params.session_id === oldSessionId) &&
+          calls.some(call => call.method === 'live_voice.composition.p2.close' && call.params.session_id === oldSessionId) &&
+          calls.some(call => call.method === 'live_voice.composition.p3.progress.close' && call.params.session_id === oldSessionId) &&
+          calls.some(call => call.method === 'live_voice.composition.p2.activate' && call.params.session_id === newSessionId) &&
+          browser.counts.stoppedTracks === 1 &&
+          browser.counts.closedAudioContexts === 1 &&
+          browser.counts.closedWorkletPorts === 1 &&
+          browser.counts.socketCloses === 1,
+        'connected replacement did not exactly tear down old P1/P2/P3 and activate its P2 successor',
+      );
+    });
+
+    const controls = mountedP3Controls(renderer);
+    const nameAfterReplacement = controls.root.findAllByType('input')[0].props.value;
+    const instructionAfterReplacement = controls.root.findByType('textarea').props.value;
+    const productInputAfterReplacement = renderer.root
+      .findByProps({ 'data-testid': 'live-voice-integrated-product-text' })
+      .findByType('textarea').props.value;
+    const taskIntentAfterReplacement = mountedTaskIntentControls(renderer).textarea.props.value;
+    await act(async () => {
+      if (!controls.button('Issue confirmation').props.disabled) {
+        controls.button('Issue confirmation').props.onClick();
+      }
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    assert.deepEqual(
+      {
+        product_input: productInputAfterReplacement,
+        task_intent: taskIntentAfterReplacement,
+        name: nameAfterReplacement,
+        instruction: instructionAfterReplacement,
+        old_media_activations: calls.filter(call => call.method === 'live_voice.media.activate' && call.params.session_id === oldSessionId).length,
+        old_media_closes: calls.filter(call => call.method === 'live_voice.media.close' && call.params.session_id === oldSessionId).length,
+        old_p2_activations: calls.filter(
+          call => call.method === 'live_voice.composition.p2.activate' && call.params.session_id === oldSessionId,
+        ).length,
+        old_p2_closes: calls.filter(call => call.method === 'live_voice.composition.p2.close' && call.params.session_id === oldSessionId).length,
+        old_p3_activations: calls.filter(
+          call =>
+            call.method === 'live_voice.composition.p3.progress.activate' &&
+            call.params.session_id === oldSessionId &&
+            call.params.task_id === oldTaskId,
+        ).length,
+        old_p3_closes: calls.filter(
+          call =>
+            call.method === 'live_voice.composition.p3.progress.close' &&
+            call.params.session_id === oldSessionId &&
+            call.params.task_id === oldTaskId,
+        ).length,
+        stopped_tracks: browser.counts.stoppedTracks,
+        closed_audio_contexts: browser.counts.closedAudioContexts,
+        closed_worklet_ports: browser.counts.closedWorkletPorts,
+        socket_closes: browser.counts.socketCloses,
+        confirmations: calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length,
+        mutations: calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
+        unified_submits: calls.filter(call => call.method === 'live_voice.composition.unified.submit').length,
+        task_mutations: calls.filter(call =>
+          ['live_voice.task.create', 'live_voice.task.update', 'live_voice.task.cancel', 'live_voice.task.retry'].includes(call.method),
+        ).length,
+        recognition_calls: calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length,
+        synthesis_calls: calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length,
+      },
+      {
+        product_input: '',
+        task_intent: '',
+        name: '',
+        instruction: '',
+        old_media_activations: 1,
+        old_media_closes: 1,
+        old_p2_activations: 2,
+        old_p2_closes: 1,
+        old_p3_activations: 1,
+        old_p3_closes: 1,
+        stopped_tracks: 1,
+        closed_audio_contexts: 1,
+        closed_worklet_ports: 1,
+        socket_closes: 1,
+        confirmations: 0,
+        mutations: 0,
+        unified_submits: 0,
+        task_mutations: 0,
+        recognition_calls: 0,
+        synthesis_calls: 0,
+      },
+    );
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    browser.restore();
+  }
+});
+
+test('late old-Session P3 confirmation cannot replace the successor leaf, prepared receipt, or draft authority', async () => {
+  const i18n = await createI18n();
+  const oldSessionId = 'mounted-late-confirmation-old-session';
+  const newSessionId = 'mounted-late-confirmation-new-session';
+  const successorTaskId = 'mounted-late-confirmation-successor-task';
+  const oldConfirmationGate = deferred();
+  const calls = [];
+  const activateP2 = createMountedP2ActivationResponder();
+  let renderer;
+  let newBinding = null;
+  const confirmationResponse = (params, sessionLabel) => ({
+    ok: true,
+    result: {
+      status: 'confirmation_issued',
+      operation: 'task.create',
+      command_id: params.command_id,
+      target_task_id: null,
+      confirmation_id: `${sessionLabel}-confirmation-${params.command_id}`,
+      expires_at: '2999-08-26T00:00:00Z',
+      task_control_binding: {
+        subject_id: `${sessionLabel}-subject`,
+        session_id: params.session_id,
+        project_id: `${sessionLabel}-project`,
+        correlation_id: params.correlation_id,
+        generation: 1,
+      },
+    },
+  });
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      if (params.session_id === oldSessionId) return oldConfirmationGate.promise;
+      assert.equal(params.session_id, newSessionId);
+      const response = confirmationResponse(params, 'successor');
+      newBinding = response.result.task_control_binding;
+      return response;
+    }
+    if (method === 'live_voice.composition.p3.mutate') {
+      assert.equal(params.session_id, newSessionId, 'only the successor confirmation may reach mutation');
+      return {
+        ok: true,
+        result: {
+          status: 'mutation_processed',
+          operation: 'task.create',
+          command_id: params.command_id,
+          target_task_id: null,
+          formal_task_result: {
+            task_id: successorTaskId,
+            attempt_id: 'mounted-late-confirmation-successor-attempt',
+            attempt_number: 1,
+            state: 'accepted',
+            outbox_id: 'mounted-late-confirmation-successor-outbox',
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.task.status') {
+      assert.notEqual(newBinding, null);
+      return mountedP3Status(newBinding, { taskId: successorTaskId, state: 'running', eventHead: 1 });
+    }
+    if (method === 'live_voice.task.events') {
+      assert.notEqual(newBinding, null);
+      return mountedP3Events(newBinding, { taskId: successorTaskId });
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    throw new Error(`unexpected late confirmation request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, oldSessionId, request));
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'old Session P3 controls did not mount');
+    });
+    await act(async () => {
+      const controls = mountedP3Controls(renderer);
+      controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Old Session Task' } });
+      controls.root.findByType('textarea').props.onChange({ target: { value: 'Old Session instruction must remain retired.' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.confirmation.issue' && call.params.session_id === oldSessionId),
+        'old Session confirmation did not enter its deferred request',
+      );
+    });
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, newSessionId, request));
+      await waitForMounted(
+        () =>
+          mountedP3Controls(renderer).root.findAllByType('input')[0].props.value === '' &&
+          mountedP3Controls(renderer).root.findByType('textarea').props.value === '',
+        'successor Session P3 owner did not clear the retired draft',
+      );
+    });
+    await act(async () => {
+      const controls = mountedP3Controls(renderer);
+      assert.equal(controls.root.findAllByType('input')[0].props.value, '');
+      assert.equal(controls.root.findByType('textarea').props.value, '');
+      controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Successor Session Task' } });
+      controls.root.findByType('textarea').props.onChange({ target: { value: 'Execute only the successor Session instruction.' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'successor confirmation did not settle first');
+    });
+    const successorP2ClosesBeforeOldSettlement = calls.filter(
+      call => call.method === 'live_voice.composition.p2.close' && call.params.session_id === newSessionId,
+    ).length;
+    const successorP3ClosesBeforeOldSettlement = calls.filter(
+      call => call.method === 'live_voice.composition.p3.progress.close' && call.params.session_id === newSessionId,
+    ).length;
+    const oldConfirmationCall = calls.find(
+      call => call.method === 'live_voice.composition.p3.confirmation.issue' && call.params.session_id === oldSessionId,
+    );
+    await act(async () => {
+      oldConfirmationGate.resolve(confirmationResponse(oldConfirmationCall.params, 'old'));
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    const controlsAfterOldSettlement = mountedP3Controls(renderer);
+    assert.equal(controlsAfterOldSettlement.root.findAllByType('input')[0].props.value, 'Successor Session Task');
+    assert.equal(controlsAfterOldSettlement.root.findByType('textarea').props.value, 'Execute only the successor Session instruction.');
+    assert.equal(
+      renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length,
+      0,
+      'late old confirmation must not revive old voice-draft authority',
+    );
+    await act(async () => {
+      controlsAfterOldSettlement.button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () =>
+          calls.filter(call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === newSessionId).length === 1,
+        'successor confirmed mutation did not reach its exact transport once',
+      );
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    assert.deepEqual(
+      {
+        old_confirmations: calls.filter(
+          call => call.method === 'live_voice.composition.p3.confirmation.issue' && call.params.session_id === oldSessionId,
+        ).length,
+        successor_confirmations: calls.filter(
+          call => call.method === 'live_voice.composition.p3.confirmation.issue' && call.params.session_id === newSessionId,
+        ).length,
+        old_mutations: calls.filter(call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === oldSessionId).length,
+        successor_mutations: calls.filter(
+          call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === newSessionId,
+        ).length,
+        direct_task_effects: calls.filter(call => /^live_voice\.task\.(create|update|cancel|retry)$/.test(call.method)).length,
+        agent_tool_history_effects: calls.filter(
+          call => call.method.includes('.agent.') || call.method.includes('.tool.') || call.method.includes('.history.'),
+        ).length,
+        successor_p2_close_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p2.close' && call.params.session_id === newSessionId).length -
+          successorP2ClosesBeforeOldSettlement,
+        successor_p3_close_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p3.progress.close' && call.params.session_id === newSessionId).length -
+          successorP3ClosesBeforeOldSettlement,
+        successor_target: mountedP3Controls(renderer).root.findAllByType('input')[0].props.value,
+      },
+      {
+        old_confirmations: 1,
+        successor_confirmations: 1,
+        old_mutations: 0,
+        successor_mutations: 1,
+        direct_task_effects: 0,
+        agent_tool_history_effects: 0,
+        successor_p2_close_delta: 0,
+        successor_p3_close_delta: 0,
+        successor_target: successorTaskId,
+      },
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
+test('late old-Session P3 submit result cannot disturb an established successor confirmation or route', async () => {
+  const i18n = await createI18n();
+  const oldSessionId = 'mounted-late-submit-old-session';
+  const newSessionId = 'mounted-late-submit-new-session';
+  const oldMutationGate = deferred();
+  const calls = [];
+  let renderer;
+  const bindingFor = params => ({
+    subject_id: `${params.session_id}-subject`,
+    session_id: params.session_id,
+    project_id: `${params.session_id}-project`,
+    correlation_id: params.correlation_id,
+    generation: 1,
+  });
+  const mutationResponse = (params, taskId) => ({
+    ok: true,
+    result: {
+      status: 'mutation_processed',
+      operation: 'task.create',
+      command_id: params.command_id,
+      target_task_id: null,
+      formal_task_result: {
+        task_id: taskId,
+        attempt_id: `${taskId}-attempt`,
+        attempt_number: 1,
+        state: 'accepted',
+        outbox_id: `${taskId}-outbox`,
+      },
+    },
+  });
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: 'task.create',
+          command_id: params.command_id,
+          target_task_id: null,
+          confirmation_id: `${params.session_id}-confirmation-${params.command_id}`,
+          expires_at: '2999-08-26T00:00:00Z',
+          task_control_binding: bindingFor(params),
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.mutate') {
+      if (params.session_id === oldSessionId) return oldMutationGate.promise;
+      assert.equal(params.session_id, newSessionId);
+      return mutationResponse(params, 'mounted-late-submit-successor-task');
+    }
+    if (method === 'live_voice.task.status') {
+      const binding = bindingFor(params);
+      return mountedP3Status(binding, { taskId: params.task_id, state: 'running', eventHead: 1 });
+    }
+    if (method === 'live_voice.task.events') {
+      return mountedP3Events(bindingFor(params), { taskId: params.task_id });
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    throw new Error(`unexpected late submit Session request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, oldSessionId, request));
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'old submit Session controls did not mount');
+    });
+    await act(async () => {
+      const controls = mountedP3Controls(renderer);
+      controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Old submitted Task' } });
+      controls.root.findByType('textarea').props.onChange({ target: { value: 'Old submitted instruction.' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'old submit confirmation did not settle');
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === oldSessionId),
+        'old Session submitMutation did not enter its deferred request',
+      );
+    });
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, newSessionId, request));
+      await waitForMounted(
+        () =>
+          mountedP3Controls(renderer).root.findAllByType('input')[0].props.value === '' &&
+          mountedP3Controls(renderer).root.findByType('textarea').props.value === '',
+        'successor submit Session did not replace the old draft owner',
+      );
+    });
+    await act(async () => {
+      const controls = mountedP3Controls(renderer);
+      controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Successor submitted Task' } });
+      controls.root.findByType('textarea').props.onChange({ target: { value: 'Execute the successor submitted instruction.' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'successor submit confirmation did not settle');
+    });
+    const oldMutationCall = calls.find(
+      call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === oldSessionId,
+    );
+    const mutationsBeforeLateOldResult = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
+    const successorP2ClosesBeforeLateOldResult = calls.filter(
+      call => call.method === 'live_voice.composition.p2.close' && call.params.session_id === newSessionId,
+    ).length;
+    const successorP3ClosesBeforeLateOldResult = calls.filter(
+      call => call.method === 'live_voice.composition.p3.progress.close' && call.params.session_id === newSessionId,
+    ).length;
+    await act(async () => {
+      oldMutationGate.resolve(mutationResponse(oldMutationCall.params, 'mounted-late-submit-old-task'));
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    assert.deepEqual(
+      {
+        execute_visible: mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
+        successor_name: mountedP3Controls(renderer).root.findAllByType('input')[0].props.value,
+        successor_instruction: mountedP3Controls(renderer).root.findByType('textarea').props.value,
+        late_mutation_delta: calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length - mutationsBeforeLateOldResult,
+        old_progress_activations: calls.filter(
+          call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.session_id === oldSessionId,
+        ).length,
+        successor_p2_close_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p2.close' && call.params.session_id === newSessionId).length -
+          successorP2ClosesBeforeLateOldResult,
+        successor_p3_close_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p3.progress.close' && call.params.session_id === newSessionId).length -
+          successorP3ClosesBeforeLateOldResult,
+      },
+      {
+        execute_visible: true,
+        successor_name: 'Successor submitted Task',
+        successor_instruction: 'Execute the successor submitted instruction.',
+        late_mutation_delta: 0,
+        old_progress_activations: 0,
+        successor_p2_close_delta: 0,
+        successor_p3_close_delta: 0,
+      },
+    );
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === newSessionId),
+        'successor submit did not reach its exact mutation transport',
+      );
+      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'successor submit result was not adopted');
+    });
+    assert.deepEqual(
+      {
+        old_mutations: calls.filter(
+          call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === oldSessionId,
+        ).length,
+        successor_mutations: calls.filter(
+          call => call.method === 'live_voice.composition.p3.mutate' && call.params.session_id === newSessionId,
+        ).length,
+        successor_target: mountedP3Controls(renderer).root.findAllByType('input')[0].props.value,
+        direct_task_effects: calls.filter(call => /^live_voice\.task\.(create|update|cancel|retry)$/.test(call.method)).length,
+        agent_tool_history_effects: calls.filter(
+          call => call.method.includes('.agent.') || call.method.includes('.tool.') || call.method.includes('.history.'),
+        ).length,
+      },
+      {
+        old_mutations: 1,
+        successor_mutations: 1,
+        successor_target: 'mounted-late-submit-successor-task',
+        direct_task_effects: 0,
+        agent_tool_history_effects: 0,
+      },
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
+test('in-flight P3 submit cannot overwrite a concurrent shipped P1 recognized draft', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-p1-recognition-supersedes-p3-submit-session';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  const oldMutationGate = deferred();
+  const activateP2 = createMountedP2ActivationResponder();
+  let p2Binding = null;
+  let activeMediaBinding = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const bindingFor = params => ({
+    subject_id: 'mounted-p1-recognition-supersedes-p3-subject',
+    session_id: params.session_id,
+    project_id: 'mounted-p1-recognition-supersedes-p3-project',
+    correlation_id: params.correlation_id,
+    generation: 1,
+  });
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Binding = { ...params };
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, 1);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'mounted-p1-recognition-supersedes-p3-media',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'R'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, 'Only the concurrently recognized instruction may remain.', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      throw Object.assign(new Error('recognized dispatch definitively rejected'), {
+        code: 'INVALID_ARGUMENT',
+        reason: 'INVALID_ARGUMENT',
+        retriable: false,
+      });
+    }
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: 'task.create',
+          command_id: params.command_id,
+          target_task_id: null,
+          confirmation_id: `mounted-p1-recognition-supersedes-p3-${params.command_id}`,
+          expires_at: '2999-08-26T00:00:00Z',
+          task_control_binding: bindingFor(params),
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.mutate') return oldMutationGate.promise;
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    throw new Error(`unexpected concurrent P1/P3 owner request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () => controlRef.current !== null && states.at(-1)?.available === true,
+        'concurrent P1 recognition owner did not activate',
+      );
+    });
+    await act(async () => {
+      const controls = mountedP3Controls(renderer);
+      controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Old in-flight P3 Task' } });
+      controls.root.findByType('textarea').props.onChange({ target: { value: 'The old P3 result must not overwrite recognition.' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'old P3 confirmation did not settle');
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.mutate'),
+        'old P3 submit did not enter its deferred transport',
+      );
+    });
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'concurrent P1 capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'concurrent P1 capture did not become ready');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.unified.submit'),
+        'concurrent shipped recognition did not reach automatic dispatch',
+      );
+      await waitForMounted(
+        () =>
+          mountedP3Controls(renderer).root.findAllByType('input')[0].props.value === 'Voice task' &&
+          mountedP3Controls(renderer).root.findByType('textarea').props.value === 'Only the concurrently recognized instruction may remain.',
+        'concurrent shipped recognition did not supersede the old P3 draft identity',
+      );
+    });
+    const oldMutationCall = calls.find(call => call.method === 'live_voice.composition.p3.mutate');
+    const p2ClosesBeforeOldSettlement = calls.filter(call => call.method === 'live_voice.composition.p2.close').length;
+    const p3ClosesBeforeOldSettlement = calls.filter(call => call.method === 'live_voice.composition.p3.progress.close').length;
+    await act(async () => {
+      oldMutationGate.resolve({
+        ok: true,
+        result: {
+          status: 'mutation_processed',
+          operation: 'task.create',
+          command_id: oldMutationCall.params.command_id,
+          target_task_id: null,
+          formal_task_result: {
+            task_id: 'mounted-old-in-flight-p3-task',
+            attempt_id: 'mounted-old-in-flight-p3-attempt',
+            attempt_number: 1,
+            state: 'accepted',
+            outbox_id: 'mounted-old-in-flight-p3-outbox',
+          },
+        },
+      });
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    assert.deepEqual(
+      {
+        operation: mountedP3Controls(renderer).select.props.value,
+        name: mountedP3Controls(renderer).root.findAllByType('input')[0].props.value,
+        instruction: mountedP3Controls(renderer).root.findByType('textarea').props.value,
+        p3_mutations: calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
+        task_origin_commits: calls.filter(call => call.method === 'live_voice.composition.p2.submit').length,
+        direct_task_effects: calls.filter(call => /^live_voice\.task\.(create|update|cancel|retry)$/.test(call.method)).length,
+        agent_tool_history_effects: calls.filter(
+          call => call.method.includes('.agent.') || call.method.includes('.tool.') || call.method.includes('.history.'),
+        ).length,
+        p2_close_delta: calls.filter(call => call.method === 'live_voice.composition.p2.close').length - p2ClosesBeforeOldSettlement,
+        p3_close_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p3.progress.close').length - p3ClosesBeforeOldSettlement,
+      },
+      {
+        operation: 'task.create',
+        name: 'Voice task',
+        instruction: 'Only the concurrently recognized instruction may remain.',
+        p3_mutations: 1,
+        task_origin_commits: 0,
+        direct_task_effects: 0,
+        agent_tool_history_effects: 0,
+        p2_close_delta: 0,
+        p3_close_delta: 0,
+      },
+    );
+    assert.notEqual(p2Binding, null);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted P3 origin panel reconciles and ACKs authoritative completed and failed progress', async () => {
   for (const outcome of ['completed', 'failed']) {
     const i18n = await createI18n();
@@ -4711,6 +5510,8 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
   let progressActivation = null;
   let progressListener = null;
   let activeMediaBinding = null;
+  let retryFinalEventsGate = null;
+  let retryFinalEventsRead = null;
   let renderer;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
   const activateP2 = createMountedP2ActivationResponder();
@@ -4775,6 +5576,10 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
     }
     if (method === 'live_voice.task.events') {
       assert.notEqual(taskBinding, null);
+      const eventReads = calls.filter(call => call.method === method).length;
+      if (retryFinalEventsGate !== null && eventReads === retryFinalEventsRead) {
+        return retryFinalEventsGate.promise;
+      }
       return mountedP3Events(taskBinding, { taskId });
     }
     if (method === 'live_voice.composition.p3.progress.activate') {
@@ -4868,6 +5673,7 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
         mountedFullyEnabledElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef,
           progressSubscribe,
+          p3RetryInspectionWait: () => new Promise(resolve => setImmediate(resolve)),
           onProductVoiceStateChange: state => states.push(state),
         }),
       );
@@ -4939,6 +5745,200 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
     assert.equal(progressNode.props['data-presentation-class'], 'text');
     assert.equal(progressNode.props['data-event-seq'], '1');
     assert.equal(JSON.stringify(renderer.toJSON()).includes('TASK_PROGRESS_AUDIO_PLAYOUT_FAILED'), true);
+    const statusReadsBeforeRetryInspection = calls.filter(call => call.method === 'live_voice.task.status').length;
+    const progressActivationsBeforeRetryInspection = calls.filter(
+      call => call.method === 'live_voice.composition.p3.progress.activate',
+    ).length;
+    const progressClosesBeforeRetryInspection = calls.filter(
+      call => call.method === 'live_voice.composition.p3.progress.close',
+    ).length;
+    const eventsReadsBeforeRetryInspection = calls.filter(call => call.method === 'live_voice.task.events').length;
+    const progressDeliveryBeforeRetryInspection = progressNode.props['data-delivery-id'];
+    retryFinalEventsGate = deferred();
+    retryFinalEventsRead = eventsReadsBeforeRetryInspection + 9;
+    await act(async () => {
+      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
+      await waitForMounted(
+        () => mountedP3Controls(renderer).hasButton('Check retry eligibility'),
+        'targeted operation did not expose retry inspection',
+      );
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.task.events').length >= retryFinalEventsRead,
+        'voice-origin retry inspection did not reach its ninth non-terminal event read',
+      );
+    });
+    await act(async () => {
+      retryFinalEventsGate.resolve(mountedP3Events(taskBinding, { taskId }));
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('ineligible'),
+        'voice-origin retry inspection did not settle after its bounded polls',
+      );
+    });
+    const retryInspectionActivation = calls.filter(
+      call => call.method === 'live_voice.composition.p3.progress.activate',
+    ).at(-1);
+    const progressAfterRetryInspection = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-progress' });
+    assert.deepEqual(
+      {
+        status_poll_delta:
+          calls.filter(call => call.method === 'live_voice.task.status').length - statusReadsBeforeRetryInspection,
+        progress_activation_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length -
+          progressActivationsBeforeRetryInspection,
+        progress_close_delta:
+          calls.filter(call => call.method === 'live_voice.composition.p3.progress.close').length - progressClosesBeforeRetryInspection,
+        origin_kind: retryInspectionActivation.params.origin_kind,
+        origin_id: retryInspectionActivation.params.origin_id,
+        progress_ack_count: calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length,
+        retained_delivery_id: progressAfterRetryInspection.props['data-delivery-id'],
+      },
+      {
+        status_poll_delta: 9,
+        progress_activation_delta: 0,
+        progress_close_delta: 0,
+        origin_kind: 'voice',
+        origin_id: p2Binding.interaction_id,
+        progress_ack_count: 1,
+        retained_delivery_id: progressDeliveryBeforeRetryInspection,
+      },
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('failed automatic voice dispatch cannot consume a Task voice receipt when the structured draft is empty', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-empty-voice-task-draft-session';
+  const controlRef = { current: null };
+  const calls = [];
+  const states = [];
+  let p2Binding = null;
+  let activeMediaBinding = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Binding = { ...params };
+      return activateP2(params);
+    }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, 1);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'mounted-empty-voice-task-draft-media',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'E'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, 'Create a task from this exact recognized instruction.', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      throw Object.assign(new Error('automatic dispatch definitively rejected'), {
+        code: 'INVALID_ARGUMENT',
+        reason: 'INVALID_ARGUMENT',
+        retriable: false,
+      });
+    }
+    if (method === 'live_voice.composition.p2.submit') {
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'task_origin_accepted',
+          ...p2Binding,
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+          response: {
+            interaction_id: p2Binding.interaction_id,
+            response_id: 'mounted-empty-voice-task-draft-response',
+            response_generation: 1,
+          },
+        },
+      };
+    }
+    throw new Error(`unexpected empty voice Task draft request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () => controlRef.current !== null && states.at(-1)?.available === true,
+        'empty voice Task draft P1 owner did not activate',
+      );
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'empty voice Task draft capture did not start');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'empty voice Task draft capture did not become ready');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 1,
+        'automatic recognized voice dispatch was not attempted',
+      );
+      await waitForMounted(
+        () => mountedP3Controls(renderer).root.findAllByType('input')[0].props.value === 'Voice task',
+        'recognized voice did not populate the structured Task draft',
+      );
+      await new Promise(resolve => setImmediate(resolve));
+      mountedP3Controls(renderer).root.findAllByType('input')[0].props.onChange({ target: { value: '' } });
+      await waitForMounted(
+        () => mountedP3Controls(renderer).root.findAllByType('input')[0].props.value === '',
+        'structured Task name did not become empty',
+      );
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    const confirmationCount = renderer.root.findAllByProps({
+      'data-testid': 'live-voice-integrated-recognized-confirmation',
+    }).length;
+    if (confirmationCount === 1) {
+      await act(async () => {
+        mountedRecognizedConfirmation(renderer).button('Confirm and dispatch').props.onClick();
+        await new Promise(resolve => setImmediate(resolve));
+      });
+    }
+    assert.deepEqual(
+      {
+        recognized_confirmations: confirmationCount,
+        task_origin_commits: calls.filter(call => call.method === 'live_voice.composition.p2.submit').length,
+        p3_confirmations: calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length,
+        p3_mutations: calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
+      },
+      {
+        recognized_confirmations: 0,
+        task_origin_commits: 0,
+        p3_confirmations: 0,
+        p3_mutations: 0,
+      },
+    );
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
@@ -11355,6 +12355,18 @@ test('mounted foreground status query restarts an idle P2 poll after background 
     if (method === 'live_voice.composition.p3.progress.close') {
       return { ok: true, result: { status: 'closed', ...params } };
     }
+    if (method === 'live_voice.composition.p3.progress.ack') {
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: false,
+          attempt_id: 'attempt-a',
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    }
     if (method === 'live_voice.media.activate') {
       const index = calls.filter(call => call.method === method).length;
       activeMediaBinding = mountedMediaBinding(params, index);
@@ -11665,6 +12677,8 @@ test('mounted foreground status query restarts an idle P2 poll after background 
       await waitForMounted(() => typeof releaseStatusAck === 'function', 'visible-text ACK did not enter its original transport');
       await controlRef.current.close();
       await controlRef.current.start();
+    });
+    await act(async () => {
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.composition.p2.close' && call.params.activation_generation === predecessorGeneration),
         'TTS Exit did not close the exact predecessor P2 generation',
@@ -11682,6 +12696,13 @@ test('mounted foreground status query restarts an idle P2 poll after background 
         'the retired visible-text ACK replayed while its original transport remained in flight',
       );
       releaseStatusAck();
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    // End the carrier's act turn so React can commit the state wake that
+    // the rejected in-flight P2 ACK schedules.  Waiting for that effect inside
+    // the same act callback would deadlock unless an unrelated P3 retry caused
+    // an extra render.
+    await act(async () => {
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === statusResponse).length === 2,
         'the original visible-text ACK timeout did not wake same-id durable recovery',
@@ -11722,6 +12743,11 @@ test('mounted foreground status query restarts an idle P2 poll after background 
     );
     assert.equal(statusAckCalls.length, 2, 'TTS Exit must settle the exact durable text ACK after its original timeout');
     assert.equal(statusAckCalls[1].requestId, statusAckCalls[0].requestId, 'visible-text ACK recovery changed request identity');
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length,
+      1,
+      'P2 durable recovery must not depend on a retrying P3 progress ACK',
+    );
     assert.equal(states.at(-1)?.text_status, 'idle', 'the exited visible-text ACK success polluted successor text status');
     assert.equal(states.at(-1)?.text_reason, null, 'the exited visible-text ACK success published a stale reason');
     assert.equal(

@@ -98,6 +98,24 @@ _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
 _MAX_FORMAL_CONTEXT_ENTRIES = 8
 _MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
+_PROGRESS_CRITICAL_KIND = "task-progress-terminal"
+_CRITICAL_REPLAY_FENCE_ROWS = 4
+_CRITICAL_REPLAY_FENCE_WIDTH = 1 << 13
+# Teardown owners, in the exact order the retained shutdown coordinator settles
+# them.  The vocabulary is registered here rather than discovered while shutting
+# down, so a failing owner can never rename or hide its own phase in a public
+# diagnostic.
+_COMPOSITION_TEARDOWN_PHASES = (
+    "submissions",
+    "admissions",
+    "bridge",
+    "consumer",
+    "harness",
+    "acks",
+    "history",
+    "conversation",
+    "notifications",
+)
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -211,6 +229,7 @@ class AgentConversationEffectAckResult:
 class _QueuedNotification:
     publish_seq: int
     notification: AgentConversationNotification
+    critical_key: tuple[str, str] | None = None
 
 
 class _NotificationBufferClosed(RuntimeError):
@@ -221,15 +240,54 @@ class _NotificationConsumerDetached(RuntimeError):
     pass
 
 
-class _BoundedNotificationBuffer:
-    """Lossy observer lane plus a bounded, non-blocking critical reserve."""
+class _CriticalLane:
+    """One critical reserve: queued capacity plus a bounded replay tombstone.
 
-    def __init__(self, *, observer_capacity: int, critical_capacity: int) -> None:
+    ``queued`` is the only capacity ledger, so delivering or discarding a
+    retained notification returns its slot to the reserve.  The released
+    identity moves into ``retired``, an exact bounded tombstone that keeps a
+    replay refusable without holding the notification payload it replaced.
+    """
+
+    __slots__ = ("capacity", "queued", "retired", "retired_keys")
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.queued: set[tuple[str, str]] = set()
+        self.retired: deque[tuple[str, str]] = deque()
+        self.retired_keys: set[tuple[str, str]] = set()
+
+
+class _BoundedNotificationBuffer:
+    """Lossy observer lane plus bounded, non-blocking critical reserves."""
+
+    def __init__(
+        self,
+        *,
+        observer_capacity: int,
+        critical_capacity: int,
+        progress_critical_capacity: int,
+    ) -> None:
         self._observer_capacity = observer_capacity
-        self._critical_capacity = critical_capacity
         self._observer: deque[_QueuedNotification] = deque()
         self._critical: deque[_QueuedNotification] = deque()
-        self._critical_keys: set[tuple[str, str]] = set()
+        self._request_lane = _CriticalLane(critical_capacity)
+        self._progress_lane = _CriticalLane(progress_critical_capacity)
+        # A released identity must stay refusable without retaining the
+        # notification the bound existed to reclaim.  Each lane keeps an exact
+        # tombstone for its own recent working set, so the two reserves cannot
+        # evict one another; anything older is folded into this conservative
+        # one-bit membership sketch, where a collision can only refuse a
+        # never-published identity and can never authorize a replay.  Four
+        # 8 KiB rows hold the whole fence in 32 KiB per composition instead of
+        # growing with the session, and only identities beyond the exact
+        # tombstones reach it: with a four-row width of 8192 the refusal is
+        # below 1e-3 for the first thousand fenced identities.
+        self._replay_fence = tuple(
+            bytearray(_CRITICAL_REPLAY_FENCE_WIDTH)
+            for _ in range(_CRITICAL_REPLAY_FENCE_ROWS)
+        )
+        self._fenced_critical_identities = 0
         self._ready = asyncio.Event()
         self._next_publish_seq = 0
         self._delivered_total = 0
@@ -251,14 +309,15 @@ class _BoundedNotificationBuffer:
                 ErrorCode.CONFLICT,
             )
         if critical_key is not None:
-            if critical_key in self._critical_keys:
+            lane = self._critical_lane(critical_key)
+            if self._critical_identity_known(lane, critical_key):
                 self._critical_invariant_failures += 1
                 raise AgentConversationRuntimeViolation(
                     "DUPLICATE_CRITICAL_NOTIFICATION",
                     "a retained presentation or terminal notification must be unique",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
-            if len(self._critical_keys) >= self._critical_capacity:
+            if len(lane.queued) >= lane.capacity:
                 self._critical_invariant_failures += 1
                 raise AgentConversationRuntimeViolation(
                     "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED",
@@ -270,9 +329,10 @@ class _BoundedNotificationBuffer:
         queued = _QueuedNotification(
             publish_seq=publish_seq,
             notification=replace(notification, publish_seq=publish_seq),
+            critical_key=critical_key,
         )
         if critical_key is not None:
-            self._critical_keys.add(critical_key)
+            self._critical_lane(critical_key).queued.add(critical_key)
             self._critical.append(queued)
         else:
             if len(self._observer) >= self._observer_capacity:
@@ -341,12 +401,15 @@ class _BoundedNotificationBuffer:
     def discard_pending_presentations(self) -> int:
         """Remove output notices invalidated by retained CR shutdown."""
 
-        retained = deque(
-            queued
-            for queued in self._critical
-            if queued.notification.presentation_unit is None
-        )
-        discarded = len(self._critical) - len(retained)
+        retained: deque[_QueuedNotification] = deque()
+        discarded = 0
+        for queued in self._critical:
+            if queued.notification.presentation_unit is None:
+                retained.append(queued)
+                continue
+            discarded += 1
+            if queued.critical_key is not None:
+                self._release_critical(queued.critical_key)
         self._critical = retained
         if not self._observer and not self._critical:
             self._ready.clear()
@@ -356,16 +419,29 @@ class _BoundedNotificationBuffer:
         """Remove only the queued notice for one invalidated response."""
 
         discarded = 0
-        for name in ("_critical", "_observer"):
-            source = getattr(self, name)
-            retained = deque(
-                queued
-                for queued in source
-                if queued.notification.response_ref != ref
-                or queued.notification.presentation_unit is None
-            )
-            discarded += len(source) - len(retained)
-            setattr(self, name, retained)
+        retained_critical: deque[_QueuedNotification] = deque()
+        for queued in self._critical:
+            if (
+                queued.notification.response_ref == ref
+                and queued.notification.presentation_unit is not None
+            ):
+                discarded += 1
+                if queued.critical_key is not None:
+                    self._release_critical(queued.critical_key)
+                continue
+            retained_critical.append(queued)
+        self._critical = retained_critical
+
+        retained_observer: deque[_QueuedNotification] = deque()
+        for queued in self._observer:
+            if (
+                queued.notification.response_ref == ref
+                and queued.notification.presentation_unit is not None
+            ):
+                discarded += 1
+                continue
+            retained_observer.append(queued)
+        self._observer = retained_observer
         if not self._observer and not self._critical:
             self._ready.clear()
         return discarded
@@ -386,8 +462,24 @@ class _BoundedNotificationBuffer:
         return self._observer_capacity
 
     @property
+    def queued_progress_critical(self) -> int:
+        return len(self._progress_lane.queued)
+
+    @property
     def critical_capacity(self) -> int:
-        return self._critical_capacity
+        return self._request_lane.capacity
+
+    @property
+    def progress_critical_capacity(self) -> int:
+        return self._progress_lane.capacity
+
+    @property
+    def retired_critical_identities(self) -> int:
+        return len(self._request_lane.retired) + len(self._progress_lane.retired)
+
+    @property
+    def fenced_critical_identities(self) -> int:
+        return self._fenced_critical_identities
 
     @property
     def published_total(self) -> int:
@@ -419,6 +511,61 @@ class _BoundedNotificationBuffer:
     def critical_invariant_failures(self) -> int:
         return self._critical_invariant_failures
 
+    def _critical_lane(self, critical_key: tuple[str, str]) -> _CriticalLane:
+        if critical_key[0] == _PROGRESS_CRITICAL_KIND:
+            return self._progress_lane
+        return self._request_lane
+
+    def _critical_identity_known(
+        self, lane: _CriticalLane, critical_key: tuple[str, str]
+    ) -> bool:
+        return (
+            critical_key in lane.queued
+            or critical_key in lane.retired_keys
+            or self._replay_fenced(critical_key)
+        )
+
+    def _release_critical(self, critical_key: tuple[str, str]) -> None:
+        """Return one reserve slot while keeping the identity unrepeatable."""
+
+        lane = self._critical_lane(critical_key)
+        lane.queued.discard(critical_key)
+        if critical_key in lane.retired_keys:
+            return
+        lane.retired.append(critical_key)
+        lane.retired_keys.add(critical_key)
+        while len(lane.retired) > lane.capacity:
+            evicted = lane.retired.popleft()
+            lane.retired_keys.discard(evicted)
+            self._record_replay_fence(evicted)
+
+    def _replay_fence_indices(self, critical_key: tuple[str, str]) -> tuple[int, ...]:
+        digest = hashlib.sha256("\0".join(critical_key).encode("utf-8")).digest()
+        width = len(self._replay_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % width
+            for offset in range(0, 4 * _CRITICAL_REPLAY_FENCE_ROWS, 4)
+        )
+
+    def _record_replay_fence(self, critical_key: tuple[str, str]) -> None:
+        for row, index in zip(
+            self._replay_fence,
+            self._replay_fence_indices(critical_key),
+            strict=True,
+        ):
+            row[index] = 1
+        self._fenced_critical_identities += 1
+
+    def _replay_fenced(self, critical_key: tuple[str, str]) -> bool:
+        return all(
+            row[index]
+            for row, index in zip(
+                self._replay_fence,
+                self._replay_fence_indices(critical_key),
+                strict=True,
+            )
+        )
+
     def _pop_next(self) -> _QueuedNotification | None:
         queued: _QueuedNotification | None
         if self._observer and self._critical:
@@ -433,6 +580,8 @@ class _BoundedNotificationBuffer:
         else:
             self._ready.clear()
             return None
+        if queued.critical_key is not None:
+            self._release_critical(queued.critical_key)
         if not self._observer and not self._critical:
             self._ready.clear()
         return queued
@@ -479,6 +628,14 @@ class AgentConversationRuntimeSnapshot:
     notification_leases_detached: int
     discarded_invalidated_presentations: int
     critical_notification_invariant_failures: int
+    notification_progress_critical_capacity: int
+    queued_progress_critical_notifications: int
+    retired_critical_identities: int
+    fenced_critical_identities: int
+    bridge_publication_failures: int
+    last_bridge_publication_failure: tuple[str, str, str] | None
+    teardown_owner_failures: int
+    first_teardown_owner_failure: tuple[str, str] | None
     pending_conversation_effects: int
     unacknowledged_effect_claims: int
     pending_history_intents: int
@@ -589,6 +746,77 @@ class _ResponseOutputState:
     terminal_event: EventEnvelope | None = None
 
 
+def _teardown_phase_name(phase: str) -> str:
+    """Keep a teardown diagnostic inside the registered owner vocabulary."""
+
+    if type(phase) is str and phase in _COMPOSITION_TEARDOWN_PHASES:
+        return phase
+    return "unknown"
+
+
+def _teardown_failure_name(error: BaseException) -> str:
+    """Name a failed owner's exception without touching its content.
+
+    Only the exception type name is read.  A hostile class whose ``__name__``
+    raises or is not a string must not be able to escape the teardown guard it
+    was raised inside, so any such lookup degrades to ``unknown``.
+    """
+
+    try:
+        name = type(error).__name__
+    except BaseException:  # noqa: BLE001 - a hostile class stays diagnosable
+        return "unknown"
+    return name if type(name) is str else "unknown"
+
+
+class _CompositionTeardownFailures:
+    """Ordered, content-free record of every failed composition teardown owner.
+
+    One failing owner must never skip a later one, so each owner is attempted
+    exactly once and its failure is recorded here instead of unwinding the rest
+    of the sequence.  Only the registered phase name and the exception type name
+    survive: no message, argument, traceback or exception object is retained, so
+    a failing owner cannot leak its own content into a public shutdown
+    diagnostic and cannot keep a teardown frame alive.
+
+    An external cancellation of the retained coordinator is caller truth rather
+    than an owner outcome.  It is distinguished from an owned child's
+    cancellation by this task's own cancellation counter, which is sampled once
+    per recorded failure so a child cancellation can never be mistaken for a
+    later caller cancellation.
+    """
+
+    __slots__ = ("_observed_cancellations", "caller_cancelled", "entries")
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str]] = []
+        self.caller_cancelled = False
+        current = asyncio.current_task()
+        self._observed_cancellations = 0 if current is None else current.cancelling()
+
+    def record(self, phase: str, error: BaseException) -> None:
+        caller_cancellation = self._observe_caller_cancellation(error)
+        if caller_cancellation and not self.entries:
+            self.caller_cancelled = True
+        self.entries.append(
+            (_teardown_phase_name(phase), _teardown_failure_name(error))
+        )
+
+    @property
+    def first(self) -> tuple[str, str] | None:
+        return self.entries[0] if self.entries else None
+
+    def _observe_caller_cancellation(self, error: BaseException) -> bool:
+        if not isinstance(error, asyncio.CancelledError):
+            return False
+        current = asyncio.current_task()
+        pending = 0 if current is None else current.cancelling()
+        if pending <= self._observed_cancellations:
+            return False
+        self._observed_cancellations = pending
+        return True
+
+
 class AgentConversationRuntime:
     """Strict two-phase composition without exposing raw mutable authorities."""
 
@@ -668,7 +896,15 @@ class AgentConversationRuntime:
         self._notifications = _BoundedNotificationBuffer(
             observer_capacity=notification_capacity,
             critical_capacity=2 * max_requests,
+            # Task progress terminals are keyed by Task evidence, not by this
+            # composition's bounded request ledger, so one live session can
+            # publish them without limit.  Their own reserve keeps them from
+            # ever consuming the presentation/terminal quota.
+            progress_critical_capacity=max_requests,
         )
+        self._bridge_publication_failures = 0
+        self._last_bridge_publication_failure: tuple[str, str, str] | None = None
+        self._teardown_failures: tuple[tuple[str, str], ...] = ()
         self._commits: dict[str, TurnCommit] = {}
         self._turn_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._commit_identity_claims: dict[str, _TurnIdentityClaim] = {}
@@ -717,7 +953,7 @@ class AgentConversationRuntime:
         self._close_requested = False
         self._ack_lock = asyncio.Lock()
         self._effect_lock = asyncio.Lock()
-        self._closing_interactions: set[str] = set()
+        self._closing_interactions: dict[str, ResponseRef] = {}
         self._generation_interruptions: dict[str, AgentGenerationInterruption] = {}
         self._generation_interruption_order: deque[str] = deque()
         self._generation_interruption_lock = asyncio.Lock()
@@ -2058,7 +2294,7 @@ class AgentConversationRuntime:
                 progress_event=intent.progress_event,
             ),
             critical_key=(
-                ("task-progress-terminal", intent.evidence_id)
+                (_PROGRESS_CRITICAL_KIND, intent.evidence_id)
                 if progress.state is WorkState.TERMINAL
                 else None
             ),
@@ -3088,9 +3324,9 @@ class AgentConversationRuntime:
                 await self._cr.transition_interaction(
                     interaction_id, InteractionState.CLOSING
                 )
-            self._closing_interactions.add(interaction_id)
+            self._closing_interactions[interaction_id] = handle.response_ref
             if handle.terminal_event is not None:
-                await self._close_interaction_after_terminal(interaction_id)
+                await self._close_interaction_after_terminal(handle.response_ref)
         return result
 
     async def close(self, *, timeout_seconds: float) -> AgentConversationShutdownResult:
@@ -3206,6 +3442,22 @@ class AgentConversationRuntime:
             ),
             critical_notification_invariant_failures=(
                 self._notifications.critical_invariant_failures
+            ),
+            notification_progress_critical_capacity=(
+                self._notifications.progress_critical_capacity
+            ),
+            queued_progress_critical_notifications=(
+                self._notifications.queued_progress_critical
+            ),
+            retired_critical_identities=(
+                self._notifications.retired_critical_identities
+            ),
+            fenced_critical_identities=self._notifications.fenced_critical_identities,
+            bridge_publication_failures=self._bridge_publication_failures,
+            last_bridge_publication_failure=self._last_bridge_publication_failure,
+            teardown_owner_failures=len(self._teardown_failures),
+            first_teardown_owner_failure=(
+                self._teardown_failures[0] if self._teardown_failures else None
             ),
             pending_conversation_effects=len(self._effect_backlog),
             unacknowledged_effect_claims=sum(
@@ -3469,7 +3721,7 @@ class AgentConversationRuntime:
                     state.total_utf8 += len(content)
             if presentation is None:
                 consumable_event = None
-        self._publish(
+        self._publish_from_bridge(
             AgentConversationNotification(
                 kind="agent.output",
                 request_id=request.request_id,
@@ -3526,11 +3778,12 @@ class AgentConversationRuntime:
                 ConversationRuntimeViolation,
             ) as error:
                 error_reason = error.reason
-            if request.response_ref.interaction_id in self._closing_interactions:
-                await self._close_interaction_after_terminal(
-                    request.response_ref.interaction_id
-                )
-        self._publish(
+            if (
+                self._closing_interactions.get(request.response_ref.interaction_id)
+                == request.response_ref
+            ):
+                await self._close_interaction_after_terminal(request.response_ref)
+        self._publish_from_bridge(
             AgentConversationNotification(
                 kind="work.progress",
                 request_id=request.request_id,
@@ -3547,7 +3800,10 @@ class AgentConversationRuntime:
             ),
         )
 
-    async def _close_interaction_after_terminal(self, interaction_id: str) -> None:
+    async def _close_interaction_after_terminal(self, response_ref: ResponseRef) -> None:
+        interaction_id = response_ref.interaction_id
+        if self._closing_interactions.get(interaction_id) != response_ref:
+            return
         snapshot = self._cr.snapshot().conversation
         interaction = next(
             item
@@ -3558,7 +3814,8 @@ class AgentConversationRuntime:
             await self._cr.transition_interaction(
                 interaction_id, InteractionState.CLOSED
             )
-        self._closing_interactions.discard(interaction_id)
+        if self._closing_interactions.get(interaction_id) == response_ref:
+            self._closing_interactions.pop(interaction_id)
 
     def _publish(
         self,
@@ -3568,84 +3825,223 @@ class AgentConversationRuntime:
     ) -> None:
         self._notifications.publish(notification, critical_key=critical_key)
 
+    def _publish_from_bridge(
+        self,
+        notification: AgentConversationNotification,
+        *,
+        critical_key: tuple[str, str] | None = None,
+    ) -> None:
+        """Publish one bridge delivery under explicit failure supervision.
+
+        ``_consume_bridge`` is the only long-lived reader of Agent events and
+        Work Progress for this composition.  A notification-invariant failure
+        is therefore recorded as an observable publication failure instead of
+        terminating that consumer and silently ending every later delivery.
+        The Conversation Runtime transition, Harness round and Agent Bridge
+        truth that preceded this call are already settled and unaffected.
+        """
+
+        try:
+            self._publish(notification, critical_key=critical_key)
+        except AgentConversationRuntimeViolation as error:
+            self._bridge_publication_failures += 1
+            self._last_bridge_publication_failure = (
+                error.reason,
+                notification.kind,
+                notification.request_id,
+            )
+
     async def _shutdown_coordinator(
         self, *, closed_detail: str = "teardown_complete"
     ) -> AgentConversationShutdownResult:
+        """Settle every teardown owner in order under its own guard.
+
+        The Agent Bridge, its sole consumer, the Harness, the Conversation
+        Runtime and notification cleanup are five separate authorities, and the
+        submission, admission, presentation-ack and history writes they own are
+        their children.  A failure in one owner is never allowed to skip a later
+        one: each owner is attempted exactly once, its failure is recorded
+        content-free, and the timing-earliest failure stays authoritative, so a
+        secondary cleanup failure can never replace an earlier truth.
+
+        A failed teardown never reports CLOSED, which keeps the composition
+        permanently unrestartable, and an external cancellation of this retained
+        owner is re-raised instead of being downgraded into a result.
+        """
+
         final_drain_lease = self._final_notification_drain_lease
+        failures = _CompositionTeardownFailures()
+        await self._run_teardown_owner(
+            "submissions", self._settle_submission_coordinators, failures
+        )
+        await self._run_teardown_owner(
+            "admissions", self._settle_admission_coordinators, failures
+        )
+        bridge_closed = (
+            await self._run_teardown_owner("bridge", self._close_bridge, failures)
+            is True
+        )
+        await self._run_teardown_owner(
+            "consumer",
+            lambda: self._settle_bridge_consumer(bridge_closed=bridge_closed),
+            failures,
+        )
+        await self._run_teardown_owner("harness", self._harness.close, failures)
+        await self._run_teardown_owner("acks", self._settle_ack_coordinators, failures)
+        await self._run_teardown_owner("history", self._settle_history_tasks, failures)
+        await self._run_teardown_owner(
+            "conversation", self._close_conversation_runtime, failures
+        )
+        await self._run_teardown_owner(
+            "notifications",
+            lambda: self._close_notification_cleanup(final_drain_lease),
+            failures,
+        )
+        self._teardown_failures = tuple(failures.entries)
+        if failures.caller_cancelled:
+            # An external cancellation of the retained teardown owner is caller
+            # truth, not an owner outcome.  Every owner has still been attempted
+            # exactly once, but this coordinator must not claim it completed a
+            # teardown that was cancelled out from under it.
+            raise asyncio.CancelledError from None
+        final_drain_capability = self._final_drain_capability(final_drain_lease)
+        first_failure = failures.first
+        if first_failure is not None:
+            return AgentConversationShutdownResult(
+                AgentConversationShutdownStatus.FAILED,
+                f"teardown_failed:{first_failure[1]}",
+                final_drain_capability,
+            )
+        if self._pending_history or self._pending_user_history:
+            return AgentConversationShutdownResult(
+                AgentConversationShutdownStatus.FAILED,
+                "history_write_intents_pending",
+                final_drain_capability,
+            )
+        self._closed = True
+        return AgentConversationShutdownResult(
+            AgentConversationShutdownStatus.CLOSED,
+            closed_detail,
+            final_drain_capability,
+        )
+
+    async def _run_teardown_owner(
+        self,
+        phase: str,
+        owner: Callable[[], Awaitable[object]],
+        failures: _CompositionTeardownFailures,
+    ) -> object:
+        """Run one teardown owner without letting it skip any later owner."""
+
         try:
-            submission_tasks = tuple(
-                entry.coordinator
-                for entry in self._committed_turn_submissions.values()
-                if entry.coordinator is not None
+            return await owner()
+        except BaseException as error:  # noqa: BLE001 - later owners must run
+            failures.record(phase, error)
+            return None
+
+    async def _settle_submission_coordinators(self) -> None:
+        submission_tasks = tuple(
+            entry.coordinator
+            for entry in self._committed_turn_submissions.values()
+            if entry.coordinator is not None
+        )
+        if submission_tasks:
+            await asyncio.shield(
+                asyncio.gather(*submission_tasks, return_exceptions=True)
             )
-            if submission_tasks:
+
+    async def _settle_admission_coordinators(self) -> None:
+        admission_tasks = tuple(
+            entry.coordinator
+            for entry in self._admissions.values()
+            if entry.coordinator is not None and not entry.coordinator.done()
+        )
+        if admission_tasks:
+            await asyncio.shield(
+                asyncio.gather(*admission_tasks, return_exceptions=True)
+            )
+
+    async def _close_bridge(self) -> bool:
+        await self._bridge.close()
+        return True
+
+    async def _settle_bridge_consumer(self, *, bridge_closed: bool) -> None:
+        """Settle the sole bridge consumer even when its terminal never arrives.
+
+        ``_consume_bridge`` is the only long-lived reader of this composition and
+        it ends exactly when the Agent Bridge reports its closed terminal.  A
+        bridge owner that failed before publishing that terminal can never
+        release the consumer, so awaiting it here would retain the owned child
+        forever; cancelling settles it instead.  The bridge's own closed truth is
+        still consulted, under its own guard, so a bridge that closed and then
+        reported a secondary failure keeps draining normally.
+        """
+
+        consumer = self._consumer
+        if consumer is None:
+            return
+        if bridge_closed or consumer.done() or self._bridge_reports_closed():
+            await asyncio.shield(consumer)
+            return
+        consumer.cancel()
+        await asyncio.shield(consumer)
+
+    def _bridge_reports_closed(self) -> bool:
+        try:
+            return self._bridge.snapshot().closed is True
+        except BaseException:  # noqa: BLE001 - a failed probe is not a terminal
+            return False
+
+    async def _settle_ack_coordinators(self) -> None:
+        ack_tasks = tuple(
+            entry.coordinator
+            for entry in self._ack_entries.values()
+            if entry.coordinator is not None and not entry.coordinator.done()
+        )
+        if ack_tasks:
+            await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
+
+    async def _settle_history_tasks(self) -> None:
+        async with self._ack_lock:
+            history_tasks = tuple(self._history_tasks)
+            if history_tasks:
                 await asyncio.shield(
-                    asyncio.gather(*submission_tasks, return_exceptions=True)
+                    asyncio.gather(*history_tasks, return_exceptions=True)
                 )
-            admission_tasks = tuple(
-                entry.coordinator
-                for entry in self._admissions.values()
-                if entry.coordinator is not None and not entry.coordinator.done()
-            )
-            if admission_tasks:
-                await asyncio.shield(
-                    asyncio.gather(*admission_tasks, return_exceptions=True)
-                )
-            await self._bridge.close()
-            if self._consumer is not None:
-                await asyncio.shield(self._consumer)
-            await self._harness.close()
-            ack_tasks = tuple(
-                entry.coordinator
-                for entry in self._ack_entries.values()
-                if entry.coordinator is not None and not entry.coordinator.done()
-            )
-            if ack_tasks:
-                await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
-            async with self._ack_lock:
-                history_tasks = tuple(self._history_tasks)
-                if history_tasks:
-                    await asyncio.shield(
-                        asyncio.gather(*history_tasks, return_exceptions=True)
-                    )
-            shutdown_effects = await self._cr.close()
-            async with self._effect_lock:
-                self._retain_effects(shutdown_effects)
-                self._prune_invalid_output_effects()
+
+    async def _close_conversation_runtime(self) -> None:
+        shutdown_effects = await self._cr.close()
+        async with self._effect_lock:
+            self._retain_effects(shutdown_effects)
+            self._prune_invalid_output_effects()
+
+    async def _close_notification_cleanup(
+        self, final_drain_lease: _NotificationLeaseRecord | None
+    ) -> None:
+        """Retire invalidated output and hand close-drain ownership over once.
+
+        The producer stream is closed even when discarding or promoting fails,
+        so no consumer can ever wait on a notification producer that this
+        composition has already given up.
+        """
+
+        try:
             self._discarded_invalidated_presentations += (
                 self._notifications.discard_pending_presentations()
             )
             if final_drain_lease is not None:
                 final_drain_lease.drain_after_close = True
                 self._active_notification_lease = final_drain_lease
+        finally:
             self._notifications.close()
-            final_drain_capability = (
-                None if final_drain_lease is None else final_drain_lease.lease
-            )
-            if self._pending_history or self._pending_user_history:
-                return AgentConversationShutdownResult(
-                    AgentConversationShutdownStatus.FAILED,
-                    "history_write_intents_pending",
-                    final_drain_capability,
-                )
-            self._closed = True
-            return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.CLOSED,
-                closed_detail,
-                final_drain_capability,
-            )
-        except BaseException as error:  # noqa: BLE001
-            self._notifications.close()
-            return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.FAILED,
-                f"teardown_failed:{type(error).__name__}",
-                (
-                    None
-                    if final_drain_lease is None
-                    or not final_drain_lease.drain_after_close
-                    else final_drain_lease.lease
-                ),
-            )
+
+    @staticmethod
+    def _final_drain_capability(
+        final_drain_lease: _NotificationLeaseRecord | None,
+    ) -> AgentConversationNotificationLease | None:
+        if final_drain_lease is None or not final_drain_lease.drain_after_close:
+            return None
+        return final_drain_lease.lease
 
     def _response_record(self, ref: ResponseRef):
         for record in self._cr.snapshot().conversation.responses:
@@ -3859,7 +4255,7 @@ class AgentConversationRuntime:
 
     def _prune_invalid_output_effects(self) -> None:
         presentation = self._cr.snapshot().presentation
-        deliverable_outputs = {
+        claimable_outputs = {
             (
                 record.unit.ref,
                 record.unit.surface,
@@ -3869,8 +4265,18 @@ class AgentConversationRuntime:
             for record in presentation.records
             if record.state is PresentationState.ENQUEUED
         }
+        retained_claim_outputs = claimable_outputs | {
+            (
+                record.unit.ref,
+                record.unit.surface,
+                record.unit.unit_id,
+                record.unit.seq,
+            )
+            for record in presentation.records
+            if record.state is PresentationState.PRESENTED
+        }
 
-        def deliverable(effect: ConversationEffect) -> bool:
+        def retained_claim(effect: ConversationEffect) -> bool:
             return (
                 effect.effect_type not in {"ui.render", "audio.enqueue"}
                 or (
@@ -3879,21 +4285,37 @@ class AgentConversationRuntime:
                     effect.unit_id,
                     effect.unit_seq,
                 )
-                in deliverable_outputs
+                in retained_claim_outputs
+            )
+
+        def claimable(effect: ConversationEffect) -> bool:
+            return (
+                effect.effect_type not in {"ui.render", "audio.enqueue"}
+                or (
+                    effect.ref,
+                    effect.surface,
+                    effect.unit_id,
+                    effect.unit_seq,
+                )
+                in claimable_outputs
             )
 
         requeued: list[ConversationEffect] = []
         for entry in self._effect_claims.values():
-            if entry.superseded or all(deliverable(effect) for effect in entry.effects):
+            if (
+                entry.superseded
+                or entry.acknowledged
+                or all(retained_claim(effect) for effect in entry.effects)
+            ):
                 continue
             if not entry.acknowledged:
                 requeued.extend(
-                    effect for effect in entry.effects if deliverable(effect)
+                    effect for effect in entry.effects if claimable(effect)
                 )
             entry.superseded = True
         self._requeue_effects_in_order(requeued)
         retained = deque(
-            effect for effect in self._effect_backlog if deliverable(effect)
+            effect for effect in self._effect_backlog if claimable(effect)
         )
         self._effect_backlog = retained
         self._effect_backlog_ids = {effect.effect_id for effect in retained}

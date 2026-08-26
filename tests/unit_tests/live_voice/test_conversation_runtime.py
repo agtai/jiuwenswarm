@@ -107,6 +107,90 @@ def test_turn_commit_is_once_only_and_concurrent_safe() -> None:
     assert raised.value.reason == "TURN_COMMIT_CONFLICT"
 
 
+def test_terminal_turns_release_heavy_commit_capacity_but_keep_replay_fence() -> (
+    None
+):
+    """A5: terminal response authority must not permanently consume 128 slots."""
+
+    runtime = ConversationRuntime(scope())
+    first_commit: TurnCommit | None = None
+    for index in range(129):
+        interaction_id = f"interaction-capacity-{index}"
+        turn_id = f"turn-capacity-{index}"
+        retained_commit = TurnCommit.from_dict(
+            {
+                "contract_version": "live-voice.contract.v2",
+                "commit_id": f"commit-capacity-{index}",
+                "turn_id": turn_id,
+                "interaction_id": interaction_id,
+                "text": "bounded sequential work",
+                "hypothesis_provenance": {"provider": "fake-sr", "seq": index},
+                "scope": scope().to_dict(),
+                "context_refs": [],
+                "committed_at": "2026-08-04T08:00:00Z",
+            }
+        )
+        first_commit = first_commit or retained_commit
+        runtime.open_interaction(interaction_id)
+        runtime.start_turn(interaction_id, turn_id)
+        accepted, _ = runtime.commit_turn(retained_commit)
+        assert accepted is True
+        response, _ = runtime.accept_response(turn_id, f"response-capacity-{index}")
+        runtime.transition_response(response, ResponseState.GENERATING)
+        runtime.transition_response(
+            response, ResponseState.TERMINAL, outcome=TerminalOutcome.COMPLETED
+        )
+        runtime.transition_interaction(interaction_id, InteractionState.CLOSED)
+
+    assert first_commit is not None
+    before_replay = runtime.events()
+    with pytest.raises(ContractViolation) as replay:
+        runtime.commit_turn(first_commit)
+    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+    assert runtime.events() == before_replay
+
+    ledger = runtime._commit_ledger
+    assert ledger._by_commit_id == {}
+    assert ledger._by_turn_id == {}
+    assert len(ledger._retired_commits) <= ledger._capacity
+    assert len(ledger._retired_commit_ids) <= ledger._capacity
+    assert len(ledger._retired_turn_ids) <= ledger._capacity
+
+
+def test_closed_interactions_release_commits_that_never_opened_a_response() -> None:
+    runtime = ConversationRuntime(scope())
+    first_commit: TurnCommit | None = None
+    for index in range(129):
+        interaction_id = f"interaction-no-response-{index}"
+        turn_id = f"turn-no-response-{index}"
+        retained_commit = TurnCommit.from_dict(
+            {
+                "contract_version": "live-voice.contract.v2",
+                "commit_id": f"commit-no-response-{index}",
+                "turn_id": turn_id,
+                "interaction_id": interaction_id,
+                "text": "closed before response",
+                "hypothesis_provenance": {"provider": "fake-sr", "seq": index},
+                "scope": scope().to_dict(),
+                "context_refs": [],
+                "committed_at": "2026-08-04T08:00:00Z",
+            }
+        )
+        first_commit = first_commit or retained_commit
+        runtime.open_interaction(interaction_id)
+        runtime.start_turn(interaction_id, turn_id)
+        accepted, _ = runtime.commit_turn(retained_commit)
+        assert accepted is True
+        runtime.transition_interaction(interaction_id, InteractionState.CLOSED)
+
+    assert first_commit is not None
+    before_replay = runtime.events()
+    with pytest.raises(ContractViolation) as replay:
+        runtime.commit_turn(first_commit)
+    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+    assert runtime.events() == before_replay
+
+
 def test_replacement_fences_old_output_and_generation_increases() -> None:
     runtime = prepared()
     first, _ = runtime.accept_response("turn-1", "response-1")

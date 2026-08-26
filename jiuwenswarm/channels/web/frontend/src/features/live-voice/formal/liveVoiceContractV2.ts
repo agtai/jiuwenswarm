@@ -101,10 +101,19 @@ function validUnicode(value: string, fieldName: string): string {
 }
 
 function requiredText(value: unknown, fieldName: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (typeof value !== 'string') {
     throw violation('INVALID_REQUIRED_TEXT', `${fieldName} must be a non-empty string`);
   }
-  return validUnicode(value, fieldName);
+  const normalized = validUnicode(value, fieldName);
+  if (
+    ![...normalized].some(char => {
+      const code = char.codePointAt(0) ?? 0;
+      return char.trim().length !== 0 && !(code >= 0x001c && code <= 0x001f) && code !== 0x0085;
+    })
+  ) {
+    throw violation('INVALID_REQUIRED_TEXT', `${fieldName} must be a non-empty string`);
+  }
+  return normalized;
 }
 
 const CONTEXT_WHITESPACE = new Set([
@@ -202,7 +211,7 @@ function recordDescriptors(value: object, fieldName: string): PropertyDescriptor
   }
   const keys = Reflect.ownKeys(value);
   if (keys.some(key => typeof key !== 'string')) {
-    throw violation('INVALID_OBJECT_KEY', `${fieldName} cannot contain symbol keys`);
+    throw violation('INVALID_JSON_KEY', `${fieldName} cannot contain symbol keys`);
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   for (const key of keys as string[]) {
@@ -283,7 +292,7 @@ function cloneJson(value: unknown, fieldName: string, ancestors: ReadonlySet<obj
   if (typeof value === 'string') return validUnicode(value, fieldName);
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
-      throw violation('INVALID_NUMBER', `${fieldName} must be finite`);
+      throw violation('NON_FINITE_NUMBER', `${fieldName} must be finite`);
     }
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
       throw violation('INVALID_SAFE_INTEGER', `${fieldName} exceeds the shared safe integer range`);
@@ -1615,8 +1624,11 @@ function parseFactText(value: unknown, fieldName: string): string {
 function parseWorkProgressSource(value: unknown): Readonly<WorkProgressSource> {
   const data = strictRecord(value, 'work_progress.source');
   exactKeys(data, ['authority', 'event_id', 'source_work_ref', 'adapter'], 'work_progress.source');
-  const authority = enumeration(['harness', 'task_core', 'executor'] as const, data.authority, 'work_progress.source.authority');
   const sourceWorkRef = parseIdentityRef(data.source_work_ref);
+  if (sourceWorkRef.kind !== 'round' && sourceWorkRef.kind !== 'task' && sourceWorkRef.kind !== 'attempt') {
+    throw violation('INVALID_PROGRESS_SOURCE_KIND', 'source_work_ref must identify a round, task, or attempt');
+  }
+  const authority = enumeration(['harness', 'task_core', 'executor'] as const, data.authority, 'work_progress.source.authority');
   const expectedKind: IdentityKind = ({ harness: 'round', task_core: 'task', executor: 'attempt' } as const)[authority];
   if (sourceWorkRef.kind !== expectedKind) {
     throw violation('PROGRESS_SOURCE_AUTHORITY_MISMATCH', `${authority} progress requires ${expectedKind} source_work_ref`, 'PERMISSION_DENIED');

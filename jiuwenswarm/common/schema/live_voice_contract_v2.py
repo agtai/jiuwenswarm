@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -287,11 +288,16 @@ def _validate_unicode(value: str, field_name: str) -> str:
 
 
 def _required_text(value: object, field_name: str) -> str:
-    if type(value) is not str or not value.strip():
+    if type(value) is not str:
         raise _violation(
             "INVALID_REQUIRED_TEXT", f"{field_name} must be a non-empty string"
         )
-    return _validate_unicode(value, field_name)
+    normalized = _validate_unicode(value, field_name)
+    if not any(not char.isspace() and ord(char) != 0xFEFF for char in normalized):
+        raise _violation(
+            "INVALID_REQUIRED_TEXT", f"{field_name} must be a non-empty string"
+        )
+    return normalized
 
 
 def _context_required_text(value: object, field_name: str) -> str:
@@ -1066,7 +1072,9 @@ class IdentityRegistry:
             if existing is not None:
                 if existing != record:
                     raise _violation(
-                        "IDENTITY_CONFLICT", "identity registration is immutable"
+                        "IDENTITY_CONFLICT",
+                        "identity registration is immutable",
+                        code=ErrorCode.CONFLICT,
                     )
                 return existing
             self._records[key] = record
@@ -1092,6 +1100,7 @@ class IdentityRegistry:
                 raise _violation(
                     "IDENTITY_NOT_FOUND",
                     f"identity {ref.kind.value}:{ref.id} is unknown",
+                    code=ErrorCode.NOT_FOUND,
                 )
             if scope is not None and record.scope != scope:
                 raise _violation(
@@ -3081,6 +3090,49 @@ class TurnCommitLedger:
         self._capacity = capacity
         self._by_commit_id: dict[str, TurnCommit] = {}
         self._by_turn_id: dict[str, TurnCommit] = {}
+        self._retired_commits: deque[tuple[bytes, bytes, bytes]] = deque()
+        self._retired_commit_ids: dict[bytes, bytes] = {}
+        self._retired_turn_ids: dict[bytes, bytes] = {}
+        digest_size = hashlib.sha256().digest_size
+        # Retired exact identities retain duplicate semantics for one existing
+        # ledger-capacity window.  This fixed-size conservative fence keeps
+        # older identities fail-closed without retaining full commit payloads.
+        self._retired_replay_fence = bytearray(capacity * digest_size)
+
+    @staticmethod
+    def _identity_digest(kind: str, value: str) -> bytes:
+        return hashlib.sha256(f"{kind}\x00{value}".encode()).digest()
+
+    @staticmethod
+    def _commit_digest(commit: TurnCommit) -> bytes:
+        return hashlib.sha256(commit.canonical_bytes()).digest()
+
+    def _replay_fence_indices(self, digest: bytes) -> tuple[int, ...]:
+        bit_capacity = len(self._retired_replay_fence) * 8
+        return tuple(
+            int.from_bytes(digest[offset:] + digest[:offset], "big") % bit_capacity
+            for offset in range(len(digest))
+        )
+
+    def _add_replay_fence(self, digest: bytes) -> None:
+        for index in self._replay_fence_indices(digest):
+            self._retired_replay_fence[index >> 3] |= 1 << (index & 7)
+
+    def _replay_fence_contains(self, digest: bytes) -> bool:
+        # False positives are permitted only in the safe direction: reject a
+        # fresh identity instead of re-authorizing a retired one.
+        return all(
+            self._retired_replay_fence[index >> 3] & (1 << (index & 7))
+            for index in self._replay_fence_indices(digest)
+        )
+
+    @staticmethod
+    def _raise_commit_conflict() -> None:
+        raise _violation(
+            "TURN_COMMIT_CONFLICT",
+            "commit_id and turn_id are immutable and may commit only once",
+            code=ErrorCode.CONFLICT,
+        )
 
     def accept(self, commit: TurnCommit) -> bool:
         with self._lock:
@@ -3090,11 +3142,23 @@ class TurnCommitLedger:
             if existing is not None:
                 if existing.canonical_bytes() == commit.canonical_bytes():
                     return False
-                raise _violation(
-                    "TURN_COMMIT_CONFLICT",
-                    "commit_id and turn_id are immutable and may commit only once",
-                    code=ErrorCode.CONFLICT,
-                )
+                self._raise_commit_conflict()
+            commit_id_digest = self._identity_digest("commit", commit.commit_id)
+            turn_id_digest = self._identity_digest("turn", commit.turn_id)
+            commit_digest = self._commit_digest(commit)
+            retired_by_commit = self._retired_commit_ids.get(commit_id_digest)
+            retired_by_turn = self._retired_turn_ids.get(turn_id_digest)
+            if retired_by_commit is not None or retired_by_turn is not None:
+                if (
+                    retired_by_commit == commit_digest
+                    and retired_by_turn == commit_digest
+                ):
+                    return False
+                self._raise_commit_conflict()
+            if self._replay_fence_contains(
+                commit_id_digest
+            ) or self._replay_fence_contains(turn_id_digest):
+                self._raise_commit_conflict()
             if len(self._by_commit_id) >= self._capacity:
                 raise _violation(
                     "TURN_COMMIT_LEDGER_FULL",
@@ -3138,6 +3202,22 @@ class TurnCommitLedger:
                 return False
             self._by_commit_id.pop(commit.commit_id, None)
             self._by_turn_id.pop(commit.turn_id, None)
+            commit_id_digest = self._identity_digest("commit", commit.commit_id)
+            turn_id_digest = self._identity_digest("turn", commit.turn_id)
+            commit_digest = self._commit_digest(commit)
+            self._add_replay_fence(commit_id_digest)
+            self._add_replay_fence(turn_id_digest)
+            if len(self._retired_commits) >= self._capacity:
+                old_commit_id, old_turn_id, old_commit = self._retired_commits.popleft()
+                if self._retired_commit_ids.get(old_commit_id) == old_commit:
+                    self._retired_commit_ids.pop(old_commit_id, None)
+                if self._retired_turn_ids.get(old_turn_id) == old_commit:
+                    self._retired_turn_ids.pop(old_turn_id, None)
+            self._retired_commits.append(
+                (commit_id_digest, turn_id_digest, commit_digest)
+            )
+            self._retired_commit_ids[commit_id_digest] = commit_digest
+            self._retired_turn_ids[turn_id_digest] = commit_digest
             return True
 
     def dispatch(

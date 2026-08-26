@@ -97,8 +97,4 @@ export class FakeP1Vertical {
   routes(): readonly Readonly<RouteTelemetryRecord>[] {
     return this.#routes.list();
   }
-
-  businessCancelCount(): number {
-    return this.#audio.businessCancelCount();
-  }
 }

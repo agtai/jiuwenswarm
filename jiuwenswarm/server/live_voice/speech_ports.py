@@ -419,7 +419,7 @@ class SynthesisPort:
                     "SYNTHESIS_ALREADY_TERMINAL",
                     "synthesis cannot emit after a terminal event",
                 )
-            if kind is SynthesisEventKind.CHUNK:
+            if kind in {SynthesisEventKind.CHUNK, SynthesisEventKind.COMPLETED}:
                 self._response_fence.apply_if_current(request.response, lambda: None)
             if kind is SynthesisEventKind.CHUNK:
                 if type(audio) is not bytes or not audio:

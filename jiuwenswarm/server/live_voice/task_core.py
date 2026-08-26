@@ -310,14 +310,14 @@ class TaskCore:
         outcome: TerminalOutcome,
         authorization: AuthorizationContext,
     ) -> tuple[TaskEvent, TaskEvent]:
-        attempt_event = self._transition_attempt(
-            task_id,
-            attempt_id,
-            AttemptState.TERMINAL,
-            authorization,
-            outcome=outcome,
-        )
         with self._lock:
+            attempt_event = self._transition_attempt(
+                task_id,
+                attempt_id,
+                AttemptState.TERMINAL,
+                authorization,
+                outcome=outcome,
+            )
             task = self._require_task(task_id, authorization.scope)
             validate_transition(
                 LifecycleKind.TASK,

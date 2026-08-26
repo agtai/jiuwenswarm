@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -2542,6 +2543,16 @@ def _store_counts(database: Path) -> tuple[int, ...]:
         )
 
 
+def _outbox_is_idle(database: Path) -> bool:
+    with sqlite3.connect(database) as connection:
+        return (
+            connection.execute(
+                "SELECT COUNT(*) FROM outbox WHERE state IN ('pending', 'claimed')"
+            ).fetchone()[0]
+            == 0
+        )
+
+
 def test_p2_response_generation_owner_is_lazy_and_bound_to_the_task_store(
     tmp_path: Path,
 ) -> None:
@@ -2602,6 +2613,7 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
             "model_config_version": "catalog-v1",
         }
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
 
         get_result = await harness.composition.handle(
             operation="task.get",
@@ -2715,6 +2727,10 @@ async def test_production_classifier_bridge_store_and_authenticated_core_queries
             harness.composition._core.store.get_task(task_id, _scope()).state
             is FormalTaskState.RUNNING
         )
+        # This is the stable-authority positive path. A11 deliberately moves
+        # reconciliation Store writes off-loop; stop the periodic test worker
+        # before freezing five successive resolver/query authorities.
+        await _stop_test_reconciliation_worker(harness.composition)
         before = _store_counts(harness.database)
         classifier = ProductionTaskIntentClassifier()
         bridge = VoiceTaskBridge()
@@ -3900,6 +3916,7 @@ async def test_voice_task_create_requires_exact_accepted_commit_and_text(
         )
         assert accepted.ok is True
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
     finally:
         await harness.composition.stop()
 
@@ -4072,6 +4089,7 @@ async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
             assert created.ok is True
             task_ids.append(str(created.payload["result"]["task_id"]))
         await _wait_until(lambda: len(harness.executor.dispatches) == 2)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
 
         store = harness.composition._core.store
         noncurrent_task_id, current_task_id = task_ids
@@ -4096,6 +4114,12 @@ async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
         assert adjusted.payload["result"]["task_id"] == noncurrent_task_id
         await _wait_until(
             lambda: harness.executor.adjustments == ["command-adjust-addressed"]
+        )
+        await _wait_until(
+            lambda: (
+                harness.executor.adjustment_settlements
+                == [("command-adjust-addressed", TaskAdjustmentState.APPLIED)]
+            )
         )
         noncurrent_events = store.events(noncurrent_task_id, _scope(), after_seq=-1)
         assert [
@@ -4134,6 +4158,7 @@ async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
         assert created.ok is True
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         before_rejection = _store_counts(harness.database)
 
         oversized = _adjust_params(task_id, "command-adjust-oversized")
@@ -4514,6 +4539,7 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         harness.authority.dirty = True
 
         operations = {
@@ -4585,6 +4611,7 @@ async def test_read_queries_survive_clean_checkpoint_revision_but_cancel_fails_c
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         harness.authority.contexts["session-1"] = replace(
             harness.authority.contexts["session-1"],
             revision_value="clean-checkpoint-revision",
@@ -4637,6 +4664,7 @@ async def test_read_and_cancel_still_fail_closed_on_redacted_context(
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         harness.authority.contexts["session-1"] = replace(
             harness.authority.contexts["session-1"],
             redacted=True,
@@ -4715,6 +4743,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
         )
         task_id = created.payload["result"]["task_id"]
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
 
         cancel_params = _issued_cancel_params(harness, task_id)
         first, replay = await asyncio.gather(
@@ -4742,7 +4771,15 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("case", "params", "session_id", "contexts", "expiry", "expected"),
+    (
+        "case",
+        "params",
+        "session_id",
+        "contexts",
+        "expiry",
+        "expected",
+        "expected_code",
+    ),
     [
         (
             "unauthenticated",
@@ -4751,6 +4788,16 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             EXPIRY,
             "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+            ErrorCode.UNAUTHENTICATED.value,
+        ),
+        (
+            "non-ascii-bearer",
+            {**_create_params(), "auth_token": "令牌" * 16},
+            "session-1",
+            None,
+            EXPIRY,
+            "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+            ErrorCode.UNAUTHENTICATED.value,
         ),
         (
             "session-mismatch",
@@ -4759,6 +4806,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             EXPIRY,
             "FORMAL_TASK_SESSION_MISMATCH",
+            ErrorCode.PERMISSION_DENIED.value,
         ),
         (
             "expired",
@@ -4767,6 +4815,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             None,
             "2026-08-05T11:59:59Z",
             "FORMAL_TASK_AUTHORIZATION_EXPIRED",
+            ErrorCode.PERMISSION_DENIED.value,
         ),
         (
             "redacted",
@@ -4775,6 +4824,7 @@ async def test_concurrent_cancel_replay_produces_one_carrier_effect(
             {"session-1": _context(Path.cwd(), redacted=True)},
             EXPIRY,
             "TASK_CONTEXT_REDACTED",
+            ErrorCode.PERMISSION_DENIED.value,
         ),
     ],
 )
@@ -4786,8 +4836,8 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
     contexts: dict[str, ResolvedTaskContext] | None,
     expiry: str,
     expected: str,
+    expected_code: str,
 ) -> None:
-    del case
     if contexts is not None:
         contexts = {
             key: replace(value, uri=tmp_path.resolve().as_uri())
@@ -4806,11 +4856,58 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
         await asyncio.sleep(0)
         assert result.ok is False
         assert result.payload["error"]["reason"] == expected
+        assert result.payload["error"]["code"] == expected_code
         assert _store_counts(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
+        assert harness.executor.statuses == []
+        assert harness.executor.adjustments == []
+        assert harness.executor.adjustment_settlements == []
+        assert harness.executor.readiness == []
+        assert harness.models.calls == []
+        if case == "non-ascii-bearer":
+            assert harness.authority.calls == []
     finally:
         await harness.composition.stop()
+
+
+def test_static_bearer_rejects_non_ascii_configuration() -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        StaticBearerAuthenticator(token="令" * 32, principal=_principal())
+
+    assert raised.value.reason == "INVALID_P3_AUTH_CONFIGURATION"
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+
+
+def test_static_bearer_compares_only_supported_ascii_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    original_compare = hmac.compare_digest
+
+    def compare(left: str, right: str) -> bool:
+        calls.append((left, right))
+        return original_compare(left, right)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.hmac.compare_digest",
+        compare,
+    )
+    authenticator = StaticBearerAuthenticator(token=TOKEN, principal=_principal())
+
+    assert authenticator.authenticate(TOKEN, operation="task.list", now=NOW) == (
+        _principal()
+    )
+    with pytest.raises(FormalTaskViolation) as wrong:
+        authenticator.authenticate("x" * 32, operation="task.list", now=NOW)
+    with pytest.raises(FormalTaskViolation) as unsupported:
+        authenticator.authenticate("令" * 32, operation="task.list", now=NOW)
+
+    assert wrong.value.reason == "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    assert wrong.value.code is ErrorCode.UNAUTHENTICATED
+    assert unsupported.value.reason == "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    assert unsupported.value.code is ErrorCode.UNAUTHENTICATED
+    assert calls == [(TOKEN, TOKEN), ("x" * 32, TOKEN)]
 
 
 @pytest.mark.asyncio
@@ -4983,6 +5080,7 @@ async def test_confirmation_is_single_use_with_exact_idempotent_replay_only(
             session_id="session-1",
         )
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         before_conflict = _store_counts(harness.database)
         conflict = await harness.composition.handle(
             operation="task.create",
@@ -5049,6 +5147,7 @@ async def test_cross_task_confirmation_rejected_without_cancel_effect(
             )
             created.append(str(result.payload["result"]["task_id"]))
         await _wait_until(lambda: len(harness.executor.dispatches) == 2)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         cancel_one = _issued_cancel_params(harness, created[0])
         before = _store_counts(harness.database)
 
@@ -5420,6 +5519,61 @@ def _configure_enabled_factory(
         "live-voice.direct-project-code.d2.v1",
     )
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS", str(interval))
+
+
+def test_factory_rejects_non_ascii_bearer_before_runtime_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 30)
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "令" * 32)
+    database = tmp_path / "non-ascii-must-not-exist.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    constructed: list[str] = []
+
+    def forbidden_dependency(name: str, **declarations: object):
+        def construct(*_args: object, **_kwargs: object) -> object:
+            constructed.append(name)
+            return object()
+
+        # Declaration-only reads must still resolve: the factory inspects
+        # candidate capability profiles before it constructs anything, and
+        # refusing that read would hide the construction gate this asserts.
+        for attribute, value in declarations.items():
+            setattr(construct, attribute, value)
+        return construct
+
+    declarations: dict[str, dict[str, object]] = {
+        "DirectProjectCodeExecutorAdapter": {
+            "construction_capability_profiles": (
+                DirectProjectCodeExecutorAdapter.construction_capability_profiles
+            ),
+        },
+    }
+    for dependency in (
+        "ServerSessionProjectAuthorityResolver",
+        "AgentManagerProjectBindingResolver",
+        "DirectProjectCodeExecutorAdapter",
+        "SqliteTaskStore",
+        "PersistentTaskCore",
+    ):
+        monkeypatch.setattr(
+            f"jiuwenswarm.server.live_voice.p3_authenticated_composition.{dependency}",
+            forbidden_dependency(dependency, **declarations.get(dependency, {})),
+        )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert raised.value.reason == "INVALID_P3_AUTH_CONFIGURATION"
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+    assert constructed == []
+    assert not database.exists()
 
 
 @pytest.mark.parametrize("interval", ["nan", "inf", "-inf", "0", "-1", "3600.1"])
@@ -5921,6 +6075,9 @@ async def test_product_create_persists_exact_direct_selection_and_admission(
             max_backoff_seconds=60,
             max_attempts=120,
         )
+        # The outbox settles off the event loop, so read the diagnostic only
+        # once no row is still pending or claimed.
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         diagnostics = await harness.composition.read_product_status_diagnostics(
             bearer_token=TOKEN,
             session_id="session-1",
@@ -7776,6 +7933,7 @@ async def test_retry_rejects_nonterminal_predecessor_with_zero_effect(
         assert created.ok is True
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        await _wait_until(lambda: _outbox_is_idle(harness.database))
         before = await _effects(harness)
         confirmations_before = _confirmation_count(harness.database)
 

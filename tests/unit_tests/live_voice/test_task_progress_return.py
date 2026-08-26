@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
@@ -14,8 +15,10 @@ import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
+    MAX_SAFE_INTEGER,
     Assurance,
     CommandEnvelope,
+    ContractViolation,
     OriginRef,
     ProducerRef,
     ScopeRef,
@@ -222,6 +225,7 @@ class _SubscriptionDouble:
         self.close_calls = 0
         self.close_gate = close_gate
         self.close_failures = close_failures
+        self.blocked = asyncio.Event()
         self._closed = asyncio.Event()
         self._changed = asyncio.Event()
 
@@ -242,7 +246,13 @@ class _SubscriptionDouble:
             self._changed.clear()
             if self.events or self._closed.is_set():
                 continue
-            await self._changed.wait()
+            # Deterministic barrier: the reader is parked exactly where the real
+            # TaskEventSubscription awaits its change signal.
+            self.blocked.set()
+            try:
+                await self._changed.wait()
+            finally:
+                self.blocked.clear()
 
     def publish(self, event: PersistentTaskEvent) -> None:
         self.events.append(event)
@@ -271,6 +281,7 @@ class _PreparedSourceDouble:
         events: list[PersistentTaskEvent],
         *,
         start_result: bool = True,
+        close_failures: int = 0,
     ) -> None:
         self.subscription = cast(TaskEventSubscription, subscription)
         self.events = deque(events)
@@ -278,6 +289,8 @@ class _PreparedSourceDouble:
         self.start_calls = 0
         self.next_calls = 0
         self.close_calls = 0
+        self.close_failures = close_failures
+        self.blocked = asyncio.Event()
         self._closed = asyncio.Event()
         self._changed = asyncio.Event()
 
@@ -295,7 +308,13 @@ class _PreparedSourceDouble:
             self._changed.clear()
             if self.events or self._closed.is_set():
                 continue
-            await self._changed.wait()
+            # Deterministic barrier: the reader is parked exactly where the real
+            # TaskEventSubscription awaits its change signal.
+            self.blocked.set()
+            try:
+                await self._changed.wait()
+            finally:
+                self.blocked.clear()
 
     def publish(self, event: PersistentTaskEvent) -> None:
         self.events.append(event)
@@ -303,6 +322,65 @@ class _PreparedSourceDouble:
 
     async def close(self) -> None:
         self.close_calls += 1
+        if self.close_failures:
+            self.close_failures -= 1
+            raise RuntimeError("injected prepared source close failure")
+        self._closed.set()
+        self._changed.set()
+
+
+class _RetainedDetachPreparedSourceDouble(_PreparedSourceDouble):
+    """Prepared source whose detach outlives its own close() call.
+
+    PreparedTaskProgressSource is a Protocol, and its close() contract does not
+    promise that a parked read has ended by the time close() returns - only
+    that the detach has been asked for.  The real TaskEventSubscription does
+    detach in stages: DETACHING and a change signal first, its own poll worker
+    exits, CLOSED and a second change signal after that, so "the source was
+    closed" and "the parked read has ended" are two different instants there
+    too.  It is fair to say, though, that the shipped subscription awaits its
+    own poll worker inside close(), so on that concrete seam both signals land
+    before close() returns and the gap is not observable from outside.
+
+    This double therefore does not reproduce the shipped seam; it deliberately
+    widens that same gap past close()'s return, which is the widest behaviour
+    the Protocol still permits, so the bridge's invariant is pinned at the
+    Protocol boundary rather than at one implementation's happen-to-be timing.
+    Without the join, the bridge's own correctness on the shipped seam rests on
+    an unpromised callback ordering; with it, the property holds for any
+    conforming source.
+
+    `detach_turns` is a count of event-loop turns, not wall-clock time: the loop
+    is single threaded, so the release lands on a later turn by construction and
+    not by a race.  Every value from one turn upward has the same meaning here.
+    """
+
+    detach_turns = 4
+
+    def __init__(
+        self,
+        subscription: _SubscriptionDouble,
+        events: list[PersistentTaskEvent],
+        *,
+        detach_release: asyncio.Event | None = None,
+    ) -> None:
+        super().__init__(subscription, events)
+        self.detach_task: asyncio.Task[None] | None = None
+        self.detach_release = detach_release
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.detach_task is None:
+            self.detach_task = asyncio.get_running_loop().create_task(
+                self._finish_detach()
+            )
+
+    async def _finish_detach(self) -> None:
+        if self.detach_release is None:
+            for _ in range(self.detach_turns):
+                await asyncio.sleep(0)
+        else:
+            await self.detach_release.wait()
         self._closed.set()
         self._changed.set()
 
@@ -321,6 +399,16 @@ async def _wait_until(predicate) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("condition was not reached")
+
+
+def _worker_task(task_id: str) -> asyncio.Task[None]:
+    """The bridge's owner-loop worker, found by the exact name the bridge gives it."""
+
+    return next(
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == f"live-voice-task-progress:{task_id}"
+    )
 
 
 def _authority_task(
@@ -945,6 +1033,114 @@ async def test_deferred_voice_waits_for_explicit_safe_drain_and_acks_once() -> N
     assert len(voice_events) == 1
     assert bridge.snapshot().voice_drains == 1
     await activation.lease.close()
+
+
+@pytest.mark.asyncio
+async def test_voice_drain_consumes_only_its_exact_work_ref() -> None:
+    """B8: same-scope bridges cannot drain or poison another Task's result."""
+
+    arbiter = ProgressNotificationArbiter()
+    foreground = _busy_foreground()
+    delivered_one: list[TaskProgressNotificationIntent] = []
+    delivered_two: list[TaskProgressNotificationIntent] = []
+    terminal_deferred_one = asyncio.Event()
+    terminal_deferred_two = asyncio.Event()
+
+    def foreground_supplier() -> ForegroundSnapshot:
+        return foreground
+
+    def make_bridge(
+        task_id: str,
+        correlation_id: str,
+        delivered: list[TaskProgressNotificationIntent],
+        terminal_deferred: asyncio.Event,
+    ):
+        subscription = _SubscriptionDouble(task_id=task_id)
+        events = [
+            _event(
+                0,
+                "task.accepted",
+                "accepted",
+                task_id=task_id,
+                correlation_id=correlation_id,
+                event_id=f"{task_id}-event-0",
+            ),
+            _event(
+                1,
+                "task.running",
+                "running",
+                task_id=task_id,
+                correlation_id=correlation_id,
+                event_id=f"{task_id}-event-1",
+            ),
+            _event(
+                2,
+                "task.terminal",
+                "terminal",
+                task_id=task_id,
+                correlation_id=correlation_id,
+                event_id=f"{task_id}-event-2",
+                outcome="completed",
+            ),
+        ]
+        prepared = _PreparedSourceDouble(subscription, events)
+
+        async def sink(intent: TaskProgressNotificationIntent) -> None:
+            delivered.append(intent)
+
+        async def deferred_sink(intent: TaskProgressNotificationIntent) -> None:
+            if intent.task_event.event_type == "task.terminal":
+                terminal_deferred.set()
+
+        return TaskProgressReturnBridge(
+            enabled=True,
+            subscription=cast(TaskEventSubscription, subscription),
+            prepared_source=prepared,
+            authorization=_grant(task_id=task_id),
+            binding=_binding(
+                TaskProgressOriginKind.VOICE,
+                task_id=task_id,
+                correlation_id=correlation_id,
+            ),
+            generation_is_current=lambda _binding: True,
+            arbiter=arbiter,
+            foreground=foreground_supplier,
+            voice_sink=sink,
+            deferred_voice_sink=deferred_sink,
+            text_sink=lambda _event: _noop(),
+            allow_package_contract_handoff=True,
+            clock=lambda: NOW,
+        )
+
+    bridge_one = make_bridge(
+        "task-1", "correlation-1", delivered_one, terminal_deferred_one
+    )
+    bridge_two = make_bridge(
+        "task-2", "correlation-2", delivered_two, terminal_deferred_two
+    )
+    activation_one = await bridge_one.activate()
+    activation_two = await bridge_two.activate()
+    assert activation_one.lease is not None
+    assert activation_two.lease is not None
+    await terminal_deferred_one.wait()
+    await terminal_deferred_two.wait()
+    assert arbiter.snapshot().pending_notifications == 2
+
+    foreground = _foreground()
+    drained_two = await activation_two.lease.drain_voice()
+    drained_one = await activation_one.lease.drain_voice()
+    state_one = bridge_one.snapshot().state
+    state_two = bridge_two.snapshot().state
+    await activation_one.lease.close()
+    await activation_two.lease.close()
+
+    assert drained_two == 1
+    assert [item.task_event.task_id for item in delivered_two] == ["task-2"]
+    assert state_two is not TaskProgressReturnState.FAILED
+    assert drained_one == 1
+    assert [item.task_event.task_id for item in delivered_one] == ["task-1"]
+    assert state_one is not TaskProgressReturnState.FAILED
+    assert arbiter.snapshot().pending_notifications == 0
 
 
 @pytest.mark.asyncio
@@ -2868,3 +3064,675 @@ async def test_sink_failure_settles_without_later_delivery() -> None:
     assert calls == 1
     assert bridge.snapshot().text_events == 0
     assert bridge.snapshot().reason_id is TaskProgressReturnReason.TEXT_SINK_FAILED
+
+
+@dataclass
+class _ParkedVoiceHarness:
+    """Voice bridge parked in the source read holding exactly one deferral."""
+
+    bridge: TaskProgressReturnBridge
+    prepared: _PreparedSourceDouble
+    subscription: _SubscriptionDouble
+    arbiter: ProgressNotificationArbiter
+    voice_events: list[TaskProgressNotificationIntent]
+    text_events: list[TaskProgressTextEvent]
+    foreground: list[ForegroundSnapshot]
+    clock: list[str]
+
+
+def _parked_voice_harness(
+    *,
+    close_failures: int = 0,
+    failing_voice_sink: bool = False,
+    prepared_factory: Callable[[_SubscriptionDouble], _PreparedSourceDouble]
+    | None = None,
+) -> _ParkedVoiceHarness:
+    subscription = _SubscriptionDouble()
+    prepared = (
+        prepared_factory(subscription)
+        if prepared_factory is not None
+        else _PreparedSourceDouble(
+            subscription,
+            [_lifecycle_events()[0]],
+            close_failures=close_failures,
+        )
+    )
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    text_events: list[TaskProgressTextEvent] = []
+    foreground = [_busy_foreground()]
+    clock = [NOW]
+
+    async def voice_sink(intent: TaskProgressNotificationIntent) -> None:
+        if failing_voice_sink:
+            raise RuntimeError("notification-intent consumer unavailable")
+        voice_events.append(intent)
+
+    async def text_sink(event: TaskProgressTextEvent) -> None:
+        text_events.append(event)
+
+    bridge = TaskProgressReturnBridge(
+        enabled=True,
+        subscription=cast(TaskEventSubscription, subscription),
+        prepared_source=prepared,
+        authorization=_grant(),
+        binding=_binding(TaskProgressOriginKind.VOICE),
+        generation_is_current=lambda _binding: True,
+        arbiter=arbiter,
+        foreground=lambda: foreground[0],
+        voice_sink=voice_sink,
+        text_sink=text_sink,
+        allow_package_contract_handoff=True,
+        clock=lambda: clock[0],
+    )
+    return _ParkedVoiceHarness(
+        bridge=bridge,
+        prepared=prepared,
+        subscription=subscription,
+        arbiter=arbiter,
+        voice_events=voice_events,
+        text_events=text_events,
+        foreground=foreground,
+        clock=clock,
+    )
+
+
+@pytest.mark.asyncio
+async def test_arbiter_failure_during_parked_read_still_closes_source_and_worker() -> (
+    None
+):
+    harness = _parked_voice_harness()
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.ACTIVE
+    assert harness.bridge.snapshot().worker_pending is True
+    assert harness.bridge.snapshot().pending_voice_intents == 1
+    assert harness.prepared.close_calls == 0
+
+    harness.foreground[0] = _foreground()
+    with patch.object(
+        harness.arbiter, "drain", side_effect=RuntimeError("arbiter unavailable")
+    ):
+        assert await activation.lease.drain_voice() == 0
+
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+    assert harness.prepared.blocked.is_set() is True
+    assert harness.prepared.close_calls == 0
+    assert harness.bridge.snapshot().worker_pending is True
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().worker_pending is False
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+    assert harness.voice_events == []
+    assert harness.text_events == []
+    assert harness.bridge.snapshot().voice_intents == 0
+    assert harness.bridge.snapshot().voice_drains == 0
+    assert harness.arbiter.snapshot().accepted_events == 1
+
+
+@pytest.mark.asyncio
+async def test_emit_failure_during_parked_read_converges_on_repeated_close() -> None:
+    harness = _parked_voice_harness(failing_voice_sink=True)
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+
+    harness.foreground[0] = _foreground()
+    assert await activation.lease.drain_voice() == 0
+
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id
+        is TaskProgressReturnReason.VOICE_SINK_FAILED
+    )
+    assert harness.prepared.blocked.is_set() is True
+    assert harness.prepared.close_calls == 0
+    assert harness.bridge.snapshot().worker_pending is True
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().worker_pending is False
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id
+        is TaskProgressReturnReason.VOICE_SINK_FAILED
+    )
+    assert harness.voice_events == []
+    assert harness.bridge.snapshot().voice_intents == 0
+    assert harness.bridge.snapshot().voice_drains == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_during_parked_read_retries_and_keeps_business_truth() -> (
+    None
+):
+    harness = _parked_voice_harness(close_failures=1)
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+
+    harness.foreground[0] = _foreground()
+    with patch.object(
+        harness.arbiter, "drain", side_effect=RuntimeError("arbiter unavailable")
+    ):
+        assert await activation.lease.drain_voice() == 0
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+
+    with pytest.raises(RuntimeError, match="injected prepared source close failure"):
+        await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().worker_pending is True
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 2
+    assert harness.bridge.snapshot().worker_pending is False
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+    assert harness.voice_events == []
+    assert harness.bridge.snapshot().voice_intents == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_delivery_with_failed_self_close_still_detaches_the_source() -> (
+    None
+):
+    subscription = _SubscriptionDouble(_lifecycle_events(), close_failures=1)
+    text_events: list[TaskProgressTextEvent] = []
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.TEXT,
+        subscription=subscription,
+        text_events=text_events,
+    )
+
+    activation = await bridge.activate()
+    assert activation.lease is not None
+    await _wait_settled(bridge)
+
+    assert [event.task_event.seq for event in text_events] == [0, 1, 2]
+    assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.TERMINAL_DELIVERED
+    assert subscription.close_calls == 1
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert subscription.close_calls == 2
+    assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.TERMINAL_DELIVERED
+    assert len(text_events) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settled", ["feature_disabled", "start_refused"])
+async def test_close_on_a_settled_bridge_adds_zero_source_effects(
+    settled: str,
+) -> None:
+    subscription = _SubscriptionDouble(start_result=settled != "start_refused")
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.TEXT,
+        subscription=subscription,
+        enabled=settled != "feature_disabled",
+    )
+
+    activation = await bridge.activate()
+    assert activation.active is False
+    expected_close_calls = 0 if settled == "feature_disabled" else 1
+    assert subscription.close_calls == expected_close_calls
+
+    await asyncio.wait_for(bridge.close(), timeout=5)
+    await asyncio.wait_for(bridge.close(), timeout=5)
+
+    assert subscription.close_calls == expected_close_calls
+    assert subscription.start_calls == (0 if settled == "feature_disabled" else 1)
+    assert bridge.snapshot().state is (
+        TaskProgressReturnState.DISABLED
+        if settled == "feature_disabled"
+        else TaskProgressReturnState.UNAVAILABLE
+    )
+    assert bridge.snapshot().reason_id is (
+        TaskProgressReturnReason.FEATURE_DISABLED
+        if settled == "feature_disabled"
+        else TaskProgressReturnReason.SOURCE_FAILED
+    )
+    assert bridge.snapshot().worker_pending is False
+
+
+@pytest.mark.asyncio
+async def test_successor_bridge_after_a_residual_close_replays_its_own_source() -> None:
+    """Same-lifetime characterization, not durability evidence.
+
+    The bridge keeps no cross-process state, so a successor after a residual
+    close is a fresh instance over a fresh source rather than a resumed one.
+    """
+
+    harness = _parked_voice_harness()
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+    harness.foreground[0] = _foreground()
+    with patch.object(
+        harness.arbiter, "drain", side_effect=RuntimeError("arbiter unavailable")
+    ):
+        assert await activation.lease.drain_voice() == 0
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+
+    successor = _parked_voice_harness()
+    successor_activation = await successor.bridge.activate()
+    assert successor_activation.active is True
+    assert successor_activation.lease is not None
+    await successor.prepared.blocked.wait()
+    successor.foreground[0] = _foreground()
+
+    assert await successor_activation.lease.drain_voice() == 1
+    assert [intent.task_event.seq for intent in successor.voice_events] == [0]
+    assert successor.bridge.snapshot().voice_drains == 1
+    assert harness.voice_events == []
+
+    await asyncio.wait_for(successor_activation.lease.close(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_expired_grant_drain_during_parked_read_joins_the_worker_on_close() -> (
+    None
+):
+    """The scenario close()'s own comment names: a failed drain, then close().
+
+    A drain that rejects settles the business reason and detaches the source
+    while the worker is still parked inside the read it started earlier.  The
+    source half being settled is not the poll being over, so close() owes this
+    scenario both halves.  Against a source whose detach outlives its close()
+    call, the parked read is released strictly after close() reached the
+    source: only the explicit worker join makes the returned close() an honest
+    statement about the poll, and skipping the join solely on this
+    preserve-the-settled-reason path leaves the poll running behind it.
+    """
+
+    detach_release = asyncio.Event()
+    harness = _parked_voice_harness(
+        prepared_factory=lambda subscription: _RetainedDetachPreparedSourceDouble(
+            subscription,
+            [_lifecycle_events()[0]],
+            detach_release=detach_release,
+        )
+    )
+    prepared = harness.prepared
+    assert isinstance(prepared, _RetainedDetachPreparedSourceDouble)
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await prepared.blocked.wait()
+
+    harness.clock[0] = AFTER_EXPIRY
+    harness.foreground[0] = _foreground()
+    assert await activation.lease.drain_voice() == 0
+
+    # The rejected drain detached the source itself, so the source half is
+    # settled while the worker is still parked in the read it started earlier.
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id
+        is TaskProgressReturnReason.AUTHORIZATION_REJECTED
+    )
+    assert prepared.close_calls == 1
+    assert harness.bridge.snapshot().worker_pending is True
+    # A barrier, not a race: the detach still owes the parked read its release,
+    # so a close() that returned here would return over a running poll.
+    assert prepared.detach_task is not None
+    assert prepared.detach_task.done() is False
+
+    close_task = asyncio.create_task(activation.lease.close())
+    for _ in range(100):
+        if close_task.done():
+            break
+        await asyncio.sleep(0)
+    # close() must still own the worker join while the source's detach is
+    # deliberately parked. Moving the settled-reason return above that join
+    # makes this task finish here and is the exact L7 merge-seam mutant.
+    assert close_task.done() is False
+    detach_release.set()
+    await asyncio.wait_for(close_task, timeout=5)
+
+    assert harness.bridge.snapshot().worker_pending is False
+    assert prepared.detach_task.done() is True
+    assert prepared.close_calls == 1
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id
+        is TaskProgressReturnReason.AUTHORIZATION_REJECTED
+    )
+    assert harness.voice_events == []
+    assert harness.text_events == []
+    assert harness.bridge.snapshot().voice_intents == 0
+    assert harness.bridge.snapshot().voice_drains == 0
+
+
+@pytest.mark.asyncio
+async def test_unsafe_generation_evidence_failure_is_contained_by_the_worker() -> None:
+    subscription = _SubscriptionDouble()
+    prepared = _PreparedSourceDouble(subscription, [])
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    text_events: list[TaskProgressTextEvent] = []
+    binding = _binding(TaskProgressOriginKind.VOICE, generation=MAX_SAFE_INTEGER + 1)
+
+    async def voice_sink(intent: TaskProgressNotificationIntent) -> None:
+        voice_events.append(intent)
+
+    async def text_sink(event: TaskProgressTextEvent) -> None:
+        text_events.append(event)
+
+    bridge = TaskProgressReturnBridge(
+        enabled=True,
+        subscription=cast(TaskEventSubscription, subscription),
+        prepared_source=prepared,
+        authorization=_grant(),
+        binding=binding,
+        generation_is_current=lambda _binding: True,
+        arbiter=arbiter,
+        foreground=_foreground,
+        voice_sink=voice_sink,
+        text_sink=text_sink,
+        allow_package_contract_handoff=True,
+        clock=lambda: NOW,
+    )
+
+    # Unchanged fail-closed disposition: minting activation evidence for a
+    # generation outside the cross-language safe range still raises.
+    with pytest.raises(ContractViolation):
+        await bridge.activate()
+
+    worker = next(
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == f"live-voice-task-progress:{binding.task_id}"
+    )
+    prepared.publish(_lifecycle_events()[0])
+    await _wait_settled(bridge)
+
+    # Containment: the worker settles its own failure instead of ending as a
+    # task whose exception nobody ever retrieves.
+    assert worker.done() is True
+    assert worker.cancelled() is False
+    assert worker.exception() is None
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
+    assert prepared.close_calls == 1
+
+    # Contained, never silently successful, and with zero delivered effects.
+    assert voice_events == []
+    assert text_events == []
+    assert bridge.snapshot().projected_events == 0
+    assert bridge.snapshot().voice_intents == 0
+    assert bridge.snapshot().voice_drains == 0
+    assert bridge.snapshot().text_events == 0
+    assert arbiter.snapshot().accepted_events == 0
+    assert arbiter.snapshot().pending_notifications == 0
+
+    await bridge.close()
+
+    assert prepared.close_calls == 1
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_stays_cancelled_instead_of_being_contained() -> None:
+    """Containment owns background failure only; caller cancellation propagates.
+
+    The worker is a bare task on the owner loop, so any loop shutdown or task
+    group teardown cancels it.  A containment handler that also absorbed the
+    cancel would report the cancelled worker as a normal completion, and the
+    supervisor that asked for the cancel would never learn the task honoured it.
+    """
+
+    harness = _parked_voice_harness()
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+    worker = _worker_task("task-1")
+    assert harness.bridge.snapshot().worker_pending is True
+
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+    # The cancel is still reported as a cancel, not as a completed worker.
+    assert worker.cancelled() is True
+    assert harness.bridge.snapshot().worker_pending is False
+
+    # Containment truth and cleanup are unchanged by the propagation.
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert harness.bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
+    assert harness.prepared.close_calls == 1
+    assert harness.voice_events == []
+    assert harness.text_events == []
+    assert harness.bridge.snapshot().voice_intents == 0
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert harness.bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_partly_attached_source_is_still_detached_by_a_later_close() -> None:
+    """A source that start() may have half attached counts as opened from then on.
+
+    activate() marks the source opened before awaiting start(), so a start()
+    that raises - and whose compensating close() also fails, escaping activate()
+    - still leaves close() obliged to reach the source.  Marking the source
+    opened only after a successful start would let close() decide there is
+    nothing to clean up and strand a source that start() had already attached.
+    """
+
+    harness = _parked_voice_harness(close_failures=1)
+
+    with (
+        patch.object(
+            harness.prepared,
+            "start",
+            side_effect=RuntimeError("prepared source start unavailable"),
+        ),
+        pytest.raises(RuntimeError, match="injected prepared source close failure"),
+    ):
+        await harness.bridge.activate()
+
+    # activate()'s own compensating close failed, so the source is still attached.
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.HANDOFF_REJECTED
+    )
+    assert harness.bridge.snapshot().worker_pending is False
+
+    await asyncio.wait_for(harness.bridge.close(), timeout=5)
+
+    # The detach actually reaches the source instead of returning early.
+    assert harness.prepared.close_calls == 2
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.HANDOFF_REJECTED
+    )
+
+    # Idempotent afterwards: a detached source is not closed a third time.
+    await asyncio.wait_for(harness.bridge.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 2
+    assert harness.voice_events == []
+    assert harness.text_events == []
+
+
+@pytest.mark.asyncio
+async def test_close_joins_a_worker_whose_source_detaches_after_close_returns() -> None:
+    """close() returning means the worker settled, not that it probably will.
+
+    The source's detach finishes on a later event-loop turn, so the parked read
+    is released strictly after source close returned.  Only the explicit worker
+    join makes the returned close() an honest statement about the worker.
+    """
+
+    harness = _parked_voice_harness(
+        prepared_factory=lambda subscription: _RetainedDetachPreparedSourceDouble(
+            subscription, [_lifecycle_events()[0]]
+        )
+    )
+    prepared = harness.prepared
+    assert isinstance(prepared, _RetainedDetachPreparedSourceDouble)
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await prepared.blocked.wait()
+    assert harness.bridge.snapshot().worker_pending is True
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    # Both owned children are settled the moment close() returns.
+    assert harness.bridge.snapshot().worker_pending is False
+    assert prepared.detach_task is not None
+    assert prepared.detach_task.done() is True
+    assert prepared.close_calls == 1
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.CLOSED
+    assert (
+        harness.bridge.snapshot().reason_id
+        is TaskProgressReturnReason.CONSUMER_DETACHED
+    )
+    assert harness.voice_events == []
+    assert harness.text_events == []
+
+
+@pytest.mark.asyncio
+async def test_worker_containment_keeps_the_earlier_settled_business_truth() -> None:
+    """An earlier settled truth wins over the worker's own later containment.
+
+    A consumer drain can settle a specific business failure while the worker is
+    still parked in the source read.  When that worker later hits an escaping
+    failure of its own, containment must record nothing new: relabelling the
+    reason as a generic source failure would erase the truth the consumer is
+    owed and was already told.
+    """
+
+    harness = _parked_voice_harness()
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+    worker = _worker_task("task-1")
+
+    harness.foreground[0] = _foreground()
+    with patch.object(
+        harness.arbiter, "drain", side_effect=RuntimeError("arbiter unavailable")
+    ):
+        assert await activation.lease.drain_voice() == 0
+
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+    assert harness.bridge.snapshot().worker_pending is True
+
+    # The source now hands the still-parked worker an event whose evidence falls
+    # outside the cross-language safe range, so the worker's own read path
+    # raises after the consumer failure has already been settled.
+    harness.prepared.publish(_event(MAX_SAFE_INTEGER + 1, "task.running", "running"))
+    await _wait_settled(harness.bridge)
+
+    # Contained, never silently successful, and never relabelled.
+    assert worker.done() is True
+    assert worker.cancelled() is False
+    assert worker.exception() is None
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+    assert harness.prepared.close_calls == 1
+    assert harness.voice_events == []
+    assert harness.text_events == []
+    assert harness.bridge.snapshot().voice_intents == 0
+    assert harness.bridge.snapshot().voice_drains == 0
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        harness.bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_containment_covers_a_failure_that_is_not_a_violation() -> None:
+    """Containment owns any escaping failure, not one exception flavour.
+
+    The worker's own delivery lane calls the arbiter's acknowledge port with no
+    handler of its own around it, and the arbiter is a construction parameter
+    with no type guard, so an unavailable one raises a plain RuntimeError
+    straight out of the worker body.  A containment clause narrowed to the
+    violation type the source itself raises still passes every source-shaped
+    regression while leaving exactly this failure ending the task with an
+    exception nobody retrieves - and leaving the bridge advertising ACTIVE
+    while it holds it.
+    """
+
+    harness = _parked_voice_harness(
+        prepared_factory=lambda subscription: _PreparedSourceDouble(subscription, [])
+    )
+    activation = await harness.bridge.activate()
+    assert activation.lease is not None
+    await harness.prepared.blocked.wait()
+    worker = _worker_task("task-1")
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.ACTIVE
+
+    # A safe foreground makes the published event a display-now delivery, so
+    # the worker reaches the acknowledge port on its own lane rather than
+    # through a consumer drain.
+    harness.foreground[0] = _foreground()
+    with patch.object(
+        harness.arbiter,
+        "acknowledge",
+        side_effect=RuntimeError("notification arbiter unavailable"),
+    ):
+        harness.prepared.publish(_lifecycle_events()[0])
+        await _wait_settled(harness.bridge)
+
+    # Contained: the worker retrieves its own failure instead of ending as a
+    # task whose exception nobody ever takes.
+    assert worker.done() is True
+    assert worker.cancelled() is False
+    assert worker.exception() is None
+
+    # And never silently successful: the bridge stops claiming it is active.
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert harness.bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED
+    assert harness.prepared.close_calls == 1
+
+    # The intent reached the sink but was never acknowledged, so it is never
+    # counted as delivered progress and no other lane advanced.
+    assert len(harness.voice_events) == 1
+    assert harness.bridge.snapshot().voice_intents == 0
+    assert harness.bridge.snapshot().voice_drains == 0
+    assert harness.bridge.snapshot().text_events == 0
+    assert harness.text_events == []
+
+    await asyncio.wait_for(activation.lease.close(), timeout=5)
+
+    assert harness.prepared.close_calls == 1
+    assert harness.bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert harness.bridge.snapshot().reason_id is TaskProgressReturnReason.SOURCE_FAILED

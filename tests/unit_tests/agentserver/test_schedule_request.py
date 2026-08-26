@@ -87,11 +87,20 @@ class _ScheduleService:
 
 
 class _AgentFacade:
-    def __init__(self, instance: object, project_root: str | None = None) -> None:
+    def __init__(
+        self, instance: object | None, project_root: str | None = None
+    ) -> None:
         self.instance = instance
         self.project_root = project_root
+        self.ensure_calls = 0
+        self.get_instance_calls = 0
 
-    def get_instance(self) -> object:
+    def get_instance(self) -> object | None:
+        self.get_instance_calls += 1
+        return self.instance
+
+    async def ensure_instance(self) -> object | None:
+        self.ensure_calls += 1
         return self.instance
 
     def get_project_execution_root(self) -> str | None:
@@ -102,32 +111,99 @@ class _AgentFacade:
             yield None
 
 
+class _ControlledAgentFacade(_AgentFacade):
+    def __init__(
+        self,
+        outcomes: list[object | None],
+        *,
+        events: list[str] | None = None,
+        project_root: str | None = None,
+    ) -> None:
+        super().__init__(None, project_root)
+        self._outcomes = list(outcomes)
+        self._events = events
+
+    async def ensure_instance(self) -> object | None:
+        self.ensure_calls += 1
+        if self._events is not None:
+            self._events.append("ensure")
+        if not self._outcomes:
+            raise AssertionError("unexpected execution-agent initialization")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        self.instance = outcome
+        return outcome
+
+
+class _SingleflightAgentFacade(_AgentFacade):
+    def __init__(self, ensured_instance: object) -> None:
+        super().__init__(None)
+        self._ensured_instance = ensured_instance
+        self._ensure_lock = asyncio.Lock()
+        self._both_entered = asyncio.Event()
+        self.build_calls = 0
+
+    async def ensure_instance(self) -> object:
+        self.ensure_calls += 1
+        if self.ensure_calls == 2:
+            self._both_entered.set()
+        if self.instance is not None:
+            return self.instance
+        async with self._ensure_lock:
+            if self.instance is None:
+                self.build_calls += 1
+                await self._both_entered.wait()
+                self.instance = self._ensured_instance
+            return self.instance
+
+
 class _ConcurrentAgentManager:
-    def __init__(self, agents: dict[str, _AgentFacade]) -> None:
+    def __init__(
+        self,
+        agents: dict[str, _AgentFacade],
+        *,
+        events: list[str] | None = None,
+    ) -> None:
         self.agents = agents
         self.pinned: list[_AgentFacade] = []
         self.unpinned: list[_AgentFacade] = []
         self.get_agent_calls: list[dict] = []
+        self._events = events
 
     async def get_agent(self, *, channel_id: str, **kwargs) -> _AgentFacade:
         await asyncio.sleep(0)
         self.get_agent_calls.append({"channel_id": channel_id, **kwargs})
+        if self._events is not None:
+            self._events.append("get_agent")
         return self.agents[channel_id]
 
     def pin_agent(self, agent: _AgentFacade) -> None:
         self.pinned.append(agent)
+        if self._events is not None:
+            self._events.append("pin")
 
     def unpin_agent(self, agent: _AgentFacade) -> None:
         self.unpinned.append(agent)
+        if self._events is not None:
+            self._events.append("unpin")
 
 
 class _ConcurrentRunService:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        expected_calls: int = 2,
+        events: list[str] | None = None,
+    ) -> None:
         self.calls: list[dict] = []
-        self._both_started = asyncio.Event()
+        self._expected_calls = expected_calls
+        self._events = events
+        self._expected_started = asyncio.Event()
 
     async def _capture(
         self,
+        action,
         query,
         model,
         pipeline,
@@ -139,8 +215,11 @@ class _ConcurrentRunService:
         idempotency_key=None,
         model_intent=None,
     ) -> dict[str, str]:
+        if self._events is not None:
+            self._events.append(f"mutate:{action}")
         self.calls.append(
             {
+                "action": action,
                 "query": query,
                 "model": model,
                 "pipeline": pipeline,
@@ -153,9 +232,9 @@ class _ConcurrentRunService:
                 "model_intent": model_intent,
             }
         )
-        if len(self.calls) == 2:
-            self._both_started.set()
-        await self._both_started.wait()
+        if len(self.calls) == self._expected_calls:
+            self._expected_started.set()
+        await self._expected_started.wait()
         suffix = "a" if query == "任务 A" else "b"
         return {"task_id": f"sch_{suffix}", "status": "running"}
 
@@ -174,6 +253,7 @@ class _ConcurrentRunService:
         model_intent=None,
     ) -> dict[str, str]:
         return await self._capture(
+            "run",
             query,
             model,
             pipeline,
@@ -200,6 +280,7 @@ class _ConcurrentRunService:
         owner_scope=None,
     ) -> dict[str, str]:
         return await self._capture(
+            "create",
             query,
             model,
             pipeline,
@@ -208,6 +289,19 @@ class _ConcurrentRunService:
             execution_target,
             owner_scope,
         )
+
+
+class _IssueWatchService:
+    def __init__(self) -> None:
+        self.updated_agents: list[_AgentFacade] = []
+        self.watch_calls: list[dict] = []
+
+    async def update_agent_instance(self, agent: _AgentFacade) -> None:
+        self.updated_agents.append(agent)
+
+    async def watch_gitcode_issues_once(self, params, model) -> dict[str, str]:
+        self.watch_calls.append({"params": params, "model": model})
+        return {"status": "checked"}
 
 
 class _FailedMutationService:
@@ -278,6 +372,200 @@ class _OwnerScopeService:
         return self.list_result
 
 
+def _patch_wire_encoder(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda response, response_id: {
+            "type": "res",
+            "id": response_id,
+            "ok": response.ok,
+            "payload": response.payload,
+        },
+    )
+
+
+def _mutation_request(
+    *,
+    request_id: str,
+    channel_id: str = "web",
+    session_id: str = "session",
+    query: str = "受控任务",
+    project_dir: str = "D:/work/project",
+    project_id: str = "project",
+) -> AgentRequest:
+    return AgentRequest(
+        request_id=request_id,
+        channel_id=channel_id,
+        session_id=session_id,
+        params={
+            "mode": "auto_harness",
+            "query": query,
+            "project_dir": project_dir,
+            "project_id": project_id,
+            "interval_hours": 4,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["create", "run"])
+async def test_cold_schedule_mutation_ensures_agent_before_pin_and_service(
+    monkeypatch,
+    action: str,
+) -> None:
+    events: list[str] = []
+    ensured = object()
+    facade = _ControlledAgentFacade([ensured], events=events)
+    manager = _ConcurrentAgentManager({"web": facade}, events=events)
+    service = _ConcurrentRunService(expected_calls=1, events=events)
+    server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
+    server._agent_manager = manager
+    server._scheduler_service = service
+    _patch_wire_encoder(monkeypatch)
+    ws = _FakeWebSocket()
+
+    await server.handle_schedule_request_for_test(
+        ws,
+        _mutation_request(request_id=f"req-cold-{action}"),
+        asyncio.Lock(),
+        action,
+    )
+
+    assert facade.ensure_calls == 1
+    assert facade.get_instance_calls == 0
+    assert len(service.calls) == 1
+    assert service.calls[0]["execution_agent"] is ensured
+    assert events == ["get_agent", "ensure", "pin", f"mutate:{action}"]
+    assert manager.pinned == [facade]
+    assert manager.unpinned == []
+    assert ws.sent[0]["ok"] is True
+    service.calls[0]["context_release"]()
+    assert manager.unpinned == [facade]
+    assert events[-1] == "unpin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["create", "run"])
+@pytest.mark.parametrize("failure", ["raise", "none"])
+async def test_schedule_initialization_failure_can_retry_without_stale_mutation(
+    monkeypatch,
+    action: str,
+    failure: str,
+) -> None:
+    events: list[str] = []
+    ensured = object()
+    first = RuntimeError("cold initialization failed") if failure == "raise" else None
+    facade = _ControlledAgentFacade([first, ensured], events=events)
+    manager = _ConcurrentAgentManager({"web": facade}, events=events)
+    service = _ConcurrentRunService(expected_calls=1, events=events)
+    server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
+    server._agent_manager = manager
+    server._scheduler_service = service
+    _patch_wire_encoder(monkeypatch)
+    first_ws = _FakeWebSocket()
+
+    await server.handle_schedule_request_for_test(
+        first_ws,
+        _mutation_request(request_id=f"req-first-{failure}-{action}"),
+        asyncio.Lock(),
+        action,
+    )
+
+    assert first_ws.sent[0]["ok"] is False
+    assert facade.ensure_calls == 1
+    assert facade.get_instance_calls == 0
+    assert service.calls == []
+    assert manager.pinned == []
+    assert manager.unpinned == []
+    assert events == ["get_agent", "ensure"]
+
+    retry_ws = _FakeWebSocket()
+    await server.handle_schedule_request_for_test(
+        retry_ws,
+        _mutation_request(request_id=f"req-retry-{failure}-{action}"),
+        asyncio.Lock(),
+        action,
+    )
+
+    assert facade.ensure_calls == 2
+    assert facade.get_instance_calls == 0
+    assert len(service.calls) == 1
+    assert service.calls[0]["execution_agent"] is ensured
+    assert manager.pinned == [facade]
+    assert retry_ws.sent[0]["ok"] is True
+    assert events == [
+        "get_agent",
+        "ensure",
+        "get_agent",
+        "ensure",
+        "pin",
+        f"mutate:{action}",
+    ]
+    service.calls[0]["context_release"]()
+    assert manager.unpinned == [facade]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["create", "run"])
+async def test_concurrent_cold_schedule_mutations_share_one_agent_build(
+    monkeypatch,
+    action: str,
+) -> None:
+    ensured = object()
+    facade = _SingleflightAgentFacade(ensured)
+    manager = _ConcurrentAgentManager({"web": facade})
+    service = _ConcurrentRunService()
+    server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
+    server._agent_manager = manager
+    server._scheduler_service = service
+    _patch_wire_encoder(monkeypatch)
+
+    await asyncio.gather(
+        server.handle_schedule_request_for_test(
+            _FakeWebSocket(),
+            _mutation_request(
+                request_id="req-same-a",
+                session_id="session-a",
+                query="任务 A",
+                project_dir="D:/work/project-a",
+                project_id="project-a",
+            ),
+            asyncio.Lock(),
+            action,
+        ),
+        server.handle_schedule_request_for_test(
+            _FakeWebSocket(),
+            _mutation_request(
+                request_id="req-same-b",
+                session_id="session-b",
+                query="任务 B",
+                project_dir="D:/work/project-b",
+                project_id="project-b",
+            ),
+            asyncio.Lock(),
+            action,
+        ),
+    )
+
+    assert facade.ensure_calls == 2
+    assert facade.build_calls == 1
+    assert facade.get_instance_calls == 0
+    calls = {call["query"]: call for call in service.calls}
+    assert calls["任务 A"]["execution_agent"] is ensured
+    assert calls["任务 B"]["execution_agent"] is ensured
+    assert calls["任务 A"]["execution_target"]["origin_session_id"] == "session-a"
+    assert calls["任务 B"]["execution_target"]["origin_session_id"] == "session-b"
+    assert calls["任务 A"]["execution_target"]["project_id"] == "project-a"
+    assert calls["任务 B"]["execution_target"]["project_id"] == "project-b"
+    assert calls["任务 A"]["owner_scope"]["session_id"] == "session-a"
+    assert calls["任务 B"]["owner_scope"]["session_id"] == "session-b"
+    assert manager.pinned == [facade, facade]
+    calls["任务 A"]["context_release"]()
+    calls["任务 B"]["context_release"]()
+    assert manager.unpinned == [facade, facade]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["create", "run"])
 @pytest.mark.parametrize("raises", [False, True])
@@ -323,6 +611,8 @@ async def test_schedule_mutation_failure_releases_agent_pin_once(
 
     assert manager.pinned == [facade]
     assert manager.unpinned == [facade]
+    assert facade.ensure_calls == 1
+    assert facade.get_instance_calls == 0
     assert service.context_release is not None
     service.context_release()
     assert manager.unpinned == [facade]
@@ -424,6 +714,10 @@ async def test_concurrent_schedule_mutations_capture_distinct_session_targets(
     get_agent_calls = {call["channel_id"]: call for call in manager.get_agent_calls}
     assert get_agent_calls["web-a"]["project_dir"] == "D:/work/project-a"
     assert get_agent_calls["web-b"]["project_dir"] == "D:/work/project-b"
+    assert facade_a.ensure_calls == 1
+    assert facade_b.ensure_calls == 1
+    assert facade_a.get_instance_calls == 0
+    assert facade_b.get_instance_calls == 0
     assert manager.pinned == [facade_a, facade_b]
     calls["任务 A"]["context_release"]()
     calls["任务 B"]["context_release"]()
@@ -677,7 +971,43 @@ async def test_schedule_logs_passes_real_owner_and_project_without_agent(
 
 
 @pytest.mark.asyncio
-async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch) -> None:
+async def test_issue_watch_keeps_service_agent_without_initializing_execution_agent(
+    monkeypatch,
+) -> None:
+    server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
+    facade = _AgentFacade(None)
+    manager = _ConcurrentAgentManager({"web": facade})
+    service = _IssueWatchService()
+    server._agent_manager = manager
+    server._scheduler_service = service
+    _patch_wire_encoder(monkeypatch)
+    ws = _FakeWebSocket()
+    request = AgentRequest(
+        request_id="req-issue-watch",
+        channel_id="web",
+        session_id="session",
+        params={"mode": "auto_harness", "repository": "example/repository"},
+    )
+
+    await server.handle_schedule_request_for_test(
+        ws,
+        request,
+        asyncio.Lock(),
+        "issue_watch_once",
+    )
+
+    assert facade.ensure_calls == 0
+    assert facade.get_instance_calls == 0
+    assert service.updated_agents == [facade]
+    assert service.watch_calls == [{"params": request.params, "model": None}]
+    assert manager.pinned == [facade]
+    assert ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_schedule_run_and_list_derive_owner_scope_from_request(
+    monkeypatch,
+) -> None:
     server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
     facade = _AgentFacade(object(), "D:/work/project-a")
     manager = _ConcurrentAgentManager({"web": facade})
@@ -735,6 +1065,8 @@ async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch
     assert service.run_kwargs["project_executor"] is facade
     assert service.run_kwargs["effective_execution_root"] == "D:/work/project-a"
     assert manager.get_agent_calls[0]["mode"] == "code"
+    assert facade.ensure_calls == 1
+    assert facade.get_instance_calls == 0
 
     list_request = AgentRequest(
         request_id="req-scoped-list",
@@ -771,6 +1103,7 @@ async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch
         "origin_namespace": "live_voice",
         "idempotency_key": "command-1",
     }
+    assert facade.ensure_calls == 1
 
     assert service.run_kwargs["context_release"] is not None
     service.run_kwargs["context_release"]()

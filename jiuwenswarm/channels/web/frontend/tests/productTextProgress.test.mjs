@@ -498,6 +498,175 @@ test('retained ACK owner retries the identical delivery after response loss', as
   owner.close();
 });
 
+test('ACK owner terminalizes a typed permanent protocol rejection', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const calls = [];
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 0,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      throw Object.assign(new Error('delivery is invalid'), {
+        code: 'INVALID_ARGUMENT',
+        reason: 'INVALID_PROGRESS_DELIVERY',
+        retriable: false,
+      });
+    },
+  });
+  try {
+    owner.setConnected(true);
+    owner.retain(parsed);
+    for (let turn = 0; turn < 50 && owner.status(parsed.delivery_id)?.status === 'pending'; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+
+    owner.setConnected(false);
+    owner.setConnected(true);
+    owner.retain(parsed);
+    await new Promise(resolve => setTimeout(resolve, 5));
+
+    assert.equal(calls.length, 1);
+    assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
+    assert.equal(owner.status(parsed.delivery_id)?.attempts, 1);
+  } finally {
+    owner.close();
+  }
+});
+
+test('unknown ACK response loss exhausts exponential retries until reconnect redrives the identical delivery', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const calls = [];
+  const scheduledDelays = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    scheduledDelays.push(delay);
+    return originalSetTimeout(callback, 0, ...args);
+  };
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 7,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (calls.length <= 3) throw new Error('response lost after server ACK');
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: true,
+          attempt_id: 'attempt-1',
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
+  });
+  try {
+    owner.setConnected(true);
+    owner.retain(parsed);
+    for (let turn = 0; turn < 50 && calls.length < 3; turn += 1) {
+      await new Promise(resolve => originalSetTimeout(resolve, 1));
+    }
+    await new Promise(resolve => originalSetTimeout(resolve, 5));
+
+    assert.equal(calls.length, 3);
+    assert.deepEqual(scheduledDelays, [7, 14]);
+    assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
+    assert.equal(owner.status(parsed.delivery_id)?.attempts, 3);
+    assert.deepEqual(calls[0], calls[1]);
+    assert.deepEqual(calls[1], calls[2]);
+
+    owner.setConnected(false);
+    owner.setConnected(true);
+    for (let turn = 0; turn < 50 && owner.status(parsed.delivery_id)?.status !== 'acknowledged'; turn += 1) {
+      await new Promise(resolve => originalSetTimeout(resolve, 1));
+    }
+
+    assert.equal(calls.length, 4);
+    assert.deepEqual(calls[2], calls[3]);
+    assert.equal(owner.status(parsed.delivery_id)?.status, 'acknowledged');
+    assert.equal(owner.status(parsed.delivery_id)?.attempts, 4);
+  } finally {
+    owner.close();
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test('reconnect during an in-flight ACK preserves one request and the full first backoff', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const calls = [];
+  const scheduledDelays = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    scheduledDelays.push(delay);
+    return originalSetTimeout(callback, 0, ...args);
+  };
+  let rejectFirst;
+  const firstRequest = new Promise((_resolve, reject) => {
+    rejectFirst = reject;
+  });
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 7,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (calls.length === 1) return firstRequest;
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: true,
+          attempt_id: 'attempt-1',
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
+  });
+  try {
+    owner.setConnected(true);
+    owner.retain(parsed);
+    await Promise.resolve();
+    assert.equal(calls.length, 1);
+
+    owner.setConnected(false);
+    owner.setConnected(true);
+    assert.equal(calls.length, 1);
+    rejectFirst(new Error('response lost during reconnect'));
+    await assert.rejects(firstRequest, /response lost during reconnect/);
+    await new Promise(resolve => setImmediate(resolve));
+    for (let turn = 0; turn < 50 && owner.status(parsed.delivery_id)?.status !== 'acknowledged'; turn += 1) {
+      await new Promise(resolve => originalSetTimeout(resolve, 1));
+    }
+
+    assert.deepEqual(
+      {
+        scheduled_delays: scheduledDelays,
+        calls: calls.length,
+        status: owner.status(parsed.delivery_id),
+      },
+      {
+        scheduled_delays: [7],
+        calls: 2,
+        status: {
+          delivery_id: parsed.delivery_id,
+          status: 'acknowledged',
+          attempts: 2,
+          retained_deliveries: 1,
+        },
+      },
+    );
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], calls[1]);
+    assert.equal(owner.status(parsed.delivery_id)?.status, 'acknowledged');
+  } finally {
+    owner.close();
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test('ACK owner retains every delivery and retries them on reconnect', async () => {
   const first = parseProductTextProgressEvent(progressEvent({ seq: 7 }));
   const second = parseProductTextProgressEvent(progressEvent({ seq: 8 }));
@@ -539,27 +708,43 @@ test('ACK owner retains every delivery and retries them on reconnect', async () 
 test('ACK owner rejects a success response without server-owned attempt identity', async () => {
   const parsed = parseProductTextProgressEvent(progressEvent());
   assert.notEqual(parsed, null);
+  const calls = [];
   const owner = new ProductTextProgressAckOwner({
     enabled: true,
-    retry_delay_ms: 1000,
-    request: async (_method, params) => ({
-      ok: true,
-      result: {
-        status: 'acknowledged',
-        replayed: false,
-        ...params,
-        acknowledgement: 'web_ui_text_consumed',
-      },
-    }),
+    retry_delay_ms: 0,
+    request: async (_method, params) => {
+      calls.push(params);
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: false,
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
   });
-  owner.setConnected(true);
-  owner.retain(parsed);
-  for (let attempt = 0; attempt < 50 && owner.status(parsed.delivery_id)?.status === 'pending'; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 1));
-  }
+  try {
+    owner.setConnected(true);
+    owner.retain(parsed);
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
 
-  assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
-  owner.close();
+    owner.setConnected(false);
+    owner.setConnected(true);
+    owner.retain(parsed);
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+
+    assert.equal(calls.length, 1);
+    assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
+    assert.equal(owner.status(parsed.delivery_id)?.attempts, 1);
+  } finally {
+    owner.close();
+  }
 });
 
 test('ACK owner rejects a foreign server attempt without reporting it in request params', async () => {
@@ -568,7 +753,7 @@ test('ACK owner rejects a foreign server attempt without reporting it in request
   const calls = [];
   const owner = new ProductTextProgressAckOwner({
     enabled: true,
-    retry_delay_ms: 1000,
+    retry_delay_ms: 0,
     request: async (_method, params) => {
       calls.push(params);
       return {
@@ -583,16 +768,27 @@ test('ACK owner rejects a foreign server attempt without reporting it in request
       };
     },
   });
-  owner.setConnected(true);
-  owner.retain(parsed);
-  for (let attempt = 0; attempt < 50 && owner.status(parsed.delivery_id)?.status === 'pending'; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 1));
-  }
+  try {
+    owner.setConnected(true);
+    owner.retain(parsed);
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
 
-  assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
-  assert.equal(calls.length, 1);
-  assert.equal('attempt_id' in calls[0], false);
-  owner.close();
+    owner.setConnected(false);
+    owner.setConnected(true);
+    owner.retain(parsed);
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+
+    assert.equal(calls.length, 1);
+    assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
+    assert.equal(owner.status(parsed.delivery_id)?.attempts, 1);
+    assert.equal('attempt_id' in calls[0], false);
+  } finally {
+    owner.close();
+  }
 });
 
 test('ACK owner rejects a retained delivery whose source attempt changes', () => {

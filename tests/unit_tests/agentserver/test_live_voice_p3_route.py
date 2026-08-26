@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -68,6 +69,24 @@ class _IterableWebSocket(_WebSocket):
         await self.closed.wait()
         return
         yield ""  # pragma: no cover - makes this an async generator
+
+
+class _BlockingAckFailureWebSocket(_IterableWebSocket):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.send_started = asyncio.Event()
+        self.release_send = asyncio.Event()
+
+    async def send(self, _payload: str) -> None:
+        self.send_started.set()
+        await self.release_send.wait()
+        raise RuntimeError("ACK transport failed")
+
+
+class _MessageIterableWebSocket(_IterableWebSocket):
+    async def __aiter__(self):
+        yield "old-generation-message"
+        await self.closed.wait()
 
 
 class _Composition:
@@ -349,11 +368,15 @@ class _RoundAcceptedRegistry(_ProductRegistry):
 class _ConnectionCleanupRegistry:
     def __init__(self) -> None:
         self.calls = 0
+        self.generations: list[int] = []
         self.first_started = asyncio.Event()
         self.release_first = asyncio.Event()
 
-    async def close_active_routes(self) -> None:
+    async def close_active_routes_for_transport_generation(
+        self, transport_generation: int
+    ) -> None:
         self.calls += 1
+        self.generations.append(transport_generation)
         if self.calls == 1:
             self.first_started.set()
             await self.release_first.wait()
@@ -367,8 +390,124 @@ class _ConnectionAgentManager:
         self.cancel_calls += 1
 
 
+class _StopOrderListener:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def close(self) -> None:
+        self.events.append("admission.stop")
+
+    async def wait_closed(self) -> None:
+        self.events.append("listener.closed")
+
+
+class _StopOrderTransport:
+    remote_address = ("stop-order", 1)
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def close(self) -> None:
+        self.events.append("generation.socket.close")
+
+
+class _SelfCancellingTransport:
+    async def close(self) -> None:
+        raise asyncio.CancelledError
+
+
+class _RecordingCleanupRegistry:
+    def __init__(self, *, self_cancel: bool = False) -> None:
+        self.calls = 0
+        self.self_cancel = self_cancel
+
+    async def close_active_routes_for_transport_generation(
+        self, _transport_generation: int
+    ) -> None:
+        self.calls += 1
+        if self.self_cancel:
+            raise asyncio.CancelledError
+
+
+class _StopOrderRegistry:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def close_active_routes_for_transport_generation(
+        self, _transport_generation: int
+    ) -> None:
+        self.events.append("generation.routes.start")
+        self.started.set()
+        await self.release.wait()
+        self.events.append("generation.routes.done")
+
+
+class _StopOrderAgentManager:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def cancel_all_inflight_work(self, **_kwargs: object) -> None:
+        self.events.append("process.inflight.stop")
+
+
+class _StopOrderRunner:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def stop(self) -> None:
+        self.events.append("process.jiuwenbox.stop")
+
+
+class _NonCooperativeConnectionServer(AgentWebSocketServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.old_message_started = asyncio.Event()
+        self.old_message_cancelled = asyncio.Event()
+        self.release_old_message = asyncio.Event()
+        self.old_send_completed = asyncio.Event()
+        self.old_send_error: BaseException | None = None
+        self.old_send_ws: object | None = None
+        self.old_send_was_current: bool | None = None
+
+    async def _handle_message(self, ws, raw, send_lock) -> None:
+        if raw != "old-generation-message":
+            return
+        self.old_message_started.set()
+        try:
+            await self.release_old_message.wait()
+        except asyncio.CancelledError:
+            self.old_message_cancelled.set()
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+            await self.release_old_message.wait()
+        try:
+            self.old_send_ws = ws
+            lease = getattr(ws, "_lease", None)
+            self.old_send_was_current = (
+                lease is not None and self._is_current_gateway_lease(lease)
+            )
+            async with send_lock:
+                await ws.send("forbidden-old-generation-frame")
+        except agent_ws_server_module._GatewayConnectionRevoked:
+            pass
+        except BaseException as exc:
+            self.old_send_error = exc
+        finally:
+            self.old_send_completed.set()
+
+
 def _server(composition) -> AgentWebSocketServer:
     server = object.__new__(AgentWebSocketServer)
+    server._gateway_connection_lifecycle_lock = asyncio.Lock()
+    server._gateway_connection_generation = 0
+    server._current_gateway_lease = None
+    server._gateway_generation_cleanups = set()
+    server._current_ws = None
+    server._current_send_lock = None
+    server._current_ws_done = None
     server._live_voice_p3_composition = composition
     server._live_voice_product_composition = None
     server._image_modality_refresh_task = None
@@ -376,7 +515,7 @@ def _server(composition) -> AgentWebSocketServer:
 
 
 @pytest.mark.asyncio
-async def test_gateway_replacement_waits_for_old_cleanup_before_becoming_current(
+async def test_gateway_replacement_acks_successor_before_old_cleanup_and_preserves_process_owners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = object.__new__(AgentWebSocketServer)
@@ -384,6 +523,8 @@ async def test_gateway_replacement_waits_for_old_cleanup_before_becoming_current
     manager = _ConnectionAgentManager()
     server._gateway_connection_lifecycle_lock = asyncio.Lock()
     server._gateway_connection_generation = 0
+    server._current_gateway_lease = None
+    server._gateway_generation_cleanups = set()
     server._current_ws = None
     server._current_send_lock = None
     server._current_ws_done = None
@@ -394,11 +535,16 @@ async def test_gateway_replacement_waits_for_old_cleanup_before_becoming_current
     server._ping_timeout = 20
     server._clear_ws_acp_client_capabilities = lambda _ws: None
 
-    async def stop_scheduler() -> None:
-        return None
+    scheduler_stops = 0
 
+    async def stop_scheduler() -> None:
+        nonlocal scheduler_stops
+        scheduler_stops += 1
+
+    team_cancels = 0
     async def cancel_team(**_kwargs: object) -> None:
-        return None
+        nonlocal team_cancels
+        team_cancels += 1
 
     server._stop_scheduler = stop_scheduler
     monkeypatch.setattr(
@@ -417,26 +563,269 @@ async def test_gateway_replacement_waits_for_old_cleanup_before_becoming_current
     await asyncio.wait_for(registry.first_started.wait(), timeout=1)
 
     assert old_ws.close_calls == 1
-    assert server._current_ws is old_ws
-    assert new_ws.sent == []
-    assert replacement.done() is False
-
-    registry.release_first.set()
-    for _ in range(20):
-        if server._current_ws is new_ws:
-            break
-        await asyncio.sleep(0)
-
     assert server._current_ws is new_ws
     assert len(new_ws.sent) == 1
     assert json.loads(new_ws.sent[0])["event"] == "connection.ack"
+    assert replacement.done() is False
+    assert len(server._gateway_generation_cleanups) == 1
+    assert manager.cancel_calls == 0
+    assert scheduler_stops == 0
+    assert team_cancels == 0
+
+    registry.release_first.set()
+    await server._drain_gateway_generation_cleanups()
+
+    assert server._current_ws is new_ws
     assert old_handler.done() is True
     assert registry.calls == 1
 
     await new_ws.close()
     await asyncio.wait_for(replacement, timeout=1)
+    await server._drain_gateway_generation_cleanups()
     assert server._current_ws is None
     assert registry.calls == 2
+    assert registry.generations == [1, 2]
+    assert manager.cancel_calls == 0
+    assert scheduler_stops == 0
+    assert team_cancels == 0
+
+
+@pytest.mark.asyncio
+async def test_superseded_generation_cancels_exact_handler_and_cannot_send_late(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _NonCooperativeConnectionServer()
+    registry = _ConnectionCleanupRegistry()
+    registry.release_first.set()
+    manager = _ConnectionAgentManager()
+    server._live_voice_product_composition = registry
+    server._agent_manager = manager
+    scheduler_stops = 0
+
+    async def stop_scheduler() -> None:
+        nonlocal scheduler_stops
+        scheduler_stops += 1
+
+    team_cancels = 0
+
+    async def cancel_team(**_kwargs: object) -> None:
+        nonlocal team_cancels
+        team_cancels += 1
+
+    server._stop_scheduler = stop_scheduler
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.cancel_all_team_stream_tasks_across_managers",
+        cancel_team,
+    )
+    old_ws = _MessageIterableWebSocket("old-message")
+    new_ws = _IterableWebSocket("new-message")
+
+    old_handler = asyncio.create_task(server._connection_handler(old_ws))
+    await asyncio.wait_for(server.old_message_started.wait(), timeout=1)
+    replacement = asyncio.create_task(server._connection_handler(new_ws))
+
+    for _ in range(20):
+        if new_ws.sent:
+            break
+        await asyncio.sleep(0)
+    assert len(new_ws.sent) == 1
+    assert json.loads(new_ws.sent[0])["event"] == "connection.ack"
+    await asyncio.wait_for(server.old_message_cancelled.wait(), timeout=1)
+    assert replacement.done() is False
+    assert len(old_ws.sent) == 1
+    assert json.loads(old_ws.sent[0])["event"] == "connection.ack"
+
+    server.release_old_message.set()
+    await asyncio.wait_for(server.old_send_completed.wait(), timeout=1)
+    assert server.old_send_error is None
+    assert type(server.old_send_ws).__name__ == "_GatewayConnectionSocket"
+    assert server.old_send_was_current is False
+    assert len(old_ws.sent) == 1
+    await server._drain_gateway_generation_cleanups()
+    assert server._current_ws is new_ws
+    assert manager.cancel_calls == 0
+    assert scheduler_stops == 0
+    assert team_cancels == 0
+
+    await new_ws.close()
+    await asyncio.wait_for(replacement, timeout=1)
+    await server._drain_gateway_generation_cleanups()
+    await asyncio.wait_for(old_handler, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_late_ack_failure_cannot_revoke_an_already_current_successor() -> None:
+    server = object.__new__(AgentWebSocketServer)
+    server._gateway_connection_lifecycle_lock = asyncio.Lock()
+    server._gateway_connection_generation = 0
+    server._current_gateway_lease = None
+    server._gateway_generation_cleanups = set()
+    server._current_ws = None
+    server._current_send_lock = None
+    server._current_ws_done = None
+    server._live_voice_product_composition = None
+    server._session_stream_tasks = {}
+    server._ping_interval = 20
+    server._ping_timeout = 20
+    server._acp_client_capabilities_by_ws = {}
+    old_ws = _BlockingAckFailureWebSocket("old-ack")
+    new_ws = _IterableWebSocket("new-ack")
+
+    old_handler = asyncio.create_task(server._connection_handler(old_ws))
+    await asyncio.wait_for(old_ws.send_started.wait(), timeout=1)
+    replacement = asyncio.create_task(server._connection_handler(new_ws))
+    for _ in range(20):
+        if new_ws.sent:
+            break
+        await asyncio.sleep(0)
+    assert len(new_ws.sent) == 1
+    assert server._current_ws is new_ws
+
+    old_ws.release_send.set()
+    await asyncio.wait_for(old_handler, timeout=1)
+    assert server._current_ws is new_ws
+    assert server._current_gateway_lease is not None
+    assert server._current_gateway_lease.transport_ws is new_ws
+
+    await new_ws.close()
+    await asyncio.wait_for(replacement, timeout=1)
+    await server._drain_gateway_generation_cleanups()
+
+
+@pytest.mark.asyncio
+async def test_connection_cancellation_during_ack_still_revokes_and_cleans_lease() -> (
+    None
+):
+    server = object.__new__(AgentWebSocketServer)
+    server._gateway_connection_lifecycle_lock = asyncio.Lock()
+    server._gateway_connection_generation = 0
+    server._current_gateway_lease = None
+    server._gateway_generation_cleanups = set()
+    server._current_ws = None
+    server._current_send_lock = None
+    server._current_ws_done = None
+    registry = _RecordingCleanupRegistry()
+    server._live_voice_product_composition = registry
+    server._session_stream_tasks = {}
+    server._ping_interval = 20
+    server._ping_timeout = 20
+    server._acp_client_capabilities_by_ws = {}
+    ws = _BlockingAckFailureWebSocket("cancelled-ack")
+
+    handler = asyncio.create_task(server._connection_handler(ws))
+    await asyncio.wait_for(ws.send_started.wait(), timeout=1)
+    lease = server._current_gateway_lease
+    assert lease is not None
+
+    handler.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler
+    await server._drain_gateway_generation_cleanups()
+
+    assert lease.done.is_set() is True
+    assert ws.close_calls == 1
+    assert registry.calls == 1
+    assert server._current_gateway_lease is None
+    assert server._current_ws is None
+
+
+@pytest.mark.asyncio
+async def test_server_stop_revokes_and_drains_generation_before_process_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    server = object.__new__(AgentWebSocketServer)
+    server._server = _StopOrderListener(events)
+    server._gateway_connection_lifecycle_lock = asyncio.Lock()
+    server._gateway_connection_generation = 0
+    server._current_gateway_lease = None
+    server._gateway_generation_cleanups = set()
+    server._current_ws = None
+    server._current_send_lock = None
+    server._current_ws_done = None
+    server._acp_client_capabilities_by_ws = {}
+    server._session_stream_tasks = {}
+    server._checkpointer_warmup_task = None
+    server._image_modality_refresh_task = None
+    server._jiuwenbox_runner = _StopOrderRunner(events)
+    registry = _StopOrderRegistry(events)
+    server._live_voice_product_composition = registry
+    server._agent_manager = _StopOrderAgentManager(events)
+
+    async def stop_scheduler() -> None:
+        events.append("process.scheduler.stop")
+
+    async def stop_product() -> bool:
+        events.append("process.product.stop")
+        return True
+
+    async def stop_p3() -> None:
+        events.append("process.p3.stop")
+
+    async def cancel_team(**_kwargs: object) -> None:
+        events.append("process.team.stop")
+
+    async def cancel_pending() -> None:
+        events.append("process.kv.stop")
+
+    server._stop_scheduler = stop_scheduler
+    server._stop_live_voice_product_composition = stop_product
+    server._stop_live_voice_p3_composition = stop_p3
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.cancel_all_team_stream_tasks_across_managers",
+        cancel_team,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks.cancel_pending_tasks",
+        cancel_pending,
+    )
+    await server._adopt_gateway_connection(_StopOrderTransport(events))
+
+    stopping = asyncio.create_task(server.stop())
+    await asyncio.wait_for(registry.started.wait(), timeout=1)
+    assert events[:4] == [
+        "admission.stop",
+        "listener.closed",
+        "generation.socket.close",
+        "generation.routes.start",
+    ]
+    assert not any(event.startswith("process.") for event in events)
+
+    registry.release.set()
+    await asyncio.wait_for(stopping, timeout=1)
+    generation_done = events.index("generation.routes.done")
+    assert events.index("process.product.stop") > generation_done
+    assert events.index("process.inflight.stop") > generation_done
+    assert events.index("process.scheduler.stop") > generation_done
+    assert events.index("process.team.stop") > generation_done
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registry_self_cancel", [False, True])
+async def test_generation_cleanup_owner_survives_provider_self_cancellation(
+    registry_self_cancel: bool,
+) -> None:
+    server = object.__new__(AgentWebSocketServer)
+    server._gateway_connection_lifecycle_lock = asyncio.Lock()
+    server._gateway_connection_generation = 0
+    server._current_gateway_lease = None
+    server._gateway_generation_cleanups = set()
+    server._current_ws = None
+    server._current_send_lock = None
+    server._current_ws_done = None
+    server._acp_client_capabilities_by_ws = {}
+    registry = _RecordingCleanupRegistry(self_cancel=registry_self_cancel)
+    server._live_voice_product_composition = registry
+    old_lease, _old_ws = await server._adopt_gateway_connection(
+        _SelfCancellingTransport()
+    )
+    await server._adopt_gateway_connection(_StopOrderTransport([]))
+
+    await server._drain_gateway_generation_cleanups()
+    assert old_lease.done.is_set()
+    assert old_lease.cleanup_task is not None
+    assert old_lease.cleanup_task.cancelled() is False
+    assert registry.calls == 1
 
 
 @pytest.mark.asyncio
@@ -947,6 +1336,39 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
         )
     ]
     assert json.loads(ws.sent[0])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_product_activation_binds_the_exact_gateway_generation() -> None:
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    transport = _WebSocket()
+    lease = agent_ws_server_module._GatewayConnectionLease(
+        transport_ws=transport,
+        send_lock=asyncio.Lock(),
+        generation=37,
+    )
+    ws = agent_ws_server_module._GatewayConnectionSocket(server, lease)
+    lease.guarded_ws = ws
+    server._current_gateway_lease = lease
+    request = AgentRequest(
+        request_id="request-p2-generation",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+        },
+    )
+
+    await server._handle_live_voice_product_request(ws, request, lease.send_lock)
+
+    assert registry.calls[0][0] == "p2.activate"
+    assert registry.calls[0][1]["transport_generation"] == 37
+    assert len(transport.sent) == 1
 
 
 @pytest.mark.asyncio

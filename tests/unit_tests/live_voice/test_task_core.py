@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -69,6 +70,34 @@ def create_command(
         TaskSpec("inventory", instruction),
         "commit-1",
     )
+
+
+class _PauseAfterNextOuterCriticalSection:
+    """Deterministic observation barrier around the real TaskCore lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._depth = threading.local()
+        self._armed = False
+        self.released = threading.Event()
+        self.resume = threading.Event()
+
+    def arm(self) -> None:
+        self._armed = True
+
+    def __enter__(self) -> _PauseAfterNextOuterCriticalSection:
+        self._lock.acquire()
+        self._depth.value = getattr(self._depth, "value", 0) + 1
+        return self
+
+    def __exit__(self, *_error: object) -> None:
+        depth = self._depth.value - 1
+        self._depth.value = depth
+        self._lock.release()
+        if depth == 0 and self._armed:
+            self._armed = False
+            self.released.set()
+            assert self.resume.wait(timeout=2.0)
 
 
 def test_create_records_task_attempt_event_result_and_dispatch_atomically() -> None:
@@ -179,6 +208,56 @@ def test_attempt_is_only_terminal_evidence_for_task() -> None:
     task = core.query(TaskQuery("q", "task.status", scope(), created.task_id), auth())
     assert task.state is TaskState.TERMINAL
     assert task.outcome is TerminalOutcome.COMPLETED
+
+
+def test_finish_attempt_is_atomic_against_snapshot_and_cancel() -> None:
+    core = TaskCore()
+    created = core.execute(create_command(), auth())
+    core.mark_attempt_running(created.task_id, created.attempt_id, auth())
+    barrier = _PauseAfterNextOuterCriticalSection()
+    core._lock = barrier  # type: ignore[assignment]
+    barrier.arm()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        finished = pool.submit(
+            core.finish_attempt,
+            created.task_id,
+            created.attempt_id,
+            TerminalOutcome.COMPLETED,
+            auth(),
+        )
+        assert barrier.released.wait(timeout=2.0)
+        paused = core.snapshot()
+        cancel_error: TaskCoreViolation | None = None
+        try:
+            core.execute(
+                TaskCommand(
+                    "request-terminal-race",
+                    "command-terminal-race",
+                    "task.cancel",
+                    scope(),
+                    created.task_id,
+                    None,
+                    "commit-terminal-race",
+                ),
+                auth(),
+            )
+        except TaskCoreViolation as error:
+            cancel_error = error
+        finally:
+            barrier.resume.set()
+        attempt_event, task_event = finished.result(timeout=2.0)
+
+    attempt = next(item for item in paused.attempts if item.attempt_id == created.attempt_id)
+    task = next(item for item in paused.tasks if item.task_id == created.task_id)
+    assert attempt.state.value == "terminal"
+    assert task.state is TaskState.TERMINAL
+    assert task.outcome is TerminalOutcome.COMPLETED
+    assert cancel_error is not None
+    assert cancel_error.reason == "TASK_ALREADY_TERMINAL"
+    assert core.snapshot().cancel_intents == ()
+    assert attempt_event.event_type == "attempt.terminal"
+    assert task_event.event_type == "task.terminal"
 
 
 def test_pure_core_retry_parity_is_bounded_and_epoch_exact() -> None:

@@ -1,3 +1,5 @@
+import { canonicalJson, canonicalJsonBytes } from './liveVoiceContractV2.js';
+
 export const PRODUCT_P2_ACTIVATE_METHOD = 'live_voice.composition.p2.activate' as const;
 export const PRODUCT_P2_CLOSE_METHOD = 'live_voice.composition.p2.close' as const;
 export const PRODUCT_P2_SUBMIT_METHOD = 'live_voice.composition.p2.submit' as const;
@@ -90,17 +92,11 @@ class ProductReplayFence {
   }
 }
 
-function evictCompletedProductOperation<T>(
-  ledger: Map<string, { requestId: string; result?: T; promise?: Promise<T> }>,
-  replayFence: ProductReplayFence,
-): boolean {
+function completedProductOperationFingerprint<T>(ledger: Map<string, { requestId: string; result?: T; promise?: Promise<T> }>): string | null {
   for (const [fingerprint, entry] of ledger) {
-    if (entry.result === undefined) continue;
-    ledger.delete(fingerprint);
-    replayFence.add(fingerprint);
-    return true;
+    if (entry.result !== undefined) return fingerprint;
   }
-  return false;
+  return null;
 }
 let productRequestSequence = 0;
 
@@ -130,7 +126,8 @@ export interface ProductP2DurableOperationJournal {
 }
 
 const PRODUCT_P2_DURABLE_OPERATION_MAX_BYTES = 131_072;
-const PRODUCT_P2_DURABLE_TEXT_MAX_LENGTH = 100_000;
+const PRODUCT_P2_DURABLE_TEXT_MAX_BYTES = 100_000;
+const PRODUCT_P2_SUBMIT_PREFLIGHT_REQUEST_ID = 'live-voice-p2-submit-00000000-0000-4000-8000-000000000000';
 
 function exactRecord(value: unknown, keys: readonly string[], field: string): Record<string, unknown> {
   const record = objectValue(value);
@@ -145,6 +142,19 @@ function exactRecord(value: unknown, keys: readonly string[], field: string): Re
 
 function exactDurableText(value: unknown, field: string, maxLength = 256): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maxLength) throw new Error(`${field} is invalid`);
+  return value;
+}
+
+function exactDurableCommittedText(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is invalid`);
+  try {
+    canonicalJsonBytes(value);
+  } catch {
+    throw new Error(`${field} is invalid`);
+  }
+  if (new TextEncoder().encode(value).byteLength > PRODUCT_P2_DURABLE_TEXT_MAX_BYTES) {
+    throw new Error(`${field} is invalid`);
+  }
   return value;
 }
 
@@ -177,15 +187,6 @@ function durableOperationParamKeys(method: ProductP2DurableOperationMethod, para
 
 /** Strictly parse one bounded, secret-free request envelope before transport or persistence. */
 export function validateProductP2DurableOperation(value: unknown, expectedBinding?: Readonly<ProductWebP2ActivationBinding>): ProductP2DurableOperation {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    throw new Error('durable product operation cannot be serialized');
-  }
-  if (!serialized || new TextEncoder().encode(serialized).byteLength > PRODUCT_P2_DURABLE_OPERATION_MAX_BYTES) {
-    throw new Error('durable product operation exceeds its bound');
-  }
   const operation = exactRecord(value, ['method', 'request_id', 'params'], 'durable product operation');
   if (
     operation.method !== PRODUCT_P2_SUBMIT_METHOD &&
@@ -213,7 +214,7 @@ export function validateProductP2DurableOperation(value: unknown, expectedBindin
     exactDurableText(params.commit_id, 'commit_id');
     exactDurableText(params.turn_id, 'turn_id');
     exactDurableText(params.committed_at, 'committed_at');
-    exactDurableText(params.text, 'text', PRODUCT_P2_DURABLE_TEXT_MAX_LENGTH);
+    exactDurableCommittedText(params.text, 'text');
     if (params.dispatch_target !== 'agent' && params.dispatch_target !== 'task') {
       throw new Error('durable product submission target is invalid');
     }
@@ -241,6 +242,15 @@ export function validateProductP2DurableOperation(value: unknown, expectedBindin
     exactDurableText(params.response_id, 'response_id');
     exactDurableGeneration(params.response_generation, 'response_generation', true);
     if (typeof params.cancel_response !== 'boolean') throw new Error('durable product barge-in policy is invalid');
+  }
+  let serialized: Uint8Array;
+  try {
+    serialized = canonicalJsonBytes(value);
+  } catch {
+    throw new Error('durable product operation cannot be serialized');
+  }
+  if (serialized.byteLength > PRODUCT_P2_DURABLE_OPERATION_MAX_BYTES) {
+    throw new Error('durable product operation exceeds its bound');
   }
   return Object.freeze({
     method,
@@ -375,6 +385,10 @@ export interface ProductWebP3TaskControlBinding {
 function requiredContent(value: string, field: string): string {
   if (!value.trim() || value.length > 100_000) throw new Error(`${field} is invalid`);
   return value;
+}
+
+function requiredCommittedText(value: string, field: string): string {
+  return exactDurableCommittedText(value, field);
 }
 
 function freezeBinding(input: Readonly<ProductWebP2ActivationBinding>): ProductWebP2ActivationBinding {
@@ -1164,15 +1178,21 @@ export class ProductWebP2ActivationOwner {
       turn_id: requiredText(input.turn_id, 'turn_id'),
       ...(responseId === null ? {} : { response_id: responseId }),
       committed_at: requiredText(input.committed_at, 'committed_at'),
-      text: requiredContent(input.text, 'text'),
+      text: requiredCommittedText(input.text, 'text'),
       dispatch_target: dispatchTarget,
       ...(input.voice_commit_receipt ? { voice_commit_receipt: requiredText(input.voice_commit_receipt, 'voice_commit_receipt') } : {}),
       ...(input.critical_confirmation === true ? { critical_confirmation: true } : {}),
     };
-    const fingerprint = JSON.stringify(params);
+    validateProductP2DurableOperation({
+      method: PRODUCT_P2_SUBMIT_METHOD,
+      request_id: PRODUCT_P2_SUBMIT_PREFLIGHT_REQUEST_ID,
+      params,
+    });
+    const fingerprint = canonicalJson(params);
     let retained = this.submissions.get(fingerprint);
     if (retained?.result) return Promise.resolve(retained.result);
     if (retained?.promise) return retained.promise;
+    let operation: ProductP2DurableOperation;
     if (!retained) {
       if (this.submissionReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed product submission replay has expired'));
@@ -1180,15 +1200,24 @@ export class ProductWebP2ActivationOwner {
       if (this.hasPendingSubmission() || this.hasPendingPresentationAck()) {
         return Promise.reject(new Error('a previous product turn is still unresolved'));
       }
-      if (this.submissions.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.submissions, this.submissionReplayFence)) {
+      const completed = this.submissions.size >= PRODUCT_OPERATION_CAPACITY ? completedProductOperationFingerprint(this.submissions) : null;
+      if (this.submissions.size >= PRODUCT_OPERATION_CAPACITY && completed === null) {
         return Promise.reject(new Error('bounded product submission ledger is full'));
       }
-      retained = { requestId: allocateProductRequestId('live-voice-p2-submit') };
+      const candidate = { requestId: allocateProductRequestId('live-voice-p2-submit') };
+      operation = freezeDurableOperation(PRODUCT_P2_SUBMIT_METHOD, candidate.requestId, params);
+      this.durableOperationJournal?.checkpointOperation(operation);
+      if (completed !== null) {
+        this.submissions.delete(completed);
+        this.submissionReplayFence.add(completed);
+      }
+      retained = candidate;
       this.submissions.set(fingerprint, retained);
+    } else {
+      operation = freezeDurableOperation(PRODUCT_P2_SUBMIT_METHOD, retained.requestId, params);
+      this.durableOperationJournal?.checkpointOperation(operation);
     }
     const entry = retained;
-    const operation = freezeDurableOperation(PRODUCT_P2_SUBMIT_METHOD, entry.requestId, params);
-    this.durableOperationJournal?.checkpointOperation(operation);
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
       .then(value => {
@@ -1273,19 +1302,29 @@ export class ProductWebP2ActivationOwner {
     let retained = this.bargeIns.get(fingerprint);
     if (retained?.result) return Promise.resolve(retained.result);
     if (retained?.promise) return retained.promise;
+    let operation: ProductP2DurableOperation;
     if (!retained) {
       if (this.bargeInReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed barge-in replay has expired'));
       }
-      if (this.bargeIns.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.bargeIns, this.bargeInReplayFence)) {
+      const completed = this.bargeIns.size >= PRODUCT_OPERATION_CAPACITY ? completedProductOperationFingerprint(this.bargeIns) : null;
+      if (this.bargeIns.size >= PRODUCT_OPERATION_CAPACITY && completed === null) {
         return Promise.reject(new Error('bounded barge-in ledger is full'));
       }
-      retained = { requestId: allocateProductRequestId('live-voice-p2-barge') };
+      const candidate = { requestId: allocateProductRequestId('live-voice-p2-barge') };
+      operation = freezeDurableOperation(PRODUCT_P2_BARGE_IN_METHOD, candidate.requestId, params);
+      this.durableOperationJournal?.checkpointOperation(operation);
+      if (completed !== null) {
+        this.bargeIns.delete(completed);
+        this.bargeInReplayFence.add(completed);
+      }
+      retained = candidate;
       this.bargeIns.set(fingerprint, retained);
+    } else {
+      operation = freezeDurableOperation(PRODUCT_P2_BARGE_IN_METHOD, retained.requestId, params);
+      this.durableOperationJournal?.checkpointOperation(operation);
     }
     const entry = retained;
-    const operation = freezeDurableOperation(PRODUCT_P2_BARGE_IN_METHOD, entry.requestId, params);
-    this.durableOperationJournal?.checkpointOperation(operation);
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_BARGE_IN_METHOD, params, entry.requestId)
       .then(value => {
@@ -1334,13 +1373,17 @@ export class ProductWebP2ActivationOwner {
       if (this.generationInterruptReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed generation interruption replay has expired'));
       }
-      if (
-        this.generationInterrupts.size >= PRODUCT_OPERATION_CAPACITY &&
-        !evictCompletedProductOperation(this.generationInterrupts, this.generationInterruptReplayFence)
-      ) {
+      const completed = this.generationInterrupts.size >= PRODUCT_OPERATION_CAPACITY
+        ? completedProductOperationFingerprint(this.generationInterrupts)
+        : null;
+      if (this.generationInterrupts.size >= PRODUCT_OPERATION_CAPACITY && completed === null) {
         return Promise.reject(new Error('bounded generation interruption ledger is full'));
       }
       retained = { requestId: allocateProductRequestId('live-voice-p2-generation-interrupt') };
+      if (completed !== null) {
+        this.generationInterrupts.delete(completed);
+        this.generationInterruptReplayFence.add(completed);
+      }
       this.generationInterrupts.set(fingerprint, retained);
     }
     const entry = retained;
@@ -1415,6 +1458,7 @@ export class ProductWebP2ActivationOwner {
     let retained = this.presentationAcks.get(fingerprint);
     if (retained?.result) return Promise.resolve(retained.result);
     if (retained?.promise) return retained.promise;
+    let operation: ProductP2DurableOperation;
     if (!retained) {
       if (this.presentationAckReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed presentation ACK replay has expired'));
@@ -1422,15 +1466,24 @@ export class ProductWebP2ActivationOwner {
       if (this.hasPendingPresentationAck() || this.hasPendingPresentationFailure()) {
         return Promise.reject(new Error('a previous presentation ACK is still unresolved'));
       }
-      if (this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.presentationAcks, this.presentationAckReplayFence)) {
+      const completed = this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY ? completedProductOperationFingerprint(this.presentationAcks) : null;
+      if (this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY && completed === null) {
         return Promise.reject(new Error('bounded presentation ACK ledger is full'));
       }
-      retained = { requestId: allocateProductRequestId('live-voice-p2-ack') };
+      const candidate = { requestId: allocateProductRequestId('live-voice-p2-ack') };
+      operation = freezeDurableOperation(PRODUCT_P2_PRESENTATION_ACK_METHOD, candidate.requestId, params);
+      this.durableOperationJournal?.checkpointOperation(operation);
+      if (completed !== null) {
+        this.presentationAcks.delete(completed);
+        this.presentationAckReplayFence.add(completed);
+      }
+      retained = candidate;
       this.presentationAcks.set(fingerprint, retained);
+    } else {
+      operation = freezeDurableOperation(PRODUCT_P2_PRESENTATION_ACK_METHOD, retained.requestId, params);
+      this.durableOperationJournal?.checkpointOperation(operation);
     }
     const entry = retained;
-    const operation = freezeDurableOperation(PRODUCT_P2_PRESENTATION_ACK_METHOD, entry.requestId, params);
-    this.durableOperationJournal?.checkpointOperation(operation);
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_PRESENTATION_ACK_METHOD, params, entry.requestId)
       .then(value => {
@@ -1488,13 +1541,18 @@ export class ProductWebP2ActivationOwner {
       if (this.hasPendingPresentationAck() || this.hasPendingPresentationFailure()) {
         return Promise.reject(new Error('a previous presentation settlement is still unresolved'));
       }
-      if (
-        this.presentationFailures.size >= PRODUCT_OPERATION_CAPACITY &&
-        !evictCompletedProductOperation(this.presentationFailures, this.presentationFailureReplayFence)
-      ) {
+      const completed =
+        this.presentationFailures.size >= PRODUCT_OPERATION_CAPACITY
+          ? completedProductOperationFingerprint(this.presentationFailures)
+          : null;
+      if (this.presentationFailures.size >= PRODUCT_OPERATION_CAPACITY && completed === null) {
         return Promise.reject(new Error('bounded presentation failure ledger is full'));
       }
       retained = { requestId: allocateProductRequestId('live-voice-p2-presentation-failed') };
+      if (completed !== null) {
+        this.presentationFailures.delete(completed);
+        this.presentationFailureReplayFence.add(completed);
+      }
       this.presentationFailures.set(fingerprint, retained);
     }
     const entry = retained;

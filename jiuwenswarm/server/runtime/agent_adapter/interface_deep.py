@@ -400,7 +400,6 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
-_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS = 5.0
 _FORMAL_ACTIVE_RAW_EVENT_TYPES = frozenset(
     {
         "answer",
@@ -9278,17 +9277,8 @@ class JiuWenSwarmDeepAdapter:
                     self.cleanup_session_adapter(request.session_id),
                     name=f"formal-live-voice-session-cleanup:{request.request_id}",
                 )
-                while not cleanup.done():
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(cleanup),
-                            timeout=_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS,
-                        )
-                    except TimeoutError:
-                        logger.warning(
-                            "formal Live Voice session cleanup is still pending"
-                        )
-                if not await asyncio.shield(cleanup):
+                cleanup_complete = await asyncio.shield(cleanup)
+                if not cleanup_complete:
                     raise RuntimeError(
                         "FORMAL_EXECUTION_SESSION_CLEANUP_INCOMPLETE"
                     )
@@ -9520,19 +9510,6 @@ class JiuWenSwarmDeepAdapter:
                             ),
                             name=f"formal-live-voice-output-close:{rid}",
                         )
-                        while not cleanup.done():
-                            try:
-                                await asyncio.wait_for(
-                                    asyncio.shield(cleanup),
-                                    timeout=_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS,
-                                )
-                            except TimeoutError:
-                                # The retained cleanup task still owns the stream.
-                                # Outer shutdown callers are bounded separately and
-                                # must report pending rather than false terminal.
-                                logger.warning(
-                                    "formal Live Voice output cleanup is still pending"
-                                )
                         await asyncio.shield(cleanup)
                         history_release_safe = True
                     if tool_capture_close_error is not None:

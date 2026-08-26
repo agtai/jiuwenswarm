@@ -1,5 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import threading
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 
@@ -40,6 +41,26 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 
 
 PROVIDER = ProviderRef("native-stream-provider", "formal")
+_CONFORMANCE_PUBLIC_CALLABLES = frozenset(
+    {
+        "accept_audio_frame",
+        "accept_recognition_boundary",
+        "accept_recognition_event",
+        "accept_synthesis_event",
+        "activate_response",
+        "close",
+        "expire",
+        "provider_closed_recognition",
+        "provider_closed_synthesis",
+        "reap_terminal",
+        "request_recognition_cancel",
+        "request_synthesis_cancel",
+        "snapshot",
+        "start_recognition",
+        "start_synthesis",
+        "take_provider_controls",
+    }
+)
 
 
 def native_capability(*, available: bool = True) -> StreamingProviderCapability:
@@ -190,17 +211,12 @@ def synthesis_event(
 
 
 def assert_zero_authority_effects(runtime: StreamingSpeechConformance) -> None:
-    snapshot = runtime.snapshot()
-    assert snapshot.agent_dispatches == 0
-    assert snapshot.tool_dispatches == 0
-    assert snapshot.task_mutations == 0
-    assert snapshot.chat_mutations == 0
-    assert snapshot.turn_commits == 0
-    assert not hasattr(runtime, "commit_turn")
-    assert not hasattr(runtime, "dispatch_agent")
-    assert not hasattr(runtime, "dispatch_tool")
-    assert not hasattr(runtime, "mutate_task")
-    assert not hasattr(runtime, "write_chat")
+    public_callables = frozenset(
+        name
+        for name, value in vars(type(runtime)).items()
+        if not name.startswith("_") and callable(value)
+    )
+    assert public_callables == _CONFORMANCE_PUBLIC_CALLABLES
 
 
 def assert_one_provider_cancel(
@@ -315,10 +331,7 @@ def test_server_vad_boundaries_require_same_item_and_cursorless_final() -> None:
         timing_basis=RecognitionTimingBasis.PROVIDER_TIME,
     )
     assert runtime.accept_recognition_event(final) is final
-    snapshot = runtime.snapshot()
-    assert snapshot.agent_dispatches == snapshot.tool_dispatches == 0
-    assert snapshot.task_mutations == snapshot.chat_mutations == 0
-    assert snapshot.turn_commits == 0
+    assert_zero_authority_effects(runtime)
 
 
 def test_server_vad_request_requires_exact_provider_capability_before_allocation() -> (
@@ -376,10 +389,7 @@ def test_server_vad_wrong_item_fails_closed_and_fences_input() -> None:
     with pytest.raises(StreamingSpeechViolation) as fenced:
         runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     assert fenced.value.reason == "RECOGNITION_INPUT_FENCED"
-    snapshot = runtime.snapshot()
-    assert snapshot.agent_dispatches == snapshot.tool_dispatches == 0
-    assert snapshot.task_mutations == snapshot.chat_mutations == 0
-    assert snapshot.turn_commits == 0
+    assert_zero_authority_effects(runtime)
 
 
 @pytest.mark.parametrize(
@@ -574,6 +584,28 @@ def test_retained_tombstones_count_every_never_evicted_identity_ledger() -> None
         response(interaction_id="interaction-2", response_id="response-2")
     )
     assert runtime.snapshot().retained_identity_tombstones == 4
+
+
+def test_zero_authority_helper_rejects_new_public_agent_dispatch_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: the zero-effect gate must kill a newly exposed Agent mutation."""
+
+    def dispatch_agent_turn(
+        _runtime: StreamingSpeechConformance, committed_text: str
+    ) -> None:
+        del committed_text
+
+    monkeypatch.setattr(
+        StreamingSpeechConformance,
+        "dispatch_agent_turn",
+        dispatch_agent_turn,
+        raising=False,
+    )
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+
+    with pytest.raises(AssertionError):
+        assert_zero_authority_effects(runtime)
 
 
 def test_unavailable_provider_rejects_without_session_side_effects() -> None:
@@ -1564,9 +1596,7 @@ def test_synthesis_timeout_and_capacity_are_bounded() -> None:
     assert_zero_authority_effects(runtime)
 
 
-def test_response_identity_capacity_fails_closed_without_evicting_prior_identity() -> (
-    None
-):
+def test_released_response_identity_still_refuses_reuse_and_stale_generation() -> None:
     runtime = StreamingSpeechConformance(
         native_capability(), enabled=True, max_identity_tombstones=2
     )
@@ -1577,30 +1607,101 @@ def test_response_identity_capacity_fails_closed_without_evicting_prior_identity
 
     request = synthesis_request(response_ref=current)
     runtime.start_synthesis(request)
+    # `interaction-1`/`response-1` own no stream, so the ledgers release them
+    # into the bounded fence instead of refusing the owner's next response.
     next_current = ResponseRef("interaction-2", "response-3", 1)
-    with pytest.raises(StreamingSpeechViolation) as response_ids_full:
-        runtime.activate_response(next_current)
-    assert response_ids_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
-
-    foreign = ResponseRef("interaction-3", "response-3", 0)
-    with pytest.raises(StreamingSpeechViolation) as interactions_full:
-        runtime.activate_response(foreign)
-    assert interactions_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
+    runtime.activate_response(next_current)
+    foreign = ResponseRef("interaction-3", "response-4", 0)
+    runtime.activate_response(foreign)
+    # Two interaction entries and two response-id entries stay exact; the
+    # released ones keep only their bounded tombstone.
+    assert runtime.snapshot().retained_identity_tombstones == 5
 
     reused = ResponseRef("interaction-1", "response-1", 1)
     with pytest.raises(StreamingSpeechViolation) as reused_id:
         runtime.activate_response(reused)
     assert reused_id.value.reason == "RESPONSE_ID_REUSED"
 
-    prior = synthesis_request(
-        response_ref=unused,
-        stream_id="synthesis-prior",
+    stale = ResponseRef("interaction-2", "response-5", 1)
+    with pytest.raises(StreamingSpeechViolation) as stale_generation:
+        runtime.activate_response(stale)
+    assert stale_generation.value.reason == "STALE_RESPONSE_GENERATION"
+
+    # Superseding `interaction-2` fenced its retained stream, so the only live
+    # synthesis left is the one the newest response owns.
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=request.ref,
     )
-    runtime.start_synthesis(prior)
+    successor = synthesis_request(
+        response_ref=foreign,
+        stream_id="synthesis-successor",
+    )
+    runtime.start_synthesis(successor)
     runtime.accept_synthesis_event(
-        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+        synthesis_event(successor, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
-    assert runtime.snapshot().active_synthesis == 2
+    assert runtime.snapshot().active_synthesis == 1
+    assert_zero_authority_effects(runtime)
+
+
+def test_response_identity_capacity_fails_closed_while_every_id_is_live() -> None:
+    """Both response ledgers must fail closed while their only id is live.
+
+    `activate_response` is the one capacity path that consults two identity
+    ledgers, derives both live sets from `self._synthesis` and interleaves
+    them with `_make_response_capacity`, so each refusal branch needs its own
+    oracle rather than one shared RESPONSE_IDENTITY_CAPACITY_EXHAUSTED check.
+    """
+
+    runtime = StreamingSpeechConformance(
+        native_capability(),
+        enabled=True,
+        max_identity_tombstones=1,
+    )
+    live_response = response()
+    runtime.activate_response(live_response)
+    live = synthesis_request(response_ref=live_response)
+    runtime.start_synthesis(live)
+    # One live stream pins the interaction ledger and the response id ledger
+    # at once, because both live sets read `self._synthesis`.
+    assert runtime.snapshot().retained_identity_tombstones == 3
+
+    # A new interaction id is refused by the interaction generation ledger,
+    # which `activate_response` consults first.
+    foreign = ResponseRef("interaction-2", "response-2", 0)
+    with pytest.raises(StreamingSpeechViolation) as interactions_full:
+        runtime.activate_response(foreign)
+    assert interactions_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
+    assert "interaction identity ledger" in str(interactions_full.value)
+
+    # Superseding the live interaction clears that first check, so only the
+    # response id ledger can refuse and the second branch is reached exactly.
+    superseding = ResponseRef("interaction-1", "response-3", 1)
+    with pytest.raises(StreamingSpeechViolation) as response_ids_full:
+        runtime.activate_response(superseding)
+    assert response_ids_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
+    assert "response identifier ledger" in str(response_ids_full.value)
+
+    # Neither refusal released a retained identity, and the refused
+    # supersession never fenced the stream it would have superseded.
+    refused = runtime.snapshot()
+    assert refused.retained_identity_tombstones == 3
+    assert refused.retained_synthesis == 1
+    assert refused.pending_provider_controls == 0
+
+    # The refused ids stayed unknown instead of being admitted and released,
+    # so retiring the stream that pinned the ledgers admits them rather than
+    # refusing them off the bounded fence as reused.
+    runtime.provider_closed_synthesis(live.ref)
+    assert runtime.reap_terminal() == (0, 1)
+    runtime.activate_response(superseding)
+    runtime.activate_response(foreign)
+    assert runtime.snapshot().retained_identity_tombstones == 3
+    with pytest.raises(StreamingSpeechViolation) as reused:
+        runtime.activate_response(ResponseRef("interaction-2", "response-2", 1))
+    assert reused.value.reason == "RESPONSE_ID_REUSED"
     assert_zero_authority_effects(runtime)
 
 
@@ -1637,7 +1738,7 @@ def test_close_fences_new_work_and_retains_both_provider_sessions() -> None:
     assert_zero_authority_effects(runtime)
 
 
-def test_recognition_identity_capacity_never_evicts_or_allows_exact_aba() -> None:
+def test_released_recognition_identity_never_allows_exact_aba() -> None:
     runtime = StreamingSpeechConformance(
         native_capability(),
         enabled=True,
@@ -1653,16 +1754,20 @@ def test_recognition_identity_capacity_never_evicts_or_allows_exact_aba() -> Non
 
     assert runtime.snapshot().retained_identity_tombstones == 2
     assert runtime.snapshot().retained_recognition == 0
-    with pytest.raises(StreamingSpeechViolation) as capacity:
-        runtime.start_recognition(
-            recognition_ref(session_id="recognition-new"), timeout_seconds=5
-        )
-    assert capacity.value.reason == "RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED"
+    # A reaped identity is releasable, so the exact ledger makes room for a new
+    # session instead of refusing every later stream for this owner's lifetime.
+    fresh = recognition_ref(session_id="recognition-new")
+    runtime.start_recognition(fresh, timeout_seconds=5)
+    assert runtime.snapshot().active_recognition == 1
+    assert runtime.snapshot().retained_identity_tombstones == 2
 
     exact_old = admitted[0]
     with pytest.raises(StreamingSpeechViolation) as stale:
         runtime.start_recognition(exact_old, timeout_seconds=5)
     assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
+    with pytest.raises(StreamingSpeechViolation) as late_released:
+        runtime.provider_closed_recognition(exact_old)
+    assert late_released.value.reason == "STALE_RECOGNITION_SESSION"
 
     replacement = recognition_ref(
         session_id=exact_old.session_id,
@@ -1675,20 +1780,153 @@ def test_recognition_identity_capacity_never_evicts_or_allows_exact_aba() -> Non
         runtime.provider_closed_recognition(exact_old)
     assert late_old.value.reason == "STALE_RECOGNITION_SESSION"
     runtime.accept_audio_frame(frame(replacement, seq=0, cursor=0))
-    assert runtime.snapshot().active_recognition == 1
+    assert runtime.snapshot().active_recognition == 2
     runtime.provider_closed_recognition(replacement)
-    assert runtime.reap_terminal() == (1, 0)
+    runtime.provider_closed_recognition(fresh)
+    assert runtime.reap_terminal() == (2, 0)
     assert runtime.snapshot().retained_recognition == 0
-
-    with pytest.raises(StreamingSpeechViolation) as still_full:
-        runtime.start_recognition(
-            recognition_ref(session_id="recognition-new"), timeout_seconds=5
-        )
-    assert still_full.value.reason == "RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED"
     assert_zero_authority_effects(runtime)
 
 
-def test_synthesis_identity_capacity_never_evicts_or_allows_exact_aba() -> None:
+def test_recognition_identity_capacity_fails_closed_while_every_id_is_live() -> None:
+    runtime = StreamingSpeechConformance(
+        native_capability(),
+        enabled=True,
+        max_identity_tombstones=1,
+    )
+    live = recognition_ref(session_id="recognition-live")
+    runtime.start_recognition(live, timeout_seconds=5)
+    with pytest.raises(StreamingSpeechViolation) as capacity:
+        runtime.start_recognition(
+            recognition_ref(session_id="recognition-new"), timeout_seconds=5
+        )
+    assert capacity.value.reason == "RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED"
+    # The refused admission released nothing, so the retained identity keeps
+    # its exact entry and the refused id is still unknown rather than stale.
+    assert runtime.snapshot().retained_identity_tombstones == 1
+    runtime.accept_audio_frame(frame(live, seq=0, cursor=0))
+    with pytest.raises(StreamingSpeechViolation) as unknown:
+        runtime.provider_closed_recognition(
+            recognition_ref(session_id="recognition-new")
+        )
+    assert unknown.value.reason == "RECOGNITION_SESSION_NOT_FOUND"
+    assert_zero_authority_effects(runtime)
+
+
+def test_released_generation_fence_keeps_the_exact_high_water_refusable() -> None:
+    runtime = StreamingSpeechConformance(
+        native_capability(),
+        enabled=True,
+        max_identity_tombstones=1,
+    )
+    for generation in (0, 1):
+        ref = recognition_ref(
+            session_id="recognition-reused",
+            session_generation=generation,
+            capture_generation=generation,
+        )
+        runtime.start_recognition(ref, timeout_seconds=5)
+        runtime.provider_closed_recognition(ref)
+        assert runtime.reap_terminal() == (1, 0)
+
+    displacing = recognition_ref(session_id="recognition-displacing")
+    runtime.start_recognition(displacing, timeout_seconds=5)
+    runtime.provider_closed_recognition(displacing)
+    assert runtime.reap_terminal() == (1, 0)
+    assert runtime.snapshot().retained_identity_tombstones == 1
+
+    for stale_generation in (0, 1):
+        with pytest.raises(StreamingSpeechViolation) as stale:
+            runtime.start_recognition(
+                recognition_ref(
+                    session_id="recognition-reused",
+                    session_generation=stale_generation,
+                    capture_generation=stale_generation,
+                ),
+                timeout_seconds=5,
+            )
+        assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
+
+    successor = recognition_ref(
+        session_id="recognition-reused",
+        session_generation=2,
+        capture_generation=2,
+    )
+    runtime.start_recognition(successor, timeout_seconds=5)
+    assert runtime.snapshot().active_recognition == 1
+    assert_zero_authority_effects(runtime)
+
+
+def test_released_identities_are_isolated_per_conformance_owner() -> None:
+    first = StreamingSpeechConformance(
+        native_capability(), enabled=True, max_identity_tombstones=1
+    )
+    second = StreamingSpeechConformance(
+        native_capability(), enabled=True, max_identity_tombstones=1
+    )
+    shared = recognition_ref(session_id="recognition-shared")
+    first.start_recognition(shared, timeout_seconds=5)
+    first.provider_closed_recognition(shared)
+    assert first.reap_terminal() == (1, 0)
+    first.start_recognition(
+        recognition_ref(session_id="recognition-other"), timeout_seconds=5
+    )
+    with pytest.raises(StreamingSpeechViolation) as released:
+        first.start_recognition(shared, timeout_seconds=5)
+    assert released.value.reason == "STALE_RECOGNITION_GENERATION"
+
+    # A second owner is a separate connection/session: it never inherits the
+    # first owner's released tombstones.  A restarted owner behaves the same,
+    # which is characterization only: this boundary holds no durable state.
+    second.start_recognition(shared, timeout_seconds=5)
+    assert second.snapshot().active_recognition == 1
+    with pytest.raises(StreamingSpeechViolation) as unknown:
+        second.provider_closed_recognition(
+            recognition_ref(session_id="recognition-other")
+        )
+    assert unknown.value.reason == "RECOGNITION_SESSION_NOT_FOUND"
+    assert_zero_authority_effects(first)
+    assert_zero_authority_effects(second)
+
+
+def test_concurrent_identity_release_admits_each_id_exactly_once() -> None:
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, max_identity_tombstones=1
+    )
+    retired = recognition_ref(session_id="recognition-retired")
+    runtime.start_recognition(retired, timeout_seconds=5)
+    runtime.provider_closed_recognition(retired)
+    assert runtime.reap_terminal() == (1, 0)
+    barrier = threading.Barrier(2)
+
+    def submit(index: int) -> str:
+        barrier.wait()
+        try:
+            runtime.start_recognition(
+                recognition_ref(session_id=f"recognition-race-{index}"),
+                timeout_seconds=5,
+            )
+        except StreamingSpeechViolation as error:
+            return error.reason
+        return "accepted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = sorted(
+            future.result()
+            for future in [executor.submit(submit, index) for index in range(2)]
+        )
+    # The first admission releases the retired identity; the second finds the
+    # winner still live and fails closed instead of evicting it.
+    assert results == ["RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED", "accepted"]
+    assert runtime.snapshot().active_recognition == 1
+    assert runtime.snapshot().retained_identity_tombstones == 1
+    with pytest.raises(StreamingSpeechViolation) as stale:
+        runtime.start_recognition(retired, timeout_seconds=5)
+    assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
+    assert_zero_authority_effects(runtime)
+
+
+def test_released_synthesis_identity_never_allows_exact_aba() -> None:
     runtime = StreamingSpeechConformance(
         native_capability(),
         enabled=True,
@@ -1717,17 +1955,28 @@ def test_synthesis_identity_capacity_never_evicts_or_allows_exact_aba() -> None:
         unit_id="unit-new",
         unit_seq=2,
     )
-    with pytest.raises(StreamingSpeechViolation) as capacity:
-        runtime.start_synthesis(new_identity)
-    assert capacity.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
+    runtime.start_synthesis(new_identity)
+    runtime.provider_closed_synthesis(new_identity.ref)
+    assert runtime.reap_terminal() == (0, 1)
 
     exact_old = admitted[0]
+    with pytest.raises(StreamingSpeechViolation) as released:
+        runtime.start_synthesis(
+            synthesis_request(
+                response_ref=response_ref,
+                stream_id=exact_old.ref.stream_id,
+                unit_id="unit-released",
+                unit_seq=3,
+            )
+        )
+    assert released.value.reason == "STALE_SYNTHESIS_GENERATION"
+
     replacement = synthesis_request(
         response_ref=response_ref,
         stream_id=exact_old.ref.stream_id,
         stream_generation=1,
         unit_id="unit-replacement",
-        unit_seq=2,
+        unit_seq=3,
     )
     runtime.start_synthesis(replacement)
     with pytest.raises(StreamingSpeechViolation) as late_old:
@@ -1753,13 +2002,236 @@ def test_synthesis_identity_capacity_never_evicts_or_allows_exact_aba() -> None:
     assert runtime.reap_terminal() == (0, 1)
     assert runtime.snapshot().retained_synthesis == 0
 
-    still_new_identity = synthesis_request(
+    reused_unit = synthesis_request(
         response_ref=response_ref,
-        stream_id="synthesis-new",
+        stream_id="synthesis-reused-unit",
         unit_id="unit-new",
-        unit_seq=3,
+        unit_seq=4,
     )
-    with pytest.raises(StreamingSpeechViolation) as still_full:
-        runtime.start_synthesis(still_new_identity)
-    assert still_full.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
+    with pytest.raises(StreamingSpeechViolation) as reused:
+        runtime.start_synthesis(reused_unit)
+    assert reused.value.reason == "SYNTHESIS_UNIT_REUSED"
+    assert_zero_authority_effects(runtime)
+
+
+def test_synthesis_identity_capacity_fails_closed_while_every_id_is_live() -> None:
+    runtime = StreamingSpeechConformance(
+        native_capability(),
+        enabled=True,
+        max_identity_tombstones=1,
+    )
+    response_ref = response()
+    runtime.activate_response(response_ref)
+    live = synthesis_request(response_ref=response_ref, stream_id="synthesis-live")
+    runtime.start_synthesis(live)
+    with pytest.raises(StreamingSpeechViolation) as capacity:
+        runtime.start_synthesis(
+            synthesis_request(
+                response_ref=response_ref,
+                stream_id="synthesis-new",
+                unit_id="unit-new",
+                unit_seq=1,
+            )
+        )
+    assert capacity.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
+    # A refused admission consumes no unit sequence and releases nothing.
+    runtime.accept_synthesis_event(
+        synthesis_event(live, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    assert runtime.snapshot().active_synthesis == 1
+    with pytest.raises(StreamingSpeechViolation) as unknown:
+        runtime.provider_closed_synthesis(
+            synthesis_request(
+                response_ref=response_ref,
+                stream_id="synthesis-new",
+                unit_id="unit-new",
+                unit_seq=1,
+            ).ref
+        )
+    assert unknown.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert_zero_authority_effects(runtime)
+
+
+def _run_product_shaped_stream(runtime: StreamingSpeechConformance, index: int) -> None:
+    """Drive one product TTS shaped stream to Provider terminal and reap it."""
+
+    response_ref = ResponseRef(f"interaction-{index}", f"response-{index}", 0)
+    runtime.activate_response(response_ref)
+    request = synthesis_request(
+        response_ref=response_ref,
+        stream_id=f"product-tts-{index}",
+        unit_id=f"unit-{index}",
+        unit_seq=0,
+    )
+    runtime.start_synthesis(request)
+    runtime.accept_synthesis_event(
+        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    runtime.accept_synthesis_event(
+        synthesis_event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=4,
+            display_span=TextSpan(10, 13),
+            spoken_span=TextSpan(0, 5),
+        )
+    )
+    runtime.accept_synthesis_event(
+        synthesis_event(request, seq=2, cursor=4, kind=SynthesisEventKind.COMPLETED)
+    )
+    runtime.provider_closed_synthesis(request.ref)
+    assert runtime.reap_terminal() == (0, 1)
+
+
+def test_reaped_streams_do_not_exhaust_the_owner_lifetime_identity_budget() -> None:
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    for index in range(65):
+        _run_product_shaped_stream(runtime, index)
+    assert runtime.snapshot().retained_synthesis == 0
+    # The first stream is long past the exact ledger, yet replaying its exact
+    # identity is still refused with the same reason it always carried.
+    replay_response = ResponseRef("interaction-replay", "response-replay", 0)
+    runtime.activate_response(replay_response)
+    with pytest.raises(StreamingSpeechViolation) as replayed:
+        runtime.start_synthesis(
+            synthesis_request(
+                response_ref=replay_response,
+                stream_id="product-tts-0",
+                unit_id="unit-replay",
+            )
+        )
+    assert replayed.value.reason == "STALE_SYNTHESIS_GENERATION"
+    with pytest.raises(StreamingSpeechViolation) as reused:
+        runtime.activate_response(ResponseRef("interaction-0", "response-0", 1))
+    assert reused.value.reason == "RESPONSE_ID_REUSED"
+    assert_zero_authority_effects(runtime)
+
+
+def _run_reaped_recognition_session(
+    runtime: StreamingSpeechConformance, index: int
+) -> None:
+    """Drive one recognition session to Provider terminal and reap it."""
+
+    ref = recognition_ref(
+        session_id=f"recognition-{index}", capture_id=f"capture-{index}"
+    )
+    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
+    runtime.provider_closed_recognition(ref)
+    assert runtime.reap_terminal() == (1, 0)
+
+
+def test_reaped_recognition_sessions_do_not_exhaust_the_lifetime_budget() -> None:
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    for index in range(65):
+        _run_reaped_recognition_session(runtime, index)
+    assert runtime.snapshot().retained_recognition == 0
+    with pytest.raises(StreamingSpeechViolation) as replayed:
+        runtime.start_recognition(
+            recognition_ref(session_id="recognition-0", capture_id="capture-0"),
+            timeout_seconds=5,
+        )
+    assert replayed.value.reason == "STALE_RECOGNITION_GENERATION"
+    successor = recognition_ref(
+        session_id="recognition-0",
+        session_generation=1,
+        capture_id="capture-0",
+        capture_generation=1,
+    )
+    runtime.start_recognition(successor, timeout_seconds=5)
+    assert runtime.snapshot().active_recognition == 1
+    assert_zero_authority_effects(runtime)
+
+
+def test_fence_collisions_only_ever_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Collapse the whole digest space onto one cell set so every identity
+    # collides.  A conservative maximum can only be raised by a collision, so
+    # the sketch may refuse an identity that could have run and can never admit
+    # a generation that must stay refused.
+    monkeypatch.setattr(
+        StreamingSpeechConformance,
+        "_fence_digest",
+        staticmethod(lambda scope, identity: b"\xa5" * 32),
+    )
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, max_identity_tombstones=1
+    )
+    retired = recognition_ref(
+        session_id="recognition-retired",
+        session_generation=3,
+        capture_generation=3,
+    )
+    runtime.start_recognition(retired, timeout_seconds=5)
+    runtime.provider_closed_recognition(retired)
+    assert runtime.reap_terminal() == (1, 0)
+
+    displacing = recognition_ref(session_id="recognition-displacing")
+    runtime.start_recognition(displacing, timeout_seconds=5)
+    runtime.provider_closed_recognition(displacing)
+    assert runtime.reap_terminal() == (1, 0)
+
+    # `recognition-fresh` was never admitted, but it collides with the released
+    # high-water of three, so it is refused instead of quietly admitted.
+    with pytest.raises(StreamingSpeechViolation) as collided:
+        runtime.start_recognition(
+            recognition_ref(session_id="recognition-fresh"), timeout_seconds=5
+        )
+    assert collided.value.reason == "STALE_RECOGNITION_GENERATION"
+    for stale_generation in (0, 3):
+        with pytest.raises(StreamingSpeechViolation) as stale:
+            runtime.start_recognition(
+                recognition_ref(
+                    session_id="recognition-retired",
+                    session_generation=stale_generation,
+                    capture_generation=stale_generation,
+                ),
+                timeout_seconds=5,
+            )
+        assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
+    successor = recognition_ref(
+        session_id="recognition-retired",
+        session_generation=4,
+        capture_generation=4,
+    )
+    runtime.start_recognition(successor, timeout_seconds=5)
+    assert runtime.snapshot().active_recognition == 1
+    assert_zero_authority_effects(runtime)
+
+
+def test_clock_fault_refuses_a_start_without_releasing_a_retired_identity() -> None:
+    clock = {"now": 1.0}
+    runtime = StreamingSpeechConformance(
+        native_capability(),
+        enabled=True,
+        max_identity_tombstones=1,
+        monotonic=lambda: clock["now"],
+    )
+    retired = recognition_ref(session_id="recognition-retired")
+    runtime.start_recognition(retired, timeout_seconds=5)
+    runtime.provider_closed_recognition(retired)
+    assert runtime.reap_terminal() == (1, 0)
+    assert runtime.snapshot().retained_identity_tombstones == 1
+
+    clock["now"] = float("inf")
+    with pytest.raises(StreamingSpeechViolation) as clock_fault:
+        runtime.start_recognition(
+            recognition_ref(session_id="recognition-clock"), timeout_seconds=5
+        )
+    assert clock_fault.value.reason == "INVALID_MONOTONIC_TIME"
+    # The refused start released nothing: the retired identity still holds its
+    # exact ledger entry rather than having been spent into the fence.
+    assert runtime.snapshot().retained_identity_tombstones == 1
+
+    clock["now"] = 2.0
+    runtime.start_recognition(
+        recognition_ref(session_id="recognition-clock"), timeout_seconds=5
+    )
+    assert runtime.snapshot().active_recognition == 1
+    with pytest.raises(StreamingSpeechViolation) as stale:
+        runtime.start_recognition(retired, timeout_seconds=5)
+    assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
     assert_zero_authority_effects(runtime)

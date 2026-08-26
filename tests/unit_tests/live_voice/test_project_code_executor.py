@@ -154,6 +154,12 @@ class _DirectProjectExecutor:
                     (project / ".gitignore").write_text("runtime/\n", encoding="utf-8")
                 elif self.behavior == "ignored_only":
                     (project / "ignored.txt").write_text("ignored", encoding="utf-8")
+                elif self.behavior == "too_many_source_paths":
+                    for index in range(33):
+                        (project / f"result-{index:02d}.txt").write_text(
+                            f"result {index}\n",
+                            encoding="utf-8",
+                        )
                 else:
                     (project / "result.txt").write_text("done", encoding="utf-8")
                 yield AgentResponseChunk(
@@ -3258,6 +3264,309 @@ async def test_direct_executor_capacity_exhaustion_precedes_resolver_and_project
 
 
 @pytest.mark.asyncio
+async def test_retained_cleanup_consumes_worker_admission_and_redrives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_project = tmp_path / "first-project"
+    second_project = tmp_path / "second-project"
+    _git_project(first_project)
+    _git_project(second_project)
+    first_executor = _DirectProjectExecutor(first_project)
+    second_executor = _DirectProjectExecutor(second_project)
+    second_releases: list[str] = []
+    resolver = _MappedResolver(
+        {
+            first_project.resolve(): _direct_binding(first_project, first_executor),
+            second_project.resolve(): _direct_binding(
+                second_project,
+                second_executor,
+                releases=second_releases,
+            ),
+        }
+    )
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    monkeypatch.setattr(project_code_executor, "_MAX_DIRECT_RUNNING_WORKERS", 1)
+    real_remove = project_code_executor._remove_attempt_worktree
+    cleanup_may_finish = Event()
+    cleanup_finished = Event()
+
+    def controlled_remove(root: Path, parent: Path, worktree: Path) -> None:
+        if not cleanup_may_finish.is_set():
+            raise RuntimeError("injected retained cleanup")
+        real_remove(root, parent, worktree)
+        cleanup_finished.set()
+
+    monkeypatch.setattr(
+        project_code_executor,
+        "_remove_attempt_worktree",
+        controlled_remove,
+    )
+    first_item = _item(first_project)
+    second_item = replace(
+        _item(second_project),
+        outbox_id="outbox-2",
+        task_id="task-2",
+        attempt_id="attempt-2",
+        command_id="command-2",
+    )
+
+    await adapter.dispatch(first_item)
+    await _wait_direct_settled(adapter)
+    assert adapter.retained_cleanup_attempt_ids() == ("attempt-1",)
+    second_before = _git(second_project, "status", "--porcelain")
+    second_parent, second_worktree = project_code_executor._attempt_worktree_paths(
+        second_project.resolve(),
+        "attempt-2",
+    )
+
+    with pytest.raises(FormalTaskViolation) as exhausted:
+        await adapter.dispatch(second_item)
+
+    assert exhausted.value.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+    assert exhausted.value.code is ErrorCode.UNAVAILABLE
+    assert resolver.calls == [first_project.resolve()]
+    assert second_executor.requests == []
+    assert second_releases == []
+    assert adapter._journal.get("attempt-2") is None
+    assert not second_parent.exists()
+    assert not second_worktree.exists()
+    assert _git(second_project, "status", "--porcelain") == second_before
+
+    cleanup_may_finish.set()
+    with pytest.raises(FormalTaskViolation) as redriving:
+        await adapter.dispatch(second_item)
+    assert redriving.value.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+    assert await asyncio.to_thread(cleanup_finished.wait, 5)
+
+    delivered = await adapter.dispatch(second_item)
+    assert delivered.executor_ref == "d0-project:attempt-2"
+    await _wait_direct_settled(adapter)
+    assert resolver.calls == [first_project.resolve(), second_project.resolve()]
+    assert len(second_executor.requests) == 1
+    assert second_releases == ["released"]
+    assert adapter.retained_cleanup_attempt_ids() == ()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_recovered_cleanup_redrive_is_bounded_per_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "recovered-cleanups"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    monkeypatch.setattr(project_code_executor, "_MAX_DIRECT_RUNNING_WORKERS", 1)
+    now = "2026-08-07T10:00:00Z"
+    before_head = _git(project, "rev-parse", "HEAD")
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    before_content = project_code_executor._project_content_fingerprint(project)
+    protected_support = project_code_executor._target_support_fingerprints(project)
+    governance = project_code_executor._runtime_support_governance(project)
+    recovered_attempts = []
+    for index in range(3):
+        attempt_id = f"recovered-attempt-{index}"
+        item = replace(
+            _item(project),
+            outbox_id=f"recovered-outbox-{index}",
+            task_id=f"recovered-task-{index}",
+            attempt_id=attempt_id,
+            command_id=f"recovered-command-{index}",
+        )
+        created, _record = adapter._journal.create(
+            item=item,
+            project_root=str(project),
+            before_tree=before_tree,
+            before_content=before_content,
+            before_head=before_head,
+            protected_support=protected_support,
+            governance=governance,
+            owner_id="dead-process",
+            now=now,
+        )
+        assert created is True
+        adapter._journal.start(attempt_id, owner_id="dead-process", now=now)
+        adapter._journal.finish(
+            attempt_id,
+            owner_id="dead-process",
+            outcome=TerminalOutcome.INTERRUPTED,
+            raw_status="interrupted_cleanup_pending",
+            summary=None,
+            error="EXECUTOR_PROCESS_RESTARTED",
+            now=now,
+        )
+        parent, worktree = project_code_executor._create_attempt_worktree(
+            project,
+            attempt_id,
+            before_head,
+        )
+        recovered_attempts.append((attempt_id, parent, worktree))
+
+    real_remove = project_code_executor._remove_attempt_worktree
+    startup_complete = False
+    cleanup_may_finish = Event()
+
+    def controlled_remove(root: Path, parent: Path, worktree: Path) -> None:
+        if not startup_complete:
+            raise RuntimeError("injected startup cleanup failure")
+        assert cleanup_may_finish.wait(5)
+        real_remove(root, parent, worktree)
+
+    monkeypatch.setattr(
+        project_code_executor,
+        "_remove_attempt_worktree",
+        controlled_remove,
+    )
+    assert await adapter.prepare_startup() == 0
+    startup_complete = True
+    assert len(adapter.retained_cleanup_attempt_ids()) == 3
+
+    class InstrumentedRetained(dict):
+        scanned = 0
+
+        def items(self):
+            for item in super().items():
+                self.scanned += 1
+                yield item
+
+    retained = InstrumentedRetained(adapter._retained_worktree_cleanups)
+    adapter._retained_worktree_cleanups = retained
+    real_ensure = adapter._ensure_attempt_cleanup_coordinator
+    started_coordinators: list[asyncio.Task[None]] = []
+
+    def instrumented_ensure(attempt_id, cleanup):
+        coordinator = real_ensure(attempt_id, cleanup)
+        if coordinator not in started_coordinators:
+            started_coordinators.append(coordinator)
+        return coordinator
+
+    monkeypatch.setattr(
+        adapter,
+        "_ensure_attempt_cleanup_coordinator",
+        instrumented_ensure,
+    )
+    fresh_item = replace(
+        _item(project),
+        outbox_id="fresh-outbox",
+        task_id="fresh-task",
+        attempt_id="fresh-attempt",
+        command_id="fresh-command",
+    )
+
+    try:
+        with pytest.raises(FormalTaskViolation) as exhausted:
+            await adapter.dispatch(fresh_item)
+        assert exhausted.value.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+        assert retained.scanned == 1
+        assert len(started_coordinators) == 1
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get("fresh-attempt") is None
+
+        cleanup_may_finish.set()
+        delivered = None
+        for _ in range(8):
+            if started_coordinators:
+                await asyncio.gather(
+                    started_coordinators[-1],
+                    return_exceptions=True,
+                )
+            before_started = len(started_coordinators)
+            try:
+                delivered = await adapter.dispatch(fresh_item)
+            except FormalTaskViolation as error:
+                assert error.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+                assert len(started_coordinators) - before_started <= 1
+                assert resolver.calls == []
+                continue
+            break
+        assert delivered is not None
+        assert delivered.executor_ref == "d0-project:fresh-attempt"
+        await _wait_direct_settled(adapter)
+        assert resolver.calls == [True]
+        assert len(executor.requests) == 1
+        assert adapter.retained_cleanup_attempt_ids() == ()
+        assert all(not parent.exists() for _attempt, parent, _worktree in recovered_attempts)
+        assert all(
+            not worktree.exists()
+            for _attempt, _parent, worktree in recovered_attempts
+        )
+    finally:
+        cleanup_may_finish.set()
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_running_cleanup_identity_counts_once_until_worker_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = [tmp_path / f"union-project-{index}" for index in range(3)]
+    for project in projects:
+        _git_project(project)
+    executors = [
+        _DirectProjectExecutor(project, "wait" if index == 1 else "success")
+        for index, project in enumerate(projects)
+    ]
+    resolver = _MappedResolver(
+        {
+            project.resolve(): _direct_binding(project, executor)
+            for project, executor in zip(projects, executors, strict=True)
+        }
+    )
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    monkeypatch.setattr(project_code_executor, "_MAX_DIRECT_RUNNING_WORKERS", 2)
+    real_remove = project_code_executor._remove_attempt_worktree
+    first_cleanup_entered = Event()
+    first_cleanup_may_finish = Event()
+
+    def block_first_cleanup(root: Path, parent: Path, worktree: Path) -> None:
+        if not first_cleanup_entered.is_set():
+            first_cleanup_entered.set()
+            assert first_cleanup_may_finish.wait(5)
+        real_remove(root, parent, worktree)
+
+    monkeypatch.setattr(
+        project_code_executor,
+        "_remove_attempt_worktree",
+        block_first_cleanup,
+    )
+    items = [
+        replace(
+            _item(project),
+            outbox_id=f"union-outbox-{index}",
+            task_id=f"union-task-{index}",
+            attempt_id=f"union-attempt-{index}",
+            command_id=f"union-command-{index}",
+        )
+        for index, project in enumerate(projects)
+    ]
+
+    try:
+        await adapter.dispatch(items[0])
+        assert await asyncio.to_thread(first_cleanup_entered.wait, 5)
+        assert "union-attempt-0" in adapter._running
+        assert adapter.retained_cleanup_attempt_ids() == ("union-attempt-0",)
+
+        await adapter.dispatch(items[1])
+        await asyncio.wait_for(executors[1].started.wait(), timeout=2)
+        assert resolver.calls == [projects[0].resolve(), projects[1].resolve()]
+
+        with pytest.raises(FormalTaskViolation) as exhausted:
+            await adapter.dispatch(items[2])
+        assert exhausted.value.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+        assert resolver.calls == [projects[0].resolve(), projects[1].resolve()]
+        assert executors[2].requests == []
+        assert adapter._journal.get("union-attempt-2") is None
+    finally:
+        first_cleanup_may_finish.set()
+        await adapter.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["cancel", "close"])
 async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isolated(
     tmp_path: Path,
@@ -4033,6 +4342,93 @@ async def test_direct_cancel_flag_crosses_process_lease_without_widening(
 
 
 @pytest.mark.asyncio
+async def test_persisted_user_cancel_wins_normal_agent_completion_and_replays(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    allow_completion = asyncio.Event()
+
+    class CompletingExecutor(_DirectProjectExecutor):
+        async def process_background_code_task_stream(self, request):
+            self.requests.append(request)
+            self.started.set()
+            await allow_completion.wait()
+            worktree = Path(request.params["project_dir"]).resolve()
+            (worktree / "result.txt").write_text("must not apply\n", encoding="utf-8")
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": "done"},
+                is_complete=True,
+            )
+            self.finished.set()
+
+    database = tmp_path / "p3.sqlite3"
+    executor = CompletingExecutor(project)
+    owner = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        heartbeat_interval=60,
+    )
+    observer = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        heartbeat_interval=60,
+    )
+    delivered = await owner.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    cancel_item = replace(
+        _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+        executor_ref=delivered.executor_ref,
+    )
+
+    with pytest.raises(FormalTaskViolation) as pending:
+        await observer.cancel(cancel_item)
+    assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    persisted = project_code_executor._DirectProjectAttemptJournal(database).get(
+        "attempt-1"
+    )
+    assert persisted is not None
+    assert persisted.cancel_requested is True
+    assert persisted.state is FormalAttemptState.RUNNING
+
+    allow_completion.set()
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(owner)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await observer.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert terminal.observations[-1].raw_status == "cancelled"
+    assert terminal.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED"
+    assert not (project / "result.txt").exists()
+    assert len(executor.requests) == 1
+
+    replay_before = owner._journal.get("attempt-1")
+    replayed = await observer.cancel(cancel_item)
+    replay_after = owner._journal.get("attempt-1")
+    assert replayed.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert replay_after == replay_before
+    assert len(executor.requests) == 1
+
+    restarted = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+    )
+    assert await restarted.prepare_startup() == 0
+    reopened = await restarted.status(task, attempt)
+    assert isinstance(reopened, ExecutorDeliveryResult)
+    assert reopened.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert reopened.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED"
+    assert not (project / "result.txt").exists()
+    await owner.close()
+    await observer.close()
+    await restarted.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("behavior", "expected_error"),
     [
@@ -4192,6 +4588,87 @@ async def test_direct_executor_rejects_git_visible_symlink_before_agent_effects(
     assert marker.read_text("utf-8") == "unchanged\n"
     assert resolver.calls == []
     assert executor.requests == []
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_rejects_33_dirty_paths_before_any_attempt_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    for index in range(33):
+        (project / f"dirty-{index:02d}.txt").write_text(
+            f"dirty {index}\n",
+            encoding="utf-8",
+        )
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    database = tmp_path / "p3.sqlite3"
+    adapter = DirectProjectCodeExecutorAdapter(resolver, database)
+    cleanup_redrives: list[str] = []
+    monkeypatch.setattr(
+        adapter,
+        "_redrive_retained_worktree_cleanups",
+        lambda: cleanup_redrives.append("redriven"),
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.dispatch(_item(project))
+
+    assert raised.value.reason == "TARGET_CHANGE_VALIDATION_FAILED"
+    assert resolver.calls == []
+    assert executor.requests == []
+    assert adapter._journal.get("attempt-1") is None
+    assert cleanup_redrives == []
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_rejects_oversize_file_before_any_attempt_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    (project / "oversize.bin").write_bytes(b"x" * (1024 * 1024 + 1))
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "p3.sqlite3",
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.dispatch(_item(project))
+
+    assert raised.value.reason == "TARGET_CHANGE_VALIDATION_FAILED"
+    assert "content_bytes_per_path limit=1048576" in str(raised.value)
+    assert resolver.calls == []
+    assert executor.requests == []
+    assert adapter._journal.get("attempt-1") is None
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_post_agent_overflow_fails_validation_without_target_apply(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "too_many_source_paths")
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].error == "TARGET_CHANGE_VALIDATION_FAILED"
+    assert list(project.glob("result-*.txt")) == []
 
 
 @pytest.mark.asyncio

@@ -617,7 +617,6 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
   assert.equal(fake.contexts[0].state, 'closed');
   assert.equal(fake.document.listenerCount('visibilitychange'), 0);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('capture handoff rejects an input track that is already muted and releases every resource', async () => {
@@ -724,7 +723,6 @@ test('active microphone permission revocation stops the exact capture with a sta
   assert.equal(status.listenerCount('change'), 0);
   assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
   assert.equal(fake.contexts[0].state, 'closed');
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('pending capture revocation rejects with MICROPHONE_PERMISSION_REVOKED and never allocates an AudioContext', async () => {
@@ -1050,7 +1048,6 @@ test('active permission revocation still releases every capture resource when li
   assert.equal(fake.contexts[0].sourceNode.disconnectCount, 1);
   assert.equal(fake.worklets[0].disconnectCount, 1);
   assert.equal(fake.worklets[0].port.closeCount, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
 
   deviceRemoveThrows = false;
   permission.state = 'granted';
@@ -1653,7 +1650,6 @@ test('close immediately fences playout while slow capture cleanup continues', as
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), false);
   assert.equal(playoutContext.bufferSources.length, 1);
   assert.equal(playoutContext.closeCount, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
   source.end();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
   await nextTask();
@@ -1683,7 +1679,6 @@ test('close keeps a failed final state when active source cleanup is unknown whi
   const lateEnded = source.onended;
   source.stopThrows = true;
   source.disconnectThrows = true;
-  const businessCancelCountBefore = adapter.businessCancelCount();
 
   await assert.rejects(
     () => adapter.close(),
@@ -1704,7 +1699,6 @@ test('close keeps a failed final state when active source cleanup is unknown whi
   assert.equal(fake.contexts[1].closeCount, 1);
   lateEnded();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
-  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
   await assert.rejects(
     () => adapter.unlockPlayout(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'ADAPTER_CLOSED'
@@ -2098,7 +2092,6 @@ test('exact output loss fences the current response with zero business cancel an
   fake.mediaDevices.emit('devicechange');
   await nextTask();
   assert.equal(events.some(event => event.state === 'failed' && event.reason === 'audio_output_selection_lost'), true);
-  assert.equal(adapter.businessCancelCount(), 0);
   assert.equal(fake.contexts[0].bufferSources[0].stopCount, 1);
   assert.equal(fake.mediaDevices.constraints.length, 0);
   assert.equal(fake.mediaDevices.listenerCount('devicechange'), 0);
@@ -2184,7 +2177,6 @@ test('playout schedules exact current response and acknowledges only contiguous 
   const completed = events.filter(event => event.reason === 'render_completed');
   assert.equal(completed.length, 1);
   assert.equal(completed[0].through_seq, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('playout unlock exposes the actual PCM rate and reports idle context loss', async () => {
@@ -2250,7 +2242,6 @@ test('playout unlock rejects an invalid AudioContext rate before playback effect
   );
   assert.equal(fake.contexts[0].buffers.length, 0);
   assert.equal(fake.contexts[0].bufferSources.length, 0);
-  assert.equal(adapter.businessCancelCount(), 0);
   assert.equal(adapter.playoutState(), 'failed');
   assert.equal(events.at(-1).reason, 'invalid_audio_context_rate');
   await adapter.close();
@@ -2311,7 +2302,6 @@ test('opaque response IDs compare structurally and observer events expose only n
   assert.equal(fake.contexts[0].buffers.length, 0);
   assert.equal(fake.contexts[0].bufferSources.length, 0);
   assert.equal(adapter.enqueuePlayout(pcmChunk(activeResponse, 0)), true);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('an invalid replacement response leaves the current browser playback active', async () => {
@@ -2333,7 +2323,7 @@ test('an invalid replacement response leaves the current browser playback active
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
 });
 
-test('browser source setup failure clears the accepted chunk without ACK or business cancel', async () => {
+test('browser source setup failure clears the accepted chunk without ACK or retained audio', async () => {
   const fake = fakeEnvironment();
   const events = [];
   const adapter = new BrowserAudioIOAdapter({
@@ -2350,7 +2340,6 @@ test('browser source setup failure clears the accepted chunk without ACK or busi
   );
   assert.equal(adapter.stopPlayout(firstResponse), false);
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('source setup cleanup uncertainty latches the same fail-closed playout admission fault', async () => {
@@ -2388,7 +2377,6 @@ test('source setup cleanup uncertainty latches the same fail-closed playout admi
   );
   assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), false);
   assert.equal(fake.contexts[0].bufferSources.length, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
   await assert.rejects(
     () => adapter.close(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
@@ -2396,7 +2384,7 @@ test('source setup cleanup uncertainty latches the same fail-closed playout admi
   assert.equal(fake.contexts[0].closeCount, 1);
 });
 
-test('exact local stop fences late playout callbacks without widening business cancel', async () => {
+test('exact local stop fences late playout callbacks without restoring audio', async () => {
   const fake = fakeEnvironment();
   const events = [];
   const adapter = new BrowserAudioIOAdapter({
@@ -2414,7 +2402,6 @@ test('exact local stop fences late playout callbacks without widening business c
   assert.equal(source.stopCount, 1);
   source.end();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('playout without a schedule observer performs only the availability check', async () => {
@@ -2443,7 +2430,7 @@ test('playout without a schedule observer performs only the availability check',
   assert.equal(scheduleObserverReads, 1);
 });
 
-test('exact local stop confirms the fenced tuple, prior cursors, source calls, timing, and zero business cancel', async () => {
+test('exact local stop confirms the fenced tuple, prior cursors, source calls, and timing', async () => {
   const fake = fakeEnvironment();
   const events = [];
   let now = 100;
@@ -2490,9 +2477,6 @@ test('exact local stop confirms the fenced tuple, prior cursors, source calls, t
   });
   assert.equal(receipt.physical_heard, 'unproven');
   assert.equal(receipt.physical_silence, 'unproven');
-  assert.equal(receipt.business_cancel_count_before, 0);
-  assert.equal(receipt.business_cancel_count_after, 0);
-  assert.equal(receipt.business_cancel_count_delta, 0);
   assert.equal(Object.isFrozen(receipt), true);
   lateEnded();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 1);
@@ -2503,7 +2487,6 @@ test('exact local stop confirms the fenced tuple, prior cursors, source calls, t
   assert.equal(repeated.browser_sources.stop_request.status, 'not_attempted');
   assert.equal(context.bufferSources[1].stopCount, 1);
   assert.equal(context.bufferSources[2].stopCount, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('exact local stop distinguishes mismatch, no target, disabled, and closed without audio effects', async () => {
@@ -2554,7 +2537,6 @@ test('exact local stop distinguishes mismatch, no target, disabled, and closed w
   assert.equal(flagOff.local_fence_established, false);
   assert.equal(disabledFake.contexts.length, 0);
   assert.equal(disabledFake.mediaDevices.constraints.length, 0);
-  assert.equal(disabled.businessCancelCount(), 0);
 });
 
 test('source stop and disconnect failures return stable unknown truth after the local fence', async () => {
@@ -2573,7 +2555,6 @@ test('source stop and disconnect failures return stable unknown truth after the 
   const lateEnded = source.onended;
   source.stopThrows = true;
   source.disconnectThrows = true;
-  const businessCancelCountBefore = adapter.businessCancelCount();
 
   const receipt = adapter.stopPlayoutExact(firstResponse, 'fault_injection');
 
@@ -2586,7 +2567,6 @@ test('source stop and disconnect failures return stable unknown truth after the 
   });
   assert.equal(receipt.physical_heard, 'unproven');
   assert.equal(receipt.physical_silence, 'unproven');
-  assert.equal(receipt.business_cancel_count_delta, 0);
   assert.equal(adapter.playoutState(), 'failed');
   assert.equal(events.at(-1).reason, 'fault_injection_source_unknown');
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), false);
@@ -2605,7 +2585,6 @@ test('source stop and disconnect failures return stable unknown truth after the 
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
   assert.equal(source.stopCount, 1);
   assert.equal(source.disconnectCount, 1);
-  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
   await assert.rejects(
     () => adapter.close(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' && error.retriable === false
@@ -2686,7 +2665,6 @@ test('stop observer reentrancy can start one replacement without reviving the fe
   lateEnded();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
   assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 1)), true);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('response replacement observer reentrancy cannot restore an older playout authority', async () => {
@@ -2714,7 +2692,6 @@ test('response replacement observer reentrancy cannot restore an older playout a
   assert.equal(adapter.stopPlayoutExact(firstResponse).outcome, 'target_mismatch');
   assert.equal(adapter.stopPlayoutExact(secondResponse).outcome, 'target_mismatch');
   assert.equal(fake.contexts[0].bufferSources[0].stopCount, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('response replacement fails closed when prior browser source cleanup is unknown', async () => {
@@ -2744,7 +2721,6 @@ test('response replacement fails closed when prior browser source cleanup is unk
   const lateEnded = source.onended;
   source.stopThrows = true;
   source.disconnectThrows = true;
-  const businessCancelCountBefore = adapter.businessCancelCount();
 
   assert.throws(
     () => adapter.beginPlayout(secondResponse),
@@ -2765,7 +2741,6 @@ test('response replacement fails closed when prior browser source cleanup is unk
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
   assert.equal(source.stopCount, 1);
   assert.equal(source.disconnectCount, 1);
-  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
   await assert.rejects(
     () => adapter.close(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
@@ -2800,7 +2775,6 @@ test('an invalid reentrant begin does not cancel the playout that emitted the ob
   assert.equal(rejectedReason, 'PLAYOUT_BEGIN_FAILED');
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
   assert.equal(fake.contexts[0].bufferSources.length, 1);
-  assert.equal(adapter.businessCancelCount(), 0);
 });
 
 test('playout remains visibly locked when AudioContext cannot resume', async () => {
@@ -2848,7 +2822,6 @@ test('page hidden synchronously fences exact playout and visible requires an exp
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
   const source = fake.contexts[0].bufferSources[0];
   const lateEnded = source.onended;
-  const businessCancelCountBefore = adapter.businessCancelCount();
 
   fake.document.visibilityState = 'hidden';
   fake.document.emit('visibilitychange');
@@ -2861,7 +2834,6 @@ test('page hidden synchronously fences exact playout and visible requires an exp
   assert.equal(fake.document.listenerCount('visibilitychange'), 1);
   lateEnded();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
-  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
 
   const eventCountBeforeVisible = events.length;
   fake.document.visibilityState = 'visible';
@@ -2912,7 +2884,6 @@ test('page hidden fences a pending playout unlock and never auto-resumes it on v
     events.some(event => event.reason === 'playout_unlocked'),
     false
   );
-  assert.equal(adapter.businessCancelCount(), 0);
   await adapter.unlockPlayout();
   assert.equal(events.filter(event => event.reason === 'playout_unlocked').length, 1);
   await adapter.close();
@@ -2936,7 +2907,6 @@ test('visibility listener partial-add failure is released before browser media o
     assert.equal(fake.document.listenerCount('visibilitychange'), 0);
     assert.equal(fake.mediaDevices.constraints.length, 0);
     assert.equal(fake.contexts.length, 0);
-    assert.equal(adapter.businessCancelCount(), 0);
     await adapter.close();
   }
 });
@@ -2972,7 +2942,6 @@ test('close attempts every capture and playout release when visibility listener 
   assert.equal(context.closeCount, 1);
   assert.equal(adapter.playoutState(), 'failed');
   assert.equal(events.at(-1).reason, 'adapter_close_failed');
-  assert.equal(adapter.businessCancelCount(), 0);
 
   const stateAfterClose = adapter.playoutState();
   fake.document.visibilityState = 'hidden';
@@ -3000,7 +2969,6 @@ test('a pending unlock inherits active source cleanup uncertainty before publish
   source.stopThrows = true;
   source.disconnectThrows = true;
   const readyCountBefore = events.filter(event => event.reason === 'playout_unlocked').length;
-  const businessCancelCountBefore = adapter.businessCancelCount();
 
   const unlock = adapter.unlockPlayout();
   await nextTask();
@@ -3018,7 +2986,6 @@ test('a pending unlock inherits active source cleanup uncertainty before publish
   assert.equal(context.bufferSources.length, 1);
   assert.equal(source.stopCount, 1);
   assert.equal(source.disconnectCount, 1);
-  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
 });
 
 test('a playout-ready observer cleanup fault rejects unlock and latches every later admission closed', async () => {
@@ -3045,7 +3012,6 @@ test('a playout-ready observer cleanup fault rejects unlock and latches every la
   const source = fake.contexts[0].bufferSources[0];
   source.stopThrows = true;
   source.disconnectThrows = true;
-  const businessCancelCountBefore = adapter.businessCancelCount();
   triggerCleanup = true;
 
   await assert.rejects(
@@ -3073,7 +3039,6 @@ test('a playout-ready observer cleanup fault rejects unlock and latches every la
   assert.equal(events.at(-1).reason, 'adapter_closed_source_unknown');
   assert.equal(source.stopCount, 1);
   assert.equal(source.disconnectCount, 1);
-  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
 });
 
 test('close fences a pending playout unlock and remains terminal', async () => {

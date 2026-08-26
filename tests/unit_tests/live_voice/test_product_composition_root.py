@@ -318,7 +318,6 @@ async def test_adapter_transfers_partial_cleanup_ownership_to_root() -> None:
 
     async def p2(_: ProductCompositionContext) -> ProductSegmentActivation:
         raise ProductSegmentActivationError(
-            "P2_PARTIAL_ACTIVATION_FAILED",
             cleanup_lease=partial,
         )
 
@@ -341,6 +340,39 @@ async def test_adapter_transfers_partial_cleanup_ownership_to_root() -> None:
     await cleanup.close()
     assert cleanup.closed is True
     assert events == ["close:p2-partial", "close:authority", "close:p2-partial"]
+
+
+@pytest.mark.asyncio
+async def test_segment_failure_redacts_private_text_to_existing_generic_reason() -> None:
+    private_marker = "private-adapter-path:C:/secret/customer"
+
+    async def authority(_: ProductCompositionContext) -> ProductSegmentActivation:
+        return ProductSegmentActivation(
+            _formal(ProductSegment.AUTHORITY), _Lease("authority", [])
+        )
+
+    async def p2(_: ProductCompositionContext) -> ProductSegmentActivation:
+        try:
+            raise RuntimeError(private_marker)
+        except RuntimeError as error:
+            raise ProductSegmentActivationError() from error
+
+    root = ProductCompositionRoot(
+        enabled=True,
+        registrations=(
+            _registration(ProductSegment.AUTHORITY, authority),
+            _registration(ProductSegment.P2_AGENT_INTERACTION, p2),
+        ),
+    )
+
+    with pytest.raises(ProductCompositionActivationError) as caught:
+        await root.activate(CONTEXT)
+
+    assert caught.value.reason == "ADAPTER_ACTIVATION_FAILED"
+    assert private_marker not in str(caught.value)
+    assert private_marker not in caught.value.reason
+    assert caught.value.__cause__ is not None
+    assert not hasattr(caught.value.__cause__, "reason")
 
 
 @pytest.mark.asyncio

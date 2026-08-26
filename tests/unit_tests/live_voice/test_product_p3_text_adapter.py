@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -50,8 +51,11 @@ from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
 )
 from jiuwenswarm.server.live_voice.task_event_subscription import (
     TaskEventSubscription,
+    TaskEventSubscriptionState,
 )
 from jiuwenswarm.server.live_voice.task_progress_return import (
+    TaskEventAuthorityProgressSource,
+    TaskProgressHandoffKind,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
     TaskProgressReturnActivation,
@@ -62,6 +66,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressSourceDecision,
     TaskProgressTextEvent,
 )
+from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 
 
 NOW = "2030-01-01T00:00:00Z"
@@ -206,6 +211,31 @@ class _SubscriptionFactory:
         return cast(TaskEventSubscription, self.subscription)
 
 
+class _PreparedSource:
+    handoff_kind = TaskProgressHandoffKind.PACKAGE_CONTRACT_TEST
+    evidence_id = "package-contract:prepared-source:strict-revalidation"
+
+    def __init__(
+        self,
+        subscription: _Subscription,
+        *,
+        evidence_id: str | None = None,
+    ) -> None:
+        self.subscription = cast(TaskEventSubscription, subscription)
+        self._subscription = subscription
+        if evidence_id is not None:
+            self.evidence_id = evidence_id
+
+    async def start(self) -> bool:
+        return await self._subscription.start()
+
+    async def next_event(self) -> PersistentTaskEvent:
+        return await self._subscription.next_event()
+
+    async def close(self) -> None:
+        await self._subscription.close()
+
+
 def _event(
     seq: int,
     event_type: str,
@@ -297,6 +327,7 @@ def _adapter(
     enabled: bool = True,
     owner: _QueryOwner | None = None,
     factory: _SubscriptionFactory | None = None,
+    prepared_source_factory=None,
     current_generation: int = 7,
     generation_is_current=None,
     cleanup_capacity: int = 64,
@@ -321,6 +352,7 @@ def _adapter(
             authority=authority_adapter,
             query_owner=query_owner,
             subscription_factory=subscription_factory,
+            prepared_source_factory=prepared_source_factory,
             generation_is_current=(
                 generation_is_current
                 if generation_is_current is not None
@@ -686,6 +718,97 @@ async def test_voice_is_hard_unavailable_with_zero_authority_source_or_sink_effe
     assert resolver.calls == []
     assert owner.calls == []
     assert factory.calls == []
+    assert text_events == []
+    assert voice_effects == []
+
+
+@pytest.mark.asyncio
+async def test_prepared_voice_disabled_handoff_returns_typed_inactive_and_detaches() -> (
+    None
+):
+    """B19: a disabled prepared handoff is typed inactive and detaches exactly."""
+
+    resolver = _Resolver([_candidate("task.events", task_id="task-1")])
+    subscription = _Subscription()
+    prepared_calls: list[tuple[object, object]] = []
+    text_events: list[TaskProgressTextEvent] = []
+    voice_effects: list[object] = []
+
+    def prepared_source_factory(authorization, binding):
+        prepared_calls.append((authorization, binding))
+        return _PreparedSource(subscription)
+
+    adapter, owner, ordinary_factory = _adapter(
+        resolver,
+        factory=_SubscriptionFactory(subscription),
+        prepared_source_factory=prepared_source_factory,
+        text_events=text_events,
+        voice_effects=voice_effects,
+    )
+    activation = await adapter.activate_progress(
+        _progress_request(origin_kind=TaskProgressOriginKind.VOICE)
+    )
+    assert activation.active is False
+    assert (
+        activation.reason_id
+        == TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE.value
+    )
+    assert activation.cleanup is not None
+    await activation.cleanup.close()
+
+    assert len(prepared_calls) == 1
+    assert ordinary_factory.calls == []
+    assert subscription.start_calls == 0
+    assert subscription.close_calls == 1
+    assert owner.calls == []
+    assert text_events == []
+    assert voice_effects == []
+
+
+@pytest.mark.asyncio
+async def test_prepared_voice_authority_source_activates_and_detaches_without_sink(
+    tmp_path: Path,
+) -> None:
+    """L11: the exact authority source is usable and start failure detaches."""
+
+    resolver = _Resolver([_candidate("task.events", task_id="task-1")])
+    subscription = _Subscription()
+    prepared_sources: list[TaskEventAuthorityProgressSource] = []
+    text_events: list[TaskProgressTextEvent] = []
+    voice_effects: list[object] = []
+
+    def prepared_source_factory(authorization, binding):
+        source = TaskEventAuthorityProgressSource(
+            store=SqliteTaskStore(tmp_path / "prepared-source.sqlite"),
+            authorization=authorization,
+            scope=binding.scope,
+            task_id=binding.task_id,
+        )
+        prepared_sources.append(source)
+        return source
+
+    adapter, owner, ordinary_factory = _adapter(
+        resolver,
+        factory=_SubscriptionFactory(subscription),
+        prepared_source_factory=prepared_source_factory,
+        text_events=text_events,
+        voice_effects=voice_effects,
+    )
+    activation = await adapter.activate_progress(
+        _progress_request(origin_kind=TaskProgressOriginKind.VOICE)
+    )
+    assert activation.active is False
+    assert activation.reason_id == TaskProgressReturnReason.HANDOFF_REJECTED.value
+    assert activation.cleanup is not None
+    await activation.cleanup.close()
+
+    assert len(prepared_sources) == 1
+    snapshot = prepared_sources[0].subscription.snapshot()
+    assert snapshot.state is TaskEventSubscriptionState.CLOSED
+    assert ordinary_factory.calls == []
+    assert subscription.start_calls == 0
+    assert subscription.close_calls == 0
+    assert owner.calls == []
     assert text_events == []
     assert voice_effects == []
 

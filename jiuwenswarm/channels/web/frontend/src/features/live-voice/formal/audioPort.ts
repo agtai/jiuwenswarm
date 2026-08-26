@@ -185,17 +185,49 @@ interface PlaybackState {
   stopped: boolean;
 }
 
+const EXACT_RESPONSE_ID_CAPACITY = 128;
+
+class ConservativeIdentityFence {
+  readonly #bits = new Uint8Array(8192);
+
+  #indices(value: string): readonly number[] {
+    return [0x811c9dc5, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35].map(seed => {
+      let hash = seed;
+      for (let index = 0; index < value.length; index += 1) {
+        hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+      }
+      return (hash >>> 0) % (this.#bits.length * 8);
+    });
+  }
+
+  add(value: string): void {
+    for (const index of this.#indices(value)) this.#bits[index >> 3] |= 1 << (index & 7);
+  }
+
+  has(value: string): boolean {
+    return this.#indices(value).every(index => (this.#bits[index >> 3] & (1 << (index & 7))) !== 0);
+  }
+}
+
 export class AudioPort {
   readonly #byInteraction = new Map<string, PlaybackState>();
   readonly #seenResponseIds = new Set<string>();
-  readonly #lastGeneration = new Map<string, number>();
+  readonly #retiredResponseIds = new ConservativeIdentityFence();
+  // This exact map contains only interactions that have not reached the
+  // authoritative close seam. stopLocal releases playback state but preserves
+  // the exact high-water needed for a later replacement or terminal close.
+  readonly #latestResponseByInteraction = new Map<string, Readonly<AudioResponseRef>>();
+  readonly #closedInteractions = new ConservativeIdentityFence();
 
   begin(input: Readonly<AudioResponseRef>): void {
     const ref = normalizeRef(input);
-    if (this.#seenResponseIds.has(ref.response_id)) {
+    if (this.#closedInteractions.has(ref.interaction_id)) {
+      throw new AudioPortViolation('RESPONSE_GENERATION_NOT_INCREASING', 'a terminal interaction cannot be revived');
+    }
+    if (this.#seenResponseIds.has(ref.response_id) || this.#retiredResponseIds.has(ref.response_id)) {
       throw new AudioPortViolation('RESPONSE_ID_REUSED', 'response identifiers cannot be reused');
     }
-    const last = this.#lastGeneration.get(ref.interaction_id) ?? -1;
+    const last = this.#latestResponseByInteraction.get(ref.interaction_id)?.response_generation ?? -1;
     if (ref.response_generation <= last) {
       throw new AudioPortViolation('RESPONSE_GENERATION_NOT_INCREASING', 'response generation must increase');
     }
@@ -204,8 +236,8 @@ export class AudioPort {
       prior.stopped = true;
       prior.chunks.length = 0;
     }
-    this.#seenResponseIds.add(ref.response_id);
-    this.#lastGeneration.set(ref.interaction_id, ref.response_generation);
+    this.#retainResponseId(ref.response_id);
+    this.#latestResponseByInteraction.set(ref.interaction_id, ref);
     this.#byInteraction.set(ref.interaction_id, {
       ref,
       chunks: [],
@@ -282,10 +314,34 @@ export class AudioPort {
     if (state === undefined || refKey(state.ref) !== refKey(ref) || state.stopped) return false;
     state.stopped = true;
     state.chunks.length = 0;
+    this.#byInteraction.delete(ref.interaction_id);
     return true;
   }
 
-  businessCancelCount(): number {
-    return 0;
+  closeInteraction(input: Readonly<AudioResponseRef>): boolean {
+    const ref = normalizeRef(input);
+    const latest = this.#latestResponseByInteraction.get(ref.interaction_id);
+    if (latest === undefined || refKey(latest) !== refKey(ref)) return false;
+    const active = this.#byInteraction.get(ref.interaction_id);
+    if (active !== undefined && refKey(active.ref) !== refKey(ref)) return false;
+    this.#closedInteractions.add(ref.interaction_id);
+    if (active !== undefined) {
+      active.stopped = true;
+      active.chunks.length = 0;
+      this.#byInteraction.delete(ref.interaction_id);
+    }
+    this.#latestResponseByInteraction.delete(ref.interaction_id);
+    return true;
+  }
+
+  #retainResponseId(responseId: string): void {
+    if (this.#seenResponseIds.size >= EXACT_RESPONSE_ID_CAPACITY) {
+      const oldest = this.#seenResponseIds.values().next().value;
+      if (oldest !== undefined) {
+        this.#retiredResponseIds.add(oldest);
+        this.#seenResponseIds.delete(oldest);
+      }
+    }
+    this.#seenResponseIds.add(responseId);
   }
 }

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -63,6 +64,14 @@ FIXTURES = Path(__file__).parents[2] / "fixtures" / "live_voice_contract_v2"
 
 def _load(name: str) -> dict[str, object]:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _capture_contract_violation(operation: object) -> dict[str, object]:
+    try:
+        operation()  # type: ignore[operator]
+    except ContractViolation as raised:
+        return {"reason": raised.reason, "code": raised.code.value}
+    return {"accepted": True}
 
 
 def _registry(fixture: dict[str, object]) -> IdentityRegistry:
@@ -2161,3 +2170,166 @@ def test_strict_json_rejects_non_json_cycles_surrogates_and_unsafe_integers() ->
     with pytest.raises(ContractViolation) as invalid_integer:
         CommandEnvelope.from_dict(unsafe)
     assert invalid_integer.value.reason == "INVALID_SAFE_INTEGER"
+
+
+def test_strict_review_shared_literal_corpus_has_exact_python_identity_reasons_and_codes() -> (
+    None
+):
+    corpus = _load("strict_review_stage2_parity.json")
+    identity = corpus["identity"]
+    scope = ScopeRef.from_dict(identity["scope"])
+    record = identity["record"]
+    identities = IdentityRegistry()
+    identities.register(
+        IdentityRecord(
+            IdentityRef.from_dict(record["ref"]),
+            scope,
+            tuple(IdentityRef.from_dict(parent) for parent in record["parents"]),
+        )
+    )
+    registry_before = (
+        identities._records.copy(),
+        identities._kind_by_id.copy(),
+    )
+    observed = {
+        "conflict": _capture_contract_violation(
+            lambda: identities.register(
+                IdentityRecord(
+                    IdentityRef.from_dict(record["ref"]),
+                    ScopeRef.from_dict(identity["conflicting_scope"]),
+                    (),
+                )
+            )
+        ),
+        "missing": _capture_contract_violation(
+            lambda: identities.require(IdentityRef.from_dict(identity["missing_ref"]))
+        ),
+    }
+    assert (
+        identities._records,
+        identities._kind_by_id,
+    ) == registry_before
+    assert observed == identity["expected"]
+
+
+def test_strict_review_shared_literal_corpus_rejects_every_required_text_unicode_whitespace_identically_in_python() -> (
+    None
+):
+    corpus = _load("strict_review_stage2_parity.json")
+    fixture = _load("critical_kernel.valid.json")
+    observed = []
+
+    for item in corpus["required_text"]:
+        command = copy.deepcopy(fixture["command"])
+        command["request_id"] = item["value"]
+        observed.append(
+            {
+                "name": item["name"],
+                "actual": _capture_contract_violation(
+                    lambda command=command: CommandEnvelope.from_dict(command)
+                ),
+                "expected": item["expected"],
+            }
+        )
+    assert [{"name": item["name"], **item["actual"]} for item in observed] == [
+        {"name": item["name"], **item["expected"]} for item in observed
+    ]
+
+
+def test_strict_review_shared_literal_corpus_rejects_illegal_progress_source_kind_before_authority_and_preserves_registry_in_python() -> (
+    None
+):
+    corpus = _load("strict_review_stage2_parity.json")
+    fixture = _load("work_progress.v2.json")
+    scope = ScopeRef.from_dict(fixture["scope"])
+    progress = copy.deepcopy(fixture["progress_events"][0]["payload"])
+    work_ref = IdentityRef.from_dict(progress["work_ref"])
+    identities = IdentityRegistry()
+    identities.register(IdentityRecord(work_ref, scope, ()))
+    invalid_source = corpus["invalid_progress_source"]
+    progress["source"]["source_work_ref"] = {
+        "kind": invalid_source["kind"],
+        "id": invalid_source["id"],
+    }
+    registry_before = (
+        identities._records.copy(),
+        identities._kind_by_id.copy(),
+    )
+    assert (
+        _capture_contract_violation(
+            lambda: WorkProgressEventV2.from_dict(
+                progress,
+                scope=scope,
+                identities=identities,
+            )
+        )
+        == invalid_source["expected"]
+    )
+    assert (
+        identities._records,
+        identities._kind_by_id,
+    ) == registry_before
+    assert identities.require(work_ref, scope=scope).scope == scope
+
+
+def test_strict_review_shared_literal_corpus_has_exact_malformed_json_reasons_and_codes_in_python() -> (
+    None
+):
+    corpus = _load("strict_review_stage2_parity.json")
+    fixture = _load("critical_kernel.valid.json")
+    observed = []
+    for item in corpus["malformed_json"]:
+        command = copy.deepcopy(fixture["command"])
+        if item["operation"] == "native_object_key":
+            command["payload"][7] = "forbidden"
+        elif item["operation"] == "non_finite_number":
+            command["payload"]["non_finite"] = float("nan")
+        elif item["operation"] == "duplicate_capability":
+            command["required_capabilities"] = ["task.create", "task.create"]
+        else:
+            raise AssertionError(f"unknown corpus operation {item['operation']}")
+        observed.append(
+            {
+                "name": item["name"],
+                "actual": _capture_contract_violation(
+                    lambda command=command: CommandEnvelope.from_dict(command)
+                ),
+                "expected": item["expected"],
+            }
+        )
+    assert [{"name": item["name"], **item["actual"]} for item in observed] == [
+        {"name": item["name"], **item["expected"]} for item in observed
+    ]
+
+
+def test_strict_review_p2_durable_text_corpus_has_exact_python_utf8_and_canonical_byte_counts() -> (
+    None
+):
+    corpus = _load("strict_review_stage2_parity.json")["p2_durable_committed_text"]
+    golden = copy.deepcopy(corpus["operation_without_text"])
+    golden["params"]["text"] = corpus["canonical_golden"]["text"]
+    golden_bytes = canonical_json_bytes(golden)
+    assert len(golden_bytes) == corpus["canonical_golden"][
+        "canonical_operation_utf8_bytes"
+    ]
+    assert hashlib.sha256(golden_bytes).hexdigest() == corpus["canonical_golden"][
+        "canonical_operation_sha256"
+    ]
+    for item in corpus["cases"]:
+        text = item["token"] * item["repeat"]
+        operation = copy.deepcopy(corpus["operation_without_text"])
+        operation["params"]["text"] = text
+        raw_bytes = len(text.encode("utf-8"))
+        operation_bytes = len(canonical_json_bytes(operation))
+        assert raw_bytes == item["raw_utf8_bytes"], item["name"]
+        assert operation_bytes == item["canonical_operation_utf8_bytes"], item["name"]
+        assert (
+            raw_bytes <= corpus["raw_text_max_utf8_bytes"]
+            and operation_bytes <= corpus["canonical_operation_max_utf8_bytes"]
+        ) is item["accepted"], item["name"]
+
+    invalid = copy.deepcopy(corpus["operation_without_text"])
+    invalid["params"]["text"] = "\ud800"
+    with pytest.raises(ContractViolation) as surrogate:
+        canonical_json_bytes(invalid)
+    assert surrogate.value.reason == "INVALID_UNICODE_SCALAR"

@@ -25,7 +25,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
+    FormalTaskState,
     FormalTaskViolation,
+    ReconciliationState,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
 )
@@ -836,17 +838,19 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
     )
     assert second_activated.ok is True, second_activated.payload
 
-    # ``accepted`` -> ``running`` is owned by the dispatch worker, so the query
-    # commit must bind only after that transition rather than relying on an
-    # incidental scheduling gap somewhere else in the activation path.
-    def _task_is_running() -> bool:
-        probe = _structured("task.status", task_id=task_id)
-        observed = core.query(probe.envelope, probe.authorization, now=NOW)
-        return bool(
-            observed.ok and observed.result["task"]["state"] == "running"
+    # ``accepted`` -> ``running`` and the initial executor reconciliation are
+    # both owned by the dispatch worker. Bind the query only after the durable
+    # authority reaches its stable no-observation state.
+    def _task_authority_is_stable() -> bool:
+        task = store.get_task(task_id, _scope())
+        return (
+            task.state is FormalTaskState.RUNNING
+            and task.reconciliation_state is ReconciliationState.PENDING
+            and task.reconciliation_reason
+            == "EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED"
         )
 
-    await _wait(_task_is_running)
+    await _wait(_task_authority_is_stable)
     status_text = f"task status {task_id}"
     status_origin = await registry.handle_p2_submit(
         params=_joint_product_task_commit(

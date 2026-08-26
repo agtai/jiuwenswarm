@@ -145,6 +145,100 @@ test('synthesis capability exposes batch-only fallback and unavailable failure',
   );
 });
 
+test('synthesis bounds 128 exact response IDs behind a conservative owner-lifetime fence', () => {
+  const fake = synthesisEnvironment();
+  const adapter = new BrowserSpeechSynthesisAdapter(fake.environment);
+  const callbacks = { onStart: () => {}, onEnd: () => {}, onError: () => {} };
+
+  for (let generation = 0; generation < 2_000; generation += 1) {
+    adapter.play(
+      {
+        response: {
+          interaction_id: 'bounded-browser-owner',
+          response_id: `bounded-response-${generation}`,
+          response_generation: generation,
+        },
+        spoken_text: `answer-${generation}`,
+      },
+      callbacks
+    );
+  }
+
+  const activeResponse = Object.freeze({
+    interaction_id: 'bounded-browser-owner',
+    response_id: 'bounded-response-1999',
+    response_generation: 1_999,
+  });
+  const beforeReject = Object.freeze({ utterances: fake.utterances.length, cancels: fake.cancelCount() });
+  assert.equal(adapter.isCurrent(activeResponse), true);
+  assert.throws(
+    () =>
+      adapter.play(
+        {
+          response: {
+            interaction_id: 'bounded-browser-owner',
+            response_id: 'bounded-response-0',
+            response_generation: 2_000,
+          },
+          spoken_text: 'retired replay',
+        },
+        callbacks
+      ),
+    error => error instanceof BrowserSpeechSynthesisAdapterViolation && error.reason === 'RESPONSE_ID_REUSED'
+  );
+  assert.deepEqual({ utterances: fake.utterances.length, cancels: fake.cancelCount() }, beforeReject);
+  assert.equal(adapter.isCurrent(activeResponse), true);
+
+  // This unused identity is a deterministic four-hash false positive only after
+  // bounded-response-1871 retires at the exact 128-entry boundary. A 129-entry
+  // exact ledger, or the old unbounded Set, admits it and causes playback effects.
+  assert.throws(
+    () =>
+      adapter.play(
+        {
+          response: {
+            interaction_id: 'bounded-browser-owner',
+            response_id: 'unused-boundary-candidate-1420439',
+            response_generation: 2_000,
+          },
+          spoken_text: 'conservative rejection',
+        },
+        callbacks
+      ),
+    error => error instanceof BrowserSpeechSynthesisAdapterViolation && error.reason === 'RESPONSE_ID_REUSED'
+  );
+  assert.deepEqual({ utterances: fake.utterances.length, cancels: fake.cancelCount() }, beforeReject);
+  assert.equal(adapter.isCurrent(activeResponse), true);
+
+  adapter.play(
+    {
+      response: {
+        interaction_id: 'bounded-browser-owner',
+        response_id: 'fresh-recovery-response',
+        response_generation: 2_000,
+      },
+      spoken_text: 'retry with a fresh identity',
+    },
+    callbacks
+  );
+  assert.equal(fake.utterances.length, beforeReject.utterances + 1);
+
+  const replacementFake = synthesisEnvironment();
+  const replacementOwner = new BrowserSpeechSynthesisAdapter(replacementFake.environment);
+  replacementOwner.play(
+    {
+      response: {
+        interaction_id: 'replacement-browser-owner',
+        response_id: 'unused-boundary-candidate-1420439',
+        response_generation: 0,
+      },
+      spoken_text: 'new owner lifetime',
+    },
+    callbacks
+  );
+  assert.equal(replacementFake.utterances.length, 1);
+});
+
 test('integrated route reports truthful owners, classes, and unsupported cursor features', () => {
   const fake = synthesisEnvironment();
   const route = createIntegratedP1Route({
@@ -172,6 +266,71 @@ test('integrated route reports truthful owners, classes, and unsupported cursor 
     synthesis_streaming: false,
     synthesis_audio_chunk_cursor: false,
   });
+});
+
+test('integrated route retains only the latest recognition and synthesis telemetry slots', () => {
+  const route = createIntegratedP1Route({
+    correlationId: 'correlation-bounded-slots',
+    observedAt: '2026-08-26T08:00:00Z',
+    recognitionAvailable: true,
+    synthesisEnvironment: synthesisEnvironment().environment,
+  });
+
+  route.beginRecognition();
+  route.finishRecognition();
+  route.speechPlayer.play('answer-0', { onStart: () => {}, onEnd: () => {}, onError: () => {} });
+  const [firstRecognition, firstSynthesis] = route.routeTelemetry();
+
+  for (let index = 1; index <= 256; index += 1) {
+    route.beginRecognition();
+    route.finishRecognition();
+    route.speechPlayer.play(`answer-${index}`, { onStart: () => {}, onEnd: () => {}, onError: () => {} });
+  }
+
+  const telemetry = route.routeTelemetry();
+  assert.equal(telemetry.length, 2);
+  assert.deepEqual(
+    telemetry.map(item => item.segment_id),
+    ['p1.browser_recognition', 'p1.browser_synthesis']
+  );
+  assert.notStrictEqual(telemetry[0], firstRecognition);
+  assert.notStrictEqual(telemetry[1], firstSynthesis);
+});
+
+test('integrated route telemetry uses fixed slot order and omits unobserved segments', () => {
+  const synthesisOnly = createIntegratedP1Route({
+    correlationId: 'correlation-synthesis-only',
+    recognitionAvailable: true,
+    synthesisEnvironment: synthesisEnvironment().environment,
+  });
+  synthesisOnly.speechPlayer.play('answer', { onStart: () => {}, onEnd: () => {}, onError: () => {} });
+  assert.deepEqual(
+    synthesisOnly.routeTelemetry().map(item => item.segment_id),
+    ['p1.browser_synthesis']
+  );
+
+  const synthesisFirst = createIntegratedP1Route({
+    correlationId: 'correlation-synthesis-first',
+    recognitionAvailable: true,
+    synthesisEnvironment: synthesisEnvironment().environment,
+  });
+  synthesisFirst.speechPlayer.play('answer', { onStart: () => {}, onEnd: () => {}, onError: () => {} });
+  synthesisFirst.beginRecognition();
+  assert.deepEqual(
+    synthesisFirst.routeTelemetry().map(item => item.segment_id),
+    ['p1.browser_recognition', 'p1.browser_synthesis']
+  );
+
+  const recognitionOnly = createIntegratedP1Route({
+    correlationId: 'correlation-recognition-only',
+    recognitionAvailable: true,
+    synthesisEnvironment: synthesisEnvironment().environment,
+  });
+  recognitionOnly.beginRecognition();
+  assert.deepEqual(
+    recognitionOnly.routeTelemetry().map(item => item.segment_id),
+    ['p1.browser_recognition']
+  );
 });
 
 test('integrated route labels unavailable Browser paths as unsupported', () => {

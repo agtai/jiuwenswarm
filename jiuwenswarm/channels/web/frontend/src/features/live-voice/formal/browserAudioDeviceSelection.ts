@@ -224,8 +224,16 @@ export class BrowserAudioDeviceSelectionOwner {
         if (stale) throw new BrowserAudioDeviceSelectionViolation('AUDIO_DEVICE_SELECTION_CANCELLED');
         if (cleanupFailed) return this.#fail('MICROPHONE_PERMISSION_PROBE_CLEANUP_FAILED');
       }
-      const devices = await this.#environment.media_devices.enumerateDevices();
-      this.#requireCurrent(operation);
+      // Device changes after an enumeration starts make its result stale.  The
+      // listener must therefore own the whole enumeration window, including
+      // the first load before a ready inventory exists.
+      this.#attachDeviceListener();
+      let devices: readonly BrowserAudioSelectionDeviceLike[];
+      do {
+        this.#deviceRefreshQueued = false;
+        devices = await this.#environment.media_devices.enumerateDevices();
+        this.#requireCurrent(operation);
+      } while (this.#deviceRefreshQueued);
       if (permission?.state === 'denied') return this.#fail('MICROPHONE_PERMISSION_DENIED');
       const ids = new Set(devices.map(device => this.#deviceKey(device.kind, device.deviceId)));
       if (priorInputId !== null && !ids.has(this.#deviceKey('audioinput', priorInputId))) {
@@ -349,6 +357,10 @@ export class BrowserAudioDeviceSelectionOwner {
 
   async #refreshAfterDeviceChange(): Promise<void> {
     if (this.#closed || this.#environment.media_devices === null) return;
+    if (this.#status === 'loading') {
+      this.#deviceRefreshQueued = true;
+      return;
+    }
     if (this.#status === 'refreshing') {
       this.#deviceRefreshQueued = true;
       return;
@@ -395,33 +407,43 @@ export class BrowserAudioDeviceSelectionOwner {
   }
 
   #attachListeners(permission: BrowserAudioSelectionPermissionLike | null): void {
-    if (this.#environment.media_devices === null) return;
-    this.#detachListeners();
-    let mediaListenerAttached = false;
+    this.#attachDeviceListener();
+    if (this.#permissionStatus === permission) return;
+    const previous = this.#permissionStatus;
+    this.#permissionStatus = null;
+    if (previous !== null) {
+      try {
+        previous.removeEventListener('change', this.#onPermissionChange);
+      } catch {
+        // A retained callback reads the current permission owner and is inert.
+      }
+    }
+    if (permission === null) return;
+    try {
+      permission.addEventListener('change', this.#onPermissionChange);
+      this.#permissionStatus = permission;
+    } catch {
+      try {
+        permission.removeEventListener('change', this.#onPermissionChange);
+      } catch {
+        // The failing registration cannot leave live ownership behind.
+      }
+      this.#detachListeners();
+      throw new BrowserAudioDeviceSelectionViolation('AUDIO_DEVICE_LISTENER_FAILED');
+    }
+  }
+
+  #attachDeviceListener(): void {
+    if (this.#environment.media_devices === null || this.#listenersAttached) return;
     try {
       this.#environment.media_devices.addEventListener('devicechange', this.#onDeviceChange);
-      mediaListenerAttached = true;
-      if (permission !== null) {
-        permission.addEventListener('change', this.#onPermissionChange);
-        this.#permissionStatus = permission;
-      }
       this.#listenersAttached = true;
     } catch {
-      if (permission !== null) {
-        try {
-          permission.removeEventListener('change', this.#onPermissionChange);
-        } catch {
-          // The failing registration cannot leave live ownership behind.
-        }
+      try {
+        this.#environment.media_devices.removeEventListener('devicechange', this.#onDeviceChange);
+      } catch {
+        // Generation fencing still makes a retained callback inert.
       }
-      if (mediaListenerAttached) {
-        try {
-          this.#environment.media_devices.removeEventListener('devicechange', this.#onDeviceChange);
-        } catch {
-          // Generation fencing still makes a retained callback inert.
-        }
-      }
-      this.#permissionStatus = null;
       this.#listenersAttached = false;
       throw new BrowserAudioDeviceSelectionViolation('AUDIO_DEVICE_LISTENER_FAILED');
     }

@@ -108,7 +108,9 @@ def register_speech_rpc_handlers(
                         else None
                     )
                     result = {
-                        **result,
+                        "contract_version": result.get("contract_version"),
+                        "request_id": result.get("request_id"),
+                        "operation_id": result.get("operation_id"),
                         "ok": False,
                         "result": None,
                         "error": {

@@ -264,9 +264,6 @@ function localStopReceipt(route, confirmedThroughSeq = null) {
     timing: { status: 'confirmed', requested_at_monotonic_ms: 1, confirmed_at_monotonic_ms: 2, duration_ms: 1 },
     physical_heard: 'unproven',
     physical_silence: 'unproven',
-    business_cancel_count_before: 0,
-    business_cancel_count_after: 0,
-    business_cancel_count_delta: 0,
   });
 }
 
@@ -625,10 +622,6 @@ test('local playback stop maps the exact confirmed unit and never escalates busi
   assert.equal(controls.at(-1).business_cancel_count_delta, 0);
   assert.equal(route.activation.leaf.closed, true);
   assert.throws(
-    () => route.activation.leaf.sendLocalPlaybackStop(closedLocalStopReceipt(localReceipt, { business_cancel_count_delta: 1 })),
-    /cannot carry business cancellation/
-  );
-  assert.throws(
     () =>
       route.activation.leaf.sendLocalPlaybackStop(
         closedLocalStopReceipt(localReceipt, {
@@ -684,11 +677,6 @@ test('active leaf rejects forged or contradictory BrowserAudio stop truth before
     ),
     closedLocalStopReceipt(trusted, { kind: 'browser_audio.local_stop.v0' }),
     closedLocalStopReceipt(trusted, { local_fence_established: false }),
-    closedLocalStopReceipt(trusted, {
-      business_cancel_count_before: 900,
-      business_cancel_count_after: 1,
-      business_cancel_count_delta: 0,
-    }),
     closedLocalStopReceipt(trusted, {
       browser_sources: {
         ...trusted.browser_sources,

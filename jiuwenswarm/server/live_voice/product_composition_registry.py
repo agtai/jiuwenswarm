@@ -19,7 +19,8 @@ import secrets
 import threading
 import time
 from array import array
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -245,6 +246,9 @@ _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation
 _PRODUCT_P2_PRESENTATION_FAILURE_OPERATION = (
     "live_voice.composition.p2.presentation.failed"
 )
+_PRODUCT_P2_SUBMIT_OPERATION = "live_voice.composition.p2.submit"
+_PRODUCT_P2_DURABLE_TEXT_MAX_UTF8_BYTES = 100_000
+_PRODUCT_P2_DURABLE_OPERATION_MAX_UTF8_BYTES = 131_072
 # The only Agent profile whose facade implements the formal Live Voice seam.
 _FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
 _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
@@ -433,6 +437,7 @@ class _P2Route:
     observability_adapter: ProductObservabilityAdapter | None = None
     notification_replay_floor: int = 0
     notification_admitted_sequence: int = 0
+    transport_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +467,8 @@ class _ProgressRoute:
     pending_presentations: dict[tuple[str, str], "_PendingProgressPresentation"] = (
         field(default_factory=dict)
     )
+    transport_generation: int | None = None
+    transport_cleanup_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,6 +788,56 @@ def _required_content(value: object, field: str, *, maximum: int) -> str:
     return value
 
 
+def _required_utf8_content(value: object, field: str, *, maximum: int) -> str:
+    if type(value) is not str or not value.strip():
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            f"{field} must be non-empty bounded text",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            f"{field} must contain Unicode scalar values",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from exc
+    if len(encoded) > maximum:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            f"{field} must be non-empty bounded text",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    return value
+
+
+def _require_p2_durable_submit_operation_bound(
+    *, params: Mapping[str, object], request_id: str
+) -> None:
+    operation = {
+        "method": _PRODUCT_P2_SUBMIT_OPERATION,
+        "request_id": request_id,
+        "params": {
+            key: value for key, value in params.items() if key != "auth_token"
+        },
+    }
+    try:
+        operation_bytes = canonical_json_bytes(operation)
+    except ContractViolation as exc:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            "durable product operation must be canonical JSON",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from exc
+    if len(operation_bytes) > _PRODUCT_P2_DURABLE_OPERATION_MAX_UTF8_BYTES:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            "durable product operation exceeds its UTF-8 byte bound",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+
+
 def _optional_claim(value: object, field: str) -> str | None:
     if value is None:
         return None
@@ -858,6 +915,29 @@ def _formal_live_voice_capable(agent: object) -> bool:
     )
 
 
+class _ScopedOperationGate:
+    """Serialize one live route key without retaining completed identities."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._active: set[tuple[str, str]] = set()
+
+    @asynccontextmanager
+    async def hold(self, key: tuple[str, str]) -> AsyncIterator[None]:
+        acquired = False
+        try:
+            async with self._condition:
+                await self._condition.wait_for(lambda: key not in self._active)
+                self._active.add(key)
+                acquired = True
+            yield
+        finally:
+            if acquired:
+                async with self._condition:
+                    self._active.discard(key)
+                    self._condition.notify_all()
+
+
 class AgentServerProductCompositionRegistry:
     """Central default-off registrations and retained route leases."""
 
@@ -868,6 +948,11 @@ class AgentServerProductCompositionRegistry:
     _PRODUCT_OPERATION_CAPACITY = 128
     _TURN_COMMIT_CAPACITY = 128
     _TURN_COMMIT_CAPACITY_PER_ROUTE = 32
+    # An accepted task origin outlives its P2 route on purpose so a late
+    # P3 create can still consume it. That grace is bounded: eight abandoned
+    # origins keep 120 of the 128 shared committed-turn slots available for
+    # live routes, and an aged-out origin keeps only its retirement fence.
+    _ABANDONED_VOICE_ORIGIN_GRACE = 8
 
     def __init__(
         self,
@@ -934,6 +1019,11 @@ class AgentServerProductCompositionRegistry:
         )
         self._lock = asyncio.Lock()
         self._p3_operation_lock = asyncio.Lock()
+        self._p2_route_gate = _ScopedOperationGate()
+        self._composition_lifecycle_condition = asyncio.Condition()
+        self._composition_lifecycle_generation = 0
+        self._composition_cleanup_active = False
+        self._composition_inflight: dict[asyncio.Task[Any], int] = {}
         self._stopped = False
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
         self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
@@ -945,6 +1035,14 @@ class AgentServerProductCompositionRegistry:
             tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
         self._progress_generations: dict[tuple[str, str, str, str], int] = {}
+        # Exact high-water values cover the active working set. Evicting the
+        # whole entry at capacity would erase the generation high-water mark and
+        # let a superseded generation activate again, so the conservative max
+        # sketch retains it for this registry lifetime without unbounded RAM.
+        # Collisions can only fail closed.
+        self._progress_generation_fence = tuple(
+            array("Q", [0]) * (1 << 15) for _ in range(4)
+        )
         self._progress_targets: dict[tuple[str, str, str, str], _ProgressTarget] = {}
         self._progress_deliveries: dict[
             tuple[str, str, str, str], dict[str, _ProgressDelivery]
@@ -2042,9 +2140,65 @@ class AgentServerProductCompositionRegistry:
                 continue
             for closed_key in closed_keys:
                 self._closed_progress_routes.pop(closed_key, None)
-            self._progress_generations.pop(retained_key, None)
+            retired = self._progress_generations.pop(retained_key, None)
+            if retired is not None:
+                self._record_progress_generation(retained_key, retired)
             return True
         return False
+
+    def _progress_generation_indices(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> tuple[int, int, int, int]:
+        digest = hashlib.sha256("\0".join(key).encode("utf-8")).digest()
+        capacity = len(self._progress_generation_fence[0])
+        return (
+            int.from_bytes(digest[0:4], "big") % capacity,
+            int.from_bytes(digest[4:8], "big") % capacity,
+            int.from_bytes(digest[8:12], "big") % capacity,
+            int.from_bytes(digest[12:16], "big") % capacity,
+        )
+
+    def _record_progress_generation(
+        self,
+        key: tuple[str, str, str, str],
+        generation: int,
+    ) -> None:
+        # No uint64 clamp: the only source is a generation already retained in
+        # `_progress_generations`, and activation fails closed above the
+        # contract's MAX_SAFE_INTEGER and rolls that transient entry back under
+        # the same lock, so `generation + 1` can never overflow a cell.
+        encoded = generation + 1
+        for row, index in zip(
+            self._progress_generation_fence,
+            self._progress_generation_indices(key),
+            strict=True,
+        ):
+            row[index] = max(row[index], encoded)
+
+    def _progress_generation_high_water(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> int:
+        encoded = min(
+            row[index]
+            for row, index in zip(
+                self._progress_generation_fence,
+                self._progress_generation_indices(key),
+                strict=True,
+            )
+        )
+        return int(encoded) - 1
+
+    def _fenced_progress_generation(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> int | None:
+        current = self._progress_generations.get(key)
+        if current is not None:
+            return current
+        fenced = self._progress_generation_high_water(key)
+        return fenced if fenced >= 0 else None
 
     @classmethod
     def _reserve_progress_delivery(
@@ -3771,7 +3925,6 @@ class AgentServerProductCompositionRegistry:
             )
         except ProductObservabilityActivationError as exc:
             raise ProductSegmentActivationError(
-                "OBSERVABILITY_ACTIVATION_CLEANUP_PENDING",
                 cleanup_lease=exc.cleanup_lease,
             ) from exc
         if not isinstance(activation, ActiveProductObservabilityActivation):
@@ -3847,6 +4000,75 @@ class AgentServerProductCompositionRegistry:
                 "Live Voice product composition is stopped",
                 ErrorCode.UNAVAILABLE,
             )
+
+    async def _reserve_composition_lifecycle(self) -> int | None:
+        """Admit one operation outside a Gateway sweep and bind its generation."""
+
+        async with self._lock:
+            if self._stopped:
+                return None
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("composition operation requires an asyncio task")
+        async with self._composition_lifecycle_condition:
+            await self._composition_lifecycle_condition.wait_for(
+                lambda: not self._composition_cleanup_active
+            )
+            if self._stopped:
+                return None
+            generation = self._composition_lifecycle_generation
+            if task in self._composition_inflight:
+                raise RuntimeError("composition operation cannot be nested")
+            self._composition_inflight[task] = generation
+            return generation
+
+    async def _release_composition_lifecycle(self, generation: int) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            return
+        async with self._composition_lifecycle_condition:
+            if self._composition_inflight.get(task) == generation:
+                self._composition_inflight.pop(task, None)
+                self._composition_lifecycle_condition.notify_all()
+
+    @asynccontextmanager
+    async def _composition_operation(self) -> AsyncIterator[int | None]:
+        generation = await self._reserve_composition_lifecycle()
+        try:
+            yield generation
+        finally:
+            if generation is not None:
+                await self._release_composition_lifecycle(generation)
+
+    def _composition_lifecycle_current(self, generation: int | None) -> bool:
+        return (
+            generation is not None
+            and generation == self._composition_lifecycle_generation
+        )
+
+    async def _begin_composition_cleanup(self) -> tuple[asyncio.Task[Any], ...]:
+        """Invalidate old candidates and return every exact owner to await."""
+
+        async with self._lock:
+            pass
+        current = asyncio.current_task()
+        async with self._composition_lifecycle_condition:
+            await self._composition_lifecycle_condition.wait_for(
+                lambda: not self._composition_cleanup_active
+            )
+            self._composition_cleanup_active = True
+            self._composition_lifecycle_generation += 1
+            generation = self._composition_lifecycle_generation
+            return tuple(
+                task
+                for task, admitted_generation in self._composition_inflight.items()
+                if task is not current and admitted_generation < generation
+            )
+
+    async def _end_composition_cleanup(self) -> None:
+        async with self._composition_lifecycle_condition:
+            self._composition_cleanup_active = False
+            self._composition_lifecycle_condition.notify_all()
 
     def _advance_notification_replay_floor(
         self,
@@ -3974,6 +4196,7 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
         session_id: str | None,
         channel_id: str,
+        transport_generation: int | None = None,
     ) -> P3RouteResult:
         del channel_id
         if not self._settings.p2_enabled:
@@ -4033,10 +4256,22 @@ class AgentServerProductCompositionRegistry:
                 message=str(exc),
             )
 
-        async with self._lock:
-            if self._stopped:
-                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
-            key = (routed_session, interaction_id)
+        key = (routed_session, interaction_id)
+        async with (
+            self._composition_operation() as lifecycle_generation,
+            self._p2_route_gate.hold(key),
+        ):
+            if self._stopped or not self._composition_lifecycle_current(
+                lifecycle_generation
+            ):
+                return _error_result(
+                    request_id,
+                    reason=(
+                        "PRODUCT_COMPOSITION_STOPPED"
+                        if self._stopped
+                        else "PRODUCT_P2_ACTIVATION_FAILED"
+                    ),
+                )
             existing = self._p2_routes.get(key)
             if existing is not None:
                 replay_state = _AuthorityState()
@@ -4069,6 +4304,8 @@ class AgentServerProductCompositionRegistry:
                         and expected.activation_id == activation_id
                         and expected.activation_generation == generation
                     ):
+                        if transport_generation is not None:
+                            existing.transport_generation = transport_generation
                         if replay_authority.lease is not None:
                             await replay_authority.lease.close()
                         return _success_result(
@@ -4121,7 +4358,13 @@ class AgentServerProductCompositionRegistry:
                         manifest=existing.manifest,
                     )
                 self._p2_routes.pop(key, None)
+                # Run the same exact cleanup normal close runs, by exact commit
+                # id. Normal close may additionally retire the whole interaction
+                # because it never republishes the key; a replacement must not,
+                # because the successor immediately reuses that interaction and
+                # its monotonic input-generation fence.
                 self._drop_voice_task_origins_for_route_locked(key)
+                self._retire_accepted_voice_commits_for_route_locked(key)
                 self._retain_closed_p2_route(
                     key,
                     _ClosedP2Route(
@@ -4166,7 +4409,7 @@ class AgentServerProductCompositionRegistry:
                 canonical = state.canonical
                 resolved_context = state.context
                 if canonical is None or resolved_context is None:
-                    raise ProductSegmentActivationError("P2_AUTHORITY_MISSING")
+                    raise ProductSegmentActivationError()
                 request = P2InteractionActivationRequest(
                     route=route,
                     interaction_id=interaction_id,
@@ -4265,7 +4508,6 @@ class AgentServerProductCompositionRegistry:
                     )
                 if result.cleanup is not None:
                     raise ProductSegmentActivationError(
-                        result.reason.value,
                         cleanup_lease=_P2FailedCleanupLease(
                             cleanup=result.cleanup,
                             agent_manager=self._agent_manager,
@@ -4330,6 +4572,25 @@ class AgentServerProductCompositionRegistry:
                     request_id,
                     reason="PRODUCT_P2_ACTIVATION_FAILED",
                 )
+            if self._stopped or not self._composition_lifecycle_current(
+                lifecycle_generation
+            ):
+                if activation.lease is not None:
+                    try:
+                        await activation.lease.close()
+                    except ProductCompositionLeaseCloseError as exc:
+                        self._retain_root_cleanup(exc.lease)
+                        logger.exception(
+                            "[LiveVoiceProduct] stopped P2 activation cleanup pending"
+                        )
+                return _error_result(
+                    request_id,
+                    reason=(
+                        "PRODUCT_COMPOSITION_STOPPED"
+                        if self._stopped
+                        else "PRODUCT_P2_ACTIVATION_FAILED"
+                    ),
+                )
             binding = holder.get("binding")
             activation_lease = holder.get("activation_lease")
             observability_context = observability_holder.get("context")
@@ -4378,7 +4639,16 @@ class AgentServerProductCompositionRegistry:
                     if isinstance(observability_adapter, ProductObservabilityAdapter)
                     else None
                 ),
+                transport_generation=transport_generation,
             )
+            # Republishing this key makes every accepted commit still bound
+            # to it reachable through the successor with its critical-token
+            # identity intact, because `_accepted_voice_commit_routes` carries
+            # no activation id or generation. The replacement branch already
+            # retires a live predecessor; a closed predecessor reaches
+            # publication directly, and its bounded late-create grace must end
+            # exactly here rather than at close, which never republishes.
+            self._retire_accepted_voice_commits_for_route_locked(key)
             self._p2_routes[key] = retained_route
             self._observe_p2_activation(retained_route)
             self._closed_p2_routes.pop(key, None)
@@ -4717,6 +4987,23 @@ class AgentServerProductCompositionRegistry:
                     self._unknown_turn_commits_by_commit[commit.commit_id] = commit
                     self._unknown_turn_commits_by_turn[commit.turn_id] = commit
                     self._unknown_voice_commit_routes[commit.commit_id] = route_key
+                elif (
+                    dispatch_target == "task"
+                    and not result_unknown
+                    and commit.commit_id not in self._accepted_turn_commits_by_commit
+                    and commit.commit_id not in self._consumed_turn_commits_by_commit
+                ):
+                    # A definite failure keeps no critical-input identity and no
+                    # token-gate hold. Releasing by exact commit id leaves a
+                    # successor commit on the same interaction untouched.
+                    #
+                    # Only the task branch records an accepted commit and only it
+                    # sets result_unknown, so without the dispatch-target guard a
+                    # successful Agent submit would look exactly like a definite
+                    # failure and lose its gate evidence one turn early.
+                    self._critical_input_commit_generations.pop(commit.commit_id, None)
+                    self._critical_input_guarded_commits.discard(commit.commit_id)
+                    self._critical_token_gate.release_commit(commit.commit_id)
                 if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
                     self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
                 if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
@@ -4727,6 +5014,11 @@ class AgentServerProductCompositionRegistry:
         self, commit: TurnCommit, route_key: tuple[str, str]
     ) -> None:
         self._preflight_turn_commit_identity_locked(commit)
+        # Runs after the identity preflight so this exact commit can never be
+        # retired and re-admitted, and before the capacity refusal so an
+        # acceptance that linearized after its own route closed is still
+        # reached even though no further close runs for that route.
+        self._enforce_abandoned_voice_origin_grace_locked()
         retained_count = (
             len(self._pending_turn_commits_by_commit)
             + len(self._accepted_turn_commits_by_commit)
@@ -4846,6 +5138,36 @@ class AgentServerProductCompositionRegistry:
         self._mark_evicted_product_request("voice.commit", commit.commit_id)
         self._mark_evicted_product_request("voice.turn", commit.turn_id)
         self._release_voice_origin_locked(commit)
+
+    def _enforce_abandoned_voice_origin_grace_locked(self) -> None:
+        """Bound how long an abandoned route's accepted origins stay retained.
+
+        An accepted origin survives its route close so a late P3 create can
+        still consume it, but a route abandoned without one released nothing:
+        repeating submit-then-close filled ``_TURN_COMMIT_CAPACITY`` with
+        origins no request could ever reach and refused every later submit
+        until ``stop``. Retirement past the grace releases the heavy commit
+        state and keeps only the compact ``_evicted_operation_replay_fence``
+        membership, so the released identity stays refusable without being
+        retained. Insertion order is acceptance order, so the oldest
+        abandoned origins are released first and a live route's own origins
+        are never candidates.
+        """
+
+        abandoned = [
+            commit_id
+            for commit_id, route_key in self._accepted_voice_commit_routes.items()
+            if route_key not in self._p2_routes
+        ]
+        excess = len(abandoned) - self._ABANDONED_VOICE_ORIGIN_GRACE
+        if excess <= 0:
+            return
+        for commit_id in abandoned[:excess]:
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is None:
+                self._accepted_voice_commit_routes.pop(commit_id, None)
+                continue
+            self._retire_voice_origin_locked(commit)
 
     def _consume_voice_origin_locked(self, commit: TurnCommit) -> None:
         self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
@@ -5103,13 +5425,21 @@ class AgentServerProductCompositionRegistry:
                 ),
             )
             self._ensure_running()
+            text_value = _required_utf8_content(
+                params.get("text"),
+                "text",
+                maximum=_PRODUCT_P2_DURABLE_TEXT_MAX_UTF8_BYTES,
+            )
+            _require_p2_durable_submit_operation_bound(
+                params=params,
+                request_id=request_id,
+            )
             parsed = self._parse_p2_route_binding(params, session_id=session_id)
             commit_id = _required_text(params.get("commit_id"), "commit_id")
             turn_id = _required_text(params.get("turn_id"), "turn_id")
             committed_at = _required_text(
                 params.get("committed_at"), "committed_at", maximum=64
             )
-            text_value = _required_content(params.get("text"), "text", maximum=100_000)
             routed_session, correlation_id, interaction_id, _, _, _ = parsed
             dispatch_target = str(params.get("dispatch_target") or "agent")
             if dispatch_target not in {"agent", "task"}:
@@ -8897,7 +9227,8 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
-        async with self._lock:
+        key = (routed_session, interaction_id)
+        async with self._p2_route_gate.hold(key), self._lock:
             if self._stopped:
                 return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
             state = _AuthorityState()
@@ -9004,6 +9335,7 @@ class AgentServerProductCompositionRegistry:
             key = (routed_session, interaction_id)
             self._p2_routes.pop(key, None)
             self._drop_voice_task_origins_for_route_locked(key)
+            self._enforce_abandoned_voice_origin_grace_locked()
             self._retain_closed_p2_route(
                 key,
                 _ClosedP2Route(
@@ -9042,6 +9374,22 @@ class AgentServerProductCompositionRegistry:
             route_facts=(
                 _formal_fact(ProductSegment.AUTHORITY),
                 _formal_fact(ProductSegment.P3_CONTROL),
+            ),
+        )
+
+    @staticmethod
+    def _p3_control_unavailable_manifest() -> ProductCompositionManifest:
+        return create_product_composition_manifest(
+            enabled=True,
+            route_facts=(
+                _unavailable_fact(
+                    ProductSegment.AUTHORITY,
+                    ProductRouteReason.TRUSTED_AUTHORITY_UNAVAILABLE,
+                ),
+                _unavailable_fact(
+                    ProductSegment.P3_CONTROL,
+                    ProductRouteReason.FORMAL_ACTIVATION_EVIDENCE_MISSING,
+                ),
             ),
         )
 
@@ -9722,13 +10070,21 @@ class AgentServerProductCompositionRegistry:
                 reason="PRODUCT_P3_MUTATION_UNAVAILABLE",
                 code=ErrorCode.UNSUPPORTED,
             )
-        async with self._lock:
-            return await self._handle_p3_query_locked(
+        async with self._composition_operation() as lifecycle_generation:
+            if lifecycle_generation is None or self._stopped:
+                return _error_result(
+                    request_id, reason="PRODUCT_COMPOSITION_STOPPED"
+                )
+            result = await self._handle_p3_query_locked(
                 operation=operation,
                 params=params,
                 request_id=request_id,
                 session_id=session_id,
+                lifecycle_generation=lifecycle_generation,
             )
+            if not self._composition_lifecycle_current(lifecycle_generation):
+                return _error_result(request_id, reason="PRODUCT_P3_QUERY_FAILED")
+            return result
 
     @staticmethod
     def _intent_resolution_facts(
@@ -9794,7 +10150,9 @@ class AgentServerProductCompositionRegistry:
                     "reason": reason,
                     "message": message,
                 },
-                "product_composition": _serialize_manifest(self._p3_control_manifest()),
+                "product_composition": _serialize_manifest(
+                    self._p3_control_unavailable_manifest()
+                ),
             },
         )
 
@@ -10587,6 +10945,31 @@ class AgentServerProductCompositionRegistry:
             and not any(key[1] == commit.interaction_id for key in self._p2_routes)
         ):
             self._critical_token_gate.release_interaction(commit.interaction_id)
+
+    def _retire_accepted_voice_commits_for_route_locked(
+        self, route_key: tuple[str, str]
+    ) -> None:
+        """Retire every accepted voice commit bound to a superseded route.
+
+        ``_accepted_voice_commit_routes`` is keyed by session and interaction
+        only, with no activation id or generation, so republishing the key for a
+        successor would otherwise leave a superseded generation's committed
+        speech fully actionable through the successor's route with its
+        critical-token identity intact. Exact-commit retirement releases the
+        commit-level gate evidence and leaves the interaction's monotonic
+        input-generation fence for the successor.
+        """
+
+        for commit_id, retained_route in tuple(
+            self._accepted_voice_commit_routes.items()
+        ):
+            if retained_route != route_key:
+                continue
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is None:
+                self._accepted_voice_commit_routes.pop(commit_id, None)
+                continue
+            self._retire_voice_origin_locked(commit)
 
     def _drop_voice_task_origins_for_route_locked(
         self, route_key: tuple[str, str]
@@ -12315,6 +12698,7 @@ class AgentServerProductCompositionRegistry:
         params: Mapping[str, object],
         request_id: str,
         session_id: str | None,
+        lifecycle_generation: int,
     ) -> P3RouteResult:
         if not self._settings.p3_text_enabled:
             return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
@@ -12407,7 +12791,7 @@ class AgentServerProductCompositionRegistry:
             canonical = state.canonical
             service = state.service
             if canonical is None or service is None:
-                raise ProductSegmentActivationError("P3_AUTHORITY_MISSING")
+                raise ProductSegmentActivationError()
             p3_authority = P3AuthorityContext(
                 authority=canonical,
                 resource=canonical.resource,
@@ -12475,6 +12859,8 @@ class AgentServerProductCompositionRegistry:
             logger.exception("[LiveVoiceProduct] P3 query failed closed")
             return _error_result(request_id, reason="PRODUCT_P3_QUERY_FAILED")
         try:
+            if not self._composition_lifecycle_current(lifecycle_generation):
+                return _error_result(request_id, reason="PRODUCT_P3_QUERY_FAILED")
             result = holder.get("result")
             envelope = getattr(result, "result", None)
             if envelope is None:
@@ -12671,13 +13057,17 @@ class AgentServerProductCompositionRegistry:
                         if isinstance(revision, Mapping)
                         else None
                     )
-                    if diagnostic_correlation is not None and all(
-                        type(value) is str and bool(value)
-                        for value in (
-                            status_correlation,
-                            status_task_id,
-                            status_attempt_id,
-                            executor_id,
+                    if (
+                        self._composition_lifecycle_current(lifecycle_generation)
+                        and diagnostic_correlation is not None
+                        and all(
+                            type(value) is str and bool(value)
+                            for value in (
+                                status_correlation,
+                                status_task_id,
+                                status_attempt_id,
+                                executor_id,
+                            )
                         )
                     ):
                         self._emit_authoritative_route_diagnostic(
@@ -12760,13 +13150,18 @@ class AgentServerProductCompositionRegistry:
                             )
                         except Exception:  # noqa: BLE001 -- projection only
                             continue
-                        if event.task_id == task_id:
-                            if diagnostic_correlation is not None:
-                                self._emit_authoritative_task_event(
-                                    event,
-                                    session_id=routed_session,
-                                    correlation_id=diagnostic_correlation,
-                                )
+                        if (
+                            event.task_id == task_id
+                            and self._composition_lifecycle_current(
+                                lifecycle_generation
+                            )
+                            and diagnostic_correlation is not None
+                        ):
+                            self._emit_authoritative_task_event(
+                                event,
+                                session_id=routed_session,
+                                correlation_id=diagnostic_correlation,
+                            )
             elif operation == "task.result" and envelope.ok:
                 result_payload = payload.get("result")
                 raw_result = (
@@ -12812,6 +13207,7 @@ class AgentServerProductCompositionRegistry:
                 if (
                     result_record is not None
                     and result_record.task_id == task_id
+                    and self._composition_lifecycle_current(lifecycle_generation)
                     and diagnostic_correlation is not None
                 ):
                     self._emit_authoritative_route_diagnostic(
@@ -12827,6 +13223,8 @@ class AgentServerProductCompositionRegistry:
                         completed=True,
                         observed_at=result_record.completed_at,
                     )
+            if not self._composition_lifecycle_current(lifecycle_generation):
+                return _error_result(request_id, reason="PRODUCT_P3_QUERY_FAILED")
             payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
         finally:
@@ -12844,6 +13242,7 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
         session_id: str | None,
         channel_id: str,
+        transport_generation: int | None = None,
     ) -> P3RouteResult:
         if not self._settings.p3_text_enabled:
             return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
@@ -12955,7 +13354,12 @@ class AgentServerProductCompositionRegistry:
 
             key = (routed_session, task_id, origin_id, generation_id)
             existing = self._progress_routes.get(key)
-            previous_generation = self._progress_generations.get(key)
+            if existing is not None and existing.transport_cleanup_pending:
+                return _error_result(
+                    request_id,
+                    reason="TASK_PROGRESS_REPLACEMENT_CLEANUP_PENDING",
+                )
+            previous_generation = self._fenced_progress_generation(key)
             state = _AuthorityState()
             preauthorized_authority: ProductSegmentActivation | None = None
             if (
@@ -13077,6 +13481,8 @@ class AgentServerProductCompositionRegistry:
                     and retained_target.requested_origin_kind is requested_origin_kind
                     and retained_target.fallback_reason == fallback_reason
                 ):
+                    if transport_generation is not None:
+                        existing.transport_generation = transport_generation
                     if preauthorized_authority.lease is not None:
                         await preauthorized_authority.lease.close()
                     log_progress_fallback()
@@ -13195,7 +13601,7 @@ class AgentServerProductCompositionRegistry:
                 canonical = state.canonical
                 service = state.service
                 if canonical is None or service is None:
-                    raise ProductSegmentActivationError("P3_AUTHORITY_MISSING")
+                    raise ProductSegmentActivationError()
                 if effective_origin_kind is TaskProgressOriginKind.VOICE:
                     exact_origin = self._voice_task_origins.get(task_id)
                     exact_route = (
@@ -13274,7 +13680,6 @@ class AgentServerProductCompositionRegistry:
                     )
                 if result.cleanup is not None:
                     raise ProductSegmentActivationError(
-                        result.reason_id,
                         cleanup_lease=_P3FailedCleanupLease(result.cleanup),
                     )
                 return ProductSegmentActivation(
@@ -13409,6 +13814,7 @@ class AgentServerProductCompositionRegistry:
                 request_id=request_id,
                 unread_authority=presentation_authorities.get("task.unread_events"),
                 result_authority=presentation_authorities.get("task.result"),
+                transport_generation=transport_generation,
             )
             self._progress_routes[key] = retained
             self._settle_progress_route_adoption(key)
@@ -14125,8 +14531,177 @@ class AgentServerProductCompositionRegistry:
                 retained.manifest,
             )
 
+    async def close_active_routes_for_transport_generation(
+        self,
+        transport_generation: int,
+    ) -> None:
+        """Close only product/media routes owned by one Gateway lease.
+
+        The carrier owns and drains its own admitted message tasks before this
+        seam is called.  Unlike the process-level sweep below, this operation
+        never advances the composition lifecycle or fences a successor
+        generation from admitting unrelated work.
+        """
+
+        if type(transport_generation) is not int or transport_generation <= 0:
+            raise ValueError("transport_generation must be a positive integer")
+
+        failures = False
+        for progress_key in reversed(tuple(self._progress_routes)):
+            async with self._lock:
+                progress_retained = self._progress_routes.get(progress_key)
+                if (
+                    progress_retained is None
+                    or progress_retained.transport_generation
+                    != transport_generation
+                ):
+                    continue
+                try:
+                    if self._p3_presentation_consumption_available:
+                        self._close_task_presentations_for_progress_route(
+                            self._progress_deliveries.get(progress_key, {}),
+                            reason="gateway_generation_progress_route_closed",
+                        )
+                except Exception:
+                    failures = True
+                    logger.exception(
+                        "[LiveVoiceProduct] generation progress cleanup pending"
+                    )
+                    continue
+                progress_retained.transport_cleanup_pending = True
+            try:
+                await progress_retained.lease.close()
+            except asyncio.CancelledError:
+                async with self._lock:
+                    if self._progress_routes.get(progress_key) is progress_retained:
+                        progress_retained.transport_cleanup_pending = False
+                        progress_retained.transport_generation = transport_generation
+                raise
+            except Exception:
+                async with self._lock:
+                    if self._progress_routes.get(progress_key) is progress_retained:
+                        progress_retained.transport_cleanup_pending = False
+                        progress_retained.transport_generation = transport_generation
+                failures = True
+                logger.exception(
+                    "[LiveVoiceProduct] generation progress cleanup pending"
+                )
+                continue
+            async with self._lock:
+                if self._progress_routes.get(progress_key) is not progress_retained:
+                    continue
+                progress_retained.transport_cleanup_pending = False
+                if self._archive_progress_route(progress_key, progress_retained):
+                    continue
+                progress_retained.transport_generation = transport_generation
+                failures = True
+                logger.error(
+                    "[LiveVoiceProduct] generation progress tombstone capacity pending"
+                )
+
+        for p2_key in reversed(tuple(self._p2_routes)):
+            async with self._p2_route_gate.hold(p2_key):
+                async with self._lock:
+                    p2_retained = self._p2_routes.get(p2_key)
+                    if (
+                        p2_retained is None
+                        or p2_retained.transport_generation != transport_generation
+                    ):
+                        continue
+                    try:
+                        self._close_task_presentations_for_p2_route(
+                            p2_retained,
+                            reason="gateway_generation_route_closed",
+                        )
+                    except TaskPresentationViolation:
+                        failures = True
+                        logger.exception(
+                            "[LiveVoiceProduct] generation P2 presentation cleanup pending"
+                        )
+                        continue
+                root_cleanup: ProductCompositionLease | None = None
+                try:
+                    await p2_retained.lease.close()
+                except ProductCompositionLeaseCloseError as exc:
+                    if p2_retained.activation_lease.snapshot().state not in {
+                        P2LeaseState.CLOSING,
+                        P2LeaseState.CLOSED,
+                    }:
+                        failures = True
+                        logger.exception(
+                            "[LiveVoiceProduct] generation P2 cleanup pending"
+                        )
+                        continue
+                    root_cleanup = exc.lease
+                    logger.info(
+                        "[LiveVoiceProduct] generation P2 route retired while cleanup completes"
+                    )
+                except Exception:
+                    failures = True
+                    logger.exception(
+                        "[LiveVoiceProduct] generation P2 cleanup pending"
+                    )
+                    continue
+                async with self._lock:
+                    if self._p2_routes.get(p2_key) is not p2_retained:
+                        continue
+                    if root_cleanup is not None:
+                        self._retire_p2_root_cleanup(root_cleanup)
+                    self._p2_routes.pop(p2_key, None)
+                    self._drop_voice_task_origins_for_route_locked(p2_key)
+                    self._retain_closed_p2_route(
+                        p2_key,
+                        _ClosedP2Route(
+                            p2_retained.binding,
+                            p2_retained.manifest,
+                            p2_retained.notification_replay_floor,
+                        ),
+                    )
+                    self._critical_token_gate.release_interaction(p2_key[1])
+
+        async with self._lock:
+            self._enforce_abandoned_voice_origin_grace_locked()
+        if failures:
+            raise RuntimeError(
+                "Live Voice transport-generation route cleanup remains pending"
+            )
+
     async def close_active_routes(self) -> None:
-        """Best-effort reverse cleanup for Gateway loss without stopping registry."""
+        """Own every admitted composition operation through a Gateway sweep."""
+
+        inflight = await self._begin_composition_cleanup()
+        cleanup_owner = asyncio.create_task(
+            self._finish_composition_cleanup(inflight),
+            name="live-voice-composition-cleanup",
+        )
+        caller_cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.shield(cleanup_owner)
+                break
+            except asyncio.CancelledError as exc:
+                if cleanup_owner.cancelled():
+                    raise
+                if caller_cancellation is None:
+                    caller_cancellation = exc
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
+    async def _finish_composition_cleanup(
+        self,
+        inflight: tuple[asyncio.Task[Any], ...],
+    ) -> None:
+        """Keep the lifecycle barrier owned despite carrier cancellation."""
+
+        try:
+            if inflight:
+                await asyncio.gather(*inflight, return_exceptions=True)
+            await self._close_active_routes_impl()
+        finally:
+            await self._end_composition_cleanup()
+
+    async def _close_active_routes_impl(self) -> None:
+        """Best-effort reverse cleanup after old lifecycle owners settle."""
 
         async with self._lock:
             failures = False
@@ -14173,6 +14748,7 @@ class AgentServerProductCompositionRegistry:
                     ),
                 )
                 self._critical_token_gate.release_interaction(p2_key[1])
+            self._enforce_abandoned_voice_origin_grace_locked()
             remaining_orphans: list[_P2FailedCleanupLease] = []
             for cleanup in self._p2_orphan_cleanups:
                 try:
@@ -14201,6 +14777,11 @@ class AgentServerProductCompositionRegistry:
         for adoption in tuple(self._progress_route_adoptions.values()):
             adoption.set()
         self._progress_route_adoptions.clear()
+        inflight_composition = tuple(self._composition_inflight)
+        if inflight_composition:
+            await asyncio.shield(
+                asyncio.gather(*inflight_composition, return_exceptions=True)
+            )
         await self.close_active_routes()
         drain_tasks = tuple(self._presentation_drain_tasks)
         if drain_tasks:

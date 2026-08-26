@@ -222,9 +222,6 @@ export interface BrowserAudioLocalStopReceipt {
   }>;
   readonly physical_heard: 'unproven';
   readonly physical_silence: 'unproven';
-  readonly business_cancel_count_before: number;
-  readonly business_cancel_count_after: number;
-  readonly business_cancel_count_delta: number;
 }
 
 export interface BrowserAudioCaptureStateEvent {
@@ -1336,12 +1333,11 @@ export class BrowserAudioIOAdapter {
     const normalizedResponse = normalizeResponse(response);
     const normalizedReason = requiredText(reason, 'reason');
     const requestedAt = readMonotonicNow(this.#monotonicNowMs);
-    const businessCancelCountBefore = this.#audioPort.businessCancelCount();
     if (this.#closed) {
-      return this.#localStopReceipt('adapter_closed', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
+      return this.#localStopReceipt('adapter_closed', normalizedResponse, normalizedReason, requestedAt);
     }
     if (!this.#enabled) {
-      return this.#localStopReceipt('feature_disabled', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
+      return this.#localStopReceipt('feature_disabled', normalizedResponse, normalizedReason, requestedAt);
     }
     const playback = this.#playback;
     if (playback === null) {
@@ -1351,17 +1347,16 @@ export class BrowserAudioIOAdapter {
           : 'no_active_target',
         normalizedResponse,
         normalizedReason,
-        requestedAt,
-        businessCancelCountBefore
+        requestedAt
       );
     }
     if (!sameResponse(playback.response, normalizedResponse) || playback.stopped) {
-      return this.#localStopReceipt('target_mismatch', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
+      return this.#localStopReceipt('target_mismatch', normalizedResponse, normalizedReason, requestedAt);
     }
     const confirmedCursor = this.#snapshotConfirmedCursor(playback);
     try {
       if (!this.#audioPort.stopLocal(normalizedResponse)) {
-        return this.#localStopReceipt('local_fence_failed', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore, confirmedCursor);
+        return this.#localStopReceipt('local_fence_failed', normalizedResponse, normalizedReason, requestedAt, confirmedCursor);
       }
     } catch (error) {
       throw mapBrowserFailure(error, 'PLAYOUT_STOP_FAILED');
@@ -1374,7 +1369,6 @@ export class BrowserAudioIOAdapter {
       normalizedResponse,
       normalizedReason,
       requestedAt,
-      businessCancelCountBefore,
       confirmedCursor,
       cleanup
     );
@@ -1438,10 +1432,6 @@ export class BrowserAudioIOAdapter {
     return closePromise;
   }
 
-  businessCancelCount(): number {
-    return this.#audioPort.businessCancelCount();
-  }
-
   #snapshotConfirmedCursor(playback: PlaybackSession): readonly Readonly<BrowserAudioConfirmedCursor>[] {
     return Object.freeze(
       [...playback.units].map(unitId =>
@@ -1488,13 +1478,11 @@ export class BrowserAudioIOAdapter {
     response: Readonly<AudioResponseRef>,
     reason: string,
     requestedAt: number | null,
-    businessCancelCountBefore: number,
     confirmedCursor: readonly Readonly<BrowserAudioConfirmedCursor>[] = Object.freeze([]),
     cleanup: Readonly<PlaybackSourceCleanupSummary> | null = null
   ): Readonly<BrowserAudioLocalStopReceipt> {
     const confirmedAt = readMonotonicNow(this.#monotonicNowMs);
     const timingConfirmed = requestedAt !== null && confirmedAt !== null && confirmedAt >= requestedAt;
-    const businessCancelCountAfter = this.#audioPort.businessCancelCount();
     const notAttempted = Object.freeze({
       status: 'not_attempted' as const,
       attempted_count: 0,
@@ -1525,9 +1513,6 @@ export class BrowserAudioIOAdapter {
       }),
       physical_heard: 'unproven' as const,
       physical_silence: 'unproven' as const,
-      business_cancel_count_before: businessCancelCountBefore,
-      business_cancel_count_after: businessCancelCountAfter,
-      business_cancel_count_delta: businessCancelCountAfter - businessCancelCountBefore,
     });
   }
 

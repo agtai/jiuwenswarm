@@ -82,10 +82,38 @@ function responseKey(response: Readonly<AudioResponseRef>): string {
   return `${response.interaction_id}\u0000${response.response_id}\u0000${response.response_generation}`;
 }
 
+const EXACT_RESPONSE_ID_CAPACITY = 128;
+
+class ConservativeResponseIdFence {
+  readonly #bits = new Uint8Array(8192);
+
+  #indices(value: string): readonly number[] {
+    return [0x811c9dc5, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35].map(seed => {
+      let hash = seed;
+      for (let index = 0; index < value.length; index += 1) {
+        hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+      }
+      return (hash >>> 0) % (this.#bits.length * 8);
+    });
+  }
+
+  add(value: string): void {
+    for (const index of this.#indices(value)) this.#bits[index >> 3] |= 1 << (index & 7);
+  }
+
+  has(value: string): boolean {
+    return this.#indices(value).every(index => (this.#bits[index >> 3] & (1 << (index & 7))) !== 0);
+  }
+}
+
 export class BrowserSpeechSynthesisAdapter {
   readonly capability: Readonly<BrowserSynthesisCapability>;
   readonly #environment: BrowserSynthesisEnvironment;
+  // Replay ownership is scoped to this adapter instance. Conservative false
+  // positives fail before playback effects; callers may retry with a fresh ID
+  // or create a replacement adapter to begin a new owner lifetime.
   readonly #seenResponseIds = new Set<string>();
+  readonly #retiredResponseIds = new ConservativeResponseIdFence();
   readonly #lastGeneration = new Map<string, number>();
   #active: { response: Readonly<AudioResponseRef>; utterance: SpeechSynthesisUtterance } | null = null;
 
@@ -113,7 +141,7 @@ export class BrowserSpeechSynthesisAdapter {
     }
     const response = normalizeResponse(request.response);
     const spokenText = requiredText(request.spoken_text, 'spoken_text');
-    if (this.#seenResponseIds.has(response.response_id)) {
+    if (this.#seenResponseIds.has(response.response_id) || this.#retiredResponseIds.has(response.response_id)) {
       throw new BrowserSpeechSynthesisAdapterViolation('RESPONSE_ID_REUSED', 'response identifiers cannot be reused');
     }
     const lastGeneration = this.#lastGeneration.get(response.interaction_id) ?? -1;
@@ -140,7 +168,7 @@ export class BrowserSpeechSynthesisAdapter {
       this.#active = null;
       callbacks.onError(new Error(`Speech playback failed: ${event.error}`));
     };
-    this.#seenResponseIds.add(response.response_id);
+    this.#retainResponseId(response.response_id);
     this.#lastGeneration.set(response.interaction_id, response.response_generation);
     this.#active = { response, utterance };
     try {
@@ -163,6 +191,17 @@ export class BrowserSpeechSynthesisAdapter {
     if (response !== undefined && !this.isCurrent(response)) return false;
     this.#clearActive(true);
     return true;
+  }
+
+  #retainResponseId(responseId: string): void {
+    if (this.#seenResponseIds.size >= EXACT_RESPONSE_ID_CAPACITY) {
+      const oldest = this.#seenResponseIds.values().next().value;
+      if (oldest !== undefined) {
+        this.#retiredResponseIds.add(oldest);
+        this.#seenResponseIds.delete(oldest);
+      }
+    }
+    this.#seenResponseIds.add(responseId);
   }
 
   #clearActive(cancelBrowser: boolean): void {

@@ -349,6 +349,34 @@ def retry_epoch(
     return persistent, source, projected, expected
 
 
+def task_attempt_source_variant(
+    source: EventEnvelope,
+    *,
+    event_id: str,
+    event_type: str,
+    seq: int,
+    state: str,
+    outcome: str | None = None,
+) -> EventEnvelope:
+    document = source.to_dict()
+    document.update(
+        {
+            "event_id": event_id,
+            "event_type": event_type,
+            "seq": seq,
+            "causation_id": source.event_id,
+            "payload": {
+                "state": state,
+                **({"outcome": outcome} if outcome is not None else {}),
+            },
+        }
+    )
+    extension = document["extensions"]["jiuwenswarm.task_progress_return"]
+    extension["persistent_event_seq"] = seq
+    extension["persistent_event_type"] = event_type
+    return EventEnvelope.from_dict(document)
+
+
 def test_constructor_rejects_noncanonical_flags_and_capacities() -> None:
     with pytest.raises(ProgressNotificationArbiterViolation) as invalid_flag:
         ProgressNotificationArbiter(enabled=1)  # type: ignore[arg-type]
@@ -1638,6 +1666,321 @@ def test_pending_capacity_is_explicit_and_retry_does_not_skip_sequence() -> None
     assert final.pending_notifications == 1
 
 
+def test_terminal_ack_releases_stream_capacity_and_keeps_replay_fence() -> None:
+    """A9: terminal+ACK releases heavy stream state, not replay authority."""
+
+    arbiter = ProgressNotificationArbiter(
+        pending_capacity=1, stream_capacity=1, events_per_stream=2
+    )
+    first_source = source_event(work_id="round-terminal-1")
+    first_progress = progress_event(first_source)
+    assert offer(arbiter, first_source, first_progress).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    assert arbiter.acknowledge(
+        first_progress.scope, first_progress.stream_ref, first_progress.event_id
+    )
+    after_nonterminal_ack = arbiter.snapshot()
+    assert after_nonterminal_ack.tracked_work_streams == 1
+    assert after_nonterminal_ack.tracked_source_streams == 1
+    assert after_nonterminal_ack.tracked_progress_streams == 1
+
+    terminal_source = source_event(
+        work_id="round-terminal-1", seq=1, state="terminal", outcome="completed"
+    )
+    terminal_progress = progress_event(terminal_source)
+    assert offer(arbiter, terminal_source, terminal_progress).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    assert arbiter.acknowledge(
+        terminal_progress.scope,
+        terminal_progress.stream_ref,
+        terminal_progress.event_id,
+    )
+
+    released = arbiter.snapshot()
+    assert released.tracked_work_streams == 0
+    assert released.tracked_source_streams == 0
+    assert released.tracked_progress_streams == 0
+    assert released.retained_source_events == 0
+    assert released.retained_progress_events == 0
+    assert released.pending_notifications == 0
+    assert released.terminal_work_streams == 0
+    assert arbiter._decisions == {}
+
+    replay = offer(arbiter, first_source, first_progress)
+    assert replay.disposition is NotificationDisposition.REJECTED
+    assert replay.progress is None
+    after_replay = arbiter.snapshot()
+    assert after_replay.tracked_work_streams == 0
+    assert after_replay.tracked_source_streams == 0
+    assert after_replay.tracked_progress_streams == 0
+    assert after_replay.retained_source_events == 0
+    assert after_replay.retained_progress_events == 0
+    assert after_replay.pending_notifications == 0
+    assert after_replay.accepted_events == released.accepted_events
+    assert arbiter._decisions == {}
+
+    second_source = source_event(work_id="round-terminal-2")
+    second_progress = progress_event(second_source)
+    second = offer(arbiter, second_source, second_progress)
+    assert second.disposition is NotificationDisposition.DISPLAY_NOW
+    assert arbiter.snapshot().tracked_work_streams == 1
+    assert arbiter.snapshot().pending_notifications == 1
+
+
+def test_terminal_ack_retires_current_attempt_but_newer_epoch_can_reopen() -> None:
+    """A9 review: fresh IDs cannot revive the retired current Attempt."""
+
+    arbiter = ProgressNotificationArbiter()
+    work_id = "task-terminal-epoch"
+    boundary_b, source_b, progress_b, binding_b = retry_epoch(
+        work_id=work_id,
+        attempt_id="attempt-b",
+        retry_of_attempt_id="attempt-a",
+        attempt_number=2,
+        seq=5,
+    )
+    baseline_b = arbiter_module._mint_verified_attempt_epoch_baseline(
+        boundary_b, binding_b
+    )
+    arbiter._begin_attempt_epoch(baseline_b)
+    assert offer(arbiter, source_b, progress_b, expected=binding_b).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    assert arbiter.acknowledge(
+        progress_b.scope, progress_b.stream_ref, progress_b.event_id
+    )
+
+    terminal_b = task_attempt_source_variant(
+        source_b,
+        event_id="task-event:terminal-epoch:b:terminal",
+        event_type="task.terminal",
+        seq=6,
+        state="terminal",
+        outcome="completed",
+    )
+    terminal_progress_b = progress_event(terminal_b)
+    terminal_binding_b = binding(terminal_b, terminal_progress_b)
+    assert offer(
+        arbiter,
+        terminal_b,
+        terminal_progress_b,
+        expected=terminal_binding_b,
+    ).disposition is NotificationDisposition.DISPLAY_NOW
+    assert arbiter.acknowledge(
+        terminal_progress_b.scope,
+        terminal_progress_b.stream_ref,
+        terminal_progress_b.event_id,
+    )
+    released = arbiter.snapshot()
+    assert released.tracked_work_streams == 0
+    assert released.retained_source_events == 0
+    assert released.pending_notifications == 0
+
+    fresh_old_source = task_attempt_source_variant(
+        source_b,
+        event_id="task-event:terminal-epoch:b:fresh",
+        event_type="task.accepted",
+        seq=0,
+        state="accepted",
+    )
+    fresh_old_progress = progress_event(
+        fresh_old_source,
+        event_id="progress:terminal-epoch:b:fresh",
+    )
+    stale = offer(
+        arbiter,
+        fresh_old_source,
+        fresh_old_progress,
+        expected=binding(fresh_old_source, fresh_old_progress),
+    )
+    assert stale.disposition is NotificationDisposition.REJECTED
+    after_stale = arbiter.snapshot()
+    assert after_stale.tracked_work_streams == released.tracked_work_streams
+    assert after_stale.retained_source_events == released.retained_source_events
+    assert after_stale.retained_progress_events == released.retained_progress_events
+    assert after_stale.pending_notifications == released.pending_notifications
+    assert after_stale.accepted_events == released.accepted_events
+    with pytest.raises(ProgressNotificationArbiterViolation) as repeated_epoch:
+        arbiter._begin_attempt_epoch(baseline_b)
+    assert repeated_epoch.value.reason == "STALE_ATTEMPT_EPOCH"
+
+    boundary_c, source_c, progress_c, binding_c = retry_epoch(
+        work_id=work_id,
+        attempt_id="attempt-c",
+        retry_of_attempt_id="attempt-b",
+        attempt_number=3,
+        seq=9,
+    )
+    arbiter._begin_attempt_epoch(
+        arbiter_module._mint_verified_attempt_epoch_baseline(boundary_c, binding_c)
+    )
+    assert offer(arbiter, source_c, progress_c, expected=binding_c).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+
+    def retained_effect_state() -> tuple[object, ...]:
+        current = arbiter.snapshot()
+        return (
+            current.tracked_work_streams,
+            current.tracked_source_streams,
+            current.tracked_progress_streams,
+            current.retained_source_events,
+            current.retained_progress_events,
+            current.pending_notifications,
+            current.accepted_events,
+            current.coalesced_events,
+            current.duplicate_events,
+            current.backpressure_events,
+            current.no_projection_advances,
+            dict(arbiter._decisions),
+        )
+
+    active_baseline = retained_effect_state()
+    old_source_id = task_attempt_source_variant(
+        source_c,
+        event_id=source_b.event_id,
+        event_type="task.running",
+        seq=10,
+        state="running",
+    )
+    fresh_progress_id = progress_event(
+        old_source_id,
+        event_id="progress:terminal-epoch:c:fresh-for-old-source",
+    )
+    source_replay = offer(
+        arbiter,
+        old_source_id,
+        fresh_progress_id,
+        expected=binding(old_source_id, fresh_progress_id),
+    )
+    assert source_replay.disposition is NotificationDisposition.REJECTED
+    assert retained_effect_state() == active_baseline
+
+    fresh_source_id = task_attempt_source_variant(
+        source_c,
+        event_id="task-event:terminal-epoch:c:fresh-for-old-progress",
+        event_type="task.running",
+        seq=10,
+        state="running",
+    )
+    old_progress_id = progress_event(
+        fresh_source_id,
+        event_id=progress_b.event_id,
+    )
+    progress_replay = offer(
+        arbiter,
+        fresh_source_id,
+        old_progress_id,
+        expected=binding(fresh_source_id, old_progress_id),
+    )
+    assert progress_replay.disposition is NotificationDisposition.REJECTED
+    assert retained_effect_state() == active_baseline
+
+
+def test_retired_attempt_epochs_share_capacity_and_keep_old_history_fenced() -> None:
+    """A9 review: retired Attempt ownership is bounded without plain LRU."""
+
+    arbiter = ProgressNotificationArbiter(
+        pending_capacity=1,
+        stream_capacity=1,
+        events_per_stream=2,
+    )
+    first_baseline = None
+    first_source: EventEnvelope | None = None
+    first_progress: EventEnvelope | None = None
+    latest_work_id = ""
+    latest_attempt_id = ""
+    for index in range(12):
+        latest_work_id = f"task-retired-epoch-{index}"
+        latest_attempt_id = f"attempt-{index}-b"
+        boundary, source, progress, expected = retry_epoch(
+            work_id=latest_work_id,
+            attempt_id=latest_attempt_id,
+            retry_of_attempt_id=f"attempt-{index}-a",
+            attempt_number=2,
+            seq=5,
+        )
+        baseline = arbiter_module._mint_verified_attempt_epoch_baseline(
+            boundary, expected
+        )
+        if first_baseline is None:
+            first_baseline = baseline
+            first_source = source
+            first_progress = progress
+        arbiter._begin_attempt_epoch(baseline)
+        assert offer(arbiter, source, progress, expected=expected).disposition is (
+            NotificationDisposition.DISPLAY_NOW
+        )
+        assert arbiter.acknowledge(
+            progress.scope, progress.stream_ref, progress.event_id
+        )
+        terminal = task_attempt_source_variant(
+            source,
+            event_id=f"task-event:{latest_work_id}:terminal",
+            event_type="task.terminal",
+            seq=6,
+            state="terminal",
+            outcome="completed",
+        )
+        terminal_progress = progress_event(terminal)
+        assert offer(
+            arbiter,
+            terminal,
+            terminal_progress,
+            expected=binding(terminal, terminal_progress),
+        ).disposition is NotificationDisposition.DISPLAY_NOW
+        assert arbiter.acknowledge(
+            terminal_progress.scope,
+            terminal_progress.stream_ref,
+            terminal_progress.event_id,
+        )
+        assert arbiter.snapshot().tracked_work_streams == 0
+
+    assert arbiter._attempt_epochs == {}
+    assert len(arbiter._retired_attempt_epochs) <= arbiter._observation_capacity
+    assert len(arbiter._retired_identities) <= arbiter._retired_identity_capacity
+    assert len(arbiter._retired_identity_set) <= arbiter._retired_identity_capacity
+    assert first_source is not None
+    assert first_progress is not None
+    first_source_digest = arbiter._retired_event_digest(
+        "source", first_source.event_id
+    )
+    assert first_source_digest not in arbiter._retired_identities
+    assert first_source_digest not in arbiter._retired_identity_set
+    assert arbiter._retired_identity_known(first_source_digest)
+    before_replay = arbiter.snapshot()
+    replay = offer(arbiter, first_source, first_progress)
+    assert replay.disposition is NotificationDisposition.REJECTED
+    after_replay = arbiter.snapshot()
+    assert after_replay.tracked_work_streams == before_replay.tracked_work_streams
+    assert after_replay.retained_source_events == before_replay.retained_source_events
+    assert after_replay.retained_progress_events == (
+        before_replay.retained_progress_events
+    )
+    assert after_replay.pending_notifications == before_replay.pending_notifications
+    assert after_replay.accepted_events == before_replay.accepted_events
+    assert first_baseline is not None
+    with pytest.raises(ProgressNotificationArbiterViolation) as fenced_history:
+        arbiter._begin_attempt_epoch(first_baseline)
+    assert fenced_history.value.reason == "STALE_ATTEMPT_EPOCH"
+
+    boundary_c, source_c, progress_c, binding_c = retry_epoch(
+        work_id=latest_work_id,
+        attempt_id=f"{latest_attempt_id}-next",
+        retry_of_attempt_id=latest_attempt_id,
+        attempt_number=3,
+        seq=9,
+    )
+    arbiter._begin_attempt_epoch(
+        arbiter_module._mint_verified_attempt_epoch_baseline(boundary_c, binding_c)
+    )
+    assert offer(arbiter, source_c, progress_c, expected=binding_c).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+
+
 def test_stream_and_event_ledger_exhaustion_are_observable_without_eviction() -> None:
     stream_limited = ProgressNotificationArbiter(pending_capacity=2, stream_capacity=1)
     first = source_event(work_id="round-1")
@@ -1843,6 +2186,13 @@ def test_invalid_drain_and_ack_inputs_fail_closed_without_consuming_pending() ->
     assert invalid[0].reason == "INVALID_FOREGROUND_SNAPSHOT"
     invalid_limit = arbiter.drain(scope(), safe_foreground(), max_items=0)
     assert invalid_limit[0].reason == "INVALID_DRAIN_LIMIT"
+    invalid_work = arbiter.drain(scope(), safe_foreground(), work_ref=object())
+    assert invalid_work[0].reason == "INVALID_PROGRESS_BINDING"
+    assert arbiter.drain(
+        scope(),
+        safe_foreground(),
+        work_ref=IdentityRef(IdentityKind.ROUND, "foreign-round"),
+    ) == ()
     assert (
         arbiter.acknowledge(projected.scope, projected.stream_ref, "foreign-event")
         is False

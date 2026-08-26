@@ -378,6 +378,52 @@ test('route telemetry maps every implementation class without exporting safe_rea
   }
 });
 
+test('non-formal contract-version markers are closed before observability storage or sink delivery', () => {
+  const delivered = [];
+  const collector = new LiveVoiceObservabilityCollector({
+    observation_sink: event => delivered.push(event),
+  });
+  const forbidden = [
+    ['private-marker', 'private-token-marker'],
+    ['blank-marker', ' '],
+    ['over-bound-marker', 'v'.repeat(65)],
+    ['overlong-marker', 'v'.repeat(200)],
+  ];
+
+  const results = forbidden.map(([suffix, contractVersion]) => [
+    suffix,
+    collector.emitObservation(
+      observation(`route-${suffix}`, 'route.selected', 'route.fallback', {
+        route: { ...nonFormalRoute(), contract_version: contractVersion },
+        reason_code: 'ROUTE_FALLBACK',
+      })
+    ),
+  ]);
+  assert.deepEqual(
+    {
+      results,
+      delivered: delivered.length,
+      stored: collector.observations().length,
+      rejected: collector.stats().rejected_observations,
+    },
+    {
+      results: forbidden.map(([suffix]) => [suffix, false]),
+      delivered: 0,
+      stored: 0,
+      rejected: forbidden.length,
+    },
+  );
+});
+
+test('non-formal contract-version accepts the exact stable-token bound', () => {
+  const descriptor = createRouteDescriptor({
+    ...nonFormalRoute(),
+    contract_version: 'v'.repeat(64),
+  });
+
+  assert.equal(descriptor.contract_version, 'v'.repeat(64));
+});
+
 test('cancel, stale fence, queue, provider, Agent, Task, and degradation facts are closed', () => {
   const collector = new LiveVoiceObservabilityCollector();
   const binding = {

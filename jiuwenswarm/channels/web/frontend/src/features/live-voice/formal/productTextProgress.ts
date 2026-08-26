@@ -1,3 +1,5 @@
+import { isDefinitiveProductOperationError } from './productWebActivation.js';
+
 export const PRODUCT_TEXT_PROGRESS_EVENT = 'live_voice.task.progress' as const;
 export const PRODUCT_PROGRESS_ACK_METHOD = 'live_voice.composition.p3.progress.ack' as const;
 
@@ -530,9 +532,16 @@ interface RetainedDeliveryAck {
   readonly expected_attempt_id: string;
   status: ProductTextProgressAckStatus;
   attempts: number;
+  automatic_attempts: number;
+  definitive_failure: boolean;
+  retry_after_reconnect: boolean;
   in_flight: boolean;
   retry_timer: ReturnType<typeof setTimeout> | null;
 }
+
+// Match the existing product retained-operation cycle: one initial request and
+// two automatic retries.  Further unknown-outcome work requires a reconnect.
+const PRODUCT_TEXT_PROGRESS_ACK_AUTOMATIC_ATTEMPTS = 3;
 
 function sameDeliveryAck(left: Readonly<ProductTextProgressDeliveryAck>, right: Readonly<ProductTextProgressDeliveryAck>): boolean {
   const baseMatches =
@@ -616,7 +625,7 @@ function requireAckResponse(value: unknown, retained: RetainedDeliveryAck): void
   }
 }
 
-/** Retains and retries every exact delivery ACK until the server confirms it. */
+/** Retains exact ACK identity, terminalizes definitive failures, and bounds unknown-outcome retries until reconnect. */
 export class ProductTextProgressAckOwner {
   private readonly enabled: boolean;
   private readonly request: ProductTextProgressAckRequest;
@@ -649,7 +658,25 @@ export class ProductTextProgressAckOwner {
   setConnected(connected: boolean): void {
     if (!this.enabled || this.closed || this.connected === connected) return;
     this.connected = connected;
-    if (connected) this.retryPending();
+    if (!connected) {
+      for (const retained of this.deliveries.values()) {
+        if (retained.retry_timer !== null) {
+          clearTimeout(retained.retry_timer);
+          retained.retry_timer = null;
+        }
+        if (retained.status !== 'acknowledged' && !retained.definitive_failure) {
+          retained.retry_after_reconnect = true;
+        }
+      }
+      return;
+    }
+    for (const retained of this.deliveries.values()) {
+      if (retained.status !== 'acknowledged' && !retained.definitive_failure) {
+        if (!retained.in_flight) retained.automatic_attempts = 0;
+        retained.retry_after_reconnect = false;
+      }
+    }
+    this.retryPending();
   }
 
   retain(event: Readonly<ProductTextProgressEvent>): ProductTextProgressAckSnapshot | null {
@@ -660,7 +687,14 @@ export class ProductTextProgressAckOwner {
       if (!sameDeliveryAck(prior.ack, ack) || prior.expected_attempt_id !== event.attempt_id) {
         throw new Error('delivery_id binding conflict');
       }
-      if (prior.status !== 'acknowledged' && this.connected) this.send(prior);
+      if (
+        prior.status !== 'acknowledged' &&
+        this.connected &&
+        !prior.definitive_failure &&
+        !prior.retry_after_reconnect
+      ) {
+        this.send(prior);
+      }
       return this.snapshot(prior);
     }
     if (this.deliveries.size >= this.capacity) {
@@ -673,6 +707,9 @@ export class ProductTextProgressAckOwner {
       expected_attempt_id: event.attempt_id,
       status: this.connected ? 'pending' : 'failed',
       attempts: 0,
+      automatic_attempts: 0,
+      definitive_failure: false,
+      retry_after_reconnect: !this.connected,
       in_flight: false,
       retry_timer: null,
     };
@@ -704,7 +741,16 @@ export class ProductTextProgressAckOwner {
   }
 
   private send(retained: RetainedDeliveryAck): void {
-    if (retained.in_flight || retained.status === 'acknowledged' || !this.connected || this.closed) return;
+    if (
+      retained.in_flight ||
+      retained.status === 'acknowledged' ||
+      retained.definitive_failure ||
+      retained.retry_after_reconnect ||
+      !this.connected ||
+      this.closed
+    ) {
+      return;
+    }
     if (retained.retry_timer !== null) {
       clearTimeout(retained.retry_timer);
       retained.retry_timer = null;
@@ -712,21 +758,50 @@ export class ProductTextProgressAckOwner {
     retained.in_flight = true;
     retained.status = 'pending';
     retained.attempts += 1;
+    retained.automatic_attempts += 1;
     this.publish(retained);
     void Promise.resolve()
       .then(() => this.request(PRODUCT_PROGRESS_ACK_METHOD, retained.ack))
       .then(value => {
-        requireAckResponse(value, retained);
-        if (!this.closed) retained.status = 'acknowledged';
+        try {
+          requireAckResponse(value, retained);
+        } catch {
+          if (!this.closed) {
+            retained.status = 'failed';
+            retained.definitive_failure = true;
+            retained.retry_after_reconnect = false;
+          }
+          return;
+        }
+        if (!this.closed) {
+          retained.status = 'acknowledged';
+          retained.retry_after_reconnect = false;
+        }
       })
-      .catch(() => {
+      .catch(error => {
         if (this.closed) return;
         retained.status = 'failed';
-        if (this.connected && !this.closed) {
+        if (isDefinitiveProductOperationError(error)) {
+          retained.definitive_failure = true;
+          retained.retry_after_reconnect = false;
+          return;
+        }
+        if (
+          this.connected &&
+          retained.automatic_attempts < PRODUCT_TEXT_PROGRESS_ACK_AUTOMATIC_ATTEMPTS
+        ) {
+          const retryDelayMs =
+            this.retryDelayMs * 2 ** (retained.automatic_attempts - 1);
+          if (!Number.isSafeInteger(retryDelayMs)) {
+            retained.retry_after_reconnect = true;
+            return;
+          }
           retained.retry_timer = setTimeout(() => {
             retained.retry_timer = null;
             this.send(retained);
-          }, this.retryDelayMs);
+          }, retryDelayMs);
+        } else {
+          retained.retry_after_reconnect = true;
         }
       })
       .finally(() => {
