@@ -206,6 +206,15 @@ class WebClient {
           this.updateState('closed');
           return;
         }
+        // 1008 Policy Violation: gateway 鉴权失败 (token 失效/缺失)。
+        // 重载页面, AppWithAuth 会探测 cookie 失效 -> 回到登录页。
+        if (closeEvent.code === 1008) {
+          this.updateState('closed');
+          if (typeof window !== 'undefined') {
+            window.location.reload();
+          }
+          return;
+        }
         this.scheduleReconnect();
       };
     });
@@ -461,7 +470,8 @@ class WebClient {
         message.error ?? i18n.t('network.requestFailed'),
         message.code,
         message.id,
-        this.isRetriableCode(message.code)
+        this.isRetriableCode(message.code),
+        message.payload
       )
     );
   }
@@ -550,12 +560,14 @@ class WebClient {
     message: string,
     code?: string,
     requestId?: string,
-    retriable = false
+    retriable = false,
+    payload?: unknown
   ): WebError {
     const error = new Error(message) as WebError;
     error.code = code;
     error.requestId = requestId;
     error.retriable = retriable;
+    error.payload = payload;
     return error;
   }
 
@@ -626,8 +638,9 @@ export async function sendGoalStreamCommand(params: {
   action: 'set' | 'resume';
   objective?: string;
   mode?: string;
+  modelName?: string | null;
 }): Promise<void> {
-  const { sessionId, action, objective, mode } = params;
+  const { sessionId, action, objective, mode, modelName } = params;
   await webClient.sendFireAndForget(
     'command.goal',
     {
@@ -635,6 +648,7 @@ export async function sendGoalStreamCommand(params: {
       action,
       mode: mode ?? 'agent',
       ...(action === 'set' ? { objective, overwrite_confirmed: true } : {}),
+      ...(modelName ? { model_name: modelName } : {}),
     },
     { isStream: true }
   );

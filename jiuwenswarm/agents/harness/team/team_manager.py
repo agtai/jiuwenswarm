@@ -738,6 +738,7 @@ class TeamManager:
         project_dir: str | None = None,
         trusted_dirs: list[str] | None = None,
         request_id: str | None = None,
+        user_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
@@ -782,6 +783,7 @@ class TeamManager:
             project_dir=project_dir,
             trusted_dirs=trusted_dirs,
             request_id=request_id,
+            user_id=user_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
             agent_group_name=agent_group_name,
@@ -1304,6 +1306,9 @@ class TeamManager:
     def find_team_skill_rail_for_request(self, request_id: str) -> Any | None:
         """Find the TeamSkillEvolutionRail that owns a pending approval with this request_id."""
         for rail in self._team_skill_rails.values():
+            owns_request = getattr(rail, "owns_approval_request", None)
+            if callable(owns_request) and owns_request(request_id):
+                return rail
             if request_id in getattr(rail, "_pending_approval_snapshots", {}):
                 return rail
             if request_id in getattr(rail, "_pending_governance", {}):
@@ -2514,9 +2519,19 @@ class TeamManager:
             if self._stream_tasks.get(session_id) is task:
                 self._stream_tasks.pop(session_id, None)
 
-    async def cancel_all_stream_tasks(self, reason: str = "") -> None:
-        """Cancel Team stream tasks after AgentServer disconnects."""
-        session_ids = list(self._stream_tasks)
+    async def cancel_all_stream_tasks(
+        self,
+        reason: str = "",
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
+        """Cancel Team streams after disconnect, preserving process-owned runs."""
+        protected = set(exclude_session_ids or ())
+        session_ids = [
+            session_id
+            for session_id in self._stream_tasks
+            if session_id not in protected
+        ]
         await asyncio.gather(
             *(self._cancel_stream_task(session_id, reason) for session_id in session_ids),
         )
@@ -2559,9 +2574,16 @@ async def reload_team_skill_views_across_managers(session_id: str | None = None)
     return await get_team_manager().reload_team_skill_views(session_id)
 
 
-async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:
-    """Cancel all team stream tasks on the singleton manager."""
-    await get_team_manager().cancel_all_stream_tasks(reason=reason)
+async def cancel_all_team_stream_tasks_across_managers(
+    reason: str = "",
+    *,
+    exclude_session_ids: set[str] | None = None,
+) -> None:
+    """Cancel Team streams except explicitly process-owned sessions."""
+    await get_team_manager().cancel_all_stream_tasks(
+        reason=reason,
+        exclude_session_ids=exclude_session_ids,
+    )
 
 
 async def stop_team_session_runtime_across_managers(

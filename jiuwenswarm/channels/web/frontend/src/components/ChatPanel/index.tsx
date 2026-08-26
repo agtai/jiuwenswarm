@@ -15,15 +15,15 @@ import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea, type InputAreaHandle } from './InputArea';
-import chatIcon from '../../assets/chat.svg';
-import expandIcon from '../../assets/expand.svg';
+import ChatOverviewIcon from '../../assets/chat-overview.svg?react';
+import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import lineUpIcon from '../../assets/lineUp.svg';
 import loadSendIcon from '../../assets/load-send.svg';
 import editIcon from '../../assets/edit.svg';
 import deleteIcon from '../../assets/delete.svg';
 import moveIcon from '../../assets/move.svg';
 import restartIcon from '../../assets/restart.svg';
-import { SubtaskProgress } from './SubtaskProgress';
+import ShareExportIcon from '../../assets/share-export.svg?react';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { InteractionSlot } from '../InteractionSlot';
 import { GoalBar } from '../GoalBar';
@@ -32,7 +32,7 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import welcomeBanner from '../../assets/home-banner-workswarm.png';
+import welcomeBanner from '../../assets/home-banner-workswarm.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
@@ -92,13 +92,13 @@ interface ChatPanelProps {
   historyPager?: ChatHistoryPagerProps | null;
   /** 历史会话首屏恢复中：保持聊天布局，避免短暂退回欢迎态 */
   isHistoryRestoring?: boolean;
-  /** 右侧面板展开状态：展开时隐藏对话框上方的活跃成员 */
-  teamAreaExpanded?: boolean;
+  /** 右侧面板展开状态：展开时隐藏对话框上方的活跃成员，null 表示面板隐藏 */
+  teamAreaExpanded?: boolean | null;
   autoFocusKey?: string | null;
   /** 跳转到技能管理页 */
   onNavigateToSkills?: () => void;
-  /** 切换右侧紧缩面板展开状态 */
-  onToggleTeamArea?: (expanded: boolean) => void;
+  /** 切换右侧紧缩面板展开状态，传 null 表示隐藏面板 */
+  onToggleTeamArea?: (expanded: boolean | null) => void;
   /** 打开右侧面板并切换到代码审核 Tab */
   onOpenCodeReview?: (target: CodeReviewTarget) => void;
   permissionsEnabled: boolean;
@@ -146,7 +146,7 @@ function InterruptResultBubble() {
   );
 }
 
-function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing: boolean; teamAreaExpanded?: boolean }) {
+function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing: boolean; teamAreaExpanded?: boolean | null }) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
@@ -749,8 +749,7 @@ export function ChatPanel({
   sessionProject = null,
   historyPager = null,
   isHistoryRestoring = false,
-  teamAreaExpanded = false,
-  autoFocusKey = null,
+  teamAreaExpanded = false,  autoFocusKey = null,
   onNavigateToSkills,
   onToggleTeamArea,
   onOpenCodeReview,
@@ -1226,7 +1225,7 @@ export function ChatPanel({
 
   return (
     <div
-      className="chat-panel-shell flex flex-col h-full"
+      className={`chat-panel-shell flex flex-col h-full ${teamAreaExpanded === false ? 'chat-panel-shell--team-floating' : ''}`}
       data-testid="chat-panel"
       onDragEnter={handleDesktopFileDragEnter}
       onDragOver={handleDesktopFileDragOver}
@@ -1272,7 +1271,7 @@ export function ChatPanel({
                     <span className="share-export-btn__label" data-testid="chat-panel-share-export-loading-label">{t('share.generating')}</span>
                   </>
                 ) : (
-                  <Share2 size={14} strokeWidth={2} />
+                  <ShareExportIcon className="h-[32px] w-[32px]" />
                 )}
               </button>
             )}
@@ -1289,22 +1288,24 @@ export function ChatPanel({
             )}
             <button
               type="button"
-              className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              className={`chat-header-icon-btn ${teamAreaExpanded === false ? 'chat-header-icon-btn--active' : ''}`}
               data-testid="chat-panel-header-chat-toggle"
               data-variant="collapse"
-              onClick={() => onToggleTeamArea?.(false)}
+              onClick={() => onToggleTeamArea?.(teamAreaExpanded === false ? null : false)}
             >
-              <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
+              <ChatOverviewIcon className="h-[32px] w-[32px]" aria-hidden />
             </button>
-            <button
-              type="button"
-              className={`chat-header-icon-btn ${teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
-              data-testid="chat-panel-header-expand-toggle"
-              data-variant="expand"
-              onClick={() => onToggleTeamArea?.(true)}
-            >
-              <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
-            </button>
+            {!(teamAreaExpanded && mode !== 'team') && (
+              <button
+                type="button"
+                className={`chat-header-icon-btn ${teamAreaExpanded === true ? 'chat-header-icon-btn--active' : ''}`}
+                data-testid="chat-panel-header-expand-toggle"
+                data-variant="expand"
+                onClick={() => onToggleTeamArea?.(teamAreaExpanded === true ? null : true)}
+              >
+                <PanelCollapseIcon className="h-[32px] w-[32px]" aria-hidden />
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -1344,7 +1345,6 @@ export function ChatPanel({
                       onShare={() => setHumanShareOpen(true)}
                     />
                   )}
-                  <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
                   <ContextCompressionLines
@@ -1362,9 +1362,9 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome" data-testid="chat-panel-welcome">
-              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
               <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
+                <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />

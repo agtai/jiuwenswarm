@@ -40,7 +40,10 @@ from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
-from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.agents.swarm.context import (
+    SwarmBuildContext,
+    get_heartbeat_job_service,
+)
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
 from jiuwenswarm.agents.harness.observability_runtime import get_trajectory_span_processor
 from jiuwenswarm.common.config import get_config
@@ -252,6 +255,7 @@ def enrich_team_spec_for_swarm(
     project_dir: str | None = None,
     trusted_dirs: list[str] | None = None,
     request_id: str | None = None,
+    user_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
     agent_group_name: str | None = None,
@@ -269,6 +273,7 @@ def enrich_team_spec_for_swarm(
         project_dir: Resolved project directory, if any.
         trusted_dirs: Directories the client declared as trusted for this request.
         request_id: Originating request id, if any.
+        user_id: Authenticated request owner, if any.
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
         agent_group_name: Optional AgentGroup package selected for this Team.
@@ -305,6 +310,7 @@ def enrich_team_spec_for_swarm(
     base = SwarmBuildContext(
         session_id=session_id,
         request_id=request_id,
+        user_id=user_id,
         channel_id=channel_id,
         channel=channel_id or "default",
         request_metadata=request_metadata,
@@ -317,6 +323,7 @@ def enrich_team_spec_for_swarm(
         team_skill_visibility_path=team_visibility_path,
         global_skills_dir=global_skills_dir,
         trajectory_span_processor=get_trajectory_span_processor(),
+        heartbeat_job_service=get_heartbeat_job_service(),
         config=config,
     )
     mcp_configs = build_enabled_mcp_server_configs(
